@@ -1,0 +1,17 @@
+Metadata-Version: 2.1
+Name: CandyCrunch
+Version: 0.1.0
+Summary: Package for predicting glycan structure from LC-MS/MS data
+Home-page: https://github.com/BojarLab/CandyCrunch
+Author: Daniel Bojar
+Author-email: daniel.bojar@gu.se
+License: UNKNOWN
+Description: # CandyCrunch
+        Predicting glycan structure from LC-MS/MS data
+        
+Platform: UNKNOWN
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown

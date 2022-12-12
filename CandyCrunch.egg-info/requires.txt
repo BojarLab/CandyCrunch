@@ -1,0 +1,9 @@
+glycowork>=0.6.0
+regex
+networkx
+scipy
+torch
+numpy_indexed
+seaborn
+pandas
+statsmodels
