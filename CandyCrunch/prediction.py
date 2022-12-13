@@ -378,7 +378,6 @@ def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 
         #    ranking[k] = ([], comp, inty)
         #  else:
         #    ranking[k] = ([], comp)
-        ##only route it to 2 if glycan_class == 0
         comp = mz_to_composition2(k_c, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                  df_use = df_use, filter_out = filter_out, libr = libr)
         if len(comp) < 1:

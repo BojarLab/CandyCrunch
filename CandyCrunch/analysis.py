@@ -3,6 +3,7 @@ import pandas as pd
 import networkx as nx
 import networkx.algorithms.isomorphism as iso
 import matplotlib.pyplot as plt
+import math
 import re
 from collections import Counter
 from itertools import product
@@ -21,7 +22,7 @@ mono_attributes = {'Gal':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A'
                   'GlcNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'GlcNAc': 203.0794},'X':{'GlcNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAc':[1,2,3,4,5,6]}},
                   'HexNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'HexNAc': 203.0794},'X':{'HexNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexNAc':[1,2,3,4,5,6]}},
                   'Neu5Ac':{'mass':{'A':{'Neu5Ac':291.0954},'X':{'02X':70,'Neu5Ac':291.0954}},'atoms':{'02X':[1,2],'Neu5Ac':[1,2,3,4,5,6,7,8,9]}},
-                  'Neu5Gc':{'mass':{'A':{'Neu5Gc':307.0903},'X':{'Neu5Gc':307.0903}},'atoms':{'Neu5Gc':[1,2,3,4,5,6,7,8,9]}},
+                  'Neu5Gc':{'mass':{'A':{'Neu5Gc':307.0903},'X':{'02X':70,'Neu5Gc':307.0903}},'atoms':{'02X':[1,2],'Neu5Gc':[1,2,3,4,5,6,7,8,9]}},
                   'GlcA':{'mass':{'A':{'GlcA':176.03209},'X':{'GlcA':176.03209}},'atoms':{'GlcA':[1,2,3,4,5,6]}},
                   'HexA':{'mass':{'A':{'HexA':176.03209},'X':{'HexA':176.03209}},'atoms':{'HexA':[1,2,3,4,5,6]}},
                   'Fuc':{'mass':{'A':{'Fuc':146.0579},'X':{'Fuc':146.0579}},'atoms':{'Fuc':[1,2,3,4,5,6]}},
@@ -735,7 +736,7 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
   | controls (bool): whether to check for systematic differences in tested glycans (length & branching)\n
   | Returns:
   | :-
-  | Returns a list of tuples of the form (bin_edge1, bin_edge2, corrected p-value, effect size via Cohen's d)
+  | Returns a list of tuples of the form (peak m/z, corrected p-value, effect size via Cohen's d)
   """
   max_bin = round((mz_cap-min_mz) / ((max_mz-min_mz)/bin_num))
   if motif is None:
@@ -756,17 +757,20 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
     print("Number of spectra in df_a: " + str(len(df_a)))
     print("Number of spectra in df_b: " + str(len(df_b)))
     run_controls(df_a, df_b)
+  df_r = pd.concat([df_a, df_b], axis = 0)
+  remainder = [np.median(col) for col in zip(*df_r.mz_remainder.values.tolist())]
   df_a = np.array(df_a.binned_intensities.values.tolist())
   df_b = np.array(df_b.binned_intensities.values.tolist())
   pvals = [ttest_ind(df_a[:,k], df_b[:,k], equal_var = False)[1] for k in range(max_bin)]
   pvals = multipletests(pvals)[1]
   cohensd = [cohen_d(df_a[:,k], df_b[:,k]) for k in range(max_bin)]
   sig_bins = [k for k in range(max_bin) if pvals[k] < 0.05]
-  sig_bins= [(min_mz+((max_mz-min_mz)/bin_num)*k, min_mz+((max_mz-min_mz)/bin_num)*(k+1), pvals[k], cohensd[k]) for k in sig_bins]
-  return sorted(sig_bins, key = lambda x: (x[2],1/abs(x[3])))
+  sig_bins= [(min_mz+((max_mz-min_mz)/bin_num)*k + remainder[k], pvals[k], cohensd[k]) for k in sig_bins]
+  return sorted(sig_bins, key = lambda x: (x[1],1/abs(x[2])))
 
 def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, bin_num = 2048,
-                 motif = None, motif2 = None, thresh = 0.5):
+                 motif = None, motif2 = None, thresh = 0.5, conf_range = [(0.9, 1.0), (0.8, 0.9),(0.6, 0.8),(0.4, 0.6),
+               (0.2, 0.4), (0, 0.2)]):
   """following diagnostic ions or ion ratios between two glycans across MS/MS spectra of different quality\n
   | Arguments:
   | :-
@@ -779,7 +783,8 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
   | bin_num (int): number of bins to bin m/z range, used for model training; default:2048, do not change
   | motif (string): if a glycan motif is specified in IUPAC-condensed, all glycans with and without will be compared; default:None
   | motif2 (string): if this and motif is specified, spectra of those motifs will be compared (with no spectra of molecules containing both motifs); default:None
-  | thresh (float): effect size threshold to exclude fragments with max value below thresh; default:0.5\n
+  | thresh (float): effect size threshold to exclude fragments with max value below thresh; default:0.5
+  | conf_range(list): list of tuples with bin edges to bin the data according to prediction confidences\n
   | Returns:
   | :-
   | Returns a plot of fragment effect size across prediction confidences and a dictionary of form bin : list of effect sizes across prediction confidences
@@ -788,8 +793,6 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
   df_a = df[df.Prediction == glycan_list[0]].reset_index(drop = True)
   df_b = df[df.Prediction == glycan_list[1]].reset_index(drop = True)
   bins = {(min_mz+((max_mz-min_mz)/bin_num)*k, min_mz+((max_mz-min_mz)/bin_num)*(k+1)):[] for k in range(max_bin)}
-  conf_range = [(0.9, 1.0), (0.8, 0.9), (0.7, 0.8), (0.6, 0.7), (0.5, 0.6), (0.4, 0.5),
-               (0.2, 0.4), (0, 0.2)]
   for conf in conf_range:
     df_a2 = df_a[df_a.Confidence.between(conf[0], conf[1])]
     df_b2 = df_b[df_b.Confidence.between(conf[0], conf[1])]
@@ -803,7 +806,7 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
         bins[list(bins.keys())[c]] += [cohensd[c]]
       else:
         bins[list(bins.keys())[c]] += [0]
-  bins = {k:v for k,v in bins.items() if max([abs(v2) for v2 in v]) >= thresh}
+  bins = {k:v for k,v in bins.items() if max([abs(v2) for v2 in v]) >= thresh and not any([math.isinf(v2) for v2 in v])}
   conf_idx = [c[1] for c in conf_range]
   for key, data_list in bins.items():
     plt.plot(conf_idx, data_list, label = key)
