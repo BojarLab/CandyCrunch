@@ -21,8 +21,8 @@ mono_attributes = {'Gal':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A'
                   'GalNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'GalNAc': 203.0794},'X':{'GalNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalNAc':[1,2,3,4,5,6]}},
                   'GlcNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'GlcNAc': 203.0794},'X':{'GlcNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAc':[1,2,3,4,5,6]}},
                   'HexNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'HexNAc': 203.0794},'X':{'HexNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexNAc':[1,2,3,4,5,6]}},
-                  'Neu5Ac':{'mass':{'A':{'Neu5Ac':291.0954},'X':{'02X':70,'Neu5Ac':291.0954}},'atoms':{'02X':[1,2],'Neu5Ac':[1,2,3,4,5,6,7,8,9]}},
-                  'Neu5Gc':{'mass':{'A':{'Neu5Gc':307.0903},'X':{'02X':70,'Neu5Gc':307.0903}},'atoms':{'02X':[1,2],'Neu5Gc':[1,2,3,4,5,6,7,8,9]}},
+                  'Neu5Ac':{'mass':{'A':{'Neu5Ac':291.0954},'X':{'02X':70,'04X':169.8,'Neu5Ac':291.0954}},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Ac':[1,2,3,4,5,6,7,8,9]}},
+                  'Neu5Gc':{'mass':{'A':{'Neu5Gc':307.0903},'X':{'02X':70,'04X':185.9,'Neu5Gc':307.0903}},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Gc':[1,2,3,4,5,6,7,8,9]}},
                   'GlcA':{'mass':{'A':{'GlcA':176.03209},'X':{'GlcA':176.03209}},'atoms':{'GlcA':[1,2,3,4,5,6]}},
                   'HexA':{'mass':{'A':{'HexA':176.03209},'X':{'HexA':176.03209}},'atoms':{'HexA':[1,2,3,4,5,6]}},
                   'Fuc':{'mass':{'A':{'Fuc':146.0579},'X':{'Fuc':146.0579}},'atoms':{'Fuc':[1,2,3,4,5,6]}},
@@ -682,7 +682,7 @@ def get_averaged_spectra(df, glycan_list, max_mz = 3000, min_mz = 39.714, bin_nu
   | glycan_list (list): list of two glycans in IUPAC-condensed nomenclature
   | max_mz (float): maximum m/z value considered for model training; default:3000, do not change
   | min_mz (float): minimum m/z value considered for model training; default:39.714, do not change
-  | bin_num (int): number of bins to bin m/z range, used for model training; default:2048, do not change
+  | bin_num (int): number of bins to bin m/z range, used for model training; default:2048, change if you binned differently
   | num_bins_plot (int): number of bins to use for plotting the averaged spectra; default:500
   | conf_analysis (bool): whether to plot the spectra comparisons separately for different levels of spectrum quality; default:False\n
   | Returns:
@@ -730,7 +730,7 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
   | mz_cap (float): maximum m/z value considered for analysis; default:3000
   | max_mz (float): maximum m/z value considered for model training; default:3000, do not change
   | min_mz (float): minimum m/z value considered for model training; default:39.714, do not change
-  | bin_num (int): number of bins to bin m/z range, used for model training; default:2048, do not change
+  | bin_num (int): number of bins to bin m/z range, used for model training; default:2048, change if you binned differently
   | motif (string): if a glycan motif is specified in IUPAC-condensed, all glycans with and without will be compared; default:None
   | motif2 (string): if this and motif is specified, spectra of those motifs will be compared (with no spectra of molecules containing both motifs); default:None
   | controls (bool): whether to check for systematic differences in tested glycans (length & branching)\n
@@ -774,25 +774,27 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
   """following diagnostic ions or ion ratios between two glycans across MS/MS spectra of different quality\n
   | Arguments:
   | :-
-  | df (dataframe): dataframe containing spectra, predictions, and prediction confidences
+  | df (dataframe): dataframe containing binned spectra, predictions, and prediction confidences
   | glycan_list (list): list of two glycans in IUPAC-condensed nomenclature
   | conf_range (list): list of two confidence values that denote the confidence bracket used for spectra extraction, default uses all; default:None
   | mz_cap (float): maximum m/z value considered for analysis; default:3000
   | max_mz (float): maximum m/z value considered for model training; default:3000, do not change
   | min_mz (float): minimum m/z value considered for model training; default:39.714, do not change
-  | bin_num (int): number of bins to bin m/z range, used for model training; default:2048, do not change
+  | bin_num (int): number of bins to bin the m/z range, used for model training; default:2048, change if you binned differently
   | motif (string): if a glycan motif is specified in IUPAC-condensed, all glycans with and without will be compared; default:None
   | motif2 (string): if this and motif is specified, spectra of those motifs will be compared (with no spectra of molecules containing both motifs); default:None
   | thresh (float): effect size threshold to exclude fragments with max value below thresh; default:0.5
-  | conf_range(list): list of tuples with bin edges to bin the data according to prediction confidences\n
+  | conf_range(list): list of tuples with prediction confidence boundaries to bin the data according to prediction confidences\n
   | Returns:
   | :-
-  | Returns a plot of fragment effect size across prediction confidences and a dictionary of form bin : list of effect sizes across prediction confidences
+  | Returns a plot of fragment effect size across prediction confidences and a dictionary of form peak : list of effect sizes across prediction confidences
   """
   max_bin = round((mz_cap-min_mz) / ((max_mz-min_mz)/bin_num))
   df_a = df[df.Prediction == glycan_list[0]].reset_index(drop = True)
   df_b = df[df.Prediction == glycan_list[1]].reset_index(drop = True)
-  bins = {(min_mz+((max_mz-min_mz)/bin_num)*k, min_mz+((max_mz-min_mz)/bin_num)*(k+1)):[] for k in range(max_bin)}
+  df_r = pd.concat([df_a, df_b], axis = 0)
+  remainder = [np.median(col) for col in zip(*df_r.mz_remainder.values.tolist())]
+  bins = {min_mz+((max_mz-min_mz)/bin_num)*k + remainder[k]:[] for k in range(max_bin)}
   for conf in conf_range:
     df_a2 = df_a[df_a.Confidence.between(conf[0], conf[1])]
     df_b2 = df_b[df_b.Confidence.between(conf[0], conf[1])]
