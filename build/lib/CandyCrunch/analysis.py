@@ -42,7 +42,7 @@ mono_attributes = {'Gal':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A'
 
 bond_type_helper = {1:['bond','no_bond'],2:['red_bond','red_no_bond']}
 
-cut_type_dict = {'bond':'Y','no_bond':'Z','red_bond':'C','red_no_bond':'B','13A':'13A','24A':'24A','04A':'04A','35A':'35A','03A':'03A','25A':'25A','02A':'02A','02X':'02X'}
+cut_type_dict = {'bond':'Y','no_bond':'Z','red_bond':'C','red_no_bond':'B','13A':'13A','24A':'24A','04A':'04A','35A':'35A','03A':'03A','25A':'25A','02A':'02A','02X':'02X','04X':'04X'}
 
 def evaluate_adjacency_monos(glycan_part, adjustment):
   """Modified version of evaluate_adjacency to check glycoletter adjacency for monosaccharide only strings\n
@@ -693,8 +693,9 @@ def get_averaged_spectra(df, glycan_list, max_mz = 3000, min_mz = 39.714, bin_nu
   mz_range= [min_mz+((max_mz-min_mz)/bin_num)*k for k in range(num_bins_plot)]
   out_dic = {}
   if conf_analysis:
-    conf_brackets = [(0.9,1.0), (0.6,0.9), (0,0.6)]
+    conf_brackets = [(0.9,1.0), (0.6,0.9), (0.3,0.6), (0,0.3)]
     for bracket in conf_brackets:
+      plt.clf()
       get_plots(df_sub[df_sub.Confidence.between(bracket[0], bracket[1])], glycan_list, num_bins_plot, mz_range)
       plt.title("Confidence range: "+ str(bracket))
       plt.show()
