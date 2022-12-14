@@ -463,11 +463,13 @@ def add_to_subgraph_fragments(subgraph_fragments,nx_mono_list,mass_list):
 
   return subgraph_fragments
 
-def generate_atomic_frags(nx_mono):
+def generate_atomic_frags(nx_mono, mass_mode = False, fragment_masses = None):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
-  | nx_mono (networkx_object): the original monosaccharide only graph\n
+  | nx_mono (networkx_object): the original monosaccharide only graph
+  | mass_mode (bool): whether to constrain subgraph generation by observed masses
+  | fragment_masses (list): all masses which are to be annotated with a fragment name\n
   | Returns:
   | :-
   | Returns a dict of lists of networkx subgraphs
@@ -475,7 +477,7 @@ def generate_atomic_frags(nx_mono):
   # These general features are calculated here to help performance
   true_leaves = [node for node in nx_mono.nodes() if nx_mono.degree()[node] < 2]
   true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
-  nx_edge_dict = {(node[0],node[1]):node[2] for node in nx_mono.edges(data=True)}
+  nx_edge_dict = {(node[0],node[1]):node[2] for node in nx_mono.edges(data = True)}
   node_dict = nx.get_node_attributes(nx_mono,'string_labels')
   # The first graphs to be added to the output are the global mods of the original input
   subgraph_fragments = {}
@@ -483,6 +485,8 @@ def generate_atomic_frags(nx_mono):
   subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,modded_graphs,modded_masses)
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
+  if mass_mode:
+    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) > min(fragment_masses)]
   subgraphs.append(nx_mono)
 
   for subg in subgraphs:
@@ -536,7 +540,7 @@ def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
 
   leaf_chains = {}
   for og_leaf in og_leaves:
-    leaf_chains[og_leaf] = nx.shortest_path(nx_mono,source=og_leaf) # Calculates all of the paths in the original glycan from each of the original leaf nodes
+    leaf_chains[og_leaf] = nx.shortest_path(nx_mono,source = og_leaf) # Calculates all of the paths in the original glycan from each of the original leaf nodes
   main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains.values()],key=lambda x:sum([mono_attributes[node_dict[n]]['mass']['A'][node_dict[n]] for n in x]),reverse=True) #Sorts the main paths by mass as described in the nomenclature
   chain_rank = list(zip(ranks,main_chains))
 
@@ -581,7 +585,7 @@ def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
     if len(cut_labels) <= max_frags:
       ion_names.append((cut_labels))
 
-  return sorted(ion_names, key=len)
+  return sorted(ion_names, key = len)[:5]
 
 def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None, max_frags = 3):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
@@ -601,10 +605,10 @@ def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None, max_frags 
   hit_list = []
   fragment_masses = sorted(fragment_masses)
   mono_graph = glycan_to_graph_monos(glycan_string)
-  nx_mono = mono_graph_to_nx(mono_graph, directed=True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono)
+  nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
+  subg_frags = generate_atomic_frags(nx_mono, mass_mode = True, fragment_masses = fragment_masses)
   for mass in fragment_masses:
-    hits = [k for k in subg_frags if abs(mass-k) <threshold]
+    hits = [k for k in subg_frags if abs(mass-k) < threshold]
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
       ion_names = subgraphs_to_domon_costello(nx_mono,graphs, max_frags = max_frags)
