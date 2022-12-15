@@ -481,8 +481,6 @@ def generate_atomic_frags(nx_mono, mass_mode = False, fragment_masses = None):
   node_dict = nx.get_node_attributes(nx_mono,'string_labels')
   # The first graphs to be added to the output are the global mods of the original input
   subgraph_fragments = {}
-  modded_graphs,modded_masses = apply_global_mods(nx_mono)
-  subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,modded_graphs,modded_masses)
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
   if mass_mode:
