@@ -10,6 +10,8 @@ import ast
 import torch
 import torch.nn.functional as F
 
+fp_in = "drive/My Drive/CandyCrunch/"
+
 #choose the correct computing architecture
 device = "cpu"
 if torch.cuda.is_available():

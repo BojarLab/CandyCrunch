@@ -218,14 +218,10 @@ def extend_subgraph(subgraph,extension,node,k,k_subgraphs,neighbor_dict,nx_mono)
     graph_obj = nx_mono.subgraph(subgraph)
     k_subgraphs.append(graph_obj)
     return None
-  #while extension:
-  #  w = extension.pop()
-  #  exclusive_neighbors = get_exclusive_neighbors(w,subgraph,neighbor_dict)
-  #  new_extension = extension|{x for x in exclusive_neighbors if x > node}
-  #  extend_subgraph(subgraph|{w},new_extension,node,k,k_subgraphs,neighbor_dict,nx_mono)
-  for w in extension:
+  while extension:
+    w = extension.pop()
     exclusive_neighbors = get_exclusive_neighbors(w,subgraph,neighbor_dict)
-    new_extension = {x for x in exclusive_neighbors if x > node}
+    new_extension = extension|{x for x in exclusive_neighbors if x > node}
     extend_subgraph(subgraph|{w},new_extension,node,k,k_subgraphs,neighbor_dict,nx_mono)
 
 def get_exclusive_neighbors(w,subgraph,neighbor_dict):
