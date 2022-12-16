@@ -598,10 +598,10 @@ def get_most_likely_fragments(out_in):
   single_list = []
   for t in out[::-1]:
     out_len = len(out_list)
-    if isinstance(t[1], list) and len(t[1][0]) == 1:
+    if len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 1:
       out_list.append((t[0], t[1][0]))
       single_list.append(t[1][0][0])
-    elif isinstance(t[1], list) and len(t[1][0]) == 2:
+    elif len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 2:
       for tt in t[1]:
         if len(tt) == 2 and any([k in tt for k in single_list]):
           out_list.append((t[0], tt))

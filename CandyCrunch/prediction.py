@@ -549,8 +549,8 @@ def adduct_detect(df, mode, modification):
   df['adduct'] = adduct_check
   return df
 
-def wrap_inference(filename, glycan_class, model, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
-                   glycans = glycans, frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
+def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
+                   frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,
                    ptm = False, filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN']):
   """wrapper function to get & curate CandyCrunch predictions\n
@@ -559,10 +559,10 @@ def wrap_inference(filename, glycan_class, model, libr = None, filepath = fp_in 
   | filename (string or dataframe): if string, filepath +filename+ ".xlsx" must point to file; datafile containing extracted spectra
   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
   | model (PyTorch): trained CandyCrunch model
+  | glycans (list): full list of glycans used for training CandyCrunch
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | filepath (string): absolute filepath to filename, used as filepath +filename+ ".xlsx"
   | bin_num (int): number of bins for binning; don't change; default: 2048
-  | glycans (list): full list of glycans used for training CandyCrunch
   | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
