@@ -600,7 +600,7 @@ def get_most_likely_fragments(out_in):
     out_len = len(out_list)
     if len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 1:
       out_list.append((t[0], t[1][0]))
-      single_list.append(t[1][0][0])
+      single_list.append(t[1][0][:1])
     elif len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 2:
       for tt in t[1]:
         if len(tt) == 2 and any([k in tt for k in single_list]):
@@ -754,7 +754,7 @@ def run_controls(df_a, df_b):
   print("p-value (Welch's t-test) for differences in glycan branching: " + str(branch_comp))
 
 def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, bin_num = 2048,
-                 motif = None, motif2 = None, controls = False):
+                 motif = None, motif2 = None, controls = False, min_spectra = 10):
   """searching diagnostic ions or ion ratios between two glycans in MS/MS spectra\n
   | Arguments:
   | :-
@@ -767,7 +767,8 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
   | bin_num (int): number of bins to bin m/z range, used for model training; default:2048, change if you binned differently
   | motif (string): if a glycan motif is specified in IUPAC-condensed, all glycans with and without will be compared; default:None
   | motif2 (string): if this and motif is specified, spectra of those motifs will be compared (with no spectra of molecules containing both motifs); default:None
-  | controls (bool): whether to check for systematic differences in tested glycans (length & branching)\n
+  | controls (bool): whether to check for systematic differences in tested glycans (length & branching)
+  | min_spectra (int): minimum number of spectra that need to be present for glycans in glycan_list; default:10\n
   | Returns:
   | :-
   | Returns a list of tuples of the form (peak m/z, corrected p-value, effect size via Cohen's d)
@@ -787,6 +788,9 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
   if conf_range is not None:
     df_a = df_a[df_a.Confidence.between(conf_range[0], conf_range[1])]
     df_b = df_b[df_b.Confidence.between(conf_range[0], conf_range[1])]
+  if len(df_a) < min_spectra or len(df_b) < min_spectra:
+    print("Not enough spectra for at least one of the two sequences")
+    return []
   if controls:
     print("Number of spectra in df_a: " + str(len(df_a)))
     print("Number of spectra in df_b: " + str(len(df_b)))
