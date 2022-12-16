@@ -4,6 +4,7 @@ import networkx as nx
 import networkx.algorithms.isomorphism as iso
 import matplotlib.pyplot as plt
 import math
+import copy
 import re
 from collections import Counter
 from itertools import product
@@ -235,8 +236,10 @@ def get_exclusive_neighbors(w,subgraph,neighbor_dict):
   | :-
   | Returns a set of node labels
   """
-  all_neighbors = set.intersection(*[neighbor_dict[n] for n in subgraph])
-  w_neighbors = neighbor_dict[w]
+  all_neighbors =  {x for n in subgraph for x in neighbor_dict[n]}
+  w_neighbors = {x for x in neighbor_dict[w]}
+  #all_neighbors = set.intersection(*[neighbor_dict[n] for n in subgraph])
+  #w_neighbors = neighbor_dict[w]
   exclusive_neighbors = w_neighbors - all_neighbors
 
   return exclusive_neighbors
@@ -581,7 +584,36 @@ def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
 
   return sorted(ion_names, key = len)[:5]
 
-def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None, max_frags = 3):
+def get_most_likely_fragments(out_in):
+  """uses Occam's razor to determine most likely fragment at a peak\n
+  | Arguments:
+  | :-
+  | out_in (list): list of tuples of the form m/z : fragment names, generated within CandyCrumbs\n
+  | Returns:
+  | :-
+  | Returns format similar to out_in but condensed
+  """
+  out = copy.deepcopy(out_in)
+  out_list = []
+  single_list = []
+  for t in out[::-1]:
+    out_len = len(out_list)
+    if isinstance(t[1], list) and len(t[1][0]) == 1:
+      out_list.append((t[0], t[1][0]))
+      single_list.append(t[1][0][0])
+    elif isinstance(t[1], list) and len(t[1][0]) == 2:
+      for tt in t[1]:
+        if len(tt) == 2 and any([k in tt for k in single_list]):
+          out_list.append((t[0], tt))
+          break
+      if len(out_list) == out_len:
+        out_list.append(t)
+    else:
+      out_list.append(t)
+  return out_list[::-1]
+
+def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None,
+                max_frags = 3, simplify = False):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -589,7 +621,8 @@ def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None, max_frags 
   | fragment_masses (list): all masses which are to be annotated with a fragment name
   | threshold (float): the tolerated mass difference around each observed mass at which to include fragments
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
-  | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3\n
+  | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
+  | simplify (bool): whether to try condensing fragment options to the most likely option; default:False\n
   | Returns:
   | :-
   | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
@@ -609,6 +642,8 @@ def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None, max_frags 
       hit_list.append((mass,ion_names))
     else:
       hit_list.append((mass,None))
+  if simplify:
+    hit_list = get_most_likely_fragments(hit_list)
 
   return hit_list
 
