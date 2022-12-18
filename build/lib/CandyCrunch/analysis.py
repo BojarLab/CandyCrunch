@@ -39,7 +39,7 @@ mono_attributes = {'Gal':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A'
                   'Glc6S':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'Glc6S': 242.0096},'X':{'Glc6S': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc6S':[1,2,3,4,5,6]}},
                   'GlcOS':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'GlcOS': 242.0096},'X':{'GalOS': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcOS':[1,2,3,4,5,6]}},
                   'HexOS':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'HexOS': 242.0096},'X':{'HexOS': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexOS':[1,2,3,4,5,6]}},
-                  'Global':{'mass':{'H2O':-18,'CH2O':-30,'C2H2O':-42.04,'C2H4O2':-60.04,'C3H8O4':-108.04}}
+                  'Global':{'mass':{'H2O':-18,'CH2O':-30,'C2H2O':-42.04, 'CO2':-44, 'C2H4O2':-60.04,'C3H8O4':-108.04}}
                   }
 
 bond_type_helper = {1:['bond','no_bond'],2:['red_bond','red_no_bond']}
@@ -311,17 +311,18 @@ def calculate_mass(nx_mono):
   return mass
 
 
-def apply_global_mods(nx_mono):
+def apply_global_mods(nx_mono, attribute_dict):
   """Returns copies and the respective masses of the input graph each modified with one global modification\n
   | Arguments:
   | :-
-  | nx_mono (networkx_object): the original monosaccharide only graph\n
+  | nx_mono (networkx_object): the original monosaccharide only graph
+  | attribute_dict (dict): dictionary of atom properties and masses\n
   | Returns:
   | :-
   | Returns two lists, one of modified graphs and one of masses
   """
   modded_subgs,modded_masses = [],[]
-  for mod,mod_mass in mono_attributes['Global']['mass'].items():
+  for mod,mod_mass in attribute_dict['Global']['mass'].items():
     mod_label = [mod]
     mod_subg = nx_mono.copy()
     nx.set_node_attributes(mod_subg, mod_label, 'global_mod')
@@ -467,11 +468,12 @@ def add_to_subgraph_fragments(subgraph_fragments,nx_mono_list,mass_list):
 
   return subgraph_fragments
 
-def generate_atomic_frags(nx_mono, mass_mode = False, fragment_masses = None):
+def generate_atomic_frags(nx_mono, attribute_dict, mass_mode = False, fragment_masses = None):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
   | nx_mono (networkx_object): the original monosaccharide only graph
+  | attribute_dict (dict): dictionary of atom properties and masses
   | mass_mode (bool): whether to constrain subgraph generation by observed masses
   | fragment_masses (list): all masses which are to be annotated with a fragment name\n
   | Returns:
@@ -513,7 +515,7 @@ def generate_atomic_frags(nx_mono, mass_mode = False, fragment_masses = None):
       mod_subg_mass = round(mod_subg_mass,6)
       # All global modifications are also added to each combination of modifications below
       # if [x for x in set(mono_mods_dict.values()) ^ set(nx.get_node_attributes(mod_subg,'string_labels').values()) if x[-1] == 'A']: # Comment in if criteria are desired to add global mods to subgraphs (this line adds them only if there is an A cross ring)
-      modded_graphs,modded_masses = apply_global_mods(mod_subg)
+      modded_graphs,modded_masses = apply_global_mods(mod_subg, attribute_dict)
       subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,modded_graphs,modded_masses)
 
       subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,[mod_subg],[mod_subg_mass])
@@ -617,17 +619,51 @@ def get_most_likely_fragments(out_in):
       out_list.append(t)
   return out_list[::-1]
 
-def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None,
-                max_frags = 3, simplify = False):
+def refine_global_mods(glycan_string):
+  """filter out conditional global mods that don't apply for a given glycan\n
+  | Arguments:
+  | :-
+  | glycan_string (string): glycan in IUPAC-condensed format\n
+  | Returns:
+  | :-
+  | Returns the modified attribute dictionary
+  """
+  attribute_dict = copy.deepcopy(mono_attributes)
+  if not any([k in glycan_string for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA']]):
+    del attribute_dict['Global']['mass']['CO2']
+  return attribute_dict
+
+def raising_temp(subg_frags, mass, start, end):
+  """slowy raises the mass threshold to annotate more peaks\n
+  | Arguments:
+  | :-
+  | subg_frags ()
+  | mass (float): m/z value of a peak
+  | start (float): the minimum mass difference threshold with which to start reverse-annealing
+  | end (float): the maximum mass difference threshold with which to end reverse-annealing\n
+  | Returns:
+  | :-
+  | Returns a list of matching fragments for that mass
+  """
+  steps = [start + i * (end - start) / 5 for i in range(6)]
+  for s in steps:
+    hits = [k for k in subg_frags if abs(mass-k) < s]
+    if len(hits) > 0:
+      return hits
+  return []
+
+def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
+                max_frags = 3, simplify = False, start = 0.1):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
   | glycan_string (string): glycan in IUPAC-condensed format
   | fragment_masses (list): all masses which are to be annotated with a fragment name
-  | threshold (float): the tolerated mass difference around each observed mass at which to include fragments
+  | end_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
-  | simplify (bool): whether to try condensing fragment options to the most likely option; default:False\n
+  | simplify (bool): whether to try condensing fragment options to the most likely option; default:False
+  | start (float): the minimum mass difference threshold with which to start reverse-annealing; default:0.1\n
   | Returns:
   | :-
   | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
@@ -636,11 +672,12 @@ def CandyCrumbs(glycan_string,fragment_masses,threshold, libr = None,
     libr = lib
   hit_list = []
   fragment_masses = sorted(fragment_masses)
+  attribute_dict = refine_global_mods(glycan_string)
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, mass_mode = True, fragment_masses = fragment_masses)
+  subg_frags = generate_atomic_frags(nx_mono, attribute_dict, mass_mode = True, fragment_masses = fragment_masses)
   for mass in fragment_masses:
-    hits = [k for k in subg_frags if abs(mass-k) < threshold]
+    hits = raising_temp(subg_frags, mass, start, end_threshold)
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
       ion_names = subgraphs_to_domon_costello(nx_mono,graphs, max_frags = max_frags)
