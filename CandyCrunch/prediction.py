@@ -7,6 +7,7 @@ from glycowork.network.biosynthesis import construct_network, plot_network, evop
 from glycowork.glycan_data.loader import unwrap, stringify_dict, lib
 from CandyCrunch.model import SimpleDataset
 import ast
+import copy
 import torch
 import torch.nn.functional as F
 

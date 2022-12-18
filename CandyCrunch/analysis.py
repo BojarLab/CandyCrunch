@@ -3,6 +3,7 @@ import pandas as pd
 import networkx as nx
 import networkx.algorithms.isomorphism as iso
 import matplotlib.pyplot as plt
+import random
 import math
 import copy
 import re
@@ -351,7 +352,11 @@ def atom_mods_init(subg,present_breakages,terminals,terminal_labels):
       red_breakage = int(bond_label[1])
       atomic_mod_dict[bond[0]][red_breakage] = 2
     else:
-      breakage = int(bond_label[-1])
+      #current improvised way of providing '?' support
+      try:
+        breakage = int(bond_label[-1])
+      except:
+        breakage = random.choice([2,3,4,5,6])
       atomic_mod_dict[bond[1]][breakage] = 1
   return atomic_mod_dict
 
