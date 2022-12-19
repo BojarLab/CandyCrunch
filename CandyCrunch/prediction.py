@@ -4,7 +4,7 @@ import numpy_indexed as npi
 from glycowork.motif.processing import enforce_class, get_lib
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, calculate_theoretical_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
-from glycowork.glycan_data.loader import unwrap, stringify_dict, lib
+from glycowork.glycan_data.loader import unwrap, stringify_dict, lib, df_glycan
 from CandyCrunch.model import SimpleDataset
 import ast
 import copy

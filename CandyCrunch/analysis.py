@@ -403,7 +403,7 @@ def get_valid_A_frags(subg,node,label,nx_edge_dict):
   A_mods_list = [x for x in mono_attributes[label]['mass']['A']]
   node_in_edges = [x for x in subg.in_edges(node)]
   for mod in A_mods_list:
-    if not set([int(nx_edge_dict[bond]['bond_label'].split('-')[1][0]) for bond in node_in_edges]) <= set(mono_attributes[label]['atoms'][mod]):
+    if not set([int(nx_edge_dict[bond]['bond_label'].split('-')[1][0].replace('?','6')) for bond in node_in_edges]) <= set(mono_attributes[label]['atoms'][mod]):
       pass
     else:
       valid_A_mods_list.append(mod)
@@ -585,7 +585,8 @@ def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
         cut_rank,cut_chain = [(rank,chain) for rank,chain in chain_rank if cut[1] in chain][0]
         cut_number = cut_chain[::-1].index(cut[1])+1
       cut_labels.append('_'.join((cut_type,str(cut_number),cut_rank)))
-
+    if not cut_labels:
+      cut_labels = ['M']
     if len(cut_labels) <= max_frags:
       ion_names.append((cut_labels))
 
