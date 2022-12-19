@@ -294,7 +294,7 @@ def get_rep_spectra(rt_label_in, intensity = False):
     return medIdx, [], tt_len
 
 def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 'O', pred_thresh = 0.1, mode = 'negative', modification = 'reduced',
-                   get_missing = False, mass_tolerance = 0.5, ptm = False, filter_out = None, df_use = None):
+                   get_missing = False, mass_tolerance = 0.5, filter_out = None, df_use = None):
   """organizes spectrum predictions into 1 representative prediction for a spectrum cluster\n
   | Arguments:
   | :-
@@ -308,7 +308,6 @@ def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 
   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
   | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
   | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
-  | ptm (bool): [not used in mz_to_composition2] whether to also consider post-translational modifications (sulfation etc.) in composition matching; default:False
   | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:None
   | df_use (dataframe): glycan database used to check whether compositions are valid; default: df_glycan\n
   | Returns:
@@ -374,13 +373,6 @@ def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 
           k_c = k-1
         else:
           k_c = k
-        #comp = mz_to_composition(k_c, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, human = False,
-        #                           ptm = ptm, there_can_only_be_one=True, filter_out = filter_out)
-        #if len(comp)>0:
-        #  if intensity:
-        #    ranking[k] = ([], comp, inty)
-        #  else:
-        #    ranking[k] = ([], comp)
         comp = mz_to_composition2(k_c, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                  df_use = df_use, filter_out = filter_out, libr = libr)
         if len(comp) < 1:
@@ -485,9 +477,9 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
     if 'Kdn' in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid']:
       truth.append(any([abs(249-j) < 1 or abs(df_out.index.tolist()[k]-250-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
     if 'Neu5Gc' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid']:
-      truth.append(not any([abs(306-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
-    if 'Neu5Ac' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid']:
-      truth.append(not any([abs(290-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
+      truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+    if 'Neu5Ac' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and 'Neu5Gc' not in df_out.composition.values.tolist()[k].keys():
+      truth.append(not any([abs(290-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
     if 'S' in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and len(df_out.predictions.values.tolist()[k]) < 1:
       truth.append(any(['S' in (mz_to_composition2(t-reduced, libr = libr, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                  df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
@@ -495,7 +487,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
     if df_out.charge.values.tolist()[k] > 1:
       truth.append(any([j > df_out.index.values[k]*1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
     if df_out.charge.values.tolist()[k] == 1:
-      truth.append(all([j < df_out.index.values[k]*1.1 for j in df_out.top_fragments.values.tolist()[k][:10]]))
+      truth.append(all([j < df_out.index.values[k]*1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
     ##if len(df_out.top_fragments.values.tolist()[k])<20:
     ##  truth.append(False)
     #check M-adduct for adducts
@@ -553,7 +545,7 @@ def adduct_detect(df, mode, modification):
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,
-                   ptm = False, filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN']):
+                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN']):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
   | :-
@@ -573,7 +565,6 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   | spectra (bool): whether to also output the actual spectra used for prediction; default:False
   | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
   | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
-  | ptm (bool): [not used in mz_to_composition2] whether to also consider post-translational modifications (sulfation etc.) in composition matching; default:False
   | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:['Kdn', 'P', 'HexA', 'Pen', 'HexN']\n
   | Returns:
   | :-
@@ -594,7 +585,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   preds = {loaded_file.reducing_mass.values.tolist()[k]:preds[k] for k in range(len(preds))}
   out, num_spectra = build_mean_dic(preds, RT, pred_conf, inty, libr = libr, glycan_class = glycan_class, pred_thresh = pred_thresh,
                        modification = modification, mode = mode, get_missing = get_missing, mass_tolerance = mass_tolerance,
-                       ptm = ptm, filter_out = filter_out)
+                       filter_out = filter_out)
   df_out = pd.DataFrame.from_dict(out, orient = 'index')
   if intensity:
     df_out.columns = ['predictions', 'composition', 'rel_abundance']

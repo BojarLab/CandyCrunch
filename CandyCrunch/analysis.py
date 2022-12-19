@@ -239,8 +239,6 @@ def get_exclusive_neighbors(w,subgraph,neighbor_dict):
   """
   all_neighbors =  {x for n in subgraph for x in neighbor_dict[n]}
   w_neighbors = {x for x in neighbor_dict[w]}
-  #all_neighbors = set.intersection(*[neighbor_dict[n] for n in subgraph])
-  #w_neighbors = neighbor_dict[w]
   exclusive_neighbors = w_neighbors - all_neighbors
 
   return exclusive_neighbors
@@ -490,7 +488,7 @@ def generate_atomic_frags(nx_mono, attribute_dict, mass_mode = False, fragment_m
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
   if mass_mode:
-    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) > min(fragment_masses)]
+    subgraphs = [subg for subg in subgraphs if calculate_mass(subg)-17 > min(fragment_masses)]
   subgraphs.append(nx_mono)
 
   for subg in subgraphs:
