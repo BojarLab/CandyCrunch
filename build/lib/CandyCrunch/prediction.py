@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import numpy_indexed as npi
 from glycowork.motif.processing import enforce_class, get_lib
-from glycowork.motif.tokenization import mapping_file, glycan_to_composition, calculate_theoretical_mass, mz_to_composition, mz_to_composition2, composition_to_mass
+from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
 from glycowork.glycan_data.loader import unwrap, stringify_dict, lib, df_glycan
 from CandyCrunch.model import SimpleDataset
@@ -203,9 +203,9 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
   if libr is None:
     libr = lib
   if modification == 'permethylated':
-    mz = calculate_theoretical_mass(glycan, libr = libr, sample_prep = 'permethylated', go_fast = True)
+    mz = glycan_to_mass(glycan, libr = libr, sample_prep = 'permethylated')
   else:
-    mz = calculate_theoretical_mass(glycan, libr = libr, go_fast = True)
+    mz = glycan_to_mass(glycan, libr = libr)
   if modification == 'reduced':
     mz += 1
   if mode == 'negative':
@@ -363,9 +363,9 @@ def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 
     #get composition of predictions
     if len(g)>0:
       if intensity:
-        ranking[k] = ([j[:2] for j in g], glycan_to_composition(g[0][0], libr = libr, go_fast = True), inty)
+        ranking[k] = ([j[:2] for j in g], glycan_to_composition(g[0][0], libr = libr), inty)
       else:
-        ranking[k] = (g, glycan_to_composition(g[0][0], libr = libr, go_fast = True))
+        ranking[k] = (g, glycan_to_composition(g[0][0], libr = libr))
     #if no valid prediction (and get_missing = True), also keep representative spectra with a valid glycan composition
     else:
       if get_missing:
