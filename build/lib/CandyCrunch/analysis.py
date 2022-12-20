@@ -39,7 +39,7 @@ mono_attributes = {'Gal':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A'
                   'Glc6S':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'Glc6S': 242.0096},'X':{'Glc6S': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc6S':[1,2,3,4,5,6]}},
                   'GlcOS':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'GlcOS': 242.0096},'X':{'GalOS': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcOS':[1,2,3,4,5,6]}},
                   'HexOS':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'HexOS': 242.0096},'X':{'HexOS': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexOS':[1,2,3,4,5,6]}},
-                  'Global':{'mass':{'H2O':-18,'CH2O':-30,'C2H2O':-42.04, 'CO2':-44, 'C2H4O2':-60.04,'C3H8O4':-108.04}}
+                  'Global':{'mass':{'H2O':-18,'CH2O':-30,'C2H2O':-42.04, 'CO2':-44, 'C2H4O2':-60.04,'C3H8O4':-108.04, '+Acetate':+42.04}}
                   }
 
 bond_type_helper = {1:['bond','no_bond'],2:['red_bond','red_no_bond']}
@@ -632,14 +632,15 @@ def refine_global_mods(glycan_string):
     del attribute_dict['Global']['mass']['CO2']
   return attribute_dict
 
-def raising_temp(subg_frags, mass, start, end):
+def raising_temp(subg_frags, mass, start, end, charge):
   """slowy raises the mass threshold to annotate more peaks\n
   | Arguments:
   | :-
-  | subg_frags ()
+  | subg_frags (dict): dictionary of form m/z : glycan subgraph
   | mass (float): m/z value of a peak
   | start (float): the minimum mass difference threshold with which to start reverse-annealing
-  | end (float): the maximum mass difference threshold with which to end reverse-annealing\n
+  | end (float): the maximum mass difference threshold with which to end reverse-annealing
+  | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:1\n
   | Returns:
   | :-
   | Returns a list of matching fragments for that mass
@@ -649,10 +650,14 @@ def raising_temp(subg_frags, mass, start, end):
     hits = [k for k in subg_frags if abs(mass-k) < s]
     if len(hits) > 0:
       return hits
+    if charge > 1:
+      hits = [k for k in subg_frags if abs(mass-((k/2)-0.5)) < s]
+      if len(hits) > 0:
+        return hits
   return []
 
 def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
-                max_frags = 3, simplify = False, start = 0.1):
+                max_frags = 3, simplify = False, start = 0.1, charge = 1):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -662,7 +667,8 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | simplify (bool): whether to try condensing fragment options to the most likely option; default:False
-  | start (float): the minimum mass difference threshold with which to start reverse-annealing; default:0.1\n
+  | start (float): the minimum mass difference threshold with which to start reverse-annealing; default:0.1
+  | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:1\n
   | Returns:
   | :-
   | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
@@ -676,7 +682,7 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
   subg_frags = generate_atomic_frags(nx_mono, attribute_dict, mass_mode = True, fragment_masses = fragment_masses)
   for mass in fragment_masses:
-    hits = raising_temp(subg_frags, mass, start, end_threshold)
+    hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
       ion_names = subgraphs_to_domon_costello(nx_mono,graphs, max_frags = max_frags)
