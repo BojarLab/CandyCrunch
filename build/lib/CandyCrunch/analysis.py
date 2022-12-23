@@ -16,35 +16,39 @@ from glycowork.motif.analysis import cohen_d
 from glycowork.motif.graph import bracket_removal, min_process_glycans
 from glycowork.glycan_data.loader import lib
 
-mono_attributes = {'Gal':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Gal':162.0528},'X':{'Gal':162.0528}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Gal':[1,2,3,4,5,6]}},
-                  'Glc':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Glc':162.0528},'X':{'Glc':162.0528}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc':[1,2,3,4,5,6]}},
-                  'Man':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Man':162.0528},'X':{'Man':162.0528}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Man':[1,2,3,4,5,6]}},
-                  'Hex':{'mass':{'A':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Hex':162.0528},'X':{'Hex':162.0528}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Hex':[1,2,3,4,5,6]}},
-                  'GalNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'GalNAc': 203.0794},'X':{'GalNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalNAc':[1,2,3,4,5,6]}},
-                  'GlcNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'GlcNAc': 203.0794},'X':{'GlcNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAc':[1,2,3,4,5,6]}},
-                  'HexNAc':{'mass':{'A':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'HexNAc': 203.0794},'X':{'HexNAc': 203.0794}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexNAc':[1,2,3,4,5,6]}},
-                  'Neu5Ac':{'mass':{'A':{'Neu5Ac':291.0954},'X':{'02X':70,'04X':169.8,'Neu5Ac':291.0954}},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Ac':[1,2,3,4,5,6,7,8,9]}},
-                  'Neu5Gc':{'mass':{'A':{'Neu5Gc':307.0903},'X':{'02X':70,'04X':185.9,'Neu5Gc':307.0903}},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Gc':[1,2,3,4,5,6,7,8,9]}},
-                  'GlcA':{'mass':{'A':{'GlcA':176.03209},'X':{'GlcA':176.03209}},'atoms':{'GlcA':[1,2,3,4,5,6]}},
-                  'HexA':{'mass':{'A':{'HexA':176.03209},'X':{'HexA':176.03209}},'atoms':{'HexA':[1,2,3,4,5,6]}},
-                  'Fuc':{'mass':{'A':{'Fuc':146.0579},'X':{'Fuc':146.0579}},'atoms':{'Fuc':[1,2,3,4,5,6]}},
-                  'dHex':{'mass':{'A':{'dHex':146.0579},'X':{'dHex':146.0579}},'atoms':{'dHex':[1,2,3,4,5,6]}},
-                  'GlcNAc6S':{'mass':{'A':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GlcNAc6S':283.0362},'X':{'GlcNAc6S':283.0362}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAc6S':[1,2,3,4,5,6]}},
-                  'GlcNAcOS':{'mass':{'A':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GlcNAcOS':283.0362},'X':{'GlcNAcOS':283.0362}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAcOS':[1,2,3,4,5,6]}},
-                  'GalNAc6S':{'mass':{'A':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GalNAc6S':283.0362},'X':{'GalNAc6S':283.0362}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalNAc6S':[1,2,3,4,5,6]}},
-                  'GalNAcOS':{'mass':{'A':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GalNAcOS':283.0362},'X':{'GalNAcOS':283.0362}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalNAcOS':[1,2,3,4,5,6]}},
-                  'HexNAcOS':{'mass':{'A':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'HexNAcOS':283.0362},'X':{'HexNAcOS':283.0362}},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexNAcOS':[1,2,3,4,5,6]}},
-                  'Gal6S':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'Gal6S': 242.0096},'X':{'Gal6S': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Gal6S':[1,2,3,4,5,6]}},
-                  'GalOS':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'GalOS': 242.0096},'X':{'GalOS': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalOS':[1,2,3,4,5,6]}},
-                  'Glc6S':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'Glc6S': 242.0096},'X':{'Glc6S': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc6S':[1,2,3,4,5,6]}},
-                  'GlcOS':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'GlcOS': 242.0096},'X':{'GalOS': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcOS':[1,2,3,4,5,6]}},
-                  'HexOS':{'mass':{'A':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'HexOS': 242.0096},'X':{'HexOS': 242.0096}},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexOS':[1,2,3,4,5,6]}},
+mono_attributes = {'Gal':{'mass':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Gal':162.0528},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Gal':[1,2,3,4,5,6]}},
+                  'Glc':{'mass':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Glc':162.0528},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc':[1,2,3,4,5,6]}},
+                  'Man':{'mass':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Man':162.0528},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Man':[1,2,3,4,5,6]}},
+                  'Hex':{'mass':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Hex':162.0528},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Hex':[1,2,3,4,5,6]}},
+                  'GalNAc':{'mass':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'GalNAc': 203.0794},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalNAc':[1,2,3,4,5,6]}},
+                  'GlcNAc':{'mass':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'GlcNAc': 203.0794},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAc':[1,2,3,4,5,6]}},
+                  'HexNAc':{'mass':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'HexNAc': 203.0794},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexNAc':[1,2,3,4,5,6]}},
+                  'Neu5Ac':{'mass':{'02X':70,'04X':169.8,'Neu5Ac':291.0954},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Ac':[1,2,3,4,5,6,7,8,9]}},
+                  'Neu5Gc':{'mass':{'02X':70,'04X':185.9,'Neu5Gc':307.0903},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Gc':[1,2,3,4,5,6,7,8,9]}},
+                  'GlcA':{'mass':{'GlcA':176.03209},'atoms':{'GlcA':[1,2,3,4,5,6]}},
+                  'HexA':{'mass':{'HexA':176.03209},'atoms':{'HexA':[1,2,3,4,5,6]}},
+                  'Fuc':{'mass':{'Fuc':146.0579},'atoms':{'Fuc':[1,2,3,4,5,6]}},
+                  'dHex':{'mass':{'dHex':146.0579},'atoms':{'dHex':[1,2,3,4,5,6]}},
+                  'GlcNAc6S':{'mass':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GlcNAc6S':283.0362},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAc6S':[1,2,3,4,5,6]}},
+                  'GlcNAcOS':{'mass':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GlcNAcOS':283.0362},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcNAcOS':[1,2,3,4,5,6]}},
+                  'GalNAc6S':{'mass':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GalNAc6S':283.0362},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalNAc6S':[1,2,3,4,5,6]}},
+                  'GalNAcOS':{'mass':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'GalNAcOS':283.0362},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalNAcOS':[1,2,3,4,5,6]}},
+                  'HexNAcOS':{'mass':{'04A':139.9568,'24A':139.9568,'35A':153.9568,'03A':169.9568,'25A':183.9568,'02A': 199.9568,'HexNAcOS':283.0362},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexNAcOS':[1,2,3,4,5,6]}},
+                  'Gal6S':{'mass':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'Gal6S': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Gal6S':[1,2,3,4,5,6]}},
+                  'GalOS':{'mass':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'GalOS': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GalOS':[1,2,3,4,5,6]}},
+                  'Glc6S':{'mass':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'Glc6S': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc6S':[1,2,3,4,5,6]}},
+                  'GlcOS':{'mass':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'GlcOS': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcOS':[1,2,3,4,5,6]}},
+                  'HexOS':{'mass':{'13A': 60,'24A': 139.9568,'04A': 139.9568,'35A': 153.9568,'25A': 183.9568,'02A': 199.9568,'HexOS': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexOS':[1,2,3,4,5,6]}},
                   'Global':{'mass':{'H2O':-18,'CH2O':-30,'C2H2O':-42.04, 'CO2':-44, 'C2H4O2':-60.04,'C3H8O4':-108.04, '+Acetate':+42.04}}
                   }
 
 bond_type_helper = {1:['bond','no_bond'],2:['red_bond','red_no_bond']}
 
 cut_type_dict = {'bond':'Y','no_bond':'Z','red_bond':'C','red_no_bond':'B','13A':'13A','24A':'24A','04A':'04A','35A':'35A','03A':'03A','25A':'25A','02A':'02A','02X':'02X','04X':'04X'}
+
+A_cross_rings =  {'13A','24A','04A','35A','03A','25A','02A'}
+
+X_cross_rings =  {'02X','04X'}
 
 def evaluate_adjacency_monos(glycan_part, adjustment):
   """Modified version of evaluate_adjacency to check glycoletter adjacency for monosaccharide only strings\n
@@ -293,9 +297,9 @@ def calculate_mass(nx_mono):
   all_atom_mods = Counter([m for d in [v.values() for v in atom_dict.values()] for m in d if m != 0])
   reducing_end = nx.get_node_attributes(nx_mono,'reducing_end')
 
-  mass = sum([mono_attributes[v]['mass']['A'][v] for k,v in comp.items() if k not in mono_mods])-1
-  mass += sum([mono_attributes[comp[k]]['mass']['A'][v] for k,v in mono_mods.items() if v in mono_attributes[comp[k]]['mass']['A']])
-  mass += sum([mono_attributes[comp[k]]['mass']['X'][v] for k,v in mono_mods.items() if v not in mono_attributes[comp[k]]['mass']['A']])
+  mass = sum([mono_attributes[v]['mass'][v] for k,v in comp.items() if k not in mono_mods])-1
+  mass += sum([mono_attributes[comp[k]]['mass'][v] for k,v in mono_mods.items() if v in mono_attributes[comp[k]]['mass']])
+  mass += sum([mono_attributes[comp[k]]['mass'][v] for k,v in mono_mods.items() if v not in mono_attributes[comp[k]]['mass']])
   mass += -18.0105546*all_atom_mods['no_bond']
   mass += +18.0105546*all_atom_mods['red_bond']
 
@@ -307,28 +311,6 @@ def calculate_mass(nx_mono):
       else:
         mass += 18.0105546+2
   return mass
-
-
-def apply_global_mods(nx_mono, attribute_dict):
-  """Returns copies and the respective masses of the input graph each modified with one global modification\n
-  | Arguments:
-  | :-
-  | nx_mono (networkx_object): the original monosaccharide only graph
-  | attribute_dict (dict): dictionary of atom properties and masses\n
-  | Returns:
-  | :-
-  | Returns two lists, one of modified graphs and one of masses
-  """
-  modded_subgs,modded_masses = [],[]
-  for mod,mod_mass in attribute_dict['Global']['mass'].items():
-    mod_label = [mod]
-    mod_subg = nx_mono.copy()
-    nx.set_node_attributes(mod_subg, mod_label, 'global_mod')
-    total_mass = calculate_mass(nx_mono)
-    mass = round(total_mass+mod_mass,6)
-    modded_subgs.append(mod_subg)
-    modded_masses.append(mass)
-  return modded_subgs,modded_masses
 
 def atom_mods_init(subg,present_breakages,terminals,terminal_labels):
   """Creates the initial nested dict of each terminal node with floating bonds labelled 1 and the reducing end floating bond labelled 2\n
@@ -381,9 +363,8 @@ def get_mono_mods_list(root_node,subg,terminals,terminal_labels,atomic_mods,nx_e
     elif subg.degree()[node] > 1:
       terminal_mods.append([label])
     else:
-      terminal_mods.append([x for x in mono_attributes[label]['mass']['X']])
+      terminal_mods.append([x for x in mono_attributes[label]['mass'] if x in X_cross_rings or x == label])
   return terminal_mods
-
 
 def get_valid_A_frags(subg,node,label,nx_edge_dict):
   """Checks which A cross-ring fragmentation is possible for the input node\n
@@ -398,7 +379,7 @@ def get_valid_A_frags(subg,node,label,nx_edge_dict):
   | Returns a list of names of possible modifications
   """
   valid_A_mods_list = []
-  A_mods_list = [x for x in mono_attributes[label]['mass']['A']]
+  A_mods_list = [x for x in mono_attributes[label]['mass'] if x in A_cross_rings or x == label]
   node_in_edges = [x for x in subg.in_edges(node)]
   for mod in A_mods_list:
     if not set([int(nx_edge_dict[bond]['bond_label'].split('-')[1][0].replace('?','6')) for bond in node_in_edges]) <= set(mono_attributes[label]['atoms'][mod]):
@@ -423,7 +404,7 @@ def create_dict_perms(dicty):
   return dict_perms
 
 def generate_mod_permutations(terminals,terminal_labels,mono_mods_list,atomic_mod_dict_subg):
-  """Determines all possible monosaccharide modification combinations and their respective atom level representations\n
+  """Determines all possible monosaccharide modifications and their respective atom level representations\n
   | Arguments:
   | :-
   | terminals (list): node labels of nodes with floating bonds
@@ -432,8 +413,8 @@ def generate_mod_permutations(terminals,terminal_labels,mono_mods_list,atomic_mo
   | atomic_mod_dict_subg (dict): nested dict of each terminal node with floating bonds labelled at each atom\n
   | Returns:
   | :-
-  | (1) a list of all cross ring level fragmentation combinations at the node level for all of the terminal nodes
-  | (2) a list of all bond fragmentation combinations at the atom dict level for all of the terminal nodes
+  | (1) a nested list of all possible cross ring level fragmentations for each terminal node
+  | (2) a nested list of all possible bond fragmentation dictionaries for each terminal node
   """
   all_terminal_perms,all_mono_mods = [],[]
   for node,label,mono_mods in zip(terminals,terminal_labels,mono_mods_list):
@@ -445,7 +426,74 @@ def generate_mod_permutations(terminals,terminal_labels,mono_mods_list,atomic_mo
       all_mono_mod_perms.extend(len(dict_perms)*[mono_mods[i]])
     all_terminal_perms.append(all_atom_dict_perms)
     all_mono_mods.append(all_mono_mod_perms)
-  return product(*all_mono_mods),product(*all_terminal_perms)
+  return all_mono_mods,all_terminal_perms
+
+def precalculate_mod_masses(all_mono_mods,all_terminal_perms,terminal_labels,global_mods):
+  """Determines the masses of all possible monosaccharide modifications and their respective atom level representations\n
+  | Arguments:
+  | :-
+  | all_mono_mods (list): all possible cross ring level fragmentations
+  | all_terminal_perms (list): all possible bond fragmentation dictionaries
+  | terminal_labels (list): string labels of nodes in terminals
+  | global_mods (list): possible global modifications\n
+  | Returns:
+  | :-
+  | (1) a list of all possible mass combinations for each cross ring combination
+  | (2) a list of all possible mass combinations for each bond fragmentation combination
+  | (3) a list of masses corresponding to each of the global mods
+  """
+  all_mono_mod_masses = []
+  for node,label in zip(all_mono_mods,terminal_labels):
+    node_mod_masses = []
+    for mod in node:
+      mass = mono_attributes[label]['mass'][mod]
+      node_mod_masses.append(mass)
+    all_mono_mod_masses.append(node_mod_masses)
+
+  all_atom_dict_masses = []
+  for node in all_terminal_perms:
+    node_dict_masses = []
+    for mod in node:
+      present_atom_mods = [x for x in mod.values() if x in ['no_bond','red_bond']]
+      mass = -18.0105546*len([x for x in present_atom_mods if x == 'no_bond'])
+      mass += +18.0105546*len([x for x in present_atom_mods if x == 'red_bond'])
+      node_dict_masses.append(mass)
+    all_atom_dict_masses.append(node_dict_masses)
+    
+  global_mods_mass = [mono_attributes['Global']['mass'][x] for x in global_mods[1:]]
+  
+  return product(*all_mono_mod_masses),product(*all_atom_dict_masses),global_mods_mass
+
+def preliminary_calculate_mass(mono_mods_mass,atom_mods_mass,global_mods_mass,terminals,inner_mass,true_root_node):
+  """Determines the mass of every permutation of monosaccharide, atom, and global modification\n
+  | Arguments:
+  | :-
+  | mono_mods_mass (list): all possible mass combinations for each cross ring combination
+  | atom_mods_mass (list): all possible mass combinations for each bond fragmentation
+  | global_mods_mass (list): masses corresponding to each of the global mods
+  | terminals (list): string labels of nodes in terminals
+  | inner_mass (float): total mass of non-terminal nodes in subgraph
+  | true_root_node (int): the node label corresponding to the root of the parent glycan\n
+  | Returns:
+  | :-
+  | Returns a list every single mass of each modification combination for each cross ring combination
+  """
+  masses_list = []
+  root_presence = False
+  if true_root_node in terminals:
+    root_presence = True
+    root_node_idx = terminals.index(true_root_node) 
+  for mod_combo,atom_combo in zip(mono_mods_mass,atom_mods_mass):
+    mass = inner_mass-1
+    mass += sum(mod_combo)+sum(atom_combo)
+    if root_presence:
+      if mod_combo[root_node_idx] not in A_cross_rings:
+        mass += 18.0105546+2
+    masses_list.append(mass)
+    for mod_mass in global_mods_mass:
+      modded_mass = mass + mod_mass
+      masses_list.append(modded_mass)
+  return masses_list
 
 def add_to_subgraph_fragments(subgraph_fragments,nx_mono_list,mass_list):
   """Helper to add lists of subgraphs and their respective masses to a dict\n
@@ -466,12 +514,27 @@ def add_to_subgraph_fragments(subgraph_fragments,nx_mono_list,mass_list):
 
   return subgraph_fragments
 
+def get_global_mods(subg,node_dict):
+  """Returns the valid list of global modifications for a given subgraph\n
+  | Arguments:
+  | :-
+  | subg (networkx_object): a subgraph
+  | node_dict (dict): a dictionary relating the integer label of each node with the monosaccharide it represents\n
+  | Returns:
+  | :-
+  | Returns a a list of modification names
+  """
+  if any([k in [node_dict[x] for x in subg.nodes()] for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA']]):
+    global_mods = sorted([x for x in mono_attributes['Global']['mass']])
+  else:
+    global_mods = sorted([x for x in mono_attributes['Global']['mass'] if x != 'CO2'])
+  return global_mods
+
 def generate_atomic_frags(nx_mono, attribute_dict, mass_mode = False, fragment_masses = None):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
   | nx_mono (networkx_object): the original monosaccharide only graph
-  | attribute_dict (dict): dictionary of atom properties and masses
   | mass_mode (bool): whether to constrain subgraph generation by observed masses
   | fragment_masses (list): all masses which are to be annotated with a fragment name\n
   | Returns:
@@ -488,37 +551,112 @@ def generate_atomic_frags(nx_mono, attribute_dict, mass_mode = False, fragment_m
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
   if mass_mode:
-    subgraphs = [subg for subg in subgraphs if calculate_mass(subg)-17 > min(fragment_masses)]
+    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) > min(fragment_masses)]
   subgraphs.append(nx_mono)
-
   for subg in subgraphs:
     # For a subgraph we find all possible node and atom level modification
     present_breakages = get_broken_bonds(subg,nx_mono,nx_edge_dict)
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg,present_breakages,root_node)
     terminal_labels = [node_dict[x] for x in terminals]
-
+    global_mods = [None] + get_global_mods(subg,node_dict)
+    inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
+    
     atomic_mod_dict_subg = atom_mods_init(subg,present_breakages,terminals,terminal_labels)
     mono_mods_list = get_mono_mods_list(root_node,subg,terminals,terminal_labels,atomic_mod_dict_subg,nx_edge_dict)
     mono_mod_perms,atom_dict_perms = generate_mod_permutations(terminals,terminal_labels,mono_mods_list,atomic_mod_dict_subg)
+    permutation_list = product(zip(product(*mono_mod_perms),product(*atom_dict_perms)),global_mods)
+    
+    mono_masses,atom_masses,global_masses = precalculate_mod_masses(mono_mod_perms,atom_dict_perms,terminal_labels,global_mods)    
+    initial_masses = preliminary_calculate_mass(mono_masses,atom_masses,global_masses,terminals,inner_mass,true_root_node)
 
-    for mono_mods,atom_dicts in zip(mono_mod_perms,atom_dict_perms):
+    for mass,(node_mod,global_mod) in zip(initial_masses,permutation_list):
+      if mass_mode:
+        if not [x for x in fragment_masses if abs(mass-x)<1]:
+          continue
       # For every modification combination we copy and label the subgraph as such, before calculating its mass and adding it to the output
       mod_subg = subg.copy() #Consider subgraph instead
-      mono_mods_dict = dict(zip(terminals,mono_mods))
+      mono_mods_dict = dict(zip(terminals,node_mod[0]))
       nx.set_node_attributes(mod_subg, mono_mods_dict, 'mod_labels')
-      atoms_mods_dict = dict(zip(terminals,atom_dicts))
+      atoms_mods_dict = dict(zip(terminals,node_mod[1]))
       nx.set_node_attributes(mod_subg, atoms_mods_dict, 'atomic_mod_dict')
-      mod_subg_mass = calculate_mass(mod_subg)
-      mod_subg_mass = round(mod_subg_mass,6)
-      # All global modifications are also added to each combination of modifications below
-      # if [x for x in set(mono_mods_dict.values()) ^ set(nx.get_node_attributes(mod_subg,'string_labels').values()) if x[-1] == 'A']: # Comment in if criteria are desired to add global mods to subgraphs (this line adds them only if there is an A cross ring)
-      modded_graphs,modded_masses = apply_global_mods(mod_subg, attribute_dict)
-      subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,modded_graphs,modded_masses)
-
+      if global_mod: 
+        nx.set_node_attributes(mod_subg, [global_mod], 'global_mod')
+      mod_subg_mass = round(mass,5)
       subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,[mod_subg],[mod_subg_mass])
 
   return subgraph_fragments
+
+def find_main_chain(subgraph,leaves,root_node):
+  """Calculates the main chain of a subgraph\n
+  | Arguments:
+  | :-
+  | subg (networkx_object): a subgraph
+  | leaves (list): integer labels of leaf nodes 
+  | root_node (list): integer label of the root node\n
+  | Returns:
+  | :-
+  | Returns a list of integer node labels representing the inputs main chain 
+  """
+  bond_dict = nx.get_edge_attributes(subgraph,'bond_label')
+  main_chains = []
+  for leaf in leaves:
+    for path in nx.all_simple_paths(subgraph, source=leaf, target=root_node):
+      main_chains.append(path)
+  main_chain_len = max([len(x) for x in main_chains])
+  main_chains = [k for k in main_chains if len(k) == main_chain_len]
+  for i in range(main_chain_len)[::-1]:
+    step = [c[i] for c in main_chains]
+    if len(set(step)) == 1:
+      pass
+    else:
+      bond_nums = [bond_dict[i][-1] for j in step for i in subgraph.edges if j==i[0]]
+      main_chains = [main_chains[i] for i, x in enumerate(bond_nums) if x == min(bond_nums)]
+  return main_chains[0]
+
+def mono_frag_to_string(sub_g):
+  """Converts a subgraph into an IUPAC-condensed format by repeatedly finding the main chain of each branch\n
+  | Arguments:
+  | :-
+  | subg (networkx_object): a subgraph\n
+  | Returns:
+  | :-
+  | Returns a string in an IUPAC-condensed format
+  """
+  if len(sub_g.nodes) == 1:
+    return list(nx.get_node_attributes(sub_g,'string_labels').values())[0]
+  root_node = [k for k,v in sub_g.out_degree if v == 0]
+  root_node = root_node[0]
+  leaves = [v for v, d in sub_g.in_degree() if d == 0]
+  main_chain = []
+  n_skelly = []
+  main_chain = [str(i) for i in find_main_chain(sub_g,leaves,root_node)]
+  n_skelly = main_chain
+
+  while set([str(k) for k in sub_g.nodes]) != set([k for k in n_skelly if k.isnumeric()]):
+    for i in [m for m in main_chain if m.isnumeric()][::-1]:
+      new_root_node = [x for x in nx.all_neighbors(sub_g,int(i)) if str(x) not in main_chain]
+      if len(new_root_node) < 1:
+        continue
+      new_root_node = new_root_node[0]
+      new_leaves = set(nx.ancestors(sub_g, new_root_node)) & set(leaves)
+      if len(new_leaves) == 0:
+        new_chain = [new_root_node]
+      else:
+        new_chain = find_main_chain(sub_g,new_leaves,new_root_node)
+      n_skelly[n_skelly.index(i):n_skelly.index(i)] = ['['] + [str(k) for k in new_chain] + [']']
+    main_chain = n_skelly
+
+  bond_dict = nx.get_edge_attributes(sub_g,'bond_label')
+  mono_to_bond = {k[0]:v for k,v in bond_dict.items()}
+  string_labels = nx.get_node_attributes(sub_g,'string_labels') 
+  for i in n_skelly:
+    if i.isnumeric():
+      if int(i) in mono_to_bond:
+        n_skelly.insert(n_skelly.index(i)+1,f'({mono_to_bond[int(i)]})')
+      n_skelly[n_skelly.index(i)] = string_labels[int(i)]
+  
+  return ''.join(n_skelly)
 
 def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
   """Converts the subgraphs of a given graph object into their canonical Domon & Costello fragment names\n
@@ -543,7 +681,7 @@ def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
   leaf_chains = {}
   for og_leaf in og_leaves:
     leaf_chains[og_leaf] = nx.shortest_path(nx_mono,source = og_leaf) # Calculates all of the paths in the original glycan from each of the original leaf nodes
-  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains.values()],key=lambda x:sum([mono_attributes[node_dict[n]]['mass']['A'][node_dict[n]] for n in x]),reverse=True) #Sorts the main paths by mass as described in the nomenclature
+  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains.values()],key=lambda x:sum([mono_attributes[node_dict[n]]['mass'][node_dict[n]] for n in x]),reverse=True) #Sorts the main paths by mass as described in the nomenclature
   chain_rank = list(zip(ranks,main_chains))
 
   for subg in subgs:
@@ -585,11 +723,12 @@ def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
       cut_labels.append('_'.join((cut_type,str(cut_number),cut_rank)))
     if not cut_labels:
       cut_labels = ['M']
-    if len(cut_labels) <= max_frags:
-      ion_names.append((cut_labels))
-  ion_names = [k for k in ion_names if not (('M_+Acetate' in k) and (len(k) > 1))]
+    ion_names.append((cut_labels))
+    
+  ion_names = sorted(ion_names, key = len)[:5]
+  ion_names = [x if len(x) <= max_frags else [f'More than {max_frags} frags'] for x in ion_names]  
 
-  return sorted(ion_names, key = len)[:5]
+  return ion_names
 
 def get_most_likely_fragments(out_in):
   """uses Occam's razor to determine most likely fragment at a peak\n
@@ -682,12 +821,14 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
     start = end_threshold/2
   hit_list = []
   fragment_masses = sorted(fragment_masses)
-  attribute_dict = refine_global_mods(glycan_string)
+  # attribute_dict = refine_global_mods(glycan_string)
+  attribute_dict = mono_attributes
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
   subg_frags = generate_atomic_frags(nx_mono, attribute_dict, mass_mode = True, fragment_masses = fragment_masses)
   for mass in fragment_masses:
-    hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
+    # hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
+    hits = [k for k in subg_frags if abs(mass-k) < end_threshold]
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
       ion_names = subgraphs_to_domon_costello(nx_mono,graphs, max_frags = max_frags)
