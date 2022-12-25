@@ -14,7 +14,7 @@ from scipy.stats import ttest_ind
 from statsmodels.stats.multitest import multipletests
 from glycowork.motif.analysis import cohen_d
 from glycowork.motif.graph import bracket_removal, min_process_glycans
-from glycowork.glycan_data.loader import lib
+from glycowork.glycan_data.loader import lib, unwrap
 
 mono_attributes = {'Gal':{'mass':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Gal':162.0528},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Gal':[1,2,3,4,5,6]}},
                   'Glc':{'mass':{'13A':60,'24A':60,'04A':60,'35A':74,'25A':104,'02A':120,'Glc':162.0528},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc':[1,2,3,4,5,6]}},
@@ -524,18 +524,35 @@ def get_global_mods(subg,node_dict):
   | :-
   | Returns a a list of modification names
   """
-  if any([k in [node_dict[x] for x in subg.nodes()] for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA']]):
-    global_mods = sorted([x for x in mono_attributes['Global']['mass']])
-  else:
-    global_mods = sorted([x for x in mono_attributes['Global']['mass'] if x != 'CO2'])
+  global_mods = sorted([x for x in mono_attributes['Global']['mass']])
+  if not any(k in [node_dict[x] for x in subg.nodes()] for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA']):
+    global_mods.remove('CO2')
   return global_mods
 
-def generate_atomic_frags(nx_mono, attribute_dict, mass_mode = False, fragment_masses = None):
+def mod_count(node_mod, global_mod):
+  """Given a description of subgraph modifications, returns a summed count of modifications\n
+  | Arguments:
+  | :-
+  | node_mod (nested list): nested list of (i) monosaccharide level modifications and (ii) atom level modifications
+  | global_mod (string): description of global modification, or None if no modification\n
+  | Returns:
+  | :-
+  | Returns a sum of modifications
+  """
+  c = 0
+  if global_mod is not None:
+    c += 1
+  c += sum([1 for k in node_mod[0] if k in A_cross_rings or k in X_cross_rings])
+  c += sum([1 for k in unwrap([list(n.values()) for n in node_mod[1]]) if isinstance(k, str)])
+  return c
+
+def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
   | nx_mono (networkx_object): the original monosaccharide only graph
-  | mass_mode (bool): whether to constrain subgraph generation by observed masses
+  | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
+  | mass_mode (bool): whether to constrain subgraph generation by observed masses; default:False
   | fragment_masses (list): all masses which are to be annotated with a fragment name\n
   | Returns:
   | :-
@@ -551,7 +568,7 @@ def generate_atomic_frags(nx_mono, attribute_dict, mass_mode = False, fragment_m
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
   if mass_mode:
-    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) > min(fragment_masses)]
+    subgraphs = [subg for subg in subgraphs if calculate_mass(subg)-17 > min(fragment_masses)]
   subgraphs.append(nx_mono)
   for subg in subgraphs:
     # For a subgraph we find all possible node and atom level modification
@@ -574,16 +591,19 @@ def generate_atomic_frags(nx_mono, attribute_dict, mass_mode = False, fragment_m
       if mass_mode:
         if not [x for x in fragment_masses if abs(mass-x)<1]:
           continue
+      if (m := mod_count(node_mod, global_mod)) <= max_frags:
+        if m > 1 and global_mod == '+Acetate':
+          continue
       # For every modification combination we copy and label the subgraph as such, before calculating its mass and adding it to the output
-      mod_subg = subg.copy() #Consider subgraph instead
-      mono_mods_dict = dict(zip(terminals,node_mod[0]))
-      nx.set_node_attributes(mod_subg, mono_mods_dict, 'mod_labels')
-      atoms_mods_dict = dict(zip(terminals,node_mod[1]))
-      nx.set_node_attributes(mod_subg, atoms_mods_dict, 'atomic_mod_dict')
-      if global_mod: 
-        nx.set_node_attributes(mod_subg, [global_mod], 'global_mod')
-      mod_subg_mass = round(mass,5)
-      subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,[mod_subg],[mod_subg_mass])
+        mod_subg = subg.copy() #Consider subgraph instead
+        mono_mods_dict = dict(zip(terminals,node_mod[0]))
+        nx.set_node_attributes(mod_subg, mono_mods_dict, 'mod_labels')
+        atoms_mods_dict = dict(zip(terminals,node_mod[1]))
+        nx.set_node_attributes(mod_subg, atoms_mods_dict, 'atomic_mod_dict')
+        if global_mod: 
+          nx.set_node_attributes(mod_subg, [global_mod], 'global_mod')
+        mod_subg_mass = round(mass,5)
+        subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments,[mod_subg],[mod_subg_mass])
 
   return subgraph_fragments
 
@@ -658,13 +678,12 @@ def mono_frag_to_string(sub_g):
   
   return ''.join(n_skelly)
 
-def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
+def subgraphs_to_domon_costello(nx_mono,subgs):
   """Converts the subgraphs of a given graph object into their canonical Domon & Costello fragment names\n
   | Arguments:
   | :-
   | nx_mono (networkx_object): the original monosaccharide only graph
-  | subg (list): a list of modified networkx subgraphs
-  | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3\n
+  | subg (list): a list of modified networkx subgraphs\n
   | Returns:
   | :-
   | Returns a nested list with one list of fragment labels for each subgraph
@@ -724,9 +743,8 @@ def subgraphs_to_domon_costello(nx_mono,subgs, max_frags = 3):
     if not cut_labels:
       cut_labels = ['M']
     ion_names.append((cut_labels))
-    
+
   ion_names = sorted(ion_names, key = len)[:5]
-  ion_names = [x if len(x) <= max_frags else [f'More than {max_frags} frags'] for x in ion_names]  
 
   return ion_names
 
@@ -799,7 +817,8 @@ def raising_temp(subg_frags, mass, start, end, charge):
   return []
 
 def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
-                max_frags = 3, simplify = False, start = 0.1, charge = 1):
+                max_frags = 3, simplify = False, start = 0.1,
+                reverse_anneal = True, charge = 1):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -821,20 +840,20 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
     start = end_threshold/2
   hit_list = []
   fragment_masses = sorted(fragment_masses)
-  # attribute_dict = refine_global_mods(glycan_string)
-  attribute_dict = mono_attributes
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, attribute_dict, mass_mode = True, fragment_masses = fragment_masses)
+  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses)
   for mass in fragment_masses:
-    # hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
-    hits = [k for k in subg_frags if abs(mass-k) < end_threshold]
+    if reverse_anneal:
+      hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
+    else:
+      hits = [k for k in subg_frags if abs(mass-k) < end_threshold]
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
-      ion_names = subgraphs_to_domon_costello(nx_mono,graphs, max_frags = max_frags)
+      ion_names = subgraphs_to_domon_costello(nx_mono,graphs)
       hit_list.append((mass,ion_names))
     else:
-      hit_list.append((mass,None))
+      hit_list.append((mass,[]))
   if simplify:
     hit_list = get_most_likely_fragments(hit_list)
 
