@@ -678,7 +678,7 @@ def mono_frag_to_string(sub_g):
   
   return ''.join(n_skelly)
 
-def subgraphs_to_domon_costello(nx_mono,subgs):
+def subgraphs_to_domon_costello(nx_mono,subgs, iupac = False):
   """Converts the subgraphs of a given graph object into their canonical Domon & Costello fragment names\n
   | Arguments:
   | :-
@@ -745,8 +745,10 @@ def subgraphs_to_domon_costello(nx_mono,subgs):
     ion_names.append((cut_labels))
 
   ion_names = sorted(ion_names, key = len)[:5]
-
-  return ion_names
+  if iupac:
+    return [(ion_names[k], mono_frag_to_string(subgs[k])) for k in range(len(ion_names))]
+  else:
+    return ion_names
 
 def get_most_likely_fragments(out_in):
   """uses Occam's razor to determine most likely fragment at a peak\n
@@ -817,8 +819,8 @@ def raising_temp(subg_frags, mass, start, end, charge):
   return []
 
 def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
-                max_frags = 3, simplify = False, start = 0.1,
-                reverse_anneal = True, charge = 1):
+                max_frags = 3, simplify = False, reverse_anneal = True, start = 0.1,
+                charge = 1, iupac = False):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -828,8 +830,10 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | simplify (bool): whether to try condensing fragment options to the most likely option; default:False
+  | reverse_anneal (bool): whether to prioritize closer matches of fragment mass / peak m/z; default:True
   | start (float): the minimum mass difference threshold with which to start reverse-annealing; default:0.1
-  | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:1\n
+  | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:1
+  | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False\n
   | Returns:
   | :-
   | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
@@ -850,7 +854,7 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
       hits = [k for k in subg_frags if abs(mass-k) < end_threshold]
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
-      ion_names = subgraphs_to_domon_costello(nx_mono,graphs)
+      ion_names = subgraphs_to_domon_costello(nx_mono,graphs, iupac = iupac)
       hit_list.append((mass,ion_names))
     else:
       hit_list.append((mass,[]))
