@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import numpy_indexed as npi
+from collections import defaultdict
 from glycowork.motif.processing import enforce_class, get_lib
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
@@ -9,6 +10,7 @@ from CandyCrunch.model import SimpleDataset
 import ast
 import copy
 import torch
+import pymzml
 import torch.nn.functional as F
 
 fp_in = "drive/My Drive/CandyCrunch/"
@@ -22,6 +24,54 @@ mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoi
 temperature = torch.Tensor([1.2097]).to(device)
 def T_scaling(logits, temperature):
   return torch.div(logits, temperature)
+
+def process_mzML_stack(filepath, num_peaks = 1000,
+                       ms_level = 2,
+                       intensity = False):
+  """function extracting all MS/MS spectra from .mzML file\n
+  | Arguments:
+  | :-
+  | filepath (string): absolute filepath to the .mzML file
+  | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+  | ms_level (int): which MS^n level to extract; default:2
+  | intensity (bool): whether to extract precursor ion intensity from spectra; default:False\n
+  | Returns:
+  | :-
+  | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, and intensity if True
+  """
+  run = pymzml.run.Reader(filepath)
+  highest_i_dict = defaultdict(dict)
+  number_of_peaks_to_extract = num_peaks
+  rts = []
+  charges = []
+  intensities = []
+  prev_len = 0
+  for spectrum in run:
+    if spectrum.ms_level == ms_level:
+      if len(spectrum.peaks("raw")) < number_of_peaks_to_extract:
+        ex_num = len(spectrum.peaks("raw"))
+      else:
+        ex_num = number_of_peaks_to_extract
+      try:
+        temp = spectrum.highest_peaks(2)
+        for mz, i in spectrum.highest_peaks(ex_num):
+          highest_i_dict[str(spectrum.ID) + '_' + str(spectrum.selected_precursors[0]['mz'])][mz] = i
+        if len(highest_i_dict.keys())>prev_len:
+          rts.append(spectrum.scan_time_in_minutes())
+          if intensity:
+            inty = spectrum.selected_precursors[0]['i'] if 'i' in spectrum.selected_precursors[0].keys() else np.nan
+            intensities.append(inty)
+          prev_len = len(highest_i_dict.keys())
+      except:
+        pass
+  reducing_mass = [float(k.split('_')[-1]) for k in list(highest_i_dict.keys())]
+  peak_d = list(highest_i_dict.values())
+  df_out = pd.DataFrame([reducing_mass, peak_d]).T
+  df_out.columns = ['reducing_mass', 'peak_d']
+  df_out['RT'] = rts
+  if intensity:
+    df_out['intensity'] = intensities
+  return df_out
 
 def bin_intensities(peak_d, frames):
   """sums up intensities for each bin across a spectrum\n
@@ -573,10 +623,14 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   if libr is None:
     libr = lib
   if isinstance(filename, str):
-    loaded_file = pd.read_excel(filepath + filename + ".xlsx")
+    try:
+        loaded_file = pd.read_excel(filepath + filename + ".xlsx")
+    except:
+        loaded_file = process_mzML_stack(filepath + filename)
   else:
     loaded_file = filename
   intensity = True if 'intensity' in loaded_file.columns else False
+  loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1]=='}'],:]
   loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass.values.tolist()]
   coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid']) else 3
   loader, RT, inty = process_for_inference(loaded_file, coded_class, mode = mode, modification = modification,

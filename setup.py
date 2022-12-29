@@ -23,5 +23,6 @@ setuptools.setup(
     python_requires='>=3.7',
     install_requires=["glycowork>=0.6.0", "regex", "networkx",
                       "scipy", "torch", "numpy_indexed",
-                      "seaborn", "pandas", "statsmodels"],
+                      "seaborn", "pandas", "statsmodels",
+                      "pymzml"],
 )
