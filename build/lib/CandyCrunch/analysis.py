@@ -568,7 +568,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
   if mass_mode:
-    subgraphs = [subg for subg in subgraphs if calculate_mass(subg)-17 > min(fragment_masses)]
+    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) > min(fragment_masses)]
   subgraphs.append(nx_mono)
   for subg in subgraphs:
     # For a subgraph we find all possible node and atom level modification
