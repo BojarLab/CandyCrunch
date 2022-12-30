@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import numpy_indexed as npi
 from collections import defaultdict
-from glycowork.motif.processing import enforce_class, get_lib
+from glycowork.motif.processing import enforce_class, get_lib, expand_lib
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
 from glycowork.glycan_data.loader import unwrap, stringify_dict, lib, df_glycan
@@ -690,20 +690,15 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   preds  = [k[0][0] for k in df_out.predictions.values.tolist() if len(k) > 0]
   if glycan_class == 'free':
     preds = [k+'-ol' for k in preds]
-    reducing_end = ['Glc-ol','GlcNAc-ol','Glc3S-ol','GlcNAc6S-ol', 'GlcNAc6P-ol',
-                    'GlcNAc1P-ol','Glc3P-ol', 'Glc6S-ol', 'GlcOS-ol']
-    libr = libr + reducing_end
+    libr = expand_lib(libr, preds)
     permitted_roots = ["Gal(b1-4)Glc-ol", "Gal(b1-4)GlcNAc-ol"]
   elif glycan_class == 'lipid':
-    reducing_end = ['Glc','Gal']
     permitted_roots = ["Glc", "Gal"]
   elif glycan_class == 'O':
-    reducing_end = ['GalNAc', 'Fuc', 'Man']
     permitted_roots = ['GalNAc', 'Fuc', 'Man']
   elif glycan_class == 'N':
-    reducing_end = ['GlcNAc']
     permitted_roots = ['Man(b1-4)GlcNAc(b1-4)GlcNAc']
-  net = construct_network(preds, reducing_end = reducing_end, permitted_roots = permitted_roots, libr = libr)
+  net = construct_network(preds, permitted_roots = permitted_roots, libr = libr)
   if glycan_class == 'free':
     net = evoprune_network(net, libr = libr)
   unexplained_idx = [k for k in range(len(df)) if len(df.predictions.values.tolist()[k]) < 1]
