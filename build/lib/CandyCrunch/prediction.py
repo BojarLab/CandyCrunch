@@ -530,6 +530,8 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
     if 'Neu5Ac' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and 'Neu5Gc' not in df_out.composition.values.tolist()[k].keys():
       truth.append(not any([abs(290-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+    if 'Neu5Ac' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and (df_out.composition.values.tolist()[k].get('dHex') > 1 if 'dHex' in df_out.composition.values.tolist()[k].keys() else False):
+      truth.append(not any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
     if 'S' in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and len(df_out.predictions.values.tolist()[k]) < 1:
       truth.append(any(['S' in (mz_to_composition2(t-reduced, libr = libr, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                  df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
