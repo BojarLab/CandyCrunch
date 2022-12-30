@@ -253,9 +253,9 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
   if libr is None:
     libr = lib
   if modification == 'permethylated':
-    mz = glycan_to_mass(glycan, libr = libr, sample_prep = 'permethylated')
+    mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), libr = libr, sample_prep = 'permethylated')
   else:
-    mz = glycan_to_mass(glycan, libr = libr)
+    mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), libr = libr)
   if modification == 'reduced':
     mz += 1
   if mode == 'negative':
