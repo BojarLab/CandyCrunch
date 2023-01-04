@@ -105,7 +105,7 @@ def glycan_to_graph_monos(glycan):
           adjustment = 1
         else:
           adjustment = 0
-        k_idx,j_idx = glycan.index(str(k)),glycan.index(str(j))
+        k_idx,j_idx = glycan.find(str(k),k),glycan.find(str(j),j)
         glycan_part = glycan[k_idx+1:j_idx]
 
         if evaluate_adjacency_monos(glycan_part, adjustment):
