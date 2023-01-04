@@ -689,7 +689,7 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   if libr is None:
     libr = lib
   df = copy.deepcopy(df_in)
-  preds  = [k[0][0] for k in df_out.predictions.values.tolist() if len(k) > 0]
+  preds  = [k[0][0] for k in df.predictions.values.tolist() if len(k) > 0]
   if glycan_class == 'free':
     preds = [k+'-ol' for k in preds]
     libr = expand_lib(libr, preds)
