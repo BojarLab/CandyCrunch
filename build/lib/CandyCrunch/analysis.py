@@ -550,7 +550,7 @@ def mod_count(node_mod, global_mod):
   c += sum([1 for k in unwrap([list(n.values()) for n in node_mod[1]]) if isinstance(k, str)])
   return c
 
-def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None):
+def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None, threshold=None):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
@@ -563,7 +563,6 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
   | Returns a dict of lists of networkx subgraphs
   """
   # These general features are calculated here to help performance
-  true_leaves = [node for node in nx_mono.nodes() if nx_mono.degree()[node] < 2]
   true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
   nx_edge_dict = {(node[0],node[1]):node[2] for node in nx_mono.edges(data = True)}
   node_dict = nx.get_node_attributes(nx_mono,'string_labels')
@@ -572,7 +571,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
   if mass_mode:
-    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) > min(fragment_masses)]
+    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) >= min(fragment_masses) - threshold]
   subgraphs.append(nx_mono)
   for subg in subgraphs:
     # For a subgraph we find all possible node and atom level modification
@@ -593,7 +592,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
 
     for mass,(node_mod,global_mod) in zip(initial_masses,permutation_list):
       if mass_mode:
-        if not [x for x in fragment_masses if abs(mass-x)<1]:
+        if not [x for x in fragment_masses if abs(mass-x)<threshold]:
           continue
       if (m := mod_count(node_mod, global_mod)) <= max_frags:
         if m > 1 and global_mod == '+Acetate':
@@ -715,8 +714,6 @@ def subgraphs_to_domon_costello(nx_mono,subgs, iupac = False):
     if global_mods:
       global_mods = list(global_mods.values())
       cut_labels.append('_'.join(('M',global_mods[0][0])))
-
-    root_node = [v for v, d in subg.out_degree() if d == 0][0]
     mono_mod_dict = nx.get_node_attributes(subg,'mod_labels')
     atomic_mod_dict = nx.get_node_attributes(subg,'atomic_mod_dict')
     # Adds different atoms to use for calculation depending on mod type
@@ -850,7 +847,7 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
   fragment_masses = sorted(fragment_masses)
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses)
+  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold=end_threshold )
   for mass in fragment_masses:
     if reverse_anneal:
       hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
