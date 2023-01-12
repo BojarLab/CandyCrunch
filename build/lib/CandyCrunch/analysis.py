@@ -158,7 +158,7 @@ def mono_graph_to_nx(mono_graph, directed = True, libr = None):
   all_dict = mono_graph[2]
 
   if len(node_dict_mono) > 1:
-    gr = nx.from_numpy_matrix(mono_graph[1],create_using=template)
+    gr = nx.from_numpy_array(mono_graph[1],create_using=template)
     for n1, n2, d in gr.edges(data = True):
       del d['weight']
   else:
