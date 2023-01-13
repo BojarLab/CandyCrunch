@@ -25,7 +25,7 @@ mono_attributes = {'Gal':{'mass':{'03X':72.0528,'02X':42.0528,'15X':28.0528,'13A
                   'HexNAc':{'mass':{'04A':60,'24A':60,'35A':74,'03A':90,'25A':104,'02A':120,'HexNAc': 203.0794},'atoms':{'04A':[5,6],'24A':[3,4],'35A':[4,5,6],'03A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexNAc':[1,2,3,4,5,6]}},
                   'Neu5Ac':{'mass':{'02X':70,'04X':169.8,'Neu5Ac':291.0954},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Ac':[1,2,3,4,5,6,7,8,9]}},
                   'Neu5Gc':{'mass':{'02X':70,'04X':185.9,'Neu5Gc':307.0903},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Neu5Gc':[1,2,3,4,5,6,7,8,9]}},
-                  'Kdn':{'mass':{'02X':70,'04X':128.8,'Kdn':250.0689},'atoms':{'Kdn':[1,2,3,4,5,6,7,8,9]}},
+                  'Kdn':{'mass':{'02X':70,'04X':128.8,'Kdn':250.0689},'atoms':{'02X':[1,2,3],'04X':[1,2,3,4,5],'Kdn':[1,2,3,4,5,6,7,8,9]}},
                   'GlcA':{'mass':{'GlcA':176.03209},'atoms':{'GlcA':[1,2,3,4,5,6]}},
                   'HexA':{'mass':{'HexA':176.03209},'atoms':{'HexA':[1,2,3,4,5,6]}},
                   'Fuc':{'mass':{'Fuc':146.0579},'atoms':{'Fuc':[1,2,3,4,5,6]}},
@@ -529,7 +529,7 @@ def get_global_mods(subg,node_dict):
   | Returns a a list of modification names
   """
   global_mods = sorted([x for x in mono_attributes['Global']['mass']])
-  if not any(k in [node_dict[x] for x in subg.nodes()] for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA']):
+  if not any(k in [node_dict[x] for x in subg.nodes()] for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
     global_mods.remove('CO2')
   return global_mods
 
@@ -791,7 +791,7 @@ def refine_global_mods(glycan_string):
   | Returns the modified attribute dictionary
   """
   attribute_dict = copy.deepcopy(mono_attributes)
-  if not any([k in glycan_string for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']]):
+  if not any([k in glycan_string for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA']]):
     del attribute_dict['Global']['mass']['CO2']
   return attribute_dict
 
@@ -847,7 +847,7 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
   fragment_masses = sorted(fragment_masses)
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold=end_threshold )
+  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold=end_threshold)
   for mass in fragment_masses:
     if reverse_anneal:
       hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
