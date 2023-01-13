@@ -681,7 +681,7 @@ def mono_frag_to_string(sub_g):
   
   return ''.join(n_skelly)
 
-def subgraphs_to_domon_costello(nx_mono,subgs, iupac = False):
+def subgraphs_to_domon_costello(nx_mono, subgs, diffs, iupac = False, reverse_anneal = False):
   """Converts the subgraphs of a given graph object into their canonical Domon & Costello fragment names\n
   | Arguments:
   | :-
@@ -745,6 +745,8 @@ def subgraphs_to_domon_costello(nx_mono,subgs, iupac = False):
       cut_labels = ['M']
     ion_names.append((cut_labels))
 
+  if reverse_anneal:
+    ion_names = mass_match(ion_names, diffs)
   ion_names = sorted(ion_names, key = len)[:5]
   if iupac:
     return [(ion_names[k], mono_frag_to_string(subgs[k])) for k in range(len(ion_names))]
@@ -775,7 +777,6 @@ def get_most_likely_fragments(out_in):
       tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
       if max(tt2_match) > 0:
         out_list.append((t[0], tt2[np.argmax(tt2_match)]))
-        break
       #for tt in t[1]:
       #  if len(tt) == 2 and any([k in tt for k in single_list]):
       #    out_list.append((t[0], tt))
@@ -786,24 +787,9 @@ def get_most_likely_fragments(out_in):
       tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
       if max(tt2_match) > 0:
         out_list.append((t[0], tt2[np.argmax(tt2_match)]))
-        break
     else:
       out_list.append(t)
   return out_list[::-1]
-
-def refine_global_mods(glycan_string):
-  """filter out conditional global mods that don't apply for a given glycan\n
-  | Arguments:
-  | :-
-  | glycan_string (string): glycan in IUPAC-condensed format\n
-  | Returns:
-  | :-
-  | Returns the modified attribute dictionary
-  """
-  attribute_dict = copy.deepcopy(mono_attributes)
-  if not any([k in glycan_string for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA']]):
-    del attribute_dict['Global']['mass']['CO2']
-  return attribute_dict
 
 def raising_temp(subg_frags, mass, start, end, charge):
   """slowy raises the mass threshold to annotate more peaks\n
@@ -829,20 +815,41 @@ def raising_temp(subg_frags, mass, start, end, charge):
         return hits
   return []
 
-def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
-                max_frags = 3, simplify = False, reverse_anneal = True, start = 0.1,
+def mass_match(ion_names, diffs):
+  if any([len(k)==1 for k in ion_names]):
+    singles, single_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k])==1])
+    return [singles[k] for k in np.where(np.array(single_diffs) == min(single_diffs))[0].tolist()]
+  elif any([len(k)==2 for k in ion_names]):
+    doubles, double_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k])==2])
+    return [doubles[k] for k in np.where(np.array(double_diffs) == min(double_diffs))[0].tolist()]
+  elif any([len(k)==3 for k in ion_names]):
+    triples, triple_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k])==3])
+    return [triples[k] for k in np.where(np.array(triple_diffs) == min(triple_diffs))[0].tolist()]
+  else:
+    return []
+  
+
+def record_diffs(subg_frags, mass, mass_threshold, charge):
+  hits = [k for k in subg_frags if abs(mass-k) < mass_threshold]
+  diffs = [abs(mass-k) for k in hits]
+  if charge > 1 and len(hits) < 1:
+    hits = [k for k in subg_frags if abs(mass-((k/2)-0.5)) < mass_threshold]
+    diffs = [abs(mass-((k/2)-0.5)) for k in hits]
+  return hits, diffs
+
+def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
+                max_frags = 3, simplify = False, reverse_anneal = True,
                 charge = 1, iupac = False):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
   | glycan_string (string): glycan in IUPAC-condensed format
   | fragment_masses (list): all masses which are to be annotated with a fragment name
-  | end_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments
+  | mass_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | simplify (bool): whether to try condensing fragment options to the most likely option; default:False
   | reverse_anneal (bool): whether to prioritize closer matches of fragment mass / peak m/z; default:True
-  | start (float): the minimum mass difference threshold with which to start reverse-annealing; default:0.1
   | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:1
   | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False\n
   | Returns:
@@ -851,21 +858,18 @@ def CandyCrumbs(glycan_string,fragment_masses,end_threshold, libr = None,
   """
   if libr is None:
     libr = lib
-  if end_threshold < start:
-    start = end_threshold/2
   hit_list = []
   fragment_masses = sorted(fragment_masses)
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold=end_threshold)
+  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold)
   for mass in fragment_masses:
-    if reverse_anneal:
-      hits = raising_temp(subg_frags, mass, start, end_threshold, charge)
-    else:
-      hits = [k for k in subg_frags if abs(mass-k) < end_threshold]
+    hits, diffs = record_diffs(subg_frags, mass, mass_threshold, charge)
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
-      ion_names = subgraphs_to_domon_costello(nx_mono,graphs, iupac = iupac)
+      graphs = [subg_frags[m] for m in hits]
+      diffs = unwrap([[diffs[k]]*len(graphs[k]) for k in range(len(diffs))])
+      ion_names = subgraphs_to_domon_costello(nx_mono, unwrap(graphs), diffs, iupac = iupac, reverse_anneal = reverse_anneal)
       hit_list.append((mass,ion_names))
     else:
       hit_list.append((mass,[]))
