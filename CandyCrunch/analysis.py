@@ -771,12 +771,22 @@ def get_most_likely_fragments(out_in):
       single_list.append(t[1][0][:1])
     #prioritize double-fragments with observed single-fragments
     elif len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 2:
-      for tt in t[1]:
-        if len(tt) == 2 and any([k in tt for k in single_list]):
-          out_list.append((t[0], tt))
-          break
-      if len(out_list) == out_len:
-        out_list.append(t)
+      tt2 = [t_int for t_int in t[1] if len(t_int) == 2]
+      tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
+      if max(tt2_match) > 0:
+        out_list.append((t[0], tt2[np.argmax(tt2_match)]))
+        break
+      #for tt in t[1]:
+      #  if len(tt) == 2 and any([k in tt for k in single_list]):
+      #    out_list.append((t[0], tt))
+      #    break
+    #prioritize triple-fragments with observed single-fragments
+    elif len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 3:
+      tt2 = [t_int for t_int in t[1] if len(t_int) == 3]
+      tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
+      if max(tt2_match) > 0:
+        out_list.append((t[0], tt2[np.argmax(tt2_match)]))
+        break
     else:
       out_list.append(t)
   return out_list[::-1]
