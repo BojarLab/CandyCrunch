@@ -43,7 +43,7 @@ mono_attributes = {'Gal':{'mass':{'03X':72.0211,'02X':42.0105,'15X':27.9949,'13A
                   'Glc3S':{'mass':{'13A': 139.9779,'24A': 139.9779,'04A': 60.0211,'35A': 74.0368,'25A': 184.0041,'02A': 199.9991,'Glc3S': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Glc3S':[1,2,3,4,5,6]}},
                   'GlcOS':{'mass':{'13A': 60.0211,'24A': 139.9779,'04A': 139.9779,'35A': 153.9936,'25A': 184.0041,'02A': 199.9991,'GlcOS': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'GlcOS':[1,2,3,4,5,6]}},
                   'HexOS':{'mass':{'13A': 60.0211,'24A': 139.9779,'04A': 139.9779,'35A': 153.9936,'25A': 184.0041,'02A': 199.9991,'HexOS': 242.0096},'atoms':{'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'HexOS':[1,2,3,4,5,6]}},
-                  'Global':{'mass':{'H2O':-18.0105546,'CH2O':-30.0106,'C2H2O':-42.0106, 'CO2':-43.9898, 'C2H4O2':-60.0211,'C3H8O4':-108.0423, '+Acetate':+42.0106}}
+                  'Global':{'mass':{'H2O':-18.0105546,'CH2O':-30.0106,'C2H2O':-42.0106, 'CO2':-43.9898, 'C2H4O2':-60.0211, 'SO4':-79.9568, 'C3H8O4':-108.0423, '+Acetate':+42.0106}}
                   }
 
 bond_type_helper = {1:['bond','no_bond'],2:['red_bond','red_no_bond']}
@@ -518,7 +518,7 @@ def add_to_subgraph_fragments(subgraph_fragments,nx_mono_list,mass_list):
 
   return subgraph_fragments
 
-def get_global_mods(subg,node_dict):
+def get_global_mods(subg, node_dict):
   """Returns the valid list of global modifications for a given subgraph\n
   | Arguments:
   | :-
@@ -531,6 +531,8 @@ def get_global_mods(subg,node_dict):
   global_mods = sorted([x for x in mono_attributes['Global']['mass']])
   if not any(k in [node_dict[x] for x in subg.nodes()] for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
     global_mods.remove('CO2')
+  if not 'S' in ''.join([node_dict[x] for x in subg.nodes()]):
+    global_mods.remove('SO4')
   return global_mods
 
 def mod_count(node_mod, global_mod):
