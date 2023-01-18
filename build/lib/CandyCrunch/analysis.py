@@ -154,7 +154,6 @@ def mono_graph_to_nx(mono_graph, directed = True, libr = None):
   else:
     template = nx.Graph
   node_dict_mono = mono_graph[0]
-  adj_matrix = mono_graph[1]
   all_dict = mono_graph[2]
 
   if len(node_dict_mono) > 1:
@@ -301,7 +300,7 @@ def calculate_mass(nx_mono):
   all_atom_mods = Counter([m for d in [v.values() for v in atom_dict.values()] for m in d if m != 0])
   reducing_end = nx.get_node_attributes(nx_mono,'reducing_end')
 
-  mass = sum([mono_attributes[v]['mass'][v] for k,v in comp.items() if k not in mono_mods])-1
+  mass = sum([mono_attributes[v]['mass'][v] for k,v in comp.items() if k not in mono_mods])-1.0078
   mass += sum([mono_attributes[comp[k]]['mass'][v] for k,v in mono_mods.items() if v in mono_attributes[comp[k]]['mass']])
   mass += sum([mono_attributes[comp[k]]['mass'][v] for k,v in mono_mods.items() if v not in mono_attributes[comp[k]]['mass']])
   mass += -18.0105546*all_atom_mods['no_bond']
@@ -311,9 +310,9 @@ def calculate_mass(nx_mono):
     if mono_mods:
       reducing_end_node = next(iter(reducing_end))
       if mono_mods[reducing_end_node] ==  comp[reducing_end_node]:
-        mass += 18.0105546+2
+        mass += 18.0105546+(2*1.0078)
       else:
-        mass += 18.0105546+2
+        mass += 18.0105546+(2*1.0078)
   return mass
 
 def atom_mods_init(subg,present_breakages,terminals,terminal_labels):
@@ -768,7 +767,6 @@ def get_most_likely_fragments(out_in):
   out_list = []
   single_list = []
   for t in out[::-1]:
-    out_len = len(out_list)
     #check for any single-fragment occurrences
     if len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 1:
       out_list.append((t[0], t[1][0]))
