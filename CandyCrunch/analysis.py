@@ -54,6 +54,8 @@ A_cross_rings =  {'13A','24A','04A','35A','03A','25A','02A'}
 
 X_cross_rings =  {'02X','04X'}
 
+ranks = ['Alpha','Beta','Gamma','Delta','Epsilon','Zeta','Eta']
+
 def evaluate_adjacency_monos(glycan_part, adjustment):
   """Modified version of evaluate_adjacency to check glycoletter adjacency for monosaccharide only strings\n
   | Arguments:
@@ -611,6 +613,59 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
 
   return subgraph_fragments
 
+def rank_chains(nx_mono):
+  node_dict = nx.get_node_attributes(nx_mono,'string_labels')
+  og_root = [v for v, d in nx_mono.out_degree() if d == 0][0]
+  og_leaves = set(v for v, d in nx_mono.in_degree() if d == 0)
+  leaf_chains = []
+  for og_leaf in og_leaves:
+    leaf_chains.append(nx.shortest_path(nx_mono,source = og_leaf))
+  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains],key=lambda x:sum([mono_attributes[node_dict[n]]['mass'][node_dict[n]] for n in x]),reverse=True)
+  return zip(ranks,main_chains)
+
+def domon_costello_to_node_labels(fragment,chain_rank):
+  skelly_dict = {}
+  global_mod = None
+  post_mono = None
+  for cut in fragment:
+    if cut[0] == 'M':
+      global_mod = cut.split('_')[-1]
+      continue
+    split_cut = cut.split('_')
+    chain = chain_rank[split_cut[2]]
+    if split_cut[0][-1] in ['Y','Z']:
+      mono = chain[::-1][int(split_cut[1])]
+    elif split_cut[0][-1] == 'X':
+      mono = chain[::-1][int(split_cut[1])-1]
+    elif split_cut[0][-1] in ['B','C']:
+      mono = chain[int(split_cut[1])]
+      post_mono = chain[int(split_cut[1])-1]
+    elif split_cut[0][-1] == 'A':
+      mono = chain[int(split_cut[1])-1]
+    skelly_dict[mono] = split_cut[0]
+  return skelly_dict,post_mono,global_mod
+
+def node_labels_to_domon_costello(cuts,chain_rank,global_mods = {}):
+  dc_cuts = []
+  for cut in cuts:
+    cut_type = cut_type_dict[cut[0]]
+    if cut_type[-1] in ['B','C','A']:
+      cut_rank,cut_chain = [(rank,chain) for rank,chain in chain_rank if cut[1] in chain][0]
+      cut_number = cut_chain.index(cut[1]) + 1
+    elif cut_type[-1] in ['Y','Z']:
+      cut_rank,cut_chain = [(rank,chain) for rank,chain in chain_rank if cut[1] in chain][0]
+      cut_number = cut_chain[::-1].index(cut[2])+1
+    elif cut_type[-1] in ['X']:
+      cut_rank,cut_chain = [(rank,chain) for rank,chain in chain_rank if cut[1] in chain][0]
+      cut_number = cut_chain[::-1].index(cut[1])+1
+    dc_cuts.append('_'.join((cut_type,str(cut_number),cut_rank)))
+  if global_mods:
+      global_mods = list(global_mods.values())
+      dc_cuts.append('_'.join(('M',global_mods[0][0])))
+  if not dc_cuts:
+    dc_cuts = ['M']
+  return dc_cuts
+
 def find_main_chain(subgraph,leaves,root_node):
   """Calculates the main chain of a subgraph\n
   | Arguments:
@@ -638,15 +693,7 @@ def find_main_chain(subgraph,leaves,root_node):
       main_chains = [main_chains[i] for i, x in enumerate(bond_nums) if x == min(bond_nums)]
   return main_chains[0]
 
-def mono_frag_to_string(sub_g):
-  """Converts a subgraph into an IUPAC-condensed format by repeatedly finding the main chain of each branch\n
-  | Arguments:
-  | :-
-  | subg (networkx_object): a subgraph\n
-  | Returns:
-  | :-
-  | Returns a string in an IUPAC-condensed format
-  """
+def subgraph_to_label_skeleton(sub_g):
   if len(sub_g.nodes) == 1:
     return list(nx.get_node_attributes(sub_g,'string_labels').values())[0]
   root_node = [k for k,v in sub_g.out_degree if v == 0]
@@ -656,7 +703,6 @@ def mono_frag_to_string(sub_g):
   n_skelly = []
   main_chain = [str(i) for i in find_main_chain(sub_g,leaves,root_node)]
   n_skelly = main_chain
-
   while set([str(k) for k in sub_g.nodes]) != set([k for k in n_skelly if k.isnumeric()]):
     for i in [m for m in main_chain if m.isnumeric()][::-1]:
       new_root_node = [x for x in nx.all_neighbors(sub_g,int(i)) if str(x) not in main_chain]
@@ -670,7 +716,9 @@ def mono_frag_to_string(sub_g):
         new_chain = find_main_chain(sub_g,new_leaves,new_root_node)
       n_skelly[n_skelly.index(i):n_skelly.index(i)] = ['['] + [str(k) for k in new_chain] + [']']
     main_chain = n_skelly
+  return n_skelly
 
+def label_skeleton_to_string(n_skelly,sub_g):
   bond_dict = nx.get_edge_attributes(sub_g,'bond_label')
   mono_to_bond = {k[0]:v for k,v in bond_dict.items()}
   string_labels = nx.get_node_attributes(sub_g,'string_labels') 
@@ -679,10 +727,45 @@ def mono_frag_to_string(sub_g):
       if int(i) in mono_to_bond:
         n_skelly.insert(n_skelly.index(i)+1,f'({mono_to_bond[int(i)]})')
       n_skelly[n_skelly.index(i)] = string_labels[int(i)]
-  
   return ''.join(n_skelly)
 
-def subgraphs_to_domon_costello(nx_mono, subgs, diffs, iupac = False, reverse_anneal = False):
+def mono_frag_to_string(sub_g):
+  n_skelly = subgraph_to_label_skeleton(sub_g)
+  glycan_string = label_skeleton_to_string(n_skelly,sub_g)
+  return glycan_string
+
+def domon_costello_to_fragIUPAC(glycan_string,fragment):
+  global_mod = None 
+  mono_graph = glycan_to_graph_monos(glycan_string)
+  nx_mono = mono_graph_to_nx(mono_graph, directed = True)
+  chain_rank = dict(rank_chains(nx_mono))
+  skelly_dict,post_mono,global_mod = domon_costello_to_node_labels(fragment,chain_rank)
+  excluded_nodes = set()
+  for k,v in skelly_dict.items():
+    if v[-1] == 'A':
+      excluded_nodes.update(nx_mono.nodes() ^ nx.ancestors(nx_mono, k).union({k}))
+    elif v[-1] in ['B','C']:
+      excluded_nodes.update(nx_mono.nodes() ^ nx.ancestors(nx_mono, post_mono).union({post_mono,k}))
+    elif v[-1] in ['X','Y','Z']:
+      excluded_nodes.update(nx.ancestors(nx_mono, k))
+  frag_subg = nx_mono.subgraph(set(nx_mono.nodes()) ^ set(excluded_nodes))
+  label_skelly = subgraph_to_label_skeleton(frag_subg)
+  skelly_dict = {str(k):v for k,v in skelly_dict.items()}
+  mono_to_bond = {str(k[0]):v for k,v in nx.get_edge_attributes(frag_subg,'bond_label').items()}
+  node_dict = {str(k):v for k,v in nx.get_node_attributes(frag_subg,'string_labels').items()}
+  for i in label_skelly[::-1]:
+    if i in mono_to_bond:
+      label_skelly.insert(label_skelly.index(i)+1,f'({mono_to_bond[i]})')
+    if i in skelly_dict:
+      label_skelly[label_skelly.index(i)] = skelly_dict[i]
+    elif i in node_dict:
+      label_skelly[label_skelly.index(i)] = node_dict[i]
+  full_skelly = ''.join(label_skelly)
+  if global_mod:
+    full_skelly = '{- ' + global_mod + '}' + full_skelly
+  return full_skelly
+
+def subgraphs_to_domon_costello(nx_mono, subgs):
   """Converts the subgraphs of a given graph object into their canonical Domon & Costello fragment names\n
   | Arguments:
   | :-
@@ -692,32 +775,15 @@ def subgraphs_to_domon_costello(nx_mono, subgs, diffs, iupac = False, reverse_an
   | :-
   | Returns a nested list with one list of fragment labels for each subgraph
   """
-  ranks = ['Alpha','Beta','Gamma','Delta','Epsilon','Zeta','Eta'] #Possible ranks (more can be added depending on branching)
   ion_names = []
-  leaf_chains = {}
-  chain_rank = []
-
   node_dict = nx.get_node_attributes(nx_mono,'string_labels')
-  og_root = [v for v, d in nx_mono.out_degree() if d == 0][0]
-  og_leaves = set(v for v, d in nx_mono.in_degree() if d == 0)
-
-  leaf_chains = {}
-  for og_leaf in og_leaves:
-    leaf_chains[og_leaf] = nx.shortest_path(nx_mono,source = og_leaf) # Calculates all of the paths in the original glycan from each of the original leaf nodes
-  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains.values()],key=lambda x:sum([mono_attributes[node_dict[n]]['mass'][node_dict[n]] for n in x]),reverse=True) #Sorts the main paths by mass as described in the nomenclature
-  chain_rank = list(zip(ranks,main_chains))
-
+  chain_rank = list(rank_chains(nx_mono))
+  
   for subg in subgs:
     cuts = []
-    cut_labels = []
-    # Adds any global mods to the fragment labels
     global_mods = nx.get_node_attributes(subg, 'global_mod')
-    if global_mods:
-      global_mods = list(global_mods.values())
-      cut_labels.append('_'.join(('M',global_mods[0][0])))
     mono_mod_dict = nx.get_node_attributes(subg,'mod_labels')
     atomic_mod_dict = nx.get_node_attributes(subg,'atomic_mod_dict')
-    # Adds different atoms to use for calculation depending on mod type
     for node,atom_mods in atomic_mod_dict.items():
       for atom,atom_mod in atom_mods.items():
         if atom_mod in ['bond','no_bond']:
@@ -729,30 +795,9 @@ def subgraphs_to_domon_costello(nx_mono, subgs, diffs, iupac = False, reverse_an
     cross_rings = [(k,v) for k,v in mono_mod_dict.items() if (k,v) not in node_dict.items()]
     for node,mod in cross_rings:
         cuts.append((mod,node))
-    #Assigns the rank of the chain on which the breakage occured and the type and number
-    for cut in cuts:
-      cut_type = cut_type_dict[cut[0]]
-      if cut_type[-1] in ['B','C','A']:
-        cut_rank,cut_chain = [(rank,chain) for rank,chain in chain_rank if cut[1] in chain][0]
-        cut_number = cut_chain.index(cut[1]) + 1
-      elif cut_type[-1] in ['Y','Z']:
-        cut_rank,cut_chain = [(rank,chain) for rank,chain in chain_rank if cut[1] in chain][0]
-        cut_number = cut_chain[::-1].index(cut[2])+1
-      elif cut_type[-1] in ['X']:
-        cut_rank,cut_chain = [(rank,chain) for rank,chain in chain_rank if cut[1] in chain][0]
-        cut_number = cut_chain[::-1].index(cut[1])+1
-      cut_labels.append('_'.join((cut_type,str(cut_number),cut_rank)))
-    if not cut_labels:
-      cut_labels = ['M']
-    ion_names.append((cut_labels))
-
-  if reverse_anneal:
-    ion_names = mass_match(ion_names, diffs)
-  ion_names = sorted(ion_names, key = len)[:5]
-  if iupac:
-    return [(ion_names[k], mono_frag_to_string(subgs[k])) for k in range(len(ion_names))]
-  else:
-    return ion_names
+    dc_cuts = node_labels_to_domon_costello(cuts,chain_rank,global_mods=global_mods)
+    ion_names.append((dc_cuts))
+  return ion_names
 
 def get_most_likely_fragments(out_in):
   """uses Occam's razor to determine most likely fragment at a peak\n
@@ -837,6 +882,17 @@ def record_diffs(subg_frags, mass, mass_threshold, charge):
     diffs = [abs(mass-((k/2)-0.5)) for k in hits]
   return hits, diffs
 
+def finalise_output_fragments(nx_mono, graphs, diffs, glycan_string, reverse_anneal = False, iupac = False):
+  ion_names = subgraphs_to_domon_costello(nx_mono, graphs)
+  if reverse_anneal:
+    ion_names = mass_match(ion_names, diffs)
+  ion_names = sorted(ion_names, key = len)[:5]
+  if iupac:
+    iupac_ion_names = [(ion_name,domon_costello_to_fragIUPAC(glycan_string,ion_name)) for ion_name in ion_names]
+    return iupac_ion_names
+  else:
+    return ion_names
+
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
                 max_frags = 3, simplify = False, reverse_anneal = True,
                 charge = 1, iupac = False):
@@ -867,15 +923,13 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
     hits, diffs = record_diffs(subg_frags, mass, mass_threshold, charge)
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
-      graphs = [subg_frags[m] for m in hits]
-      diffs = unwrap([[diffs[k]]*len(graphs[k]) for k in range(len(diffs))])
-      ion_names = subgraphs_to_domon_costello(nx_mono, unwrap(graphs), diffs, iupac = iupac, reverse_anneal = reverse_anneal)
+      diffs = unwrap([[diffs[i]]*len(subg_frags[k]) for i,k in enumerate(hits)])
+      ion_names = finalise_output_fragments(nx_mono, graphs, diffs, glycan_string, reverse_anneal = reverse_anneal, iupac = iupac) 
       hit_list.append((mass,ion_names))
     else:
       hit_list.append((mass,[]))
   if simplify:
     hit_list = get_most_likely_fragments(hit_list)
-
   return hit_list
 
 def get_unique_subgraphs(nx_mono1,nx_mono2):
