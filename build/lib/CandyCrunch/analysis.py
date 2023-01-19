@@ -799,7 +799,7 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
     ion_names.append((dc_cuts))
   return ion_names
 
-def get_most_likely_fragments(out_in):
+def get_most_likely_fragments(out_in, intensities = None):
   """uses Occam's razor to determine most likely fragment at a peak\n
   | Arguments:
   | :-
@@ -808,26 +808,28 @@ def get_most_likely_fragments(out_in):
   | :-
   | Returns format similar to out_in but condensed
   """
+  if intensities:
+    ranks = [k/max(intensities) for k in intensities][::-1]
+  else:
+    ranks = [0]*len(out_in)
+  int_dic = {}
   out = copy.deepcopy(out_in)
   out_list = []
   single_list = []
-  for t in out[::-1]:
+  for i,t in enumerate(out[::-1]):
     #check for any single-fragment occurrences
-    if len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 1:
+    if len(t) > 1 and isinstance(t[1], list) and len(t[1]) > 0 and len(t[1][0]) == 1:
       out_list.append((t[0], t[1][0]))
-      single_list.append(t[1][0][:1])
+      single_list.append(t[1][0][0])
+      int_dic[t[1][0][0]] = ranks[i]
     #prioritize double-fragments with observed single-fragments
-    elif len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 2:
+    elif len(t) > 1 and isinstance(t[1], list) and len(t[1]) > 0 and len(t[1][0]) == 2:
       tt2 = [t_int for t_int in t[1] if len(t_int) == 2]
-      tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
+      tt2_match = [sum([(k in tt)*(int_dic[k]+1) for k in single_list]) for tt in tt2]
       if max(tt2_match) > 0:
         out_list.append((t[0], tt2[np.argmax(tt2_match)]))
-      #for tt in t[1]:
-      #  if len(tt) == 2 and any([k in tt for k in single_list]):
-      #    out_list.append((t[0], tt))
-      #    break
     #prioritize triple-fragments with observed single-fragments
-    elif len(t) > 1 and isinstance(t[1], list) and len(t[1][:1]) == 3:
+    elif len(t) > 1 and isinstance(t[1], list) and len(t[1]) > 0 and len(t[1][0]) == 3:
       tt2 = [t_int for t_int in t[1] if len(t_int) == 3]
       tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
       if max(tt2_match) > 0:
@@ -836,43 +838,19 @@ def get_most_likely_fragments(out_in):
       out_list.append(t)
   return out_list[::-1]
 
-def raising_temp(subg_frags, mass, start, end, charge):
-  """slowy raises the mass threshold to annotate more peaks\n
-  | Arguments:
-  | :-
-  | subg_frags (dict): dictionary of form m/z : glycan subgraph
-  | mass (float): m/z value of a peak
-  | start (float): the minimum mass difference threshold with which to start reverse-annealing
-  | end (float): the maximum mass difference threshold with which to end reverse-annealing
-  | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:1\n
-  | Returns:
-  | :-
-  | Returns a list of matching fragments for that mass
-  """
-  steps = [start + i * (end - start) / 5 for i in range(6)]
-  for s in steps:
-    hits = [k for k in subg_frags if abs(mass-k) < s]
-    if len(hits) > 0:
-      return hits
-    if charge > 1:
-      hits = [k for k in subg_frags if abs(mass-((k/2)-0.5)) < s]
-      if len(hits) > 0:
-        return hits
-  return []
-
 def mass_match(ion_names, diffs):
+  min_diff = 0.01
   if any([len(k)==1 for k in ion_names]):
     singles, single_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k])==1])
-    return [singles[k] for k in np.where(np.array(single_diffs) == min(single_diffs))[0].tolist()]
+    return [singles[k] for k in np.where((np.array(single_diffs) < min(single_diffs)+min_diff) & (np.array(single_diffs) > min(single_diffs)-min_diff))[0].tolist()]
   elif any([len(k)==2 for k in ion_names]):
     doubles, double_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k])==2])
-    return [doubles[k] for k in np.where(np.array(double_diffs) == min(double_diffs))[0].tolist()]
+    return [doubles[k] for k in np.where((np.array(double_diffs) < min(double_diffs)+min_diff) & (np.array(double_diffs) > min(double_diffs)-min_diff))[0].tolist()]
   elif any([len(k)==3 for k in ion_names]):
     triples, triple_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k])==3])
-    return [triples[k] for k in np.where(np.array(triple_diffs) == min(triple_diffs))[0].tolist()]
+    return [triples[k] for k in np.where((np.array(triple_diffs) < min(triple_diffs)+min_diff) & (np.array(triple_diffs) > min(triple_diffs)-min_diff))[0].tolist()]
   else:
     return []
-  
 
 def record_diffs(subg_frags, mass, mass_threshold, charge):
   hits = [k for k in subg_frags if abs(mass-k) < mass_threshold]
@@ -895,7 +873,7 @@ def finalise_output_fragments(nx_mono, graphs, diffs, glycan_string, reverse_ann
 
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
                 max_frags = 3, simplify = False, reverse_anneal = True,
-                charge = 1, iupac = False):
+                charge = 1, iupac = False, intensities = None):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -915,7 +893,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   if libr is None:
     libr = lib
   hit_list = []
-  fragment_masses = sorted(fragment_masses)
+  fragment_masses = sorted(fragment_masses) #keep track of intensities
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
   subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold)
@@ -928,8 +906,8 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
       hit_list.append((mass,ion_names))
     else:
       hit_list.append((mass,[]))
-  if simplify:
-    hit_list = get_most_likely_fragments(hit_list)
+  if simplify: 
+    hit_list = get_most_likely_fragments(hit_list, intensities = intensities)
   return hit_list
 
 def get_unique_subgraphs(nx_mono1,nx_mono2):
