@@ -150,14 +150,14 @@ def process_for_inference(df_in, glycan_class, mode = 'negative', modification =
   else:
     return dloader, df.RT.values.tolist(), []
 
-def get_topk(dataloader, model, glycans, k=10, temp = False):
+def get_topk(dataloader, model, glycans, k=50, temp = False):
   """yields topk CandyCrunch predictions for spectra in dataloader\n
   | Arguments:
   | :-
   | dataloader (PyTorch): dataloader from process_for_inference
   | model (PyTorch): trained CandyCrunch model
   | glycans (list): full list of glycans used for training CandyCrunch
-  | k (int): how many top predictions to provide for each spectrum; default:10
+  | k (int): how many top predictions to provide for each spectrum; default:50
   | temp (bool): whether to calibrate logits by temperature factor; default:False\n
   | Returns:
   | :-
@@ -333,7 +333,7 @@ def get_rep_spectra(rt_label_in, intensity = False):
   | (2) nested lists of indices for each spectrum group, to group their intensities, if intensity=True; else empty list
   | (3) list of length of each group of retention times (i.e., number of spectra)
   """
-  rt_label = list(sorted(rt_label_in))
+  rt_label = sorted(rt_label_in)
   tt, tt_len = break_alert_loop(rt_label)
   medIdx = [t.index(np.percentile(t, 50, interpolation = 'nearest')) for t in tt]
   medIdx = [rt_label_in.index(tt[k][i]) if isinstance(tt[k][i], float) else rt_label_in.index(tt[k][i][0]) for k,i in enumerate(medIdx)]
@@ -409,7 +409,7 @@ def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 
     if intensity:
       inty = v[0][2]
     g = [gly for gly in v if enforce_class(gly[0], glycan_class) and gly[1] > pred_thresh]
-    g = [(gly[0], round(gly[1],4)) for gly in g if mass_check(k, gly[0], libr = libr, modification = modification, mode = mode)]
+    g = [(gly[0], round(gly[1],4)) for gly in g if mass_check(k, gly[0], libr = libr, modification = modification, mode = mode)][:5]
     #get composition of predictions
     if len(g)>0:
       if intensity:
@@ -512,42 +512,60 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
     df_use = df_glycan
   if libr is None:
     libr = lib
-  keep = []
   if modification == 'reduced':
     reduced = 1
   else:
     reduced = 0
   for k in range(len(df_out)):
-    truth = [True]
-    #check diagnostic ions
-    if 'Neu5Ac' in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid']:
-      truth.append(any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
-    if 'Neu5Gc' in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid']:
-      truth.append(any([abs(306-j) < 1 or abs(df_out.index.tolist()[k]-307-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
-    if 'Kdn' in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid']:
-      truth.append(any([abs(249-j) < 1 or abs(df_out.index.tolist()[k]-250-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
-    if 'Neu5Gc' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid']:
-      truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
-    if 'Neu5Ac' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and 'Neu5Gc' not in df_out.composition.values.tolist()[k].keys():
-      truth.append(not any([abs(290-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
-    if 'Neu5Ac' not in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and (df_out.composition.values.tolist()[k].get('dHex') > 1 if 'dHex' in df_out.composition.values.tolist()[k].keys() else False):
-      truth.append(not any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
-    if 'S' in df_out.composition.values.tolist()[k].keys() and glycan_class in ['O', 'free', 'lipid'] and len(df_out.predictions.values.tolist()[k]) < 1:
-      truth.append(any(['S' in (mz_to_composition2(t-reduced, libr = libr, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
-                                 df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
-    #check fragment size distribution
-    if df_out.charge.values.tolist()[k] > 1:
-      truth.append(any([j > df_out.index.values[k]*1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
-    if df_out.charge.values.tolist()[k] == 1:
-      truth.append(all([j < df_out.index.values[k]*1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
-    ##if len(df_out.top_fragments.values.tolist()[k])<20:
-    ##  truth.append(False)
-    #check M-adduct for adducts
-    if isinstance(df_out.adduct.values.tolist()[k], str):
-      truth.append(any([abs(df_out.index.tolist()[k]-mass_dict[df_out.adduct.values.tolist()[k]]-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:10]]))
-    if all(truth):
-      keep.append(k)
-  df_out = df_out.iloc[keep,:]
+    keep = []
+    if len(df_out.predictions.values.tolist()[k])>0:
+      current_preds = df_out.predictions.values.tolist()[k]
+      to_append = True
+    else:
+      current_preds = [''.join(list(df_out.composition.values.tolist()[k].keys()))]
+      to_append = False
+    for i,m in enumerate(current_preds):
+      m = m[0]
+      truth = [True]
+      #check diagnostic ions
+      if 'Neu5Ac' in m and glycan_class in ['O', 'free', 'lipid']:
+        truth.append(any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+      if 'Neu5Gc' in m and glycan_class in ['O', 'free', 'lipid']:
+        truth.append(any([abs(306-j) < 1 or abs(df_out.index.tolist()[k]-307-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+      if 'Kdn' in m and glycan_class in ['O', 'free', 'lipid']:
+        truth.append(any([abs(249-j) < 1 or abs(df_out.index.tolist()[k]-250-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+      if 'Neu5Gc' not in m and glycan_class in ['O', 'free', 'lipid']:
+        truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+      if 'Neu5Ac' not in m and glycan_class in ['O', 'free', 'lipid'] and 'Neu5Gc' not in m:
+        truth.append(not any([abs(290-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+      if 'Neu5Ac' not in m and glycan_class in ['O', 'free', 'lipid'] and (m.count('Fuc')+m.count('dHex') > 1):
+        truth.append(not any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
+      if 'S' in m and glycan_class in ['O', 'free', 'lipid'] and len(df_out.predictions.values.tolist()[k]) < 1:
+        truth.append(any(['S' in (mz_to_composition2(t-reduced, libr = libr, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
+                                  df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
+      #check fragment size distribution
+      if df_out.charge.values.tolist()[k] > 1:
+        truth.append(any([j > df_out.index.values[k]*1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
+      if df_out.charge.values.tolist()[k] == 1:
+        truth.append(all([j < df_out.index.values[k]*1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
+      ##if len(df_out.top_fragments.values.tolist()[k])<20:
+      ##  truth.append(False)
+      #check M-adduct for adducts
+      if isinstance(df_out.adduct.values.tolist()[k], str):
+        truth.append(any([abs(df_out.index.tolist()[k]-mass_dict[df_out.adduct.values.tolist()[k]]-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:10]]))
+      if all(truth):
+        if to_append:
+          keep.append(current_preds[i])
+        else:
+          pass
+      else:
+        if to_append:
+          pass
+        else:
+          keep.append('remove')
+    df_out.iat[k,0] = keep
+  idx = [k for k in range(len(df_out)) if 'remove' not in df_out.predictions.values.tolist()[k][:1]]
+  df_out = df_out.iloc[idx,:]
   return df_out
 
 def backfill_missing(df):
@@ -597,7 +615,7 @@ def adduct_detect(df, mode, modification):
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,
-                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN']):
+                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me']):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
   | :-
