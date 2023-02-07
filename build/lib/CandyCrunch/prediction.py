@@ -11,6 +11,7 @@ import ast
 import copy
 import torch
 import pymzml
+import operator
 import torch.nn.functional as F
 
 fp_in = "drive/My Drive/CandyCrunch/"
@@ -610,7 +611,7 @@ def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filte
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,
-                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me']):
+                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me'], supplement = False):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
   | :-
@@ -680,6 +681,11 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out = adduct_detect(df_out, mode, modification)
   df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification,mass_tolerance = mass_tolerance)
   df_out = deduplicate_predictions(df_out)
+  if supplement:
+    try:
+      df_out = supplement_prediction(df_out, glycan_class, libr = libr, mode = mode, modification = modification)
+    except:
+      pass
   if get_missing:
     pass
   else:
