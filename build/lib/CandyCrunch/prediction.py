@@ -656,8 +656,8 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
     inty = []
   coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid']) else 3
   spec_dic = {loaded_file.reducing_mass.values.tolist()[k]:loaded_file.peak_d.values.tolist()[k] for k in range(len(loaded_file))}
-  keys, values, RT, num_spectra, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty,libr = libr, glycan_class = glycan_class,modification = modification, mode = mode, mass_tolerance = mass_tolerance)
-  loader, df_out = process_for_inference(keys, values, RT, num_spectra, coded_class, mode = mode, modification = modification,lc = lc, trap = trap, bin_num = bin_num, intensity = intensity)
+  keys, values, RT, num_spectra, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
+  loader, df_out = process_for_inference(keys, values, RT, num_spectra, coded_class, mode = mode, modification = modification,lc = lc, trap = trap, bin_num = bin_num)
   preds, pred_conf = get_topk(loader, model, glycans, temp = True)
   preds, pred_conf = average_preds(preds, pred_conf)
   if intensity:
