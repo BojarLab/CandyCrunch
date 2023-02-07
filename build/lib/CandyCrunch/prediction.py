@@ -113,6 +113,32 @@ def bin_intensities(peak_d, frames):
     out_list2[b-1] = m
   return out_list, out_list2
 
+
+def enforce_class(glycan, glycan_class, conf = None, extra_thresh = 0.3):
+  """given a glycan and glycan class, determines whether glycan is from this class\n
+  | Arguments:
+  | :-
+  | glycan (string): glycan in IUPAC-condensed nomenclature
+  | glycan_class (string): glycan class in form of "O", "N", "free", or "lipid"\n
+  | Returns:
+  | :-
+  | Returns True if glycan is in glycan class and False if not
+  """
+  if glycan_class == 'O':
+    pool =  ['GalNAc', 'GalNAcOS', 'GalNAc6S' 'Man', 'Fuc', 'Gal', 'GlcNAc', 'GlcNAcOS', 'GlcNAc6S']
+  elif glycan_class == 'N':
+    pool = ['GlcNAc']
+  elif glycan_class == 'free' or glycan_class == 'lipid':
+    pool = ['Glc', 'GlcOS', 'Glc3S', 'GlcNAc', 'GlcNAcOS', 'Gal', 'GalOS', 'Gal3S', 'Ins']
+  truth = any([glycan.endswith(k) for k in pool])
+  if glycan_class == 'free' or glycan_class == 'lipid' or glycan_class == 'O':
+    if any([glycan.endswith(k) for k in ['GlcNAc(b1-4)GlcNAc', '[Fuc(a1-6)]GlcNAc']]):
+      truth = False
+  if not truth and conf:
+    if conf>extra_thresh:
+      truth = True
+  return truth
+
 def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
                           trap = 'linear', min_mz = 39.714, max_mz = 3000, bin_num = 2048):
   """processes averaged spectra for them being inputs to CandyCrunch\n
@@ -608,10 +634,44 @@ def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filte
     comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance,glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out, libr = libr)
   return comp
 
+def impute(df_out):
+  for k in range(len(df_out)):
+    for j in range(len(df_out)):
+      if len(df_out.predictions.values.tolist()[k])>0 and len(df_out.predictions.values.tolist()[j])<1:
+        if abs(df_out.index.tolist()[k]+16-df_out.index.tolist()[j])<0.5 and 'Neu5Gc' in df_out.composition.values.tolist()[j].keys():
+          df_out.iat[j,0] = [(m[0].replace('Neu5Ac', 'Neu5Gc', 1),) for m in df_out.predictions.values.tolist()[k]]
+        elif abs(df_out.index.tolist()[k]-16-df_out.index.tolist()[j])<0.5 and 'Neu5Ac' in df_out.composition.values.tolist()[j].keys():
+          df_out.iat[j,0] = [(m[0].replace('Neu5Gc', 'Neu5Ac', 1),) for m in df_out.predictions.values.tolist()[k]]
+  return df_out
+
+def possibles(df_out, mass_dic, reduced):
+  for k in range(len(df_out)):
+    if len(df_out.predictions.values.tolist()[k]) < 1:
+      check_mass = df_out.index.tolist()[k]-reduced
+      diffs = [abs(j-check_mass) for j in mass_dic.keys()]
+      if min(diffs) < 0.5:
+        possible = mass_dic[list(mass_dic.keys())[np.argmin(diffs)]]
+        df_out.iat[k,0] = [(m,) for m in possible]
+  return df_out
+
+def make_mass_dic(glycans, glycan_class, taxonomy_class = 'Mammalia'):
+  exp_glycans = df_glycan[(df_glycan.glycan_type==glycan_class) & (df_glycan.Class.str.contains(taxonomy_class))].glycan.values.tolist()
+  class_glycans = [k for k in glycans if enforce_class(k, glycan_class)]
+  exp_glycans = list(set(class_glycans+exp_glycans))
+  masses = []
+  for k in exp_glycans:
+    try:
+      masses.append(glycan_to_mass(k))
+    except:
+      masses.append(9999)
+  unq_masses = set(masses)
+  mass_dic = {u:[exp_glycans[j] for j in [i for i,m in enumerate(masses) if m==u]] for u in unq_masses}
+  return mass_dic
+
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
-                   pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,
-                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me'], supplement = False):
+                   pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,extra_thresh = 0.3,
+                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me'], supplement = False, experimental = False, mass_dic = None):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
   | :-
@@ -665,7 +725,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
     df_out['rel_abundance'] = intensity
     df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance.values.tolist()]
   df_out['predictions'] = [[(preds[k][j], pred_conf[k][j]) for j in range(len(preds[k]))] for k in range(len(preds))]
-  df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class) and gly[1] > pred_thresh] for v in df_out.predictions.values.tolist()]
+  df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class, gly[1], extra_thresh = extra_thresh) and gly[1] > pred_thresh] for v in df_out.predictions.values.tolist()]
   df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
   #get composition of predictions
   df_out['composition'] = [glycan_to_composition(g[0][0], libr = libr) if len(g)>0 and len(g[0])>0 else np.nan for g in df_out.predictions.values.tolist()]
@@ -681,11 +741,19 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out = adduct_detect(df_out, mode, modification)
   df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification,mass_tolerance = mass_tolerance)
   df_out = deduplicate_predictions(df_out)
+  df_out['evidence'] = ['strong' if len(k)>0 else np.nan for k in df_out.predictions.values.tolist()]
   if supplement:
     try:
       df_out = supplement_prediction(df_out, glycan_class, libr = libr, mode = mode, modification = modification)
+      df_out.evidence = ['medium' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k])>0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
     except:
       pass
+  if experimental:
+    df_out = impute(df_out)
+    if mass_dic is None:
+        mass_dic = make_mass_dic(glycans, glycan_class)
+    df_out = possibles(df_out, mass_dic, reduced)
+    df_out.evidence = ['weak' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k])>0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
   if get_missing:
     pass
   else:
@@ -740,5 +808,5 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
       explained[nn].append(n[0])
   pred_idx = df.columns.tolist().index('predictions')
   for k in explained.keys():
-    df.iat[k,pred_idx] = explained[k]#.sort(key=len)
+    df.iat[k,pred_idx] = [(t,) for t in explained[k]]#.sort(key=len)
   return df
