@@ -6,7 +6,7 @@ from glycowork.motif.processing import enforce_class, get_lib, expand_lib
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
 from glycowork.glycan_data.loader import unwrap, stringify_dict, lib, df_glycan
-from CandyCrunch.model import SimpleDataset
+from CandyCrunch.model import SimpleDataset, transform_mz, transform_prec, transform_rt
 import ast
 import copy
 import torch
@@ -73,6 +73,21 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     df_out['intensity'] = intensities
   return df_out
 
+def average_dicts(dicts, mode = 'mean'):
+  result = {}
+  for d in dicts:
+    for mass, intensity in d.items():
+      if mass in result:
+        result[mass].append(intensity)
+      else:
+        result[mass] = [intensity]
+  for mass, intensities in result.items():
+    if mode == 'mean':
+      result[mass] = sum(intensities) / len(intensities)
+    else:
+      result[mass] = max(intensities)
+  return result
+
 def bin_intensities(peak_d, frames):
   """sums up intensities for each bin across a spectrum\n
   | Arguments:
@@ -97,14 +112,15 @@ def bin_intensities(peak_d, frames):
     out_list2[b-1] = m
   return out_list, out_list2
 
-def process_for_inference(df_in, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
-                          trap = 'linear', min_mz = 39.714, max_mz = 3000, bin_num = 2048,
-                          #trap = 'linear', min_mz = 64.95, max_mz = 2500, bin_num = 2048,
-                          intensity = False):
-  """processes extracted spectra for them being inputs to CandyCrunch\n
+def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
+                          trap = 'linear', min_mz = 39.714, max_mz = 3000, bin_num = 2048):
+  """processes averaged spectra for them being inputs to CandyCrunch\n
   | Arguments:
   | :-
-  | df_in (dataframe): extracted spectra with columns: reducing_mass, peak_d, and (optional) RT, (optional) intensity
+  | keys (list): list of m/z values
+  | values (list): list of spectra in form peak m/z:intensity
+  | rts (list): list of retention times
+  | num_spectra (list): list of number of spectra for each cluster
   | glycan_class (int): 0 = O-linked, 1 = N-linked, 2 = lipid/free, 3 = other
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
@@ -112,27 +128,23 @@ def process_for_inference(df_in, glycan_class, mode = 'negative', modification =
   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
   | min_mz (float): minimal m/z used for binning; don't change; default:39.714
   | max_mz (float): maximal m/z used for binning; don't change; default:3000
-  | bin_num (int): number of bins for binning; don't change; default: 2048
-  | intensity (bool): whether to use intensity for relative abundance estimation; default: False\n
+  | bin_num (int): number of bins for binning; don't change; default: 2048\n
   | Returns:
   | :-
   | (1) a dataloader used for model prediction
-  | (2) a list of retention times
-  | (3) a list of intensities (if intensity = True, else an empty list)
+  | (2) a preliminary df_out dataframe
   """
-  df = copy.deepcopy(df_in)
+  data = {'reducing_mass':keys, 'RT':rts,'peak_d':values,'num_spectra':num_spectra}
+  dd = list(zip(*data.values()))
+  df = pd.DataFrame(dd, columns= data.keys())
   df['glycan_type'] = [glycan_class]*len(df)
   df['glycan'] = [0]*len(df)
   df['mode'] = [0]*len(df) if mode == 'negative' else [1]*len(df)
   df['lc'] = [0]*len(df) if lc == 'PGC' else [1]*len(df) if lc == 'C18' else [2]*len(df)
   df['modification'] = [0]*len(df) if modification == 'reduced' else [1]*len(df) if modification == 'permethylated' else [2]*len(df)
   df['trap'] = [0]*len(df) if trap == 'linear' else [1]*len(df) if trap == 'orbitrap' else [2]*len(df) if trap == 'amazon' else [3]*len(df)
-  df.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in df.peak_d.values.tolist()]
-  df.dropna(subset = ['peak_d'], inplace=True)
   #intensity normalization
   df.peak_d = [{k: v / sum(d.values()) for k, v in d.items()} for d in df.peak_d.values.tolist()]
-  if 'RT' not in df.columns.tolist():
-    df['RT'] = [0]*len(df)
   #retention time normalization
   df['RT2'] = [k/max(max(df.RT.values.tolist()),30) for k in df.RT.values.tolist()]
   #intensity binning
@@ -142,13 +154,15 @@ def process_for_inference(df_in, glycan_class, mode = 'negative', modification =
   #dataloader generation
   X = list(zip(df.binned_intensities.values.tolist(),df.mz_remainder.values.tolist(),df.reducing_mass.values.tolist(),df.glycan_type.values.tolist(),
                df.RT2.values.tolist(), df['mode'].values.tolist(), df.lc.values.tolist(), df.modification.values.tolist(), df.trap.values.tolist()))
+  X = unwrap([[k]*10 for k in X])
   y = df.glycan.values.tolist()
-  dset = SimpleDataset(X, y)
+  y = unwrap([[k]*10 for k in y])
+  dset = SimpleDataset(X, y, transform_mz=transform_mz, transform_prec=transform_prec, transform_rt=transform_rt)
   dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
-  if intensity:
-    return dloader, df.RT.values.tolist(), df.intensity.values.tolist()
-  else:
-    return dloader, df.RT.values.tolist(), []
+  df.index=df.reducing_mass.values.tolist()
+  df.drop(['reducing_mass','binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification',
+           'trap', 'glycan', 'glycan_type', 'lc'], axis=1, inplace=True)
+  return dloader, df
 
 def get_topk(dataloader, model, glycans, k=50, temp = False):
   """yields topk CandyCrunch predictions for spectra in dataloader\n
@@ -226,15 +240,15 @@ def determine_threshold(m):
   if m < 1500:
     thresh = 0.5
   elif 1500 < m < 2500:
-    thresh = 1.0
+    thresh = 0.75
   elif 2500 < m < 3500:
-    thresh = 1.0
+    thresh = 0.75
   else:
-    thresh = 1.0
+    thresh = 0.75
   return thresh
 
 def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', 
-               double_thresh = 900, triple_thresh = 1200, quadruple_thresh = 3500):
+               double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500):
   """determine whether glycan could explain m/z\n
   | Arguments:
   | :-
@@ -255,7 +269,10 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
   if modification == 'permethylated':
     mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), libr = libr, sample_prep = 'permethylated')
   else:
-    mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), libr = libr)
+    try:
+      mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), libr = libr)
+    except:
+      return False
   if modification == 'reduced':
     mz += 1
   if mode == 'negative':
@@ -343,32 +360,21 @@ def get_rep_spectra(rt_label_in, intensity = False):
   else:
     return medIdx, [], tt_len
 
-def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 'O', pred_thresh = 0.1, mode = 'negative', modification = 'reduced',
-                   get_missing = False, mass_tolerance = 0.5, filter_out = None, df_use = None):
-  """organizes spectrum predictions into 1 representative prediction for a spectrum cluster\n
+def build_mean_dic(dicty, rt,intensity):
+  """organizes a spectra cluster into an averaged spectrum\n
   | Arguments:
   | :-
-  | dicty (dict): dictionary of form m/z : list of predictions
+  | dicty (dict): dictionary of form m/z : spectrum
   | rt (list): list of retention times
-  | intensity (list): list of intensities
-  | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
-  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"; default: "O"
-  | pred_thresh (float): prediction confidence threshold used for filtering; default:0.1
-  | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-  | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
-  | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
-  | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
-  | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:None
-  | df_use (dataframe): glycan database used to check whether compositions are valid; default: df_glycan\n
+  | intensity (list): list of intensities\n
   | Returns:
   | :-
-  | (1) dictionary of form m/z : list of remaining predictions with their prediction confidence
-  | (2) list of number of spectra per item in dictionary
+  | (1) list of peak m/z
+  | (2) list of spectra, of form peak m/z:intensity
+  | (3) list of retention times
+  | (4) list of number of spectra per spectra cluster
+  | (5) (optional) list of intensities for each spectra cluster
   """
-  if libr is None:
-    libr = lib
-  if df_use is None:
-    df_use = df_glycan
   if len(intensity) > 0:
     inty_check = True
   else:
@@ -380,10 +386,9 @@ def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 
   labels = assign_dict_labels(dicty)
   unq_labels = list(set(labels))
   rt = [rt[k] for k in sort_idx]
-  pred_conf = [pred_conf[k] for k in sort_idx]
   rt_labels = [[rt[k] for k in range(len(rt)) if labels[k]==j] for j in unq_labels]
   #detect retention groups of mass groups & retrieve indices representative spectra
-  rt_idx, inty_idx, num_spectra = list(zip(*[get_rep_spectra(k, intensity = inty_check) for k in rt_labels]))
+  rt_idx, inty_idx, num_spectra = list(zip(*[get_rep_spectra(k, intensity = True) for k in rt_labels]))
   num_spectra = unwrap(num_spectra)
   if inty_check:
     intensity = [intensity[k] for k in sort_idx]
@@ -392,49 +397,17 @@ def build_mean_dic(dicty, rt, pred_conf, intensity, libr = None, glycan_class = 
     intensity = unwrap([[sum(j) for j in k] if isinstance(k[0], list) else [k] for k in intensity])
   #get m/z, predictions, and prediction confidence of those representative spectra
   keys = [[list(dicty.keys())[k] for k in range(len(labels)) if labels[k]==j] for j in unq_labels]
-  keys = unwrap([[keys[k][j] for j in rt_idx[k]] for k in range(len(keys))])
+  keys = [[[keys[k][l] for l in j] if isinstance(j, list) else [keys[k][j]] for j in inty_idx[k]] for k in range(len(keys))]
+  keys = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in keys])
   values = [[list(dicty.values())[k] for k in range(len(labels)) if labels[k]==j] for j in unq_labels]
-  values = unwrap([[values[k][j] for j in rt_idx[k]] for k in range(len(values))])
-  pred_conf = [[pred_conf[k] for k in range(len(labels)) if labels[k]==j] for j in unq_labels]
-  pred_conf = unwrap([[pred_conf[k][j] for j in rt_idx[k]] for k in range(len(pred_conf))])
-  num_spectra = {keys[k]:num_spectra[k] for k in range(len(keys))}
-  #make dictionary of m/z : (predictions, prediction confidences, [intensities])
+  values = [[[values[k][l] for l in j] if isinstance(j, list) else [values[k][j]] for j in inty_idx[k]] for k in range(len(values))]
+  values = unwrap([[average_dicts(j) for j in k] if isinstance(k[0], list) else [k] for k in values])
+  rts = [[[rt_labels[k][l] for l in j] if isinstance(j, list) else [rt_labels[k][j]] for j in inty_idx[k]] for k in range(len(rt_labels))]
+  rts = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in rts])
   if inty_check:
-    reduced_dic = {keys[k]:list(zip(values[k], pred_conf[k], [intensity[k]]*len(values[k]))) for k in range(len(keys))}
+    return keys, values, rts, num_spectra, intensity
   else:
-    reduced_dic = {keys[k]:list(zip(values[k], pred_conf[k])) for k in range(len(keys))}
-  #filter out predictions of (i) wrong glycan class, (ii) too low prediction confidence, (iii) wrong mass
-  ranking = {}
-  for k,v in reduced_dic.items():
-    if intensity:
-      inty = v[0][2]
-    g = [gly for gly in v if enforce_class(gly[0], glycan_class) and gly[1] > pred_thresh]
-    g = [(gly[0], round(gly[1],4)) for gly in g if mass_check(k, gly[0], libr = libr, modification = modification, mode = mode)][:5]
-    #get composition of predictions
-    if len(g)>0:
-      if intensity:
-        ranking[k] = ([j[:2] for j in g], glycan_to_composition(g[0][0], libr = libr), inty)
-      else:
-        ranking[k] = (g, glycan_to_composition(g[0][0], libr = libr))
-    #if no valid prediction (and get_missing = True), also keep representative spectra with a valid glycan composition
-    else:
-      if get_missing:
-        if modification == 'reduced':
-          k_c = k-1
-        else:
-          k_c = k
-        comp = mz_to_composition2(k_c, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
-                                 df_use = df_use, filter_out = filter_out, libr = libr)
-        if len(comp) < 1:
-          k_c2 = (k_c+0.5) * 2 if mode == 'negative' else (k_c-0.5) * 2 
-          comp = mz_to_composition2(k_c2, mode = mode, mass_tolerance = mass_tolerance/2, glycan_class = glycan_class,
-                                 df_use = df_use, filter_out = filter_out, libr = libr)
-        if len(comp)>0:
-          if intensity:
-            ranking[k] = ([], comp[0], inty)
-          else:
-            ranking[k] = ([], comp[0])
-  return ranking, [num_spectra[k] for k in ranking.keys()]
+    return keys, values, rts, num_spectra, []
 
 def deduplicate_predictions(df):
   """removes/unifies duplicate predictions\n
@@ -612,6 +585,28 @@ def adduct_detect(df, mode, modification):
   df['adduct'] = adduct_check
   return df
 
+def average_preds(preds, conf, k=10):
+  pred_chunks = [preds[i:i + k] for i in range(0, len(preds), k)]
+  conf_chunks = [conf[i:i + k] for i in range(0, len(conf), k)]
+  out_p = []
+  out_c = []
+  for c in range(len(pred_chunks)):
+    this_pred = pred_chunks[c]
+    this_conf = conf_chunks[c]
+    combs = [{this_pred[j][m]:this_conf[j][m] for m in range(len(this_pred[j]))} for j in range(len(this_pred))]
+    combs = average_dicts(combs, mode='max')
+    combs = dict(sorted(combs.items(), key=operator.itemgetter(1),reverse=True))
+    out_p.append(list(combs.keys()))
+    out_c.append(list(combs.values()))
+  return out_p, out_c
+
+def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filter_out, libr):
+  comp = mz_to_composition2(mass-reduced, mode = mode, mass_tolerance = mass_tolerance,glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out, libr = libr)
+  if len(comp)<1:
+    new_mass = (mass+0.5)*2-reduced if mode =='negative' else (mass-0.5)*2-reduced
+    comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance,glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out, libr = libr)
+  return comp
+
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,
@@ -643,49 +638,55 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   if libr is None:
     libr = lib
   if isinstance(filename, str):
-    try:
-        loaded_file = pd.read_excel(filepath + filename + ".xlsx")
-    except:
-        loaded_file = process_mzML_stack(filepath + filename)
+    loaded_file = pd.read_excel(filepath + filename + ".xlsx")
   else:
     loaded_file = filename
+  if modification == 'reduced':
+    reduced = 1
+  else:
+    reduced = 0
   intensity = True if 'intensity' in loaded_file.columns else False
   loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1]=='}'],:]
+  loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d.values.tolist()]
+  loaded_file.dropna(subset = ['peak_d'], inplace=True)
   loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass.values.tolist()]
-  coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid']) else 3
-  loader, RT, inty = process_for_inference(loaded_file, coded_class, mode = mode, modification = modification,
-                                           lc = lc, trap = trap, bin_num = bin_num, intensity = intensity)
-  preds, pred_conf = get_topk(loader, model, glycans, temp = True)
-  preds = {loaded_file.reducing_mass.values.tolist()[k]:preds[k] for k in range(len(preds))}
-  out, num_spectra = build_mean_dic(preds, RT, pred_conf, inty, libr = libr, glycan_class = glycan_class, pred_thresh = pred_thresh,
-                       modification = modification, mode = mode, get_missing = get_missing, mass_tolerance = mass_tolerance,
-                       filter_out = filter_out)
-  df_out = pd.DataFrame.from_dict(out, orient = 'index')
   if intensity:
-    df_out.columns = ['predictions', 'composition', 'rel_abundance']
-    df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance.values.tolist()]
+    inty = loaded_file.intensity.values.tolist()
   else:
-    df_out.columns = ['predictions', 'composition']
-  df_out['num_spectra'] = num_spectra
-  df_out = deduplicate_predictions(df_out)
+    inty = []
+  coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid']) else 3
+  spec_dic = {loaded_file.reducing_mass.values.tolist()[k]:loaded_file.peak_d.values.tolist()[k] for k in range(len(loaded_file))}
+  keys, values, RT, num_spectra, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty,libr = libr, glycan_class = glycan_class,modification = modification, mode = mode, mass_tolerance = mass_tolerance)
+  loader, df_out = process_for_inference(keys, values, RT, num_spectra, coded_class, mode = mode, modification = modification,lc = lc, trap = trap, bin_num = bin_num, intensity = intensity)
+  preds, pred_conf = get_topk(loader, model, glycans, temp = True)
+  preds, pred_conf = average_preds(preds, pred_conf)
+  if intensity:
+    df_out['rel_abundance'] = intensity
+    df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance.values.tolist()]
+  df_out['predictions'] = [[(preds[k][j], pred_conf[k][j]) for j in range(len(preds[k]))] for k in range(len(preds))]
+  df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class) and gly[1] > pred_thresh] for v in df_out.predictions.values.tolist()]
+  df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
+  #get composition of predictions
+  df_out['composition'] = [glycan_to_composition(g[0][0], libr = libr) if len(g)>0 and len(g[0])>0 else np.nan for g in df_out.predictions.values.tolist()]
+  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance,glycan_class, df_glycan, filter_out, libr) for i,k in enumerate(df_out.composition.values.tolist())]
+  df_out.composition = [np.nan if isinstance(k, list) and len(k)<1 else k[0] if isinstance(k, list) and len(k)>0 else k for k in df_out.composition.values.tolist()]
+  df_out.dropna(subset=['composition'], inplace=True)
   df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k]) for k in range(len(df_out))]
-  idx = [loaded_file.reducing_mass.values.tolist().index(k) for k in df_out.index.values]
-  spectra_out = loaded_file.iloc[idx, :].reset_index(drop = True)
-  df_out['RT'] = [round(k,2) for k in spectra_out.RT.values.tolist()]
-  if get_missing:
-    #df_out = deduplicate_retention(df_out)
-    df_out = backfill_missing(df_out)
-    idx = [loaded_file.reducing_mass.values.tolist().index(k) for k in df_out.index.values]
-    spectra_out = loaded_file.iloc[idx, :].reset_index(drop = True)  
-  spectra_out.peak_d = [ast.literal_eval(k) for k in spectra_out.peak_d.values.tolist()]
-  top_frags = [sorted(k.items(), key = lambda x: x[1], reverse = True)[:frag_num] for k in spectra_out.peak_d.values.tolist()]
+  df_out.RT = [round(k,2) for k in df_out.RT.values.tolist()]
+  df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d']]
+  df_out = backfill_missing(df_out)
+  top_frags = [sorted(k.items(), key = lambda x: x[1], reverse = True)[:frag_num] for k in df_out.peak_d.values.tolist()]
   df_out['top_fragments'] = [[round(j[0],4) for j in k] for k in top_frags]
   df_out = adduct_detect(df_out, mode, modification)
-  df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification,
-                         mass_tolerance = mass_tolerance)
-  idx = [loaded_file.reducing_mass.values.tolist().index(k) for k in df_out.index.values]
-  spectra_out = loaded_file.iloc[idx, :].reset_index(drop = True)
-  spectra_out.peak_d = [ast.literal_eval(k) for k in spectra_out.peak_d.values.tolist()]
+  df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification,mass_tolerance = mass_tolerance)
+  df_out = deduplicate_predictions(df_out)
+  if get_missing:
+    pass
+  else:
+    idx = [k for k in range(len(df_out)) if len(df_out.predictions.values.tolist()[k])>0]
+    df_out = df_out.iloc[idx,:]
+  spectra_out = df_out.peak_d.values.tolist()
+  df_out.drop(['peak_d'], axis=1, inplace=True)
   if spectra:
     return df_out, spectra_out
   else:

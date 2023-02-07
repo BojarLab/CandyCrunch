@@ -1,26 +1,84 @@
 import torch
+import numpy as np
+import random
 from torch import flatten
 from torch import nn
 import torch.nn.functional as F
+from torchvision import transforms
+
+def remove_low_intensity_peaks(array, removal_threshold, removal_percentage):
+  candidate_indices = np.where(np.logical_and(array>0.0001, array<=removal_threshold))[0]
+  indices_to_remove = np.random.choice(candidate_indices, round(removal_percentage*len(candidate_indices)))
+  array_copy = np.copy(array)
+  array_copy[indices_to_remove] = 0
+  return array_copy
+
+def peak_intensity_jitter(array, augment_intensity):
+  return array * np.random.uniform(1-augment_intensity,1+augment_intensity,len(array)).astype(np.float32)
+
+def new_peak_addition(array, n_noise_peaks, max_noise_intensity):
+  idx_noise_peaks = np.random.choice(np.argwhere(array == 0)[0], n_noise_peaks)
+  new_values = max_noise_intensity * np.random.random(len(idx_noise_peaks))
+  noisy_array = np.copy(array) 
+  noisy_array[idx_noise_peaks] = new_values 
+  return noisy_array
+
+transform_mz = transforms.Compose([
+  lambda x: remove_low_intensity_peaks(x,removal_threshold=0.008,removal_percentage=0.1),
+  lambda x: peak_intensity_jitter(x,augment_intensity=0.25),
+  lambda x: new_peak_addition(x,n_noise_peaks=10,max_noise_intensity=0.005)
+])
+
+def precursor_jitter(prec):
+  return prec + random.uniform(-0.5, 0.5)
+
+transform_prec = transforms.Compose([
+    lambda x: precursor_jitter(x)
+])
+
+def rt_jitter(RT):
+  return max(0, RT + random.uniform(-0.2, 0.2))
+
+transform_rt = transforms.Compose([
+    lambda x: rt_jitter(x)
+])
+
 
 class SimpleDataset(torch.utils.data.Dataset):
-  def __init__(self, x, y):
+  def __init__(self, x, y, transform_mz=None, transform_prec=None, transform_rt = None,
+               transform_prec_neg = None, transform_prec_pos = None):
     self.x = x
     self.y = y
+    self.transform_mz = transform_mz
+    self.transform_prec = transform_prec
+    self.transform_prec_neg = transform_prec_neg
+    self.transform_prec_pos = transform_prec_pos
+    self.transform_rt = transform_rt
   def __len__(self):
     return len(self.x)
   def __getitem__(self, index):
     mz = self.x[index][0]
+    if self.transform_mz:
+      mz = self.transform_mz(mz)
     mz_r = self.x[index][1]
     prec = self.x[index][2]
+    if self.transform_prec:
+      prec = self.transform_prec(prec)
     glycan_type = self.x[index][3]
     RT = self.x[index][4]
+    if self.transform_rt:
+      RT = self.transform_rt(RT)
     mode = self.x[index][5]
+    if any([self.transform_prec_neg, self.transform_prec_pos]):
+      if mode == 0:
+        prec = self.transform_prec_neg(prec)
+      else:
+        prec = self.transform_prec_pos(prec)
     lc = self.x[index][6]
     modification = self.x[index][7]
     trap = self.x[index][8]
     out = self.y[index]
-    return torch.FloatTensor(mz), torch.FloatTensor(mz_r), torch.FloatTensor([prec]), torch.LongTensor([glycan_type]), torch.FloatTensor([RT]), torch.LongTensor([mode]), torch.LongTensor([lc]), torch.LongTensor([modification]), torch.LongTensor([trap]), torch.LongTensor([out])
+    return torch.FloatTensor(mz),torch.FloatTensor(mz_r), torch.FloatTensor([prec]), torch.LongTensor([glycan_type]), torch.FloatTensor([RT]), torch.LongTensor([mode]), torch.LongTensor([lc]), torch.LongTensor([modification]), torch.LongTensor([trap]), torch.LongTensor([out])
 
 class ResUnit(nn.Module):
     def __init__(self, in_channels, size=3, dilation=1, causal=False, in_ln=True):
