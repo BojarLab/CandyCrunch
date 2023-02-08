@@ -580,7 +580,7 @@ def backfill_missing(df):
   str_dics = [stringify_dict(k) for k in df.composition.values.tolist()]
   for k in range(len(df)):
     if not len(df.predictions.values.tolist()[k]) > 0:
-      idx = [j for j in range(len(str_dics)) if str_dics[j] == str_dics[k] and abs(df.index.tolist()[j]-df.index.tolist()[k]) > determine_threshold(df.index.tolist()[j])]
+      idx = [j for j in range(len(str_dics)) if str_dics[j] == str_dics[k] and abs(df.index.tolist()[j]*df.charge.values.tolist()[j]+(1*df.charge.values.tolist()[j]-1)-df.index.tolist()[k]*df.charge.values.tolist()[k]+(1*df.charge.values.tolist()[k]-1)) < determine_threshold(df.index.tolist()[j])]
       if len(idx) > 0:
         df.iat[k,0] = df.predictions.values.tolist()[idx[0]]
   return df
