@@ -165,7 +165,7 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
            'trap', 'glycan', 'glycan_type', 'lc'], axis=1, inplace=True)
   return dloader, df
 
-def get_topk(dataloader, model, glycans, k=50, temp = False):
+def get_topk(dataloader, model, glycans, k=50, temp = False, temperature = temperature):
   """yields topk CandyCrunch predictions for spectra in dataloader\n
   | Arguments:
   | :-
@@ -502,19 +502,19 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       m = m[0]
       truth = [True]
       #check diagnostic ions
-      if 'Neu5Ac' in m and glycan_class in ['O', 'free', 'lipid']:
+      if 'Neu5Ac' in m:
         truth.append(any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
-      if 'Neu5Gc' in m and glycan_class in ['O', 'free', 'lipid']:
+      if 'Neu5Gc' in m:
         truth.append(any([abs(306-j) < 1 or abs(df_out.index.tolist()[k]-307-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
-      if 'Kdn' in m and glycan_class in ['O', 'free', 'lipid']:
+      if 'Kdn' in m:
         truth.append(any([abs(249-j) < 1 or abs(df_out.index.tolist()[k]-250-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
-      if 'Neu5Gc' not in m and glycan_class in ['O', 'free', 'lipid']:
+      if 'Neu5Gc' not in m:
         truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
-      if 'Neu5Ac' not in m and glycan_class in ['O', 'free', 'lipid'] and 'Neu5Gc' not in m:
+      if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
         truth.append(not any([abs(290-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
-      if 'Neu5Ac' not in m and glycan_class in ['O', 'free', 'lipid'] and (m.count('Fuc')+m.count('dHex') > 1):
+      if 'Neu5Ac' not in m and (m.count('Fuc')+m.count('dHex') > 1):
         truth.append(not any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
-      if 'S' in m and glycan_class in ['O', 'free', 'lipid'] and len(df_out.predictions.values.tolist()[k]) < 1:
+      if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
         truth.append(any(['S' in (mz_to_composition2(t-reduced, libr = libr, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                   df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
       #check fragment size distribution
@@ -644,7 +644,7 @@ def make_mass_dic(glycans, glycan_class, taxonomy_class = 'Mammalia'):
 
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
-                   pred_thresh = 0.01, spectra = False, get_missing = False, mass_tolerance = 0.5,extra_thresh = 0.3,
+                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5,extra_thresh = 0.3,
                    filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me'], supplement = False, experimental = False, mass_dic = None):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
@@ -693,7 +693,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   spec_dic = {loaded_file.reducing_mass.values.tolist()[k]:loaded_file.peak_d.values.tolist()[k] for k in range(len(loaded_file))}
   keys, values, RT, num_spectra, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
   loader, df_out = process_for_inference(keys, values, RT, num_spectra, coded_class, mode = mode, modification = modification,lc = lc, trap = trap, bin_num = bin_num)
-  preds, pred_conf = get_topk(loader, model, glycans, temp = True)
+  preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
   preds, pred_conf = average_preds(preds, pred_conf)
   if intensity:
     df_out['rel_abundance'] = intensity
@@ -728,6 +728,8 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
         mass_dic = make_mass_dic(glycans, glycan_class)
     df_out = possibles(df_out, mass_dic, reduced)
     df_out.evidence = ['weak' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k])>0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
+  if supplement or experimental:
+    df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification,mass_tolerance = mass_tolerance)
   if get_missing:
     pass
   else:
