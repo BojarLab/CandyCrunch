@@ -3,6 +3,7 @@ import pandas as pd
 import numpy_indexed as npi
 from collections import defaultdict
 from glycowork.motif.processing import enforce_class, get_lib, expand_lib
+from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
 from glycowork.glycan_data.loader import unwrap, stringify_dict, lib, df_glycan
