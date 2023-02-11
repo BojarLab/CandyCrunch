@@ -642,6 +642,25 @@ def make_mass_dic(glycans, glycan_class, taxonomy_class = 'Mammalia'):
   mass_dic = {u:[exp_glycans[j] for j in [i for i,m in enumerate(masses) if m==u]] for u in unq_masses}
   return mass_dic
 
+def canonicalize_biosynthesis(df_out, libr):
+  df_out['true_mass'] = [df_out.index.tolist()[j]*df_out.charge.values.tolist()[j]+(1*df_out.charge.values.tolist()[j]-1) for j in range(len(df_out))]
+  df_out.sort_values(by='true_mass', inplace=True)
+  for k in reversed(range(len(df_out))):
+    preds = df_out.iloc[k, 0]
+    if len(preds) > 0:
+      rest_top1 = [df_out.predictions.values.tolist()[j][0][0] for j in range(k) if len(df_out.predictions.values.tolist()[j])>0]
+      for i,p in enumerate(preds):
+        p = list(p)
+        if len(p)==1:
+          p.append(0)
+        p[1] += 0.1*sum([subgraph_isomorphism(t, p[0], libr = libr)*(not t==p[0]) for t in rest_top1])
+        p = tuple(p)
+        preds[i] = p
+      preds = sorted(preds, key = lambda x: x[1], reverse=True)
+      df_out.iat[k,0] = preds
+  df_out.drop(['true_mass'], axis=1, inplace=True)
+  return df_out.sort_index()
+
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5,extra_thresh = 0.3,
@@ -735,6 +754,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   else:
     idx = [k for k in range(len(df_out)) if len(df_out.predictions.values.tolist()[k])>0]
     df_out = df_out.iloc[idx,:]
+  df_out = canonicalize_biosynthesis(df_out, libr)
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis=1, inplace=True)
   if spectra:
