@@ -346,7 +346,7 @@ def atom_mods_init(subg,present_breakages,terminals,terminal_labels):
       atomic_mod_dict[bond[1]][breakage] = 1
   return atomic_mod_dict
 
-def get_mono_mods_list(root_node,subg,terminals,terminal_labels,atomic_mods,nx_edge_dict):
+def get_mono_mods_list(root_node,subg,terminals,terminal_labels,nx_edge_dict):
   """Determines all possible cross-ring modifications for each node label in terminals\n
   | Arguments:
   | :-
@@ -387,7 +387,7 @@ def get_valid_A_frags(subg,node,label,nx_edge_dict):
   A_mods_list = [x for x in mono_attributes[label]['mass'] if x in A_cross_rings or x == label]
   node_in_edges = [x for x in subg.in_edges(node)]
   for mod in A_mods_list:
-    if not set([int(nx_edge_dict[bond]['bond_label'].split('-')[1][0].replace('?','6')) for bond in node_in_edges]) <= set(mono_attributes[label]['atoms'][mod]):
+    if not set([int(nx_edge_dict[bond]['bond_label'][-1]) for bond in node_in_edges if nx_edge_dict[bond]['bond_label'][-1] != '?']) <= set(mono_attributes[label]['atoms'][mod]):
       pass
     else:
       valid_A_mods_list.append(mod)
@@ -586,7 +586,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
     inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
     
     atomic_mod_dict_subg = atom_mods_init(subg,present_breakages,terminals,terminal_labels)
-    mono_mods_list = get_mono_mods_list(root_node,subg,terminals,terminal_labels,atomic_mod_dict_subg,nx_edge_dict)
+    mono_mods_list = get_mono_mods_list(root_node,subg,terminals,terminal_labels,nx_edge_dict)
     mono_mod_perms,atom_dict_perms = generate_mod_permutations(terminals,terminal_labels,mono_mods_list,atomic_mod_dict_subg)
     permutation_list = product(zip(product(*mono_mod_perms),product(*atom_dict_perms)),global_mods)
     
@@ -860,16 +860,19 @@ def record_diffs(subg_frags, mass, mass_threshold, charge):
     diffs = [abs(mass-((k/2)-0.5)) for k in hits]
   return hits, diffs
 
-def finalise_output_fragments(nx_mono, graphs, diffs, glycan_string, reverse_anneal = False, iupac = False):
-  ion_names = subgraphs_to_domon_costello(nx_mono, graphs)
+def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iupac=False):
+  ion_names = []
+  dc_names = subgraphs_to_domon_costello(nx_mono, graphs)
   if reverse_anneal:
-    ion_names = mass_match(ion_names, diffs)
-  ion_names = sorted(ion_names, key = len)[:5]
+    dc_names = mass_match(dc_names, diffs)
+  idx = np.argsort([len(x) for x in dc_names])
+  dc_names = [dc_names[x] for x in idx][:5]
+  ion_names.append(dc_names)
   if iupac:
-    iupac_ion_names = [(ion_name,domon_costello_to_fragIUPAC(glycan_string,ion_name)) for ion_name in ion_names]
-    return iupac_ion_names
-  else:
-    return ion_names
+    graphs = [graphs[x] for x in idx][:5]
+    iupac_names = [mono_frag_to_string(graph) for graph in graphs]
+    ion_names.append(iupac_names)
+  return ion_names
 
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
                 max_frags = 3, simplify = False, reverse_anneal = True,
@@ -902,7 +905,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
       diffs = unwrap([[diffs[i]]*len(subg_frags[k]) for i,k in enumerate(hits)])
-      ion_names = finalise_output_fragments(nx_mono, graphs, diffs, glycan_string, reverse_anneal = reverse_anneal, iupac = iupac) 
+      ion_names = finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = reverse_anneal, iupac = iupac) 
       hit_list.append((mass,ion_names))
     else:
       hit_list.append((mass,[]))
@@ -914,7 +917,7 @@ def get_unique_subgraphs(nx_mono1,nx_mono2):
   """Gets the subgraphs unique to each of two input graphs\n
   | Arguments:
   | :-
-  | nx_mono1 (networkx object): a monosaccharide only graph
+  | nx_mono1 (networkx object): a stmonosaccharide only graph
   | nx_mono2 (networkx object): a different monosaccharide only graph\n
   | Returns:
   | :-
