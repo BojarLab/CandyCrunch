@@ -701,12 +701,13 @@ def make_mass_dic(glycans, glycan_class, taxonomy_class = 'Mammalia'):
   mass_dic = {u:[exp_glycans[j] for j in [i for i,m in enumerate(masses) if m == u]] for u in unq_masses}
   return mass_dic
 
-def canonicalize_biosynthesis(df_out, libr):
+def canonicalize_biosynthesis(df_out, libr, pred_thresh):
   """regularize predictions by incentivizing biosynthetic feasibility\n
   | Arguments:
   | :-
   | df_out (dataframe): prediction dataframe generated within wrap_inference
-  | libr (list): library of monosaccharides\n
+  | libr (list): library of monosaccharides
+  | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01\n
   | Returns:
   | :-
   | Returns prediction dataframe with re-ordered predictions, based on observed biosynthetic activities
@@ -726,14 +727,19 @@ def canonicalize_biosynthesis(df_out, libr):
         p = tuple(p)
         preds[i] = p
       preds = sorted(preds, key = lambda x: x[1], reverse = True)
-      df_out.iat[k,0] = [(p[0],p[1] if p[1] < 1 else 1) for p in preds]
+      total = sum([p[1] for p in preds])
+      if total > 1:
+        df_out.iat[k,0] = [(p[0],p[1]/total) for p in preds if p[1]/total>pred_thresh][:5]
+      else:
+        df_out.iat[k,0] = [(p[0],p[1]) for p in preds if p[1]>pred_thresh][:5]
   df_out.drop(['true_mass'], axis = 1, inplace= True)
   return df_out.loc[idx,:]
 
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
-                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me'], supplement = True, experimental = True, mass_dic = None):
+                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'], supplement = True, experimental = True, mass_dic = None,
+                   taxonomy_class = 'Mammalia'):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
   | :-
@@ -758,7 +764,8 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me']
   | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
   | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
-  | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally\n
+  | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
+  | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'\n
   | Returns:
   | :-
   | Returns dataframe of predictions for spectra in file
@@ -810,7 +817,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out = deduplicate_predictions(df_out)
   df_out['evidence'] = ['strong' if len(k) > 0 else np.nan for k in df_out.predictions.values.tolist()]
   if supplement:
-    if len(df_out) > 250:
+    if len(df_out) > 200:
       print("Very large number of glycans detected; biosynthetic network construction could take a while. If you're in a hurry, restart with supplement=False")
     try:
       df_out = supplement_prediction(df_out, glycan_class, libr = libr, mode = mode, modification = modification)
@@ -820,7 +827,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   if experimental:
     df_out = impute(df_out)
     if mass_dic is None:
-        mass_dic = make_mass_dic(glycans, glycan_class)
+        mass_dic = make_mass_dic(glycans, glycan_class, taxonomy_class = taxonomy_class)
     df_out = possibles(df_out, mass_dic, reduced)
     df_out.evidence = ['weak' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
   if supplement or experimental:
@@ -830,7 +837,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   else:
     idx = [k for k in range(len(df_out)) if len(df_out.predictions.values.tolist()[k]) > 0]
     df_out = df_out.iloc[idx,:]
-  df_out = canonicalize_biosynthesis(df_out, libr)
+  df_out = canonicalize_biosynthesis(df_out, libr, pred_thresh)
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis = 1, inplace = True)
   if spectra:
