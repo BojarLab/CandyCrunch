@@ -468,8 +468,7 @@ def deduplicate_retention(df):
         if len(rest)>0:
           drop_idx.append(rest)
   drop_idx = set(unwrap(drop_idx))
-  df = df.drop([df.index.tolist()[k] for k in drop_idx], axis = 0)
-  return df
+  return df.drop([df.index.tolist()[k] for k in drop_idx], axis = 0)
 
 def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modification = 'reduced',
                   mass_tolerance = 0.5, filter_out = None, df_use = None):
@@ -545,8 +544,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
           keep.append('remove')
     df_out.iat[k,0] = keep
   idx = [k for k in range(len(df_out)) if 'remove' not in df_out.predictions.values.tolist()[k][:1]]
-  df_out = df_out.iloc[idx,:]
-  return df_out
+  return df_out.iloc[idx,:]
 
 def backfill_missing(df):
   """finds rows with composition-only that match existing predictions and propagates\n
@@ -634,7 +632,7 @@ def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filte
   | Returns composition (as a dict)
   """
   comp = mz_to_composition2(mass-reduced, mode = mode, mass_tolerance = mass_tolerance,glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out, libr = libr)
-  if len(comp)<1:
+  if len(comp) < 1:
     new_mass = (mass+0.5)*2-reduced if mode == 'negative' else (mass-0.5)*2-reduced
     comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance,glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out, libr = libr)
   return comp
@@ -677,12 +675,13 @@ def possibles(df_out, mass_dic, reduced):
         df_out.iat[k,0] = [(m,) for m in possible]
   return df_out
 
-def make_mass_dic(glycans, glycan_class, taxonomy_class = 'Mammalia'):
+def make_mass_dic(glycans, glycan_class, filter_out, taxonomy_class = 'Mammalia'):
   """generates a mass dict that can be used in the possibles() function\n
   | Arguments:
   | :-
   | glycans (list): glycans used for training CandyCrunch
   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
+  | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
   | taxonomy_class (string): which taxonomic class to use for selecting possible glycans; default:'Mammalia'\n
   | Returns:
   | :-
@@ -694,7 +693,8 @@ def make_mass_dic(glycans, glycan_class, taxonomy_class = 'Mammalia'):
   masses = []
   for k in exp_glycans:
     try:
-      masses.append(glycan_to_mass(k))
+      if not any([j in glycan_to_composition(k).keys() for j in filter_out]):
+        masses.append(glycan_to_mass(k))
     except:
       masses.append(9999)
   unq_masses = set(masses)
@@ -729,10 +729,10 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
       preds = sorted(preds, key = lambda x: x[1], reverse = True)
       total = sum([p[1] for p in preds])
       if total > 1:
-        df_out.iat[k,0] = [(p[0],p[1]/total) for p in preds if p[1]/total>pred_thresh][:5]
+        df_out.iat[k,0] = [(p[0],p[1]/total) for p in preds][:5]
       else:
-        df_out.iat[k,0] = [(p[0],p[1]) for p in preds if p[1]>pred_thresh][:5]
-  df_out.drop(['true_mass'], axis = 1, inplace= True)
+        df_out.iat[k,0] = [(p[0],p[1]) for p in preds][:5]
+  df_out.drop(['true_mass'], axis = 1, inplace = True)
   return df_out.loc[idx,:]
 
 def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
@@ -827,11 +827,11 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   if experimental:
     df_out = impute(df_out)
     if mass_dic is None:
-        mass_dic = make_mass_dic(glycans, glycan_class, taxonomy_class = taxonomy_class)
+        mass_dic = make_mass_dic(glycans, glycan_class, filter_out, taxonomy_class = taxonomy_class)
     df_out = possibles(df_out, mass_dic, reduced)
     df_out.evidence = ['weak' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
   if supplement or experimental:
-    df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification,mass_tolerance = mass_tolerance)
+    df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance)
   if get_missing:
     pass
   else:
@@ -840,6 +840,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out = canonicalize_biosynthesis(df_out, libr, pred_thresh)
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis = 1, inplace = True)
+  df_out.composition = [glycan_to_composition(k[0][0], libr = libr) if len(k) > 0 else df_out.composition[i] for i,k in enumerate(df_out.predictions)]
   if spectra:
     return df_out, spectra_out
   else:
@@ -865,13 +866,13 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   if glycan_class == 'free':
     preds = [k+'-ol' for k in preds]
     libr = expand_lib(libr, preds)
-    permitted_roots = ["Gal(b1-4)Glc-ol", "Gal(b1-4)GlcNAc-ol"]
+    permitted_roots = {"Gal(b1-4)Glc-ol", "Gal(b1-4)GlcNAc-ol"}
   elif glycan_class == 'lipid':
-    permitted_roots = ["Glc", "Gal"]
+    permitted_roots = {"Glc", "Gal"}
   elif glycan_class == 'O':
-    permitted_roots = ['GalNAc', 'Fuc', 'Man']
+    permitted_roots = {'GalNAc', 'Fuc', 'Man'}
   elif glycan_class == 'N':
-    permitted_roots = ['Man(b1-4)GlcNAc(b1-4)GlcNAc']
+    permitted_roots = {'Man(b1-4)GlcNAc(b1-4)GlcNAc'}
   net = construct_network(preds, permitted_roots = permitted_roots, libr = libr)
   if glycan_class == 'free':
     net = evoprune_network(net, libr = libr)
