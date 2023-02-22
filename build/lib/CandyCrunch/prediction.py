@@ -175,14 +175,14 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
            'trap', 'glycan', 'glycan_type', 'lc'], axis = 1, inplace = True)
   return dloader, df
 
-def get_topk(dataloader, model, glycans, k = 50, temp = False, temperature = temperature):
+def get_topk(dataloader, model, glycans, k = 25, temp = False, temperature = temperature):
   """yields topk CandyCrunch predictions for spectra in dataloader\n
   | Arguments:
   | :-
   | dataloader (PyTorch): dataloader from process_for_inference
   | model (PyTorch): trained CandyCrunch model
   | glycans (list): full list of glycans used for training CandyCrunch
-  | k (int): how many top predictions to provide for each spectrum; default:50
+  | k (int): how many top predictions to provide for each spectrum; default:25
   | temp (bool): whether to calibrate logits by temperature factor; default:False
   | temperature (float): the temperature factor used to calibrate logits; default:1.2097\n
   | Returns:
