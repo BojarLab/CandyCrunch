@@ -695,6 +695,8 @@ def make_mass_dic(glycans, glycan_class, filter_out, taxonomy_class = 'Mammalia'
     try:
       if not any([j in glycan_to_composition(k).keys() for j in filter_out]):
         masses.append(glycan_to_mass(k))
+      else:
+        masses.append(9999)
     except:
       masses.append(9999)
   unq_masses = set(masses)
