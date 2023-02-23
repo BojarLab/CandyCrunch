@@ -113,12 +113,12 @@ def bin_intensities(peak_d, frames):
   out_list = np.zeros(len(frames))
   out_list2 = np.zeros(len(frames))
   keys = list(dict.fromkeys(peak_d))
-  filled_bins = np.digitize(np.array(keys,dtype='float32'),frames,right=True)
+  filled_bins = np.digitize(np.array(keys, dtype = 'float32'), frames, right = True)
   mz_remainder = keys-frames[filled_bins-1]
-  unq, ids = np.unique(filled_bins, return_inverse=True)
+  unq, ids = np.unique(filled_bins, return_inverse = True)
   vals = np.array(list(map(peak_d.get, keys)))
   a2 = mz_remainder[npi.group_by(ids).argmax(vals)[1]]
-  for b,s,m in zip(unq,np.bincount(ids, np.array(list(map(peak_d.get, keys)))), np.bincount(range(len(a2)), a2)):
+  for b,s,m in zip(unq, np.bincount(ids, np.array(list(map(peak_d.get, keys)))), np.bincount(range(len(a2)), a2)):
     out_list[b-1] = s
     out_list2[b-1] = m
   return out_list, out_list2
@@ -274,10 +274,10 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
   if libr is None:
     libr = lib
   if modification == 'permethylated':
-    mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), libr = libr, sample_prep = 'permethylated')
+    mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), sample_prep = 'permethylated')
   else:
     try:
-      mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), libr = libr)
+      mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'))
     except:
       return False
   if modification == 'reduced':
@@ -520,7 +520,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       if 'Neu5Ac' not in m and (m.count('Fuc')+m.count('dHex') > 1):
         truth.append(not any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
       if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
-        truth.append(any(['S' in (mz_to_composition2(t-reduced, libr = libr, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
+        truth.append(any(['S' in (mz_to_composition2(t-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                   df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
       #check fragment size distribution
       if df_out.charge.values.tolist()[k] > 1:
@@ -615,7 +615,7 @@ def average_preds(preds, conf, k = 10):
     out_c.append(list(combs.values()))
   return out_p, out_c
 
-def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filter_out, libr):
+def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filter_out):
   """robust workflow to map an m/z value to a composition\n
   | Arguments:
   | :-
@@ -631,10 +631,10 @@ def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filte
   | :-
   | Returns composition (as a dict)
   """
-  comp = mz_to_composition2(mass-reduced, mode = mode, mass_tolerance = mass_tolerance,glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out, libr = libr)
+  comp = mz_to_composition2(mass-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out)
   if len(comp) < 1:
     new_mass = (mass+0.5)*2-reduced if mode == 'negative' else (mass-0.5)*2-reduced
-    comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance,glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out, libr = libr)
+    comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out)
   return comp
 
 def impute(df_out):
@@ -802,8 +802,8 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class, gly[1], extra_thresh = extra_thresh) and gly[1] > pred_thresh] for v in df_out.predictions.values.tolist()]
   df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
   #get composition of predictions
-  df_out['composition'] = [glycan_to_composition(g[0][0], libr = libr) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions.values.tolist()]
-  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance,glycan_class, df_glycan, filter_out, libr) for i,k in enumerate(df_out.composition.values.tolist())]
+  df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions.values.tolist()]
+  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance,glycan_class, df_glycan, filter_out) for i,k in enumerate(df_out.composition.values.tolist())]
   df_out.composition = [np.nan if isinstance(k, list) and len(k)<1 else k[0] if isinstance(k, list) and len(k)>0 else k for k in df_out.composition.values.tolist()]
   df_out.dropna(subset = ['composition'], inplace = True)
   df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k]) for k in range(len(df_out))]
@@ -840,7 +840,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out = canonicalize_biosynthesis(df_out, libr, pred_thresh)
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis = 1, inplace = True)
-  df_out.composition = [glycan_to_composition(k[0][0], libr = libr) if len(k) > 0 else df_out.composition[i] for i,k in enumerate(df_out.predictions)]
+  df_out.composition = [glycan_to_composition(k[0][0]) if len(k) > 0 else df_out.composition[i] for i,k in enumerate(df_out.predictions)]
   if spectra:
     return df_out, spectra_out
   else:
