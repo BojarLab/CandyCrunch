@@ -649,9 +649,9 @@ def impute(df_out):
   for k in range(len(df_out)):
     for j in range(len(df_out)):
       if len(df_out.predictions.values.tolist()[k]) > 0 and len(df_out.predictions.values.tolist()[j]) < 1:
-        if abs(df_out.index.tolist()[k]+16-df_out.index.tolist()[j]) < 0.5 and 'Neu5Gc' in df_out.composition.values.tolist()[j].keys():
+        if abs(df_out.index.tolist()[k]+(16/max([df_out.charge.values.tolist()[k],1]))-df_out.index.tolist()[j]) < 0.5 and 'Neu5Gc' in df_out.composition.values.tolist()[j].keys():
           df_out.iat[j,0] = [(m[0].replace('Neu5Ac', 'Neu5Gc', 1),) for m in df_out.predictions.values.tolist()[k]]
-        elif abs(df_out.index.tolist()[k]-16-df_out.index.tolist()[j]) < 0.5 and 'Neu5Ac' in df_out.composition.values.tolist()[j].keys():
+        elif abs(df_out.index.tolist()[k]-(16/max([df_out.charge.values.tolist()[k],1]))-df_out.index.tolist()[j]) < 0.5 and 'Neu5Ac' in df_out.composition.values.tolist()[j].keys():
           df_out.iat[j,0] = [(m[0].replace('Neu5Gc', 'Neu5Ac', 1),) for m in df_out.predictions.values.tolist()[k]]
   return df_out
 
