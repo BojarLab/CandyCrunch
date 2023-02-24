@@ -407,14 +407,15 @@ def build_mean_dic(dicty, rt, intensity):
   keys = [[[keys[k][l] for l in j] if isinstance(j, list) else [keys[k][j]] for j in inty_idx[k]] for k in range(len(keys))]
   keys = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in keys])
   values = [[list(dicty.values())[k] for k in range(len(labels)) if labels[k]==j] for j in unq_labels]
+  rep_values = unwrap([[values[k][j] for j in rt_idx[k]] for k in range(len(values))])
   values = [[[values[k][l] for l in j] if isinstance(j, list) else [values[k][j]] for j in inty_idx[k]] for k in range(len(values))]
   values = unwrap([[average_dicts(j) for j in k] if isinstance(k[0], list) else [k] for k in values])
   rts = [[[rt_labels[k][l] for l in j] if isinstance(j, list) else [rt_labels[k][j]] for j in inty_idx[k]] for k in range(len(rt_labels))]
   rts = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in rts])
   if inty_check:
-    return keys, values, rts, num_spectra, intensity
+    return keys, values, rts, num_spectra, rep_values, intensity
   else:
-    return keys, values, rts, num_spectra, []
+    return keys, values, rts, num_spectra, rep_values, []
 
 def deduplicate_predictions(df):
   """removes/unifies duplicate predictions\n
@@ -796,8 +797,9 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
     inty = []
   coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid']) else 3
   spec_dic = {loaded_file.reducing_mass.values.tolist()[k]:loaded_file.peak_d.values.tolist()[k] for k in range(len(loaded_file))}
-  keys, values, RT, num_spectra, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
+  keys, values, RT, num_spectra, rep_values, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
   loader, df_out = process_for_inference(keys, values, RT, num_spectra, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, bin_num = bin_num)
+  df_out.peak_d = rep_values
   preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
   preds, pred_conf = average_preds(preds, pred_conf)
   if intensity:
@@ -837,6 +839,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
     df_out.evidence = ['weak' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
   if supplement or experimental:
     df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance)
+    df_out.predictions = [[(k[0].replace('-ol','').replace('1Cer',''), k[1]) if len(k) > 1 else (k[0].replace('-ol','').replace('1Cer',''),) for k in j] if len(j) > 0 else j for j in df_out.predictions]
   if get_missing:
     pass
   else:
