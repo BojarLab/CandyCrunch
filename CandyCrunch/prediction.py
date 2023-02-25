@@ -165,9 +165,9 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
   #dataloader generation
   X = list(zip(df.binned_intensities.values.tolist(),df.mz_remainder.values.tolist(),df.reducing_mass.values.tolist(),df.glycan_type.values.tolist(),
                df.RT2.values.tolist(), df['mode'].values.tolist(), df.lc.values.tolist(), df.modification.values.tolist(), df.trap.values.tolist()))
-  X = unwrap([[k]*10 for k in X])
+  X = unwrap([[k]*5 for k in X])
   y = df.glycan.values.tolist()
-  y = unwrap([[k]*10 for k in y])
+  y = unwrap([[k]*5 for k in y])
   dset = SimpleDataset(X, y, transform_mz=transform_mz, transform_prec=transform_prec, transform_rt=transform_rt)
   dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
   df.index=df.reducing_mass.values.tolist()
@@ -509,11 +509,11 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       truth = [True]
       #check diagnostic ions
       if 'Neu5Ac' in m:
-        truth.append(any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 or abs((df_out.index.tolist()[k]-291)/2+(0.5*multiplier)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' in m:
-        truth.append(any([abs(306-j) < 1 or abs(df_out.index.tolist()[k]-307-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(306-j) < 1 or abs(df_out.index.tolist()[k]-307-j) < 1 or abs((df_out.index.tolist()[k]-307)/2+(0.5*multiplier)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Kdn' in m:
-        truth.append(any([abs(249-j) < 1 or abs(df_out.index.tolist()[k]-250-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(249-j) < 1 or abs(df_out.index.tolist()[k]-250-j) < 1 or abs((df_out.index.tolist()[k]-250)/2+(0.5*multiplier)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' not in m:
         truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
       if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
@@ -594,13 +594,13 @@ def adduct_detect(df, mode, modification):
   df['adduct'] = adduct_check
   return df
 
-def average_preds(preds, conf, k = 10):
+def average_preds(preds, conf, k = 5):
   """takes in data-augmentation based prediction variants and averages them\n
   | Arguments:
   | :-
   | preds (list): nested list of predictions (glycan strings) for each spectrum cluster
   | conf (list): nested list of prediction confidences (floats) for each spectrum cluster
-  | k (int): how many predictions should be averaged for one cluster; default:10, do not change lightly\n
+  | k (int): how many predictions should be averaged for one cluster; default:5, do not change lightly\n
   | Returns:
   | :-
   | Returns averaged predictions and averaged prediction confidences
@@ -787,7 +787,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   else:
     reduced = 0
   intensity = True if 'intensity' in loaded_file.columns else False
-  loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}'],:]
+  loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}' and loaded_file.RT[k] > 2],:]
   loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d.values.tolist()]
   loaded_file.dropna(subset = ['peak_d'], inplace = True)
   loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass.values.tolist()]
@@ -880,7 +880,7 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   elif glycan_class == 'O':
     permitted_roots = {'GalNAc', 'Fuc', 'Man'}
   elif glycan_class == 'N':
-    permitted_roots = {'Man(b1-4)GlcNAc(b1-4)GlcNAc'}
+    permitted_roots = {'GlcNAc(b1-4)GlcNAc'}
   net = construct_network(preds, permitted_roots = permitted_roots, libr = libr)
   if glycan_class == 'free':
     net = evoprune_network(net, libr = libr)
