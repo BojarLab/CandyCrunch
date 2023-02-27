@@ -496,6 +496,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
     reduced = 1
   else:
     reduced = 0
+  multiplier = -1 if mode == 'negative' else 1
   for k in range(len(df_out)):
     keep = []
     if len(df_out.predictions.values.tolist()[k])>0:
