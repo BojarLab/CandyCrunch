@@ -816,7 +816,10 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out.dropna(subset = ['composition'], inplace = True)
   df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k]) for k in range(len(df_out))]
   df_out.RT = [round(k,2) for k in df_out.RT.values.tolist()]
-  df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d']]
+  cols = ['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d']
+  if intensity:
+    cols += ['rel_abundance']
+  df_out = df_out[cols]
   df_out = backfill_missing(df_out)
   top_frags = [sorted(k.items(), key = lambda x: x[1], reverse = True)[:frag_num] for k in df_out.peak_d.values.tolist()]
   df_out['top_fragments'] = [[round(j[0],4) for j in k] for k in top_frags]
@@ -850,6 +853,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis = 1, inplace = True)
   df_out.composition = [glycan_to_composition(k[0][0]) if len(k) > 0 else df_out.composition[i] for i,k in enumerate(df_out.predictions)]
+  df_out.charge = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.tolist()[k]) for k in range(len(df_out))]
   if spectra:
     return df_out, spectra_out
   else:
