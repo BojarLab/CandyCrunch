@@ -680,19 +680,20 @@ def possibles(df_out, mass_dic, reduced):
         df_out.iat[k,0] = [(m,) for m in possible]
   return df_out
 
-def make_mass_dic(glycans, glycan_class, filter_out, taxonomy_class = 'Mammalia'):
+def make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = 'Mammalia'):
   """generates a mass dict that can be used in the possibles() function\n
   | Arguments:
   | :-
   | glycans (list): glycans used for training CandyCrunch
   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
   | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
+  | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
   | taxonomy_class (string): which taxonomic class to use for selecting possible glycans; default:'Mammalia'\n
   | Returns:
   | :-
   | Returns a dictionary of form mass : list of glycans
   """
-  exp_glycans = df_glycan[(df_glycan.glycan_type==glycan_class) & (df_glycan.Class.str.contains(taxonomy_class))].glycan.values.tolist()
+  exp_glycans = df_use[(df_use.glycan_type==glycan_class) & (df_use.Class.str.contains(taxonomy_class))].glycan.values.tolist()
   class_glycans = [k for k in glycans if enforce_class(k, glycan_class)]
   exp_glycans = list(set(class_glycans+exp_glycans))
   masses = []
@@ -746,7 +747,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'], supplement = True, experimental = True, mass_dic = None,
-                   taxonomy_class = 'Mammalia'):
+                   taxonomy_class = 'Mammalia', df_use = None):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
   | :-
@@ -772,13 +773,16 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
   | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
   | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
-  | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'\n
+  | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'
+  | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan\n
   | Returns:
   | :-
   | Returns dataframe of predictions for spectra in file
   """
   if libr is None:
     libr = lib
+  if df_use is None:
+    df_use = df_glycan
   if isinstance(filename, str):
     loaded_file = pd.read_excel(filepath + filename + ".xlsx")
   else:
@@ -811,7 +815,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
   #get composition of predictions
   df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions.values.tolist()]
-  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance,glycan_class, df_glycan, filter_out) for i,k in enumerate(df_out.composition.values.tolist())]
+  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance,glycan_class, df_use, filter_out) for i,k in enumerate(df_out.composition.values.tolist())]
   df_out.composition = [np.nan if isinstance(k, list) and len(k)<1 else k[0] if isinstance(k, list) and len(k)>0 else k for k in df_out.composition.values.tolist()]
   df_out.dropna(subset = ['composition'], inplace = True)
   df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k]) for k in range(len(df_out))]
@@ -838,7 +842,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   if experimental:
     df_out = impute(df_out)
     if mass_dic is None:
-        mass_dic = make_mass_dic(glycans, glycan_class, filter_out, taxonomy_class = taxonomy_class)
+        mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_class)
     df_out = possibles(df_out, mass_dic, reduced)
     df_out.evidence = ['weak' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
   if supplement or experimental:
