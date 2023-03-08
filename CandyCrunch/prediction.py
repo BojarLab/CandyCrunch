@@ -23,7 +23,7 @@ if torch.cuda.is_available():
     device = "cuda:0"
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
-temperature = torch.Tensor([1.2097]).to(device)
+temperature = torch.Tensor([1.15]).to(device)
 def T_scaling(logits, temperature):
   return torch.div(logits, temperature)
 
@@ -809,7 +809,6 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   preds, pred_conf = average_preds(preds, pred_conf)
   if intensity:
     df_out['rel_abundance'] = intensity
-    df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance.values.tolist()]
   df_out['predictions'] = [[(preds[k][j], pred_conf[k][j]) for j in range(len(preds[k]))] for k in range(len(preds))]
   df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class, gly[1], extra_thresh = extra_thresh) and gly[1] > pred_thresh] for v in df_out.predictions.values.tolist()]
   df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
@@ -828,7 +827,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   top_frags = [sorted(k.items(), key = lambda x: x[1], reverse = True)[:frag_num] for k in df_out.peak_d.values.tolist()]
   df_out['top_fragments'] = [[round(j[0],4) for j in k] for k in top_frags]
   df_out = adduct_detect(df_out, mode, modification)
-  df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance)
+  df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
   df_out = deduplicate_predictions(df_out)
   df_out['evidence'] = ['strong' if len(k) > 0 else np.nan for k in df_out.predictions.values.tolist()]
   if supplement:
@@ -846,7 +845,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
     df_out = possibles(df_out, mass_dic, reduced)
     df_out.evidence = ['weak' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
   if supplement or experimental:
-    df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance)
+    df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
     df_out.predictions = [[(k[0].replace('-ol','').replace('1Cer',''), k[1]) if len(k) > 1 else (k[0].replace('-ol','').replace('1Cer',''),) for k in j] if len(j) > 0 else j for j in df_out.predictions]
   if get_missing:
     pass
@@ -856,8 +855,11 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out = canonicalize_biosynthesis(df_out, libr, pred_thresh)
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis = 1, inplace = True)
-  df_out.composition = [glycan_to_composition(k[0][0]) if len(k) > 0 else df_out.composition[i] for i,k in enumerate(df_out.predictions)]
+  #clean-up
+  df_out.composition = [glycan_to_composition(k[0][0]) if len(k) > 0 else df_out.composition.values.tolist()[i] for i,k in enumerate(df_out.predictions)]
   df_out.charge = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.tolist()[k]) for k in range(len(df_out))]
+  if intensity:
+    df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance.values.tolist()]
   if spectra:
     return df_out, spectra_out
   else:
