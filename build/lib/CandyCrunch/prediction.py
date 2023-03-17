@@ -497,6 +497,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
   else:
     reduced = 0
   multiplier = -1 if mode == 'negative' else 1
+  df_out = adduct_detect(df_out, mode, modification)
   for k in range(len(df_out)):
     keep = []
     if len(df_out.predictions.values.tolist()[k])>0:
@@ -588,7 +589,7 @@ def adduct_detect(df, mode, modification):
     adduct_mass += 1
   adduct_check = []
   for k in range(len(df)):
-    if abs(composition_to_mass(df.composition.values.tolist()[k]) + adduct_mass - df.index.tolist()[k]) < 0.5:
+    if abs(composition_to_mass(df.composition.values.tolist()[k]) + adduct_mass - (df.index.tolist()[k]*df.charge.values.tolist()[k]+(1*df.charge.values.tolist()[k]-1))) < 0.5:
       adduct_check.append(adduct)
     else:
       adduct_check.append(np.nan)
@@ -826,7 +827,6 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   df_out = backfill_missing(df_out)
   top_frags = [sorted(k.items(), key = lambda x: x[1], reverse = True)[:frag_num] for k in df_out.peak_d.values.tolist()]
   df_out['top_fragments'] = [[round(j[0],4) for j in k] for k in top_frags]
-  df_out = adduct_detect(df_out, mode, modification)
   df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
   df_out = deduplicate_predictions(df_out)
   df_out['evidence'] = ['strong' if len(k) > 0 else np.nan for k in df_out.predictions.values.tolist()]
