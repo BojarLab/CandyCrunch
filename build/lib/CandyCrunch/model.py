@@ -37,7 +37,7 @@ transform_prec = transforms.Compose([
 ])
 
 def rt_jitter(RT):
-  return max(0, RT + random.uniform(-0.2, 0.2))
+  return max(0, RT + random.uniform(-0.1, 0.1))
 
 transform_rt = transforms.Compose([
     lambda x: rt_jitter(x)

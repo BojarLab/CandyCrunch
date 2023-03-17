@@ -818,19 +818,19 @@ def get_most_likely_fragments(out_in, intensities = None):
   single_list = []
   for i,t in enumerate(out[::-1]):
     #check for any single-fragment occurrences
-    if len(t) > 1 and isinstance(t[1], list) and len(t[1]) > 0 and len(t[1][0]) == 1:
-      out_list.append((t[0], t[1][0]))
-      single_list.append(t[1][0][0])
-      int_dic[t[1][0][0]] = ranks[i]
+    if t[1] and t[1][0] and len(t[1][0][0]) == 1:
+      out_list.append((t[0], t[1][0][0]))
+      single_list.append(t[1][0][0][0])
+      int_dic[t[1][0][0][0]] = ranks[i]
     #prioritize double-fragments with observed single-fragments
-    elif len(t) > 1 and isinstance(t[1], list) and len(t[1]) > 0 and len(t[1][0]) == 2:
-      tt2 = [t_int for t_int in t[1] if len(t_int) == 2]
+    elif t[1] and t[1][0] and len(t[1][0][0]) == 2:
+      tt2 = [t_int for t_int in t[1][0] if len(t_int) == 2]
       tt2_match = [sum([(k in tt)*(int_dic[k]+1) for k in single_list]) for tt in tt2]
       if max(tt2_match) > 0:
         out_list.append((t[0], tt2[np.argmax(tt2_match)]))
     #prioritize triple-fragments with observed single-fragments
-    elif len(t) > 1 and isinstance(t[1], list) and len(t[1]) > 0 and len(t[1][0]) == 3:
-      tt2 = [t_int for t_int in t[1] if len(t_int) == 3]
+    elif t[1] and t[1][0] and len(t[1][0][0]) == 3:
+      tt2 = [t_int for t_int in t[1][0] if len(t_int) == 3]
       tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
       if max(tt2_match) > 0:
         out_list.append((t[0], tt2[np.argmax(tt2_match)]))
