@@ -875,7 +875,7 @@ def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iu
   return ion_names
 
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
-                max_frags = 3, simplify = False, reverse_anneal = True,
+                max_frags = 3, simplify = True, reverse_anneal = True,
                 charge = 1, iupac = False, intensities = None):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
@@ -885,7 +885,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   | mass_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
-  | simplify (bool): whether to try condensing fragment options to the most likely option; default:False
+  | simplify (bool): whether to try condensing fragment options to the most likely option; default:True
   | reverse_anneal (bool): whether to prioritize closer matches of fragment mass / peak m/z; default:True
   | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:1
   | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False\n
