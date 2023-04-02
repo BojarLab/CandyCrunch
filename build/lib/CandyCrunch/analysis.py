@@ -874,6 +874,43 @@ def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iu
     ion_names.append(iupac_names)
   return ion_names
 
+def observed_fragments_checker(possible_fragments,observed_fragments):
+  max_seen_list = []
+  for frag_combo in possible_fragments:
+    seen_frags = 0
+    for y in observed_fragments:
+      if len(y)==2:
+        if all([x in frag_combo for x in y]):
+          seen_frags = 2
+          break
+      elif len(y) ==1:
+        if y[0] in frag_combo:
+          seen_frags = 1
+    max_seen_list.append(seen_frags)
+  return max_seen_list
+
+def simplify_fragments(dc_names):
+  observed_frags = []
+  for glyc_mass in dc_names:
+    glyc_mass = sorted(glyc_mass,key=len)
+    if not glyc_mass or len(glyc_mass[0]) ==0:
+      observed_frags.append([])
+    elif len(glyc_mass[0]) ==1:
+      observed_frags.append([glyc_mass[0]])
+      continue
+    elif len(glyc_mass[0]) ==2:
+      double_frag_options = [x for x in glyc_mass if len(x) ==2]
+      max_seen_list = (observed_fragments_checker(double_frag_options,observed_frags))
+      max_seen_idx = np.argsort(max_seen_list)[-1]
+      observed_frags.append([double_frag_options[max_seen_idx]])
+      continue
+    elif len(glyc_mass[0]) ==3:
+      triple_frag_options = [x for x in glyc_mass if len(x) ==3]
+      max_seen_list = (observed_fragments_checker(triple_frag_options,observed_frags))
+      max_seen_idx = np.argsort(max_seen_list)[-1]
+      observed_frags.append([triple_frag_options[max_seen_idx]])
+  return observed_frags
+
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
                 max_frags = 3, simplify = True, reverse_anneal = True,
                 charge = 1, iupac = False, intensities = None):
@@ -900,17 +937,28 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
   subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold)
+  downstream_values = []
   for mass in fragment_masses:
     hits, diffs = record_diffs(subg_frags, mass, mass_threshold, charge)
     if hits:
       graphs = [g for m in hits for g in subg_frags[m]]
       diffs = unwrap([[diffs[i]]*len(subg_frags[k]) for i,k in enumerate(hits)])
-      ion_names = finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = reverse_anneal, iupac = iupac) 
-      hit_list.append((mass,ion_names))
+      dc_names = subgraphs_to_domon_costello(nx_mono, graphs)
+      downstream_values.append((dc_names,graphs,diffs,mass))
     else:
-      hit_list.append((mass,[]))
-  if simplify: 
-    hit_list = get_most_likely_fragments(hit_list, intensities = intensities)
+      downstream_values.append(([],[],[],mass))
+  filtered_dc_names = [x[0] for x in downstream_values]
+  if reverse_anneal:
+    filtered_dc_names = [mass_match(x[0], x[2]) for x in downstream_values]
+  if simplify:
+    filtered_dc_names = simplify_fragments(filtered_dc_names)
+  filtered_dc_names = [x[:5] for x in filtered_dc_names]
+  for i,(dc_names,graphs,diffs,mass) in enumerate(downstream_values):
+    if iupac:  
+      filtered_graphs = [graphs[i] for i in [dc_names.index(f) for f in filtered_dc_names[i]]]
+      hit_list.append((mass,filtered_dc_names[i],[[mono_frag_to_string(x) for x in filtered_graphs]]))
+    else:
+      hit_list.append((mass,filtered_dc_names[i]))
   return hit_list
 
 def get_unique_subgraphs(nx_mono1,nx_mono2):
