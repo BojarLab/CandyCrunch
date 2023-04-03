@@ -6,14 +6,21 @@ from glycowork.motif.processing import enforce_class, get_lib, expand_lib
 from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
-from glycowork.glycan_data.loader import unwrap, stringify_dict, lib, df_glycan
+from glycowork.glycan_data.loader import unwrap, stringify_dict, df_glycan
 from CandyCrunch.model import SimpleDataset, transform_mz, transform_prec, transform_rt
+import os
 import ast
 import copy
 import torch
+import pickle
 import pymzml
 import operator
 import torch.nn.functional as F
+
+this_dir, this_filename = os.path.split(__file__) 
+data_path = os.path.join(this_dir, 'glycans.pkl')
+glycans = pickle.load(open(data_path, 'rb'))
+lib = get_lib(glycans)
 
 fp_in = "drive/My Drive/CandyCrunch/"
 
@@ -744,7 +751,7 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
   df_out.drop(['true_mass'], axis = 1, inplace = True)
   return df_out.loc[idx,:]
 
-def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
+def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'], supplement = True, experimental = True, mass_dic = None,
@@ -755,7 +762,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   | filename (string or dataframe): if string, filepath +filename+ ".xlsx" must point to file; datafile containing extracted spectra
   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
   | model (PyTorch): trained CandyCrunch model
-  | glycans (list): full list of glycans used for training CandyCrunch
+  | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | filepath (string): absolute filepath to filename, used as filepath +filename+ ".xlsx"
   | bin_num (int): number of bins for binning; don't change; default: 2048
@@ -765,7 +772,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
   | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
-  | temperature (float): the temperature factor used to calibrate logits; default:1.2097
+  | temperature (float): the temperature factor used to calibrate logits; default:1.15
   | spectra (bool): whether to also output the actual spectra used for prediction; default:False
   | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
   | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
@@ -780,6 +787,7 @@ def wrap_inference(filename, glycan_class, model, glycans, libr = None, filepath
   | :-
   | Returns dataframe of predictions for spectra in file
   """
+  print("Your chosen settings are: " + glycan_class + " glycans, " + mode + " ion mode, " + modification + " glycans, " + lc + " LC, and " + trap + " ion trap. If any of that seems off to you, please restart with correct parameters.")
   if libr is None:
     libr = lib
   if df_use is None:
