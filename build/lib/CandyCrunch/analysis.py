@@ -695,7 +695,7 @@ def find_main_chain(subgraph,leaves,root_node):
 
 def subgraph_to_label_skeleton(sub_g):
   if len(sub_g.nodes) == 1:
-    return list(nx.get_node_attributes(sub_g,'string_labels').values())[0]
+    return [str(x) for x in sub_g.nodes]
   root_node = [k for k,v in sub_g.out_degree if v == 0]
   root_node = root_node[0]
   leaves = [v for v, d in sub_g.in_degree() if d == 0]
