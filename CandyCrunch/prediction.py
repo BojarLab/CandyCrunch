@@ -503,10 +503,13 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
     reduced = 1
   else:
     reduced = 0
-  multiplier = -1 if mode == 'negative' else 1
+  multiplier = 1 if mode == 'negative' else -1
   df_out = adduct_detect(df_out, mode, modification)
   for k in range(len(df_out)):
     keep = []
+    addy = (1*df_out.charge.values.tolist()[k]-1)*multiplier
+    c = df_out.charge.tolist()[k]
+    assumed_mass = df_out.index.tolist()[k]*c + addy
     if len(df_out.predictions.values.tolist()[k])>0:
       current_preds = df_out.predictions.values.tolist()[k]
       to_append = True
@@ -518,11 +521,11 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       truth = [True]
       #check diagnostic ions
       if 'Neu5Ac' in m:
-        truth.append(any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 or abs((df_out.index.tolist()[k]-291)/2+(0.5*multiplier)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(290-j) < 1 or abs(assumed_mass-291-j) < 1 or abs(df_out.index.tolist()[k]-((291-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' in m:
-        truth.append(any([abs(306-j) < 1 or abs(df_out.index.tolist()[k]-307-j) < 1 or abs((df_out.index.tolist()[k]-307)/2+(0.5*multiplier)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(306-j) < 1 or abs(assumed_mass-307-j) < 1 or abs(df_out.index.tolist()[k]-((307-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Kdn' in m:
-        truth.append(any([abs(249-j) < 1 or abs(df_out.index.tolist()[k]-250-j) < 1 or abs((df_out.index.tolist()[k]-250)/2+(0.5*multiplier)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(249-j) < 1 or abs(assumed_mass-250-j) < 1 or abs(df_out.index.tolist()[k]-((250-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' not in m:
         truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
       if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
