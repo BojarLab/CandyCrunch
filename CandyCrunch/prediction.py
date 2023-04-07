@@ -521,17 +521,17 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       truth = [True]
       #check diagnostic ions
       if 'Neu5Ac' in m:
-        truth.append(any([abs(290-j) < 1 or abs(assumed_mass-291-j) < 1 or abs(df_out.index.tolist()[k]-((291-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(mass_dict['Neu5Ac']-1-j) < 1 or abs(assumed_mass-mass_dict['Neu5Ac']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Ac']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' in m:
-        truth.append(any([abs(306-j) < 1 or abs(assumed_mass-307-j) < 1 or abs(df_out.index.tolist()[k]-((307-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(mass_dict['Neu5Gc']-1-j) < 1 or abs(assumed_mass-mass_dict['Neu5Gc']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Gc']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Kdn' in m:
-        truth.append(any([abs(249-j) < 1 or abs(assumed_mass-250-j) < 1 or abs(df_out.index.tolist()[k]-((250-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(mass_dict['Kdn']-1-j) < 1 or abs(assumed_mass-mass_dict['Kdn']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Kdn']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' not in m:
-        truth.append(not any([abs(306-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+        truth.append(not any([abs(mass_dict['Neu5Gc']-1-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
       if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
-        truth.append(not any([abs(290-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+        truth.append(not any([abs(mass_dict['Neu5Ac']-1-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
       if 'Neu5Ac' not in m and (m.count('Fuc')+m.count('dHex') > 1):
-        truth.append(not any([abs(290-j) < 1 or abs(df_out.index.tolist()[k]-291-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
+        truth.append(not any([abs(mass_dict['Neu5Ac']-1-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
       if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
         truth.append(any(['S' in (mz_to_composition2(t-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                   df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
@@ -560,7 +560,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
   return df_out.iloc[idx,:]
 
 def backfill_missing(df):
-  """finds rows with composition-only that match existing predictions and propagates\n
+  """finds rows with composition-only that match existing predictions wrt mass and RT and propagates\n
   | Arguments:
   | :-
   | df (dataframe): df_out generated within wrap_inference\n
@@ -568,7 +568,7 @@ def backfill_missing(df):
   | :-
   | Returns backfilled dataframe
   """
-  str_dics = [stringify_dict(k) for k in df.composition.values.tolist()]
+  str_dics = [stringify_dict(k) for k in df.composition]
   for k in range(len(df)):
     if not len(df.predictions.values.tolist()[k]) > 0:
       idx = [j for j in range(len(str_dics))
@@ -737,7 +737,7 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
   for k in reversed(range(len(df_out))):
     preds = df_out.iloc[k, 0]
     if len(preds) > 0:
-      rest_top1 = [df_out.predictions.values.tolist()[j][0][0] for j in range(k) if len(df_out.predictions.values.tolist()[j]) > 0 and df_out.evidence.values.tolist()[j] == 'strong']
+      rest_top1 = set([df_out.predictions.values.tolist()[j][0][0] for j in range(k) if len(df_out.predictions.values.tolist()[j]) > 0 and df_out.evidence.values.tolist()[j] == 'strong'])
       for i,p in enumerate(preds):
         p = list(p)
         if len(p) == 1:
