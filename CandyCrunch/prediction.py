@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import numpy_indexed as npi
 from collections import defaultdict
+from itertools import combinations
 from glycowork.motif.processing import enforce_class, get_lib, expand_lib
 from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
@@ -478,6 +479,20 @@ def deduplicate_retention(df):
   drop_idx = set(unwrap(drop_idx))
   return df.drop([df.index.tolist()[k] for k in drop_idx], axis = 0)
 
+def combinatorics(comp):
+  """given a composition, create a crude approximation of possible B/C/Y/Z fragments\n
+  | Arguments:
+  | :-
+  | comp (dict): composition in dictionary form\n
+  | Returns:
+  | :-
+  | Returns a list of rough masses to check against fragments
+  """
+  clist = unwrap([[k.replace('S', 'Sulphate').replace('P', 'Phosphate')]*v for k,v in comp.items()])
+  all_combinations = set(unwrap([[comb for comb in combinations(clist, i)] for i in range(1, len(clist)+1)]))
+  masses = [sum([mass_dict[k] for k in j]) for j in all_combinations]
+  return masses + [k+18.01056 for k in masses]
+
 def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modification = 'reduced',
                   mass_tolerance = 0.5, filter_out = None, df_use = None):
   """filters out false-positive predictions\n
@@ -510,12 +525,17 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
     addy = (1*df_out.charge.values.tolist()[k]-1)*multiplier
     c = df_out.charge.tolist()[k]
     assumed_mass = df_out.index.tolist()[k]*c + addy
+    cmasses = np.array(combinatorics(df_out.composition.values.tolist()[k]))
     if len(df_out.predictions.values.tolist()[k])>0:
       current_preds = df_out.predictions.values.tolist()[k]
       to_append = True
     else:
       current_preds = [''.join(list(df_out.composition.values.tolist()[k].keys()))]
       to_append = False
+    #check if it's a glycan spectrum
+    if not np.any(np.abs(np.array(df_out.top_fragments.values.tolist()[k][:10])[:, None] - cmasses) < 1.5):
+      df_out.iat[k,0] = ['remove']
+      continue
     for i,m in enumerate(current_preds):
       m = m[0]
       truth = [True]
