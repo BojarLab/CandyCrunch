@@ -787,7 +787,7 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
     for node,atom_mods in atomic_mod_dict.items():
       for atom,atom_mod in atom_mods.items():
         if atom_mod in ['bond','no_bond']:
-          cut_node = [bonding_node for bonding_node,bonded_node,atts in nx_mono.edges(data=True) if bonded_node==node if atts['bond_label'][-1] == str(atom)] #Finds the node which was cleaved to produce the floating bond
+          cut_node = [bonding_node for bonding_node,bonded_node,atts in nx_mono.edges(data=True) if bonded_node==node if atts['bond_label'][-1] == str(atom) or atts['bond_label'][-1] == '?'] #Finds the node which was cleaved to produce the floating bond
           if cut_node:
             cuts.append((atom_mod,cut_node[0],node))
         if atom_mod in ['red_bond','red_no_bond']:
