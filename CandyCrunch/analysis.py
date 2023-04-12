@@ -469,7 +469,7 @@ def precalculate_mod_masses(all_mono_mods,all_terminal_perms,terminal_labels,glo
   
   return product(*all_mono_mod_masses),product(*all_atom_dict_masses),global_mods_mass
 
-def preliminary_calculate_mass(mono_mods_mass,atom_mods_mass,global_mods_mass,terminals,inner_mass,true_root_node):
+def preliminary_calculate_mass(mono_mods_mass,atom_mods_mass,global_mods_mass,terminals,inner_mass,true_root_node,mode):
   """Determines the mass of every permutation of monosaccharide, atom, and global modification\n
   | Arguments:
   | :-
@@ -483,13 +483,17 @@ def preliminary_calculate_mass(mono_mods_mass,atom_mods_mass,global_mods_mass,te
   | :-
   | Returns a list every single mass of each modification combination for each cross ring combination
   """
+  if mode == 'negative':
+    mode_mass = -1
+  elif mode == 'positive':
+    mode_mass = +1
   masses_list = []
   root_presence = False
   if true_root_node in terminals:
     root_presence = True
     root_node_idx = terminals.index(true_root_node) 
   for mod_combo,atom_combo in zip(mono_mods_mass,atom_mods_mass):
-    mass = inner_mass-1
+    mass = inner_mass+mode_mass
     mass += sum(mod_combo)+sum(atom_combo)
     if root_presence:
       if mod_combo[root_node_idx] not in A_cross_rings:
@@ -553,7 +557,7 @@ def mod_count(node_mod, global_mod):
   c += sum([1 for k in unwrap([list(n.values()) for n in node_mod[1]]) if isinstance(k, str)])
   return c
 
-def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None, threshold=None):
+def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None, threshold=None, mode = 'negative'):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
@@ -593,7 +597,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
     permutation_list = product(zip(product(*mono_mod_perms),product(*atom_dict_perms)),global_mods)
     
     mono_masses,atom_masses,global_masses = precalculate_mod_masses(mono_mod_perms,atom_dict_perms,terminal_labels,global_mods)    
-    initial_masses = preliminary_calculate_mass(mono_masses,atom_masses,global_masses,terminals,inner_mass,true_root_node)
+    initial_masses = preliminary_calculate_mass(mono_masses,atom_masses,global_masses,terminals,inner_mass,true_root_node,mode)
 
     for mass,(node_mod,global_mod) in zip(initial_masses,permutation_list):
       if mass_mode:
@@ -915,7 +919,7 @@ def simplify_fragments(dc_names):
 
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
                 max_frags = 3, simplify = True, reverse_anneal = True,
-                charge = 1, iupac = False, intensities = None):
+                charge = 1, iupac = False, intensities = None, mode = 'negative'):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -938,7 +942,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   fragment_masses = sorted(fragment_masses) #keep track of intensities
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold)
+  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, mode = mode)
   downstream_values = []
   for mass in fragment_masses:
     hits, diffs = record_diffs(subg_frags, mass, mass_threshold, charge)
