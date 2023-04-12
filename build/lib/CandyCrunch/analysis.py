@@ -314,7 +314,7 @@ def calculate_mass(nx_mono):
       if mono_mods[reducing_end_node] ==  comp[reducing_end_node]:
         mass += 18.0105546+(2*1.0078)
       else:
-        mass += 18.0105546+(2*1.0078)
+        mass += 18.0105546
   return mass
 
 def atom_mods_init(subg,present_breakages,terminals,terminal_labels):
@@ -573,17 +573,19 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
   subgraph_fragments = {}
   #The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
-  if mass_mode:
-    subgraphs = [subg for subg in subgraphs if calculate_mass(subg) >= min(fragment_masses) - threshold]
   subgraphs.append(nx_mono)
   for subg in subgraphs:
     # For a subgraph we find all possible node and atom level modification
     present_breakages = get_broken_bonds(subg,nx_mono,nx_edge_dict)
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg,present_breakages,root_node)
+    inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
+    max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18*len(terminals)
+    if mass_mode:
+      if max_mass < min(fragment_masses) - threshold:
+        continue
     terminal_labels = [node_dict[x] for x in terminals]
     global_mods = [None] + get_global_mods(subg,node_dict)
-    inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
     
     atomic_mod_dict_subg = atom_mods_init(subg,present_breakages,terminals,terminal_labels)
     mono_mods_list = get_mono_mods_list(root_node,subg,terminals,terminal_labels,nx_edge_dict)
