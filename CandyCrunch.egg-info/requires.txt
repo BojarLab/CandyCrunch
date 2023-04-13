@@ -8,3 +8,4 @@ seaborn
 pandas
 statsmodels
 pymzml
+statsmodels

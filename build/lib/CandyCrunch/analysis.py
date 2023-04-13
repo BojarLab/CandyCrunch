@@ -13,7 +13,7 @@ from operator import neg
 from scipy.stats import ttest_ind
 from statsmodels.stats.multitest import multipletests
 from glycowork.motif.analysis import cohen_d
-from glycowork.motif.graph import bracket_removal, min_process_glycans
+from glycowork.motif.processing import bracket_removal, min_process_glycans
 from glycowork.glycan_data.loader import lib, unwrap
 
 mono_attributes = {'Gal':{'mass':{'03X':72.0211,'02X':42.0105,'15X':27.9949,'13A':60.0211,'24A':60.0211,'04A':60.0211,'35A':74.0368,'25A':104.0473,'02A':120.0423,'Gal':162.0528},'atoms':{'03X':[1,2,3],'02X':[1,2],'15X':[1],'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Gal':[1,2,3,4,5,6]}},
@@ -484,9 +484,9 @@ def preliminary_calculate_mass(mono_mods_mass,atom_mods_mass,global_mods_mass,te
   | Returns a list every single mass of each modification combination for each cross ring combination
   """
   if mode == 'negative':
-    mode_mass = -1
+    mode_mass = -1.0078
   elif mode == 'positive':
-    mode_mass = +1
+    mode_mass = +1.0078
   masses_list = []
   root_presence = False
   if true_root_node in terminals:
@@ -584,7 +584,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg,present_breakages,root_node)
     inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
-    max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18*len(terminals)
+    max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18.0105546*len(terminals)
     if mass_mode:
       if max_mass < min(fragment_masses) - threshold:
         continue
