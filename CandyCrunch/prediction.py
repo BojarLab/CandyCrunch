@@ -515,15 +515,15 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
   if libr is None:
     libr = lib
   if modification == 'reduced':
-    reduced = 1
+    reduced = 1.0078
   else:
     reduced = 0
-  multiplier = 1 if mode == 'negative' else -1
+  multiplier = -1 if mode == 'negative' else 1
   df_out = adduct_detect(df_out, mode, modification)
   for k in range(len(df_out)):
     keep = []
-    addy = (1*df_out.charge.values.tolist()[k]-1)*multiplier
-    c = df_out.charge.tolist()[k]
+    addy = df_out.charge.values.tolist()[k]*multiplier-1
+    c = abs(df_out.charge.tolist()[k])
     assumed_mass = df_out.index.tolist()[k]*c + addy
     cmasses = np.array(combinatorics(df_out.composition.values.tolist()[k]))
     if len(df_out.predictions.values.tolist()[k]) > 0:
@@ -541,24 +541,24 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       truth = [True]
       #check diagnostic ions
       if 'Neu5Ac' in m:
-        truth.append(any([abs(mass_dict['Neu5Ac']-multiplier-j) < 1 or abs(assumed_mass-mass_dict['Neu5Ac']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Ac']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Neu5Ac']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Ac']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' in m:
-        truth.append(any([abs(mass_dict['Neu5Gc']-multiplier-j) < 1 or abs(assumed_mass-mass_dict['Neu5Gc']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Gc']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(mass_dict['Neu5Gc']+(1.0078*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Neu5Gc']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Gc']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Kdn' in m:
-        truth.append(any([abs(mass_dict['Kdn']-multiplier-j) < 1 or abs(assumed_mass-mass_dict['Kdn']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Kdn']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
+        truth.append(any([abs(mass_dict['Kdn']+(1.0078*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Kdn']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Kdn']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j,float)]))
       if 'Neu5Gc' not in m:
-        truth.append(not any([abs(mass_dict['Neu5Gc']-multiplier-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+        truth.append(not any([abs(mass_dict['Neu5Gc']+(1.0078*multiplier)-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
       if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
-        truth.append(not any([abs(mass_dict['Neu5Ac']-multiplier-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
+        truth.append(not any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j,float)]))
       if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
-        truth.append(not any([abs(mass_dict['Neu5Ac']-multiplier-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
+        truth.append(not any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
       if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
         truth.append(any(['S' in (mz_to_composition2(t-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                   df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
       #check fragment size distribution
-      if df_out.charge.values.tolist()[k] > 1:
+      if c > 1:
         truth.append(any([j > df_out.index.values[k]*1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
-      if df_out.charge.values.tolist()[k] == 1:
+      if c == 1:
         truth.append(all([j < df_out.index.values[k]*1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
       if len(df_out.top_fragments.values.tolist()[k]) < 5:
         truth.append(False)
@@ -593,7 +593,7 @@ def backfill_missing(df):
     if not len(df.predictions.values.tolist()[k]) > 0:
       idx = [j for j in range(len(str_dics))
              if str_dics[j] == str_dics[k]
-             and abs(df.index.tolist()[j]*df.charge.values.tolist()[j]+(1*df.charge.values.tolist()[j]-1)-df.index.tolist()[k]*df.charge.values.tolist()[k]+(1*df.charge.values.tolist()[k]-1)) < determine_threshold(df.index.tolist()[j])
+             and abs(df.index.tolist()[j]*abs(df.charge.values.tolist()[j])+(abs(df.charge.values.tolist()[j])-1)-df.index.tolist()[k]*abs(df.charge.values.tolist()[k])+(abs(df.charge.values.tolist()[k])-1)) < determine_threshold(df.index.tolist()[j])
              and abs(df.RT.values.tolist()[j]-df.RT.values.tolist()[k]) < 1]
       if len(idx) > 0:
         df.iat[k,0] = df.predictions.values.tolist()[idx[0]]
@@ -616,10 +616,10 @@ def adduct_detect(df, mode, modification):
     adduct = 'Na+'
   adduct_mass = mass_dict[adduct]
   if modification == 'reduced':
-    adduct_mass += 1
+    adduct_mass += 1.0078
   adduct_check = []
   for k in range(len(df)):
-    if abs(composition_to_mass(df.composition.values.tolist()[k]) + adduct_mass - (df.index.tolist()[k]*df.charge.values.tolist()[k]+(1*df.charge.values.tolist()[k]-1))) < 0.5:
+    if abs(composition_to_mass(df.composition.values.tolist()[k]) + adduct_mass - (df.index.tolist()[k]*abs(df.charge.values.tolist()[k])+(abs(df.charge.values.tolist()[k])-1))) < 0.5:
       adduct_check.append(adduct)
     else:
       adduct_check.append(np.nan)
@@ -685,9 +685,9 @@ def impute(df_out):
   for k in range(len(df_out)):
     for j in range(len(df_out)):
       if len(df_out.predictions.values.tolist()[k]) > 0 and len(df_out.predictions.values.tolist()[j]) < 1:
-        if abs(df_out.index.tolist()[k]+(16/max([df_out.charge.values.tolist()[k],1]))-df_out.index.tolist()[j]) < 0.5 and 'Neu5Gc' in df_out.composition.values.tolist()[j].keys():
+        if abs(df_out.index.tolist()[k]+(16.0051/max([abs(df_out.charge.values.tolist()[k]),1]))-df_out.index.tolist()[j]) < 0.5 and 'Neu5Gc' in df_out.composition.values.tolist()[j].keys():
           df_out.iat[j,0] = [(m[0].replace('Neu5Ac', 'Neu5Gc', 1),) for m in df_out.predictions.values.tolist()[k]]
-        elif abs(df_out.index.tolist()[k]-(16/max([df_out.charge.values.tolist()[k],1]))-df_out.index.tolist()[j]) < 0.5 and 'Neu5Ac' in df_out.composition.values.tolist()[j].keys():
+        elif abs(df_out.index.tolist()[k]-(16.0051/max([abs(df_out.charge.values.tolist()[k]),1]))-df_out.index.tolist()[j]) < 0.5 and 'Neu5Ac' in df_out.composition.values.tolist()[j].keys():
           df_out.iat[j,0] = [(m[0].replace('Neu5Gc', 'Neu5Ac', 1),) for m in df_out.predictions.values.tolist()[k]]
   return df_out
 
@@ -751,7 +751,7 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
   | :-
   | Returns prediction dataframe with re-ordered predictions, based on observed biosynthetic activities
   """
-  df_out['true_mass'] = [df_out.index.tolist()[j]*df_out.charge.values.tolist()[j]+(1*df_out.charge.values.tolist()[j]-1) for j in range(len(df_out))]
+  df_out['true_mass'] = [df_out.index.tolist()[j]*abs(df_out.charge.values.tolist()[j])+(abs(df_out.charge.values.tolist()[j])-1) for j in range(len(df_out))]
   idx = df_out.index.tolist()
   df_out.sort_values(by = 'true_mass', inplace = True)
   for k in reversed(range(len(df_out))):
@@ -820,10 +820,11 @@ def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None
   else:
     loaded_file = filename
   if modification == 'reduced':
-    reduced = 1
+    reduced = 1.0078
   else:
     reduced = 0
   intensity = True if 'intensity' in loaded_file.columns else False
+  multiplier = -1 if mode == 'negative' else 1
   #prepare file for processing
   loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}' and loaded_file.RT[k] > 2],:]
   loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d.values.tolist()]
@@ -854,7 +855,7 @@ def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None
   df_out.composition = [np.nan if isinstance(k, list) and len(k)<1 else k[0] if isinstance(k, list) and len(k)>0 else k for k in df_out.composition.values.tolist()]
   df_out.dropna(subset = ['composition'], inplace = True)
   #calculate precursor ion charge
-  df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k]) for k in range(len(df_out))]
+  df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k])*multiplier for k in range(len(df_out))]
   df_out.RT = [round(k,2) for k in df_out.RT.values.tolist()]
   cols = ['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d']
   if intensity:
@@ -902,7 +903,7 @@ def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None
   df_out.drop(['peak_d'], axis = 1, inplace = True)
   #clean-up
   df_out.composition = [glycan_to_composition(k[0][0]) if len(k) > 0 else df_out.composition.values.tolist()[i] for i,k in enumerate(df_out.predictions)]
-  df_out.charge = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.tolist()[k]) for k in range(len(df_out))]
+  df_out.charge = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.tolist()[k])*multiplier for k in range(len(df_out))]
   #normalize relative abundances if relevant
   if intensity:
     df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance.values.tolist()]
