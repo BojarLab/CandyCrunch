@@ -31,6 +31,7 @@ if torch.cuda.is_available():
     device = "cuda:0"
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
+abbrev_dict = {'S':'Sulphate','P':'Phosphate','Ac':'Acetate'}
 temperature = torch.Tensor([1.15]).to(device)
 def T_scaling(logits, temperature):
   return torch.div(logits, temperature)
@@ -488,8 +489,9 @@ def combinatorics(comp):
   | :-
   | Returns a list of rough masses to check against fragments
   """
-  clist = unwrap([[k.replace('S', 'Sulphate').replace('P', 'Phosphate')]*v for k,v in comp.items()])
-  all_combinations = set(unwrap([[comb for comb in combinations(clist, i)] for i in range(1, len(clist)+1)]))
+  clist = unwrap([[k]*v for k,v in comp.items()])
+  verbose_clist = [abbrev_dict[x] if x in abbrev_dict else x for x in clist]
+  all_combinations = set(unwrap([[comb for comb in combinations(verbose_clist, i)] for i in range(1, len(clist)+1)]))
   masses = [sum([mass_dict[k] for k in j]) for j in all_combinations]
   return masses + [k+18.01056 for k in masses]
 

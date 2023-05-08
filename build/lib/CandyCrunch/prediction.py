@@ -31,6 +31,7 @@ if torch.cuda.is_available():
     device = "cuda:0"
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
+abbrev_dict = {'S':'Sulphate','P':'Phosphate','Ac':'Acetate'}
 temperature = torch.Tensor([1.15]).to(device)
 def T_scaling(logits, temperature):
   return torch.div(logits, temperature)
@@ -282,10 +283,10 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
   if libr is None:
     libr = lib
   if modification == 'permethylated':
-    mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'), sample_prep = 'permethylated')
+    mz = glycan_to_mass(glycan, sample_prep = 'permethylated')
   else:
     try:
-      mz = glycan_to_mass(glycan.replace('?1-6', 'b1-6'))
+      mz = glycan_to_mass(glycan)
     except:
       return False
   if modification == 'reduced':
@@ -488,8 +489,9 @@ def combinatorics(comp):
   | :-
   | Returns a list of rough masses to check against fragments
   """
-  clist = unwrap([[k.replace('S', 'Sulphate').replace('P', 'Phosphate')]*v for k,v in comp.items()])
-  all_combinations = set(unwrap([[comb for comb in combinations(clist, i)] for i in range(1, len(clist)+1)]))
+  clist = unwrap([[k]*v for k,v in comp.items()])
+  verbose_clist = [abbrev_dict[x] if x in abbrev_dict else x for x in clist]
+  all_combinations = set(unwrap([[comb for comb in combinations(verbose_clist, i)] for i in range(1, len(clist)+1)]))
   masses = [sum([mass_dict[k] for k in j]) for j in all_combinations]
   return masses + [k+18.01056 for k in masses]
 
@@ -827,9 +829,9 @@ def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None
   multiplier = -1 if mode == 'negative' else 1
   #prepare file for processing
   loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}' and loaded_file.RT[k] > 2],:]
-  loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d.values.tolist()]
+  loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d]
   loaded_file.dropna(subset = ['peak_d'], inplace = True)
-  loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass.values.tolist()]
+  loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass]
   if intensity:
     inty = loaded_file.intensity.values.tolist()
   else:
@@ -847,12 +849,12 @@ def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None
     df_out['rel_abundance'] = intensity
   df_out['predictions'] = [[(preds[k][j], pred_conf[k][j]) for j in range(len(preds[k]))] for k in range(len(preds))]
   #check correctness of glycan class & mass
-  df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class, gly[1], extra_thresh = extra_thresh) and gly[1] > pred_thresh] for v in df_out.predictions.values.tolist()]
+  df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class, gly[1], extra_thresh = extra_thresh) and gly[1] > pred_thresh] for v in df_out.predictions]
   df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
   #get composition of predictions
-  df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions.values.tolist()]
+  df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions]
   df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance,glycan_class, df_use, filter_out) for i,k in enumerate(df_out.composition.values.tolist())]
-  df_out.composition = [np.nan if isinstance(k, list) and len(k)<1 else k[0] if isinstance(k, list) and len(k)>0 else k for k in df_out.composition.values.tolist()]
+  df_out.composition = [np.nan if isinstance(k, list) and len(k)<1 else k[0] if isinstance(k, list) and len(k)>0 else k for k in df_out.composition]
   df_out.dropna(subset = ['composition'], inplace = True)
   #calculate precursor ion charge
   df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k])*multiplier for k in range(len(df_out))]
@@ -864,13 +866,13 @@ def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None
   #fill up possible gaps of singly-/doubly-charged spectra of the same structure
   df_out = backfill_missing(df_out)
   #extract & sort the top 100 fragments by intensity
-  top_frags = [sorted(k.items(), key = lambda x: x[1], reverse = True)[:frag_num] for k in df_out.peak_d.values.tolist()]
+  top_frags = [sorted(k.items(), key = lambda x: x[1], reverse = True)[:frag_num] for k in df_out.peak_d]
   df_out['top_fragments'] = [[round(j[0],4) for j in k] for k in top_frags]
   #filter out wrong predictions via diagnostic ions etc.
   df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
   #deduplicate identical predictions for different spectra
   df_out = deduplicate_predictions(df_out)
-  df_out['evidence'] = ['strong' if len(k) > 0 else np.nan for k in df_out.predictions.values.tolist()]
+  df_out['evidence'] = ['strong' if len(k) > 0 else np.nan for k in df_out.predictions]
   #construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
   if supplement:
     if len(df_out) > 200:
@@ -906,7 +908,7 @@ def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None
   df_out.charge = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.tolist()[k])*multiplier for k in range(len(df_out))]
   #normalize relative abundances if relevant
   if intensity:
-    df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance.values.tolist()]
+    df_out.rel_abundance = [k/sum(df_out.rel_abundance.values.tolist())*100 for k in df_out.rel_abundance]
   if spectra:
     return df_out, spectra_out
   else:
@@ -928,7 +930,7 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   if libr is None:
     libr = lib
   df = copy.deepcopy(df_in)
-  preds  = [k[0][0] for k in df.predictions.values.tolist() if len(k) > 0]
+  preds  = [k[0][0] for k in df.predictions if len(k) > 0]
   if glycan_class == 'free':
     preds = [k+'-ol' for k in preds]
     libr = expand_lib(libr, preds)
