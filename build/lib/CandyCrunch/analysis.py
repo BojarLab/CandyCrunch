@@ -12,8 +12,7 @@ from itertools import product
 from operator import neg
 from scipy.stats import ttest_ind
 from statsmodels.stats.multitest import multipletests
-from glycowork.motif.analysis import cohen_d
-from glycowork.motif.processing import bracket_removal, min_process_glycans
+from glycowork.motif.processing import bracket_removal, min_process_glycans, cohen_d
 from glycowork.glycan_data.loader import lib, unwrap
 
 mono_attributes = {'Gal':{'mass':{'03X':72.0211,'02X':42.0105,'15X':27.9949,'13A':60.0211,'24A':60.0211,'04A':60.0211,'35A':74.0368,'25A':104.0473,'02A':120.0423,'Gal':162.0528},'atoms':{'03X':[1,2,3],'02X':[1,2],'15X':[1],'13A':[2,3],'24A':[3,4],'04A':[5,6],'35A':[4,5,6],'25A':[3,4,5,6],'02A':[3,4,5,6],'Gal':[1,2,3,4,5,6]}},

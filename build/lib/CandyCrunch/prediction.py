@@ -8,7 +8,7 @@ from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
 from glycowork.glycan_data.loader import unwrap, stringify_dict, df_glycan
-from CandyCrunch.model import SimpleDataset, transform_mz, transform_prec, transform_rt
+from CandyCrunch.model import CandyCrunch_CNN, SimpleDataset, transform_mz, transform_prec, transform_rt
 import os
 import ast
 import copy
@@ -29,6 +29,13 @@ fp_in = "drive/My Drive/CandyCrunch/"
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda:0"
+
+sdict = os.path.join(this_dir, 'candycrunch.pt')
+sdict = torch.load(sdict)
+sdict = {k.replace('module.',''):v for k,v in sdict.items()}
+candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans)).to(device)
+candycrunch.load_state_dict(sdict)
+candycrunch = candycrunch.eval()
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
 abbrev_dict = {'S':'Sulphate','P':'Phosphate','Ac':'Acetate'}
@@ -776,7 +783,7 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
   df_out.drop(['true_mass'], axis = 1, inplace = True)
   return df_out.loc[idx,:]
 
-def wrap_inference(filename, glycan_class, model, glycans = glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
+def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'], supplement = True, experimental = True, mass_dic = None,
