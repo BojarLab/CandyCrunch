@@ -556,7 +556,12 @@ def mod_count(node_mod, global_mod):
   c += sum([1 for k in unwrap([list(n.values()) for n in node_mod[1]]) if isinstance(k, str)])
   return c
 
-def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None, threshold=None, mode = 'negative'):
+def extend_masses(fragment_masses, charge):
+  for z in range(2,charge+1):
+    charged_masses = fragment_masses + [(k/z)+((1-z)/z) for k in fragment_masses]
+  return charged_masses
+
+def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None, threshold=None, charge = 1, mode = 'negative'):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
@@ -568,6 +573,8 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
   | :-
   | Returns a dict of lists of networkx subgraphs
   """
+  if mass_mode:
+      charge_masses = extend_masses(fragment_masses, charge)
   # These general features are calculated here to help performance
   true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
   nx_edge_dict = {(node[0],node[1]):node[2] for node in nx_mono.edges(data = True)}
@@ -585,7 +592,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
     inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
     max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18.0105546*len(terminals)
     if mass_mode:
-      if max_mass < min(fragment_masses) - threshold:
+      if max_mass < min(charge_masses) - threshold:
         continue
     terminal_labels = [node_dict[x] for x in terminals]
     global_mods = [None] + get_global_mods(subg,node_dict)
@@ -597,10 +604,10 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
     
     mono_masses,atom_masses,global_masses = precalculate_mod_masses(mono_mod_perms,atom_dict_perms,terminal_labels,global_mods)    
     initial_masses = preliminary_calculate_mass(mono_masses,atom_masses,global_masses,terminals,inner_mass,true_root_node,mode)
-
+    fragment_arr = np.array(charge_masses)
     for mass,(node_mod,global_mod) in zip(initial_masses,permutation_list):
       if mass_mode:
-        if not [x for x in fragment_masses if abs(mass-x)<threshold]:
+        if not(abs(fragment_arr - mass) < threshold).any():
           continue
       if (m := mod_count(node_mod, global_mod)) <= max_frags:
         if m > 1 and global_mod == '+Acetate':
@@ -858,11 +865,14 @@ def mass_match(ion_names, diffs):
     return []
 
 def record_diffs(subg_frags, mass, mass_threshold, charge):
-  hits = [k for k in subg_frags if abs(mass-k) < mass_threshold]
-  diffs = [abs(mass-k) for k in hits]
-  if charge > 1 and len(hits) < 1:
-    hits = [k for k in subg_frags if abs(mass-((k/2)-0.5)) < mass_threshold]
-    diffs = [abs(mass-((k/2)-0.5)) for k in hits]
+  hits = []
+  diffs = []
+  for z in range(1,charge+1):
+    charged_mass = (mass/z)+((1-z)/z)
+    for k in subg_frags:
+      if abs(charged_mass-k) < mass_threshold:
+        hits.append(k)
+        diffs.append(abs(charged_mass-k))
   return hits, diffs
 
 def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iupac=False):
@@ -941,7 +951,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   fragment_masses = sorted(fragment_masses) #keep track of intensities
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, mode = mode)
+  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, charge = charge, mode = mode)
   downstream_values = []
   for mass in fragment_masses:
     hits, diffs = record_diffs(subg_frags, mass, mass_threshold, charge)
