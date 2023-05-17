@@ -31,7 +31,7 @@ if torch.cuda.is_available():
     device = "cuda:0"
 
 sdict = os.path.join(this_dir, 'candycrunch.pt')
-sdict = torch.load(sdict)
+sdict = torch.load(sdict,map_location=device)
 sdict = {k.replace('module.',''):v for k,v in sdict.items()}
 candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans)).to(device)
 candycrunch.load_state_dict(sdict)
