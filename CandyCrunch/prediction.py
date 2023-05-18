@@ -31,7 +31,7 @@ if torch.cuda.is_available():
     device = "cuda:0"
 
 sdict = os.path.join(this_dir, 'candycrunch.pt')
-sdict = torch.load(sdict,map_location=device)
+sdict = torch.load(sdict, map_location = device)
 sdict = {k.replace('module.',''):v for k,v in sdict.items()}
 candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans)).to(device)
 candycrunch.load_state_dict(sdict)
@@ -676,10 +676,10 @@ def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filte
   | :-
   | Returns composition (as a dict)
   """
-  comp = mz_to_composition2(mass-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out)
+  comp = mz_to_composition2(mass-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_use, filter_out = filter_out)
   if len(comp) < 1:
     new_mass = (mass+0.5)*2-reduced if mode == 'negative' else (mass-0.5)*2-reduced
-    comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_glycan, filter_out = filter_out)
+    comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_use, filter_out = filter_out)
   return comp
 
 def impute(df_out):
@@ -733,7 +733,7 @@ def make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = 'M
   | :-
   | Returns a dictionary of form mass : list of glycans
   """
-  exp_glycans = df_use[(df_use.glycan_type==glycan_class) & (df_use.Class.str.contains(taxonomy_class))].glycan.values.tolist()
+  exp_glycans = df_use.glycan.values.tolist()
   class_glycans = [k for k in glycans if enforce_class(k, glycan_class)]
   exp_glycans = list(set(class_glycans+exp_glycans))
   masses = []
@@ -823,7 +823,7 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   if libr is None:
     libr = lib
   if df_use is None:
-    df_use = df_glycan
+    df_use = df_glycan[(df_glycan.glycan_type==glycan_class) & (df_glycan.Class.str.contains(taxonomy_class))]
   if isinstance(filename, str):
     loaded_file = pd.read_excel(filepath + filename + ".xlsx")
   else:
@@ -860,8 +860,8 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
   #get composition of predictions
   df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions]
-  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance,glycan_class, df_use, filter_out) for i,k in enumerate(df_out.composition.values.tolist())]
-  df_out.composition = [np.nan if isinstance(k, list) and len(k)<1 else k[0] if isinstance(k, list) and len(k)>0 else k for k in df_out.composition]
+  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance, glycan_class, df_use, filter_out) for i,k in enumerate(df_out.composition.values.tolist())]
+  df_out.composition = [np.nan if isinstance(k, list) and len(k) < 1 else k[0] if isinstance(k, list) and len(k) > 0 else k for k in df_out.composition]
   df_out.dropna(subset = ['composition'], inplace = True)
   #calculate precursor ion charge
   df_out['charge'] = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.values.tolist()[k])*multiplier for k in range(len(df_out))]
@@ -882,8 +882,8 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   df_out['evidence'] = ['strong' if len(k) > 0 else np.nan for k in df_out.predictions]
   #construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
   if supplement:
-    if len(df_out) > 200:
-      print("Very large number of glycans detected; biosynthetic network construction could take a while. If you're in a hurry, restart with supplement=False")
+    #if len(df_out) > 200:
+    #  print("Very large number of glycans detected; biosynthetic network construction could take a while. If you're in a hurry, restart with supplement=False")
     try:
       df_out = supplement_prediction(df_out, glycan_class, libr = libr, mode = mode, modification = modification)
       df_out.evidence = ['medium' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
