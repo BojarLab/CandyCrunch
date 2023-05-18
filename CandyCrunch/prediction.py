@@ -801,7 +801,8 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   if libr is None:
     libr = lib
   if df_use is None:
-    df_use = df_glycan[(df_glycan.glycan_type==glycan_class) & (df_glycan.Class.str.contains(taxonomy_class))]
+    df_use = copy.deepcopy(df_glycan[(df_glycan.glycan_type==glycan_class) & (df_glycan.Class.str.contains(taxonomy_class))])
+    df_use.Composition = [ast.literal_eval(k) for k in df_use.Composition]
   if isinstance(filename, str):
     loaded_file = pd.read_excel(filepath + filename + ".xlsx")
   else:
