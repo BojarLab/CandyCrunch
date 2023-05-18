@@ -557,6 +557,8 @@ def mod_count(node_mod, global_mod):
   return c
 
 def extend_masses(fragment_masses, charge):
+  if charge == 1:
+    return fragment_masses 
   for z in range(2,charge+1):
     charged_masses = fragment_masses + [(k/z)+((1-z)/z) for k in fragment_masses]
   return charged_masses
