@@ -3,20 +3,20 @@ Predicting glycan structure from LC-MS/MS data, further described in our upcomin
 
 ## Install
 `pip install git+https://github.com/BojarLab/CandyCrunch.git` <br>
-`import CandyCrunch`
+`import CandyCrunch` <br>
 via pip (WIP): <br> `pip install CandyCrunch` <br> `import CandyCrunch`
 
 ## Most important
-`wrap_inference` (in `CandyCrunch.prediction`)
+`wrap_inference` (in `CandyCrunch.prediction`) <br>
 Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `CandyCrunch`; requires at minimum a filepath/dataframe and the information which glycan class was measured ("N", "O", "lipid", "free", or "other").
 
-`CandyCrumbs` (in `CandyCrunch.analysis`)
+`CandyCrumbs` (in `CandyCrunch.analysis`) <br>
 Wrapper function to annotate MSn fragments using `CandyCrumbs`; requires at minimum a hypothesized glycan structure, a list of peak m/z values, and a mass threshold.
 
 ## Modules
-`prediction`
-Contains all the code functionality used in `wrap_inference`. Also contains `process_mzML_stack` to extract spectra from .mzML files
-`analysis`
-Contains all the code functionality used in `CandyCrumbs`. Also contains functions to analyze and compare averaged spectra
-`model`
-Mostly contains code for model definition, dataset handling, and data augmentation; only used in the back-end
+`prediction` <br>
+Contains all the code functionality used in `wrap_inference`. Also contains `process_mzML_stack` to extract spectra from .mzML files <br>
+`analysis` <br>
+Contains all the code functionality used in `CandyCrumbs`. Also contains functions to analyze and compare averaged spectra <br>
+`model` <br>
+Mostly contains code for model definition, dataset handling, and data augmentation; only used in the back-end <br>

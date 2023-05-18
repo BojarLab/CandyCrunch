@@ -5,7 +5,7 @@ from collections import defaultdict
 from itertools import combinations
 from glycowork.motif.processing import enforce_class, get_lib, expand_lib
 from glycowork.motif.graph import subgraph_isomorphism
-from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition, mz_to_composition2, composition_to_mass
+from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition2, composition_to_mass
 from glycowork.network.biosynthesis import construct_network, plot_network, evoprune_network
 from glycowork.glycan_data.loader import unwrap, stringify_dict, df_glycan
 from CandyCrunch.model import CandyCrunch_CNN, SimpleDataset, transform_mz, transform_prec, transform_rt
@@ -503,7 +503,7 @@ def combinatorics(comp):
   return masses + [k+18.01056 for k in masses]
 
 def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modification = 'reduced',
-                  mass_tolerance = 0.5, filter_out = None, df_use = None):
+                  mass_tolerance = 0.5, filter_out = set(), df_use = None):
   """filters out false-positive predictions\n
   | Arguments:
   | :-
@@ -513,7 +513,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
   | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
-  | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:None
+  | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:None
   | df_use (dataframe): glycan database used to check whether compositions are valid; default: df_glycan\n
   | Returns:
   | :-
@@ -562,8 +562,8 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
         truth.append(not any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j,float)]))
       if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
-        truth.append(any(['S' in (mz_to_composition2(t-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
-                                  df_use = df_use, filter_out = filter_out)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
+        truth.append(any(['S' in (mz_to_composition2(t, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
+                                  df_use = df_use, filter_out = filter_out, reduced = reduced>0)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
       #check fragment size distribution
       if c > 1:
         truth.append(any([j > df_out.index.values[k]*1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
@@ -660,28 +660,6 @@ def average_preds(preds, conf, k = 5):
     out_c.append(list(combs.values()))
   return out_p, out_c
 
-def map_to_comp(mass, reduced, mode, mass_tolerance, glycan_class, df_use, filter_out):
-  """robust workflow to map an m/z value to a composition\n
-  | Arguments:
-  | :-
-  | mass (float): observed m/z value
-  | reduced (int): 1 if modification = 'reduced' and 0 otherwise
-  | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-  | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
-  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
-  | df_use (dataframe): database to use for searching valid compositions; should only be used with some version of df_glycan
-  | filter_out (list): list of composition elements that are not allowed in the final composition
-  | libr (list): library of monosaccharides\n
-  | Returns:
-  | :-
-  | Returns composition (as a dict)
-  """
-  comp = mz_to_composition2(mass-reduced, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_use, filter_out = filter_out)
-  if len(comp) < 1:
-    new_mass = (mass+0.5)*2-reduced if mode == 'negative' else (mass-0.5)*2-reduced
-    comp = mz_to_composition2(new_mass, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class, df_use = df_use, filter_out = filter_out)
-  return comp
-
 def impute(df_out):
   """searches for specific isomers that could be added to the prediction dataframe\n
   | Arguments:
@@ -726,7 +704,7 @@ def make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = 'M
   | :-
   | glycans (list): glycans used for training CandyCrunch
   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
-  | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
+  | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
   | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
   | taxonomy_class (string): which taxonomic class to use for selecting possible glycans; default:'Mammalia'\n
   | Returns:
@@ -786,7 +764,7 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
 def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
-                   filter_out = ['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'], supplement = True, experimental = True, mass_dic = None,
+                   filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
                    taxonomy_class = 'Mammalia', df_use = None):
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
@@ -809,7 +787,7 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
   | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
   | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); default:0.2
-  | filter_out (list): list of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:['Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me']
+  | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
   | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
   | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
   | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
@@ -860,7 +838,9 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   df_out.predictions = [[(gly[0], round(gly[1],4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
   #get composition of predictions
   df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions]
-  df_out.composition = [k if isinstance(k, dict) else map_to_comp(df_out.index.tolist()[i], reduced, mode, mass_tolerance, glycan_class, df_use, filter_out) for i,k in enumerate(df_out.composition.values.tolist())]
+  df_out.composition = [k if isinstance(k, dict) else mz_to_composition2(df_out.index.tolist()[i], mode = mode, mass_tolerance = mass_tolerance,
+                                                                         glycan_class = glycan_class, df_use = df_use, filter_out = filter_out,
+                                                                         reduced = reduced>0) for i,k in enumerate(df_out.composition.values.tolist())]
   df_out.composition = [np.nan if isinstance(k, list) and len(k) < 1 else k[0] if isinstance(k, list) and len(k) > 0 else k for k in df_out.composition]
   df_out.dropna(subset = ['composition'], inplace = True)
   #calculate precursor ion charge
