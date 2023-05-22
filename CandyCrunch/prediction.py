@@ -139,6 +139,11 @@ def bin_intensities(peak_d, frames):
     out_list2[b-1] = m
   return out_list, out_list2
 
+def normalise_dict(peak_d):
+  peak_sum = sum(peak_d.values())
+  new_d = {k: v /peak_sum for k, v in peak_d.items()}
+  return new_d
+
 def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
                           trap = 'linear', min_mz = 39.714, max_mz = 3000, bin_num = 2048):
   """processes averaged spectra for them being inputs to CandyCrunch\n
@@ -171,13 +176,14 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
   df['modification'] = [0]*len(df) if modification == 'reduced' else [1]*len(df) if modification == 'permethylated' else [2]*len(df)
   df['trap'] = [0]*len(df) if trap == 'linear' else [1]*len(df) if trap == 'orbitrap' else [2]*len(df) if trap == 'amazon' else [3]*len(df)
   #intensity normalization
-  df.peak_d = [{k: v / sum(d.values()) for k, v in d.items()} for d in df.peak_d]
+  normalised_peak_dicts = [normalise_dict(x) for x in values]
+  df.peak_d = normalised_peak_dicts
   #retention time normalization
   df['RT2'] = [k/max(max(df.RT.values.tolist()),30) for k in df.RT]
   #intensity binning
   step = (max_mz - min_mz) / (bin_num - 1)
   frames = np.array([min_mz + step * i for i in range(bin_num)])
-  df['binned_intensities'], df['mz_remainder'] = list(zip(*[bin_intensities(df.peak_d.values.tolist()[k], frames) for k in range(len(df))]))
+  df['binned_intensities'], df['mz_remainder'] = list(zip(*[bin_intensities(k, frames) for k in normalised_peak_dicts]))
   #dataloader generation
   X = list(zip(df.binned_intensities.values.tolist(), df.mz_remainder.values.tolist(), df.reducing_mass.values.tolist(), df.glycan_type.values.tolist(),
                df.RT2.values.tolist(), df['mode'].values.tolist(), df.lc.values.tolist(), df.modification.values.tolist(), df.trap.values.tolist()))
