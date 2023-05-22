@@ -1,4 +1,4 @@
-glycowork>=0.7
+glycowork==0.7
 regex
 networkx
 scipy

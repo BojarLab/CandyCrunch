@@ -1077,11 +1077,11 @@ def run_controls(df_a, df_b):
   | :-
   | Returns printed p-values of comparing systematic differences in tested glycans (length & branching)
   """
-  len_comp = ttest_ind([len(k) for k in df_a.Prediction.values.tolist()],
-                       [len(k) for k in df_b.Prediction.values.tolist()], equal_var = False)
+  len_comp = ttest_ind([len(k) for k in df_a.Prediction],
+                       [len(k) for k in df_b.Prediction], equal_var = False)
   print("p-value (Welch's t-test) for differences in glycan length: " + str(len_comp))
-  branch_comp = ttest_ind([k.count('[') for k in df_a.Prediction.values.tolist()],
-                       [k.count('[') for k in df_b.Prediction.values.tolist()], equal_var = False)
+  branch_comp = ttest_ind([k.count('[') for k in df_a.Prediction],
+                       [k.count('[') for k in df_b.Prediction], equal_var = False)
   print("p-value (Welch's t-test) for differences in glycan branching: " + str(branch_comp))
 
 def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, bin_num = 2048,
@@ -1181,4 +1181,5 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
   conf_idx = [c[1] for c in conf_range]
   for key, data_list in bins.items():
     plt.plot(conf_idx, data_list, label = key)
+  plt.legend()
   return bins

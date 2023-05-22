@@ -38,7 +38,7 @@ candycrunch.load_state_dict(sdict)
 candycrunch = candycrunch.eval()
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
-abbrev_dict = {'S':'Sulphate','P':'Phosphate','Ac':'Acetate'}
+abbrev_dict = {'S':'Sulphate', 'P':'Phosphate', 'Ac':'Acetate'}
 temperature = torch.Tensor([1.15]).to(device)
 def T_scaling(logits, temperature):
   return torch.div(logits, temperature)
@@ -74,7 +74,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
         temp = spectrum.highest_peaks(2)
         for mz, i in spectrum.highest_peaks(ex_num):
           highest_i_dict[str(spectrum.ID) + '_' + str(spectrum.selected_precursors[0]['mz'])][mz] = i
-        if len(highest_i_dict.keys())>prev_len:
+        if len(highest_i_dict.keys()) > prev_len:
           rts.append(spectrum.scan_time_in_minutes())
           if intensity:
             inty = spectrum.selected_precursors[0]['i'] if 'i' in spectrum.selected_precursors[0].keys() else np.nan
@@ -161,9 +161,9 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
   | (1) a dataloader used for model prediction
   | (2) a preliminary df_out dataframe
   """
-  data = {'reducing_mass':keys, 'RT':rts,'peak_d':values,'num_spectra':num_spectra}
+  data = {'reducing_mass':keys, 'RT':rts, 'peak_d':values, 'num_spectra':num_spectra}
   dd = list(zip(*data.values()))
-  df = pd.DataFrame(dd, columns= data.keys())
+  df = pd.DataFrame(dd, columns = data.keys())
   df['glycan_type'] = [glycan_class]*len(df)
   df['glycan'] = [0]*len(df)
   df['mode'] = [0]*len(df) if mode == 'negative' else [1]*len(df)
@@ -171,23 +171,23 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
   df['modification'] = [0]*len(df) if modification == 'reduced' else [1]*len(df) if modification == 'permethylated' else [2]*len(df)
   df['trap'] = [0]*len(df) if trap == 'linear' else [1]*len(df) if trap == 'orbitrap' else [2]*len(df) if trap == 'amazon' else [3]*len(df)
   #intensity normalization
-  df.peak_d = [{k: v / sum(d.values()) for k, v in d.items()} for d in df.peak_d.values.tolist()]
+  df.peak_d = [{k: v / sum(d.values()) for k, v in d.items()} for d in df.peak_d]
   #retention time normalization
-  df['RT2'] = [k/max(max(df.RT.values.tolist()),30) for k in df.RT.values.tolist()]
+  df['RT2'] = [k/max(max(df.RT.values.tolist()),30) for k in df.RT]
   #intensity binning
   step = (max_mz - min_mz) / (bin_num - 1)
   frames = np.array([min_mz + step * i for i in range(bin_num)])
   df['binned_intensities'], df['mz_remainder'] = list(zip(*[bin_intensities(df.peak_d.values.tolist()[k], frames) for k in range(len(df))]))
   #dataloader generation
-  X = list(zip(df.binned_intensities.values.tolist(),df.mz_remainder.values.tolist(),df.reducing_mass.values.tolist(),df.glycan_type.values.tolist(),
+  X = list(zip(df.binned_intensities.values.tolist(), df.mz_remainder.values.tolist(), df.reducing_mass.values.tolist(), df.glycan_type.values.tolist(),
                df.RT2.values.tolist(), df['mode'].values.tolist(), df.lc.values.tolist(), df.modification.values.tolist(), df.trap.values.tolist()))
   X = unwrap([[k]*5 for k in X])
   y = df.glycan.values.tolist()
   y = unwrap([[k]*5 for k in y])
-  dset = SimpleDataset(X, y, transform_mz=transform_mz, transform_prec=transform_prec, transform_rt=transform_rt)
+  dset = SimpleDataset(X, y, transform_mz = transform_mz, transform_prec = transform_prec, transform_rt = transform_rt)
   dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
-  df.index=df.reducing_mass.values.tolist()
-  df.drop(['reducing_mass','binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification',
+  df.index = df.reducing_mass.values.tolist()
+  df.drop(['reducing_mass', 'binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification',
            'trap', 'glycan', 'glycan_type', 'lc'], axis = 1, inplace = True)
   return dloader, df
 
@@ -465,28 +465,6 @@ def deduplicate_predictions(df):
     df.rel_abundance = [struc_abundance[df.predictions.values.tolist()[k][0][0]] if len(df.predictions.values.tolist()[k])>0 else struc_abundance["ID"+str(df.index.tolist()[k])] for k in range(len(df))]
   return df
 
-def deduplicate_retention(df):
-  """removes/unifies duplicate predictions based on retention time\n
-  | Arguments:
-  | :-
-  | df (dataframe): df_out generated within wrap_inference\n
-  | Returns:
-  | :-
-  | Returns a deduplicated dataframe
-  """
-  drop_idx = []
-  for k in range(len(df)-1):
-    if k not in drop_idx and len(df.predictions.values.tolist()[k])<1:
-      check = [abs(df.RT.values.tolist()[k]-df.RT.values.tolist()[j]) < 0.5 and abs(df.index.tolist()[k]-df.index.tolist()[j]) < determine_threshold(df.index.tolist()[k])+0.5 if len(df.predictions.values.tolist()[j])<1 else False for j in range(len(df))]
-      if any(check):
-        idx = np.where(np.array(check) == True)[0]
-        winner = idx[0]
-        rest = [i for i in idx if i!=winner]
-        if len(rest)>0:
-          drop_idx.append(rest)
-  drop_idx = set(unwrap(drop_idx))
-  return df.drop([df.index.tolist()[k] for k in drop_idx], axis = 0)
-
 def combinatorics(comp):
   """given a composition, create a crude approximation of possible B/C/Y/Z fragments\n
   | Arguments:
@@ -541,7 +519,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
     else:
       current_preds = [''.join(list(df_out.composition.values.tolist()[k].keys()))]
       to_append = False
-    #check if it's a glycan spectrum
+    #check whether it's a glycan spectrum
     if not np.any(np.abs(np.array(df_out.top_fragments.values.tolist()[k][:10])[:, None] - cmasses) < 1.5):
       df_out.iat[k,0] = ['remove']
       continue
@@ -863,8 +841,6 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   df_out['evidence'] = ['strong' if len(k) > 0 else np.nan for k in df_out.predictions]
   #construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
   if supplement:
-    #if len(df_out) > 200:
-    #  print("Very large number of glycans detected; biosynthetic network construction could take a while. If you're in a hurry, restart with supplement=False")
     try:
       df_out = supplement_prediction(df_out, glycan_class, libr = libr, mode = mode, modification = modification)
       df_out.evidence = ['medium' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
@@ -944,5 +920,5 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
       explained[nn].append(n[0])
   pred_idx = df.columns.tolist().index('predictions')
   for k in explained.keys():
-    df.iat[k,pred_idx] = [(t,) for t in explained[k]]#.sort(key=len)
+    df.iat[k,pred_idx] = [(t,) for t in explained[k]]
   return df

@@ -21,7 +21,7 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     python_requires='>=3.8',
-    install_requires=["glycowork>=0.7", "regex", "networkx",
+    install_requires=["glycowork==0.7", "regex", "networkx",
                       "scipy", "torch", "numpy_indexed",
                       "seaborn", "pandas", "statsmodels",
                       "pymzml", "statsmodels"],
