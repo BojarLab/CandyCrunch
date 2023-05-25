@@ -560,7 +560,7 @@ def extend_masses(fragment_masses, charge):
   if charge == 1:
     return fragment_masses 
   for z in range(2,charge+1):
-    charged_masses = fragment_masses + [(k/z)+((1-z)/z) for k in fragment_masses]
+    charged_masses = fragment_masses + [(k*z)+(z-1) for k in fragment_masses]
   return charged_masses
 
 def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None, threshold=None, charge = 1, mode = 'negative'):
@@ -870,7 +870,7 @@ def record_diffs(subg_frags, mass, mass_threshold, charge):
   hits = []
   diffs = []
   for z in range(1,charge+1):
-    charged_mass = (mass/z)+((1-z)/z)
+    charged_mass = (mass*z)+(z-1)
     for k in subg_frags:
       if abs(charged_mass-k) < mass_threshold:
         hits.append(k)
@@ -950,6 +950,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   if libr is None:
     libr = lib
   hit_list = []
+  charge = abs(charge)
   fragment_masses = sorted(fragment_masses) #keep track of intensities
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
