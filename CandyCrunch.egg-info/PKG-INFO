@@ -7,9 +7,10 @@ Author: Daniel Bojar
 Author-email: daniel.bojar@gu.se
 License: UNKNOWN
 Description: # CandyCrunch
-        Predicting glycan structure from LC-MS/MS data, further described in our upcoming manuscript (Urban et al., bioRxiv 2023). If you use `CandyCrunch` or any of our datasets in your project, please cite Urban et al., bioRxiv 2023. The data used to train `CandyCrunch` can be found at Zenodo, under the doi:10.5281/zenodo.7940047
         
         <img src="./candycrunch_logo.jpg" width="200" />
+        
+        Predicting glycan structure from LC-MS/MS data, further described in our upcoming manuscript (Urban et al., bioRxiv 2023). If you use `CandyCrunch` or any of our datasets in your project, please cite Urban et al., bioRxiv 2023. The data used to train `CandyCrunch` can be found at Zenodo, under the doi:10.5281/zenodo.7940047
         
         ## Install
         `pip install git+https://github.com/BojarLab/CandyCrunch.git` <br>
