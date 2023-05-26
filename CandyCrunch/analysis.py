@@ -967,17 +967,19 @@ def mass_match(ion_names, diffs):
     return []
 
 
-def record_diffs(subg_frags, mass, mass_threshold, charge):
-  hits = []
-  diffs = []
+def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
+  fragment_properties = []
   modifier = np.sign(charge)
   for z in range(1, abs(charge)+1):
     charged_mass = (mass*z)-(z*modifier-modifier)
     for k in subg_frags:
       if abs(charged_mass-k) < mass_threshold:
-        hits.append(k)
-        diffs.append(abs(charged_mass-k))
-  return hits, diffs
+        for graph in subg_frags[k]:
+          fragment_properties.append((mass,k,abs(charged_mass-k),z,graph))
+  if fragment_properties:
+    return list(zip(*fragment_properties)) 
+  else:
+    return [[],[],[],[],[]]
 
 
 def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iupac = False):
@@ -1055,35 +1057,34 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   """
   if libr is None:
     libr = lib
-  hit_list = []
+  hit_dict = {}
   mode = 'negative' if charge < 0 else 'positive'
   fragment_masses = sorted(fragment_masses)  # Keep track of intensities
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
   subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, charge = charge, mode = mode)
   downstream_values = []
-  for mass in fragment_masses:
-    hits, diffs = record_diffs(subg_frags, mass, mass_threshold, charge)
-    if hits:
-      graphs = [g for m in hits for g in subg_frags[m]]
-      diffs = unwrap([[diffs[i]]*len(subg_frags[k]) for i, k in enumerate(hits)])
-      dc_names = subgraphs_to_domon_costello(nx_mono, graphs)
-      downstream_values.append((dc_names, graphs, diffs, mass))
-    else:
-      downstream_values.append(([], [], [], mass))
-  filtered_dc_names = [x[0] for x in downstream_values]
+  for observed_mass in fragment_masses:
+    fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge)
+    dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1])
+    downstream_values.append((*fragment_properties,dc_names))
+  filtered_dc_names = [x[5] for x in downstream_values]
   if reverse_anneal:
-    filtered_dc_names = [mass_match(x[0], x[2]) for x in downstream_values]
+    filtered_dc_names = [mass_match(x[5], x[2]) for x in downstream_values]
   if simplify:
     filtered_dc_names = simplify_fragments(filtered_dc_names)
   filtered_dc_names = [x[:5] for x in filtered_dc_names]
-  for i, (dc_names, graphs, diffs, mass) in enumerate(downstream_values):
-    if iupac:
-      filtered_graphs = [graphs[i] for i in [dc_names.index(f) for f in filtered_dc_names[i]]]
-      hit_list.append((mass, filtered_dc_names[i], [[mono_frag_to_string(x) for x in filtered_graphs]]))
+  for i,filtered_dc_names in enumerate(filtered_dc_names):
+    filtered_properties = list(zip(*downstream_values[i]))
+    if filtered_properties:
+      final_hits = [x for x in filtered_properties if x[5] in filtered_dc_names]
+      final_hits = [list(x) for x in list(zip(*final_hits))]
+      hit_dict[fragment_masses[i]] = {'Theoretical fragment masses':final_hits[1],'Domon-Costello nomenclatures':final_hits[5], 'Fragment charges':final_hits[3]}
+      if iupac:
+        hit_dict[fragment_masses[i]]['Fragment IUPAC'] = [mono_frag_to_string(x) for x in final_hits[4]]
     else:
-      hit_list.append((mass, filtered_dc_names[i]))
-  return hit_list
+      hit_dict[fragment_masses[i]] = None
+  return hit_dict
 
 
 def get_unique_subgraphs(nx_mono1, nx_mono2):
