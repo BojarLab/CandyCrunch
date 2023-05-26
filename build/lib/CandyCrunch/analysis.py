@@ -110,7 +110,7 @@ mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.99
                             'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
                                       '02A': [3, 4, 5, 6], 'HexOS': [1, 2, 3, 4, 5, 6]}},
                   'Global': {'mass': {'H2O': -18.0105546, 'CH2O': -30.0106, 'C2H2O': -42.0106, 'CO2': -43.9898, 'C2H4O2': -60.0211,
-                                      'SO4': -79.9568, 'C3H8O4': -108.0423, '+Acetate': +42.0106}}
+                                      'SO4': -79.9568, 'C3H8O4': -108.0423, '+Acetate': +42.0106, '+Na': +22.989218}}
                    }
 
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond']}
@@ -607,7 +607,7 @@ def add_to_subgraph_fragments(subgraph_fragments, nx_mono_list, mass_list):
   return subgraph_fragments
 
 
-def get_global_mods(subg, node_dict):
+def get_global_mods(subg, node_dict, mode):
   """Returns the valid list of global modifications for a given subgraph\n
   | Arguments:
   | :-
@@ -622,6 +622,10 @@ def get_global_mods(subg, node_dict):
     global_mods.remove('CO2')
   if 'S' not in ''.join([node_dict[x] for x in subg.nodes()]):
     global_mods.remove('SO4')
+  if mode == 'negative':
+    global_mods.remove('+Na')
+  if mode == 'positive':
+    global_mods.remove('+Acetate')
   return global_mods
 
 
@@ -681,12 +685,13 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg, present_breakages, root_node)
     inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
-    max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18.0105546*len(terminals)
+    max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18.0105546*len(terminals) 
+    max_mass += mono_attributes['Global']['mass']['+Acetate']
     if mass_mode:
       if max_mass < min(charge_masses) - threshold:
         continue
     terminal_labels = [node_dict[x] for x in terminals]
-    global_mods = [None] + get_global_mods(subg, node_dict)
+    global_mods = [None] + get_global_mods(subg, node_dict,mode)
     
     atomic_mod_dict_subg = atom_mods_init(subg, present_breakages, terminals, terminal_labels)
     mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict)
@@ -701,7 +706,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
         if not (abs(fragment_arr - mass) < threshold).any():
           continue
       if (m := mod_count(node_mod, global_mod)) <= max_frags:
-        if m > 1 and global_mod == '+Acetate':
+        if m > 1 and global_mod in ['+Acetate','+Na']:
           continue
       # For every modification combination we copy and label the subgraph as such, before calculating its mass and adding it to the output
         mod_subg = subg.copy()  # Consider subgraph instead
@@ -713,7 +718,6 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
           nx.set_node_attributes(mod_subg, [global_mod], 'global_mod')
         mod_subg_mass = round(mass, 5)
         subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments, [mod_subg], [mod_subg_mass])
-
   return subgraph_fragments
 
 
@@ -975,11 +979,11 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
     for k in subg_frags:
       if abs(charged_mass-k) < mass_threshold:
         for graph in subg_frags[k]:
-          fragment_properties.append((mass,k,abs(charged_mass-k),z,graph))
+          fragment_properties.append((mass, k, abs(charged_mass-k), modifier*z, graph))
   if fragment_properties:
     return list(zip(*fragment_properties)) 
   else:
-    return [[],[],[],[],[]]
+    return [[], [], [], [], []]
 
 
 def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iupac = False):
