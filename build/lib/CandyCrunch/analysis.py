@@ -877,7 +877,12 @@ def domon_costello_to_fragIUPAC(glycan_string, fragment):
       label_skelly[label_skelly.index(i)] = node_dict[i]
   full_skelly = ''.join(label_skelly)
   if global_mod:
-    full_skelly = '{- ' + global_mod + '}' + full_skelly
+    global_mod_list = list(global_mod)
+    for i,char in enumerate(global_mod_list):
+      if char.isnumeric():
+        global_mod_list[i] = chr(0x2080 + int(char))
+    format_global_mod = ''.join(global_mod_list)
+    full_skelly = '{- ' + format_global_mod + '}' + full_skelly
   return full_skelly
 
 
