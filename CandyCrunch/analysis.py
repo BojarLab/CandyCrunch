@@ -656,12 +656,12 @@ def extend_masses(fragment_masses, charge):
   return charged_masses
 
 
-def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_masses = None, threshold=None, charge = 1, mode = 'negative'):
+def generate_atomic_frags(nx_mono, max_cleavages = 3, mass_mode = False, fragment_masses = None, threshold=None, charge = 1, mode = 'negative'):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
   | nx_mono (networkx_object): the original monosaccharide only graph
-  | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
+  | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | mass_mode (bool): whether to constrain subgraph generation by observed masses; default:False
   | fragment_masses (list): all masses which are to be annotated with a fragment name\n
   | Returns:
@@ -705,7 +705,7 @@ def generate_atomic_frags(nx_mono, max_frags = 3, mass_mode = False, fragment_ma
       if mass_mode:
         if not (abs(fragment_arr - mass) < threshold).any():
           continue
-      if (m := mod_count(node_mod, global_mod)) <= max_frags:
+      if (m := mod_count(node_mod, global_mod)) <= max_cleavages:
         if m > 1 and global_mod in ['+Acetate','+Na']:
           continue
       # For every modification combination we copy and label the subgraph as such, before calculating its mass and adding it to the output
@@ -961,19 +961,13 @@ def get_most_likely_fragments(out_in, intensities = None):
   return out_list[::-1]
 
 
-def mass_match(ion_names, diffs):
+def mass_match(dc_names, diffs, max_cleavages):
   min_diff = 0.01
-  if any([len(k) == 1 for k in ion_names]):
-    singles, single_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k]) == 1])
-    return [singles[k] for k in np.where((np.array(single_diffs) < min(single_diffs)+min_diff) & (np.array(single_diffs) > min(single_diffs)-min_diff))[0].tolist()]
-  elif any([len(k) == 2 for k in ion_names]):
-    doubles, double_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k]) == 2])
-    return [doubles[k] for k in np.where((np.array(double_diffs) < min(double_diffs)+min_diff) & (np.array(double_diffs) > min(double_diffs)-min_diff))[0].tolist()]
-  elif any([len(k) == 3 for k in ion_names]):
-    triples, triple_diffs = zip(*[(ion_names[k], diffs[k]) for k in range(len(ion_names)) if len(ion_names[k]) == 3])
-    return [triples[k] for k in np.where((np.array(triple_diffs) < min(triple_diffs)+min_diff) & (np.array(triple_diffs) > min(triple_diffs)-min_diff))[0].tolist()]
-  else:
-    return []
+  for num_cleavages in range(1, max_cleavages+1):
+    if any([len(k) == num_cleavages for k in dc_names]):
+      frags, frag_diffs = zip(*[(dc_names[k], diffs[k]) for k in range(len(dc_names)) if len(dc_names[k]) == num_cleavages])
+      return [frags[k] for k in np.where((np.array(frag_diffs) < min(frag_diffs)+min_diff) & (np.array(frag_diffs) > min(frag_diffs)-min_diff))[0].tolist()]
+  return []
 
 
 def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
@@ -1007,46 +1001,38 @@ def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iu
 
 
 def observed_fragments_checker(possible_fragments, observed_fragments):
-  max_seen_list = []
-  for frag_combo in possible_fragments:
-    seen_frags = 0
-    for y in observed_fragments:
-      if len(y) == 2:
-        if all([x in frag_combo for x in y]):
-          seen_frags = 2
-          break
-      elif len(y) == 1:
-        if y[0] in frag_combo:
-          seen_frags = 1
-    max_seen_list.append(seen_frags)
-  return max_seen_list
+  max_overlaps_seen = []
+  for cleavage_combo in possible_fragments:
+    seen_cleavage_overlaps = []
+    for obs in observed_fragments:
+      if not obs:
+        seen_cleavage_overlaps.append(0)
+        continue  
+      seen_cleavage_overlaps.append(len(set(cleavage_combo) & set(obs[0])))
+    max_overlaps_seen.append(max(seen_cleavage_overlaps, default = 0))
+  return max_overlaps_seen
 
 
 def simplify_fragments(dc_names):
   observed_frags = []
-  for glyc_mass in dc_names:
-    glyc_mass = sorted(glyc_mass, key = len)
-    if not glyc_mass or len(glyc_mass[0]) == 0:
+  for possible_frags in dc_names:
+    possible_frags = sorted(possible_frags, key = len)
+    if not possible_frags or len(possible_frags[0]) == 0:
       observed_frags.append([])
-    elif len(glyc_mass[0]) == 1:
-      observed_frags.append([glyc_mass[0]])
+    elif len(possible_frags[0]) == 1:
+      observed_frags.append([possible_frags[0]])
       continue
-    elif len(glyc_mass[0]) == 2:
-      double_frag_options = [x for x in glyc_mass if len(x) == 2]
-      max_seen_list = (observed_fragments_checker(double_frag_options, observed_frags))
-      max_seen_idx = np.argsort(max_seen_list)[-1]
-      observed_frags.append([double_frag_options[max_seen_idx]])
+    else:
+      frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
+      max_overlaps_seen = (observed_fragments_checker(frag_options, observed_frags))
+      max_overlap_idx = np.argsort(max_overlaps_seen, kind = 'stable')[-1]
+      observed_frags.append([frag_options[max_overlap_idx]])
       continue
-    elif len(glyc_mass[0]) == 3:
-      triple_frag_options = [x for x in glyc_mass if len(x) == 3]
-      max_seen_list = (observed_fragments_checker(triple_frag_options, observed_frags))
-      max_seen_idx = np.argsort(max_seen_list)[-1]
-      observed_frags.append([triple_frag_options[max_seen_idx]])
   return observed_frags
 
 
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
-                max_frags = 3, simplify = True, reverse_anneal = True,
+                max_cleavages = 3, simplify = True, reverse_anneal = True,
                 charge = -1, iupac = False, intensities = None):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
@@ -1055,7 +1041,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   | fragment_masses (list): all masses which are to be annotated with a fragment name
   | mass_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
-  | max_frags (int): maximum number of allowed concurrent fragmentations per mass; default:3
+  | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | simplify (bool): whether to try condensing fragment options to the most likely option; default:True
   | reverse_anneal (bool): whether to prioritize closer matches of fragment mass / peak m/z; default:True
   | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:-1
@@ -1071,7 +1057,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   fragment_masses = sorted(fragment_masses)  # Keep track of intensities
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_frags = max_frags, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, charge = charge, mode = mode)
+  subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, charge = charge, mode = mode)
   downstream_values = []
   for observed_mass in fragment_masses:
     fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge)
@@ -1079,7 +1065,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
     downstream_values.append((*fragment_properties,dc_names))
   filtered_dc_names = [x[5] for x in downstream_values]
   if reverse_anneal:
-    filtered_dc_names = [mass_match(x[5], x[2]) for x in downstream_values]
+    filtered_dc_names = [mass_match(x[5], x[2],max_cleavages) for x in downstream_values]
   if simplify:
     filtered_dc_names = simplify_fragments(filtered_dc_names)
   filtered_dc_names = [x[:5] for x in filtered_dc_names]
