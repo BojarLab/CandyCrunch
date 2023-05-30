@@ -9,3 +9,4 @@ pandas
 statsmodels
 pymzml
 statsmodels
+pyteomics

@@ -3,6 +3,7 @@ import pandas as pd
 import numpy_indexed as npi
 from collections import defaultdict
 from itertools import combinations
+from pyteomics import mzxml
 from glycowork.motif.processing import enforce_class, get_lib, expand_lib
 from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition2, composition_to_mass
@@ -88,6 +89,49 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     df_out['intensity'] = intensities
 
   return df_out
+
+
+def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = False):
+    """function extracting all MS/MS spectra from .mzXML file\n
+    | Arguments:
+    | :-
+    | filepath (string): absolute filepath to the .mzXML file
+    | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+    | ms_level (int): which MS^n level to extract; default:2
+    | intensity (bool): whether to extract precursor ion intensity from spectra; default:False\n
+    | Returns:
+    | :-
+    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, and intensity if True
+    """
+    highest_i_dict = defaultdict(dict)
+    rts, intensities, reducing_mass = [], [], []
+
+    with mzxml.read(filepath) as reader:
+        for spectrum in reader:
+            if spectrum['msLevel'] == ms_level:
+                mz_i_dict = {}
+                num_peaks_to_extract = min(num_peaks, len(spectrum['m/z array']))
+                for mz, i in zip(spectrum['m/z array'][:num_peaks_to_extract], spectrum['intensity array'][:num_peaks_to_extract]):
+                    mz_i_dict[mz] = i
+                if mz_i_dict:
+                    key = f"{spectrum['id']}_{spectrum['precursorMz'][0]['precursorMz']}"
+                    highest_i_dict[key] = mz_i_dict
+                    reducing_mass.append(float(key.split('_')[-1]))
+                    rts.append(spectrum['retentionTime'])
+                    if intensity:
+                        inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
+                        intensities.append(inty)
+
+    df_out = pd.DataFrame({
+        'reducing_mass': reducing_mass, 
+        'peak_d': list(highest_i_dict.values()), 
+        'RT': rts,
+    })
+
+    if intensity:
+        df_out['intensity'] = intensities
+
+    return df_out
 
 
 def average_dicts(dicts, mode = 'mean'):

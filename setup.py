@@ -24,5 +24,5 @@ setuptools.setup(
     install_requires=["glycowork[draw]==0.7", "regex", "networkx",
                       "scipy", "torch", "numpy_indexed",
                       "seaborn", "pandas", "statsmodels",
-                      "pymzml", "statsmodels"],
+                      "pymzml", "statsmodels", "pyteomics"],
 )
