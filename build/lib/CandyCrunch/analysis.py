@@ -992,8 +992,8 @@ def simplify_fragments(dc_names):
 
 
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
-                max_cleavages = 3, simplify = True, reverse_anneal = True,
-                charge = -1, iupac = False, intensities = None):
+                max_cleavages = 3, simplify = True, charge = -1, iupac = False,
+                intensities = None):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -1003,7 +1003,6 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | simplify (bool): whether to try condensing fragment options to the most likely option; default:True
-  | reverse_anneal (bool): whether to prioritize closer matches of fragment mass / peak m/z; default:True
   | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:-1
   | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False\n
   | Returns:
@@ -1024,9 +1023,8 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
     dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1])
     downstream_values.append((*fragment_properties,dc_names))
   filtered_dc_names = [x[5] for x in downstream_values]
-  if reverse_anneal:
-    filtered_dc_names = [mass_match(x[5], x[2],max_cleavages) for x in downstream_values]
   if simplify:
+    filtered_dc_names = [mass_match(x[5], x[2],max_cleavages) for x in downstream_values]
     filtered_dc_names = simplify_fragments(filtered_dc_names)
   filtered_dc_names = [x[:5] for x in filtered_dc_names]
   for i,filtered_dc_names in enumerate(filtered_dc_names):
