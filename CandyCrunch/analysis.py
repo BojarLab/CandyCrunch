@@ -921,46 +921,6 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
   return ion_names
 
 
-def get_most_likely_fragments(out_in, intensities = None):
-  """uses Occam's razor to determine most likely fragment at a peak\n
-  | Arguments:
-  | :-
-  | out_in (list): list of tuples of the form m/z : fragment names, generated within CandyCrumbs\n
-  | Returns:
-  | :-
-  | Returns format similar to out_in but condensed
-  """
-  if intensities:
-    ranks = [k/max(intensities) for k in intensities][::-1]
-  else:
-    ranks = [0]*len(out_in)
-  int_dic = {}
-  out = copy.deepcopy(out_in)
-  out_list = []
-  single_list = []
-  for i, t in enumerate(out[::-1]):
-    # Check for any single-fragment occurrences
-    if t[1] and t[1][0] and len(t[1][0][0]) == 1:
-      out_list.append((t[0], t[1][0][0]))
-      single_list.append(t[1][0][0][0])
-      int_dic[t[1][0][0][0]] = ranks[i]
-    # Prioritize double-fragments with observed single-fragments
-    elif t[1] and t[1][0] and len(t[1][0][0]) == 2:
-      tt2 = [t_int for t_int in t[1][0] if len(t_int) == 2]
-      tt2_match = [sum([(k in tt)*(int_dic[k]+1) for k in single_list]) for tt in tt2]
-      if max(tt2_match) > 0:
-        out_list.append((t[0], tt2[np.argmax(tt2_match)]))
-    # Prioritize triple-fragments with observed single-fragments
-    elif t[1] and t[1][0] and len(t[1][0][0]) == 3:
-      tt2 = [t_int for t_int in t[1][0] if len(t_int) == 3]
-      tt2_match = [sum([k in tt for k in single_list]) for tt in tt2]
-      if max(tt2_match) > 0:
-        out_list.append((t[0], tt2[np.argmax(tt2_match)]))
-    else:
-      out_list.append(t)
-  return out_list[::-1]
-
-
 def mass_match(dc_names, diffs, max_cleavages):
   min_diff = 0.01
   for num_cleavages in range(1, max_cleavages+1):
