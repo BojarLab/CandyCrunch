@@ -62,35 +62,31 @@ def process_mzML_stack(filepath, num_peaks = 1000,
   """
   run = pymzml.run.Reader(filepath)
   highest_i_dict = defaultdict(dict)
-  number_of_peaks_to_extract = num_peaks
-  rts = []
-  intensities = []
-  prev_len = 0
+  rts, intensities, reducing_mass = [], [], []
+
   for spectrum in run:
     if spectrum.ms_level == ms_level:
-      if len(spectrum.peaks("raw")) < number_of_peaks_to_extract:
-        ex_num = len(spectrum.peaks("raw"))
-      else:
-        ex_num = number_of_peaks_to_extract
-      try:
-        temp = spectrum.highest_peaks(2)
-        for mz, i in spectrum.highest_peaks(ex_num):
-          highest_i_dict[str(spectrum.ID) + '_' + str(spectrum.selected_precursors[0]['mz'])][mz] = i
-        if len(highest_i_dict.keys()) > prev_len:
-          rts.append(spectrum.scan_time_in_minutes())
-          if intensity:
-            inty = spectrum.selected_precursors[0]['i'] if 'i' in spectrum.selected_precursors[0].keys() else np.nan
-            intensities.append(inty)
-          prev_len = len(highest_i_dict.keys())
-      except:
-        pass
-  reducing_mass = [float(k.split('_')[-1]) for k in list(highest_i_dict.keys())]
-  peak_d = list(highest_i_dict.values())
-  df_out = pd.DataFrame([reducing_mass, peak_d]).T
-  df_out.columns = ['reducing_mass', 'peak_d']
-  df_out['RT'] = rts
+      mz_i_dict = {}
+      for mz, i in spectrum.highest_peaks(min(num_peaks, len(spectrum.peaks("raw")))):
+        mz_i_dict[mz] = i
+      if mz_i_dict:
+        key = f"{spectrum.ID}_{spectrum.selected_precursors[0]['mz']}"
+        highest_i_dict[key] = mz_i_dict
+        reducing_mass.append(float(key.split('_')[-1]))
+        rts.append(spectrum.scan_time_in_minutes())
+        if intensity:
+          inty = spectrum.selected_precursors[0].get('i', np.nan)
+          intensities.append(inty)
+  
+  df_out = pd.DataFrame({
+      'reducing_mass': reducing_mass, 
+      'peak_d': list(highest_i_dict.values()), 
+      'RT': rts,
+  })
+
   if intensity:
     df_out['intensity'] = intensities
+
   return df_out
 
 
