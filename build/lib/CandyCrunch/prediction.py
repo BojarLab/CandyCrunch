@@ -67,6 +67,10 @@ def process_mzML_stack(filepath, num_peaks = 1000,
 
   for spectrum in run:
     if spectrum.ms_level == ms_level:
+      try:
+        temp = spectrum.highest_peaks(2)
+      except:
+        continue
       mz_i_dict = {}
       for mz, i in spectrum.highest_peaks(min(num_peaks, len(spectrum.peaks("raw")))):
         mz_i_dict[mz] = i
