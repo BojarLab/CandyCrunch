@@ -813,8 +813,22 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
   df_out.drop(['true_mass'], axis = 1, inplace = True)
   return df_out.loc[idx, :]
 
+  
+def load_spectra_filepath(spectra_filepath):
+  if spectra_filepath.endswith(".xlsx"):
+    loaded_file = pd.read_excel(spectra_filepath)
+    loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}' and loaded_file.RT[k] > 2], :]
+    loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d]
+  elif spectra_filepath.endswith(".mzML"):
+    loaded_file = process_mzML_stack(spectra_filepath, intensity = True)
+  elif spectra_filepath.endswith(".mzXML"):
+    loaded_file = process_mzXML_stack(spectra_filepath, intensity = True)
+  else:
+    raise FileNotFoundError('Incorrect filepath or extension, please ensure it is in the intended directory and is one of the supported formats')
+  return loaded_file
 
-def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycans, libr = None, filepath = fp_in + "for_prediction/", bin_num = 2048,
+
+def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
@@ -822,12 +836,11 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   """wrapper function to get & curate CandyCrunch predictions\n
   | Arguments:
   | :-
-  | filename (string or dataframe): if string, filepath +filename+ ".xlsx" must point to file; datafile containing extracted spectra
+  | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", or ".xlsx" pointing to a file containing spectra or preprocessed spectra 
   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
   | model (PyTorch): trained CandyCrunch model
   | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
-  | filepath (string): absolute filepath to filename, used as filepath +filename+ ".xlsx"
   | bin_num (int): number of bins for binning; don't change; default: 2048
   | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
@@ -856,25 +869,16 @@ def wrap_inference(filename, glycan_class, model = candycrunch, glycans = glycan
   if df_use is None:
     df_use = copy.deepcopy(df_glycan[(df_glycan.glycan_type==glycan_class) & (df_glycan.Class.str.contains(taxonomy_class))])
     df_use.Composition = [ast.literal_eval(k) for k in df_use.Composition]
-  if isinstance(filename, str):
-    loaded_file = pd.read_excel(filepath + filename + ".xlsx")
-  else:
-    loaded_file = filename
-  if modification == 'reduced':
-    reduced = 1.0078
-  else:
-    reduced = 0
-  intensity = True if 'intensity' in loaded_file.columns else False
+  reduced = 1.0078 if modification == 'reduced' else 0
   multiplier = -1 if mode == 'negative' else 1
+  loaded_file = load_spectra_filepath(spectra_filepath)
+  intensity = 'intensity' in loaded_file.columns
+  if intensity:
+    intensity = False if (loaded_file['intensity'] == 0).all() or loaded_file['intensity'].isnull().all() else True
   # Prepare file for processing
-  loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}' and loaded_file.RT[k] > 2], :]
-  loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d]
   loaded_file.dropna(subset = ['peak_d'], inplace = True)
   loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass]
-  if intensity:
-    inty = loaded_file.intensity.values.tolist()
-  else:
-    inty = []
+  inty = loaded_file.intensity.values.tolist() if intensity else []
   coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid']) else 3
   spec_dic = {loaded_file.reducing_mass.values.tolist()[k]: loaded_file.peak_d.values.tolist()[k] for k in range(len(loaded_file))}
   # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
