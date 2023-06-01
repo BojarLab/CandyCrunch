@@ -886,6 +886,30 @@ def domon_costello_to_fragIUPAC(glycan_string, fragment):
   return full_skelly
 
 
+def domon_costello_to_html(dc_name):
+  html_name = []
+  for nom in dc_name:
+    html_nom = nom
+    html_nom_parts = html_nom.split('_')
+    if len(html_nom_parts) == 3:
+      branch = html_nom_parts[2]
+      branch_symbol = branch[0].lower() + branch[1:]
+      html_nom = html_nom.replace(f'_{branch}',f"<sub>&{branch_symbol};</sub>")
+      branch_number = html_nom_parts[1] 
+      html_nom = html_nom.replace(f'_{branch_number}',f"<sub>{branch_number}</sub>")
+      frag_type = html_nom_parts[0]
+      if len(frag_type) > 1:
+        html_nom = html_nom.replace(f'{frag_type}',f"<sup>{frag_type[0]},{frag_type[1]}</sup>{frag_type[2]}")
+    if len(html_nom_parts) == 2:
+      mass_loss = list(html_nom_parts[1])
+      for i,char in enumerate(mass_loss):
+        if char.isnumeric():
+          mass_loss[i] = f"<sub>{char}</sub>"
+      html_nom = html_nom.replace(f'_{html_nom_parts[1]}',f" - {''.join(mass_loss)}")
+    html_name.append(html_nom)
+  return ", ".join(html_name) 
+
+
 def subgraphs_to_domon_costello(nx_mono, subgs):
   """Converts the subgraphs of a given graph object into their canonical Domon & Costello fragment names\n
   | Arguments:
