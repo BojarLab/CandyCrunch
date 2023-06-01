@@ -945,21 +945,6 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
     return [[], [], [], [], []]
 
 
-def finalise_output_fragments(nx_mono, graphs, diffs, reverse_anneal = False, iupac = False):
-  ion_names = []
-  dc_names = subgraphs_to_domon_costello(nx_mono, graphs)
-  if reverse_anneal:
-    dc_names = mass_match(dc_names, diffs)
-  idx = np.argsort([len(x) for x in dc_names])
-  dc_names = [dc_names[x] for x in idx][:5]
-  ion_names.append(dc_names)
-  if iupac:
-    graphs = [graphs[x] for x in idx][:5]
-    iupac_names = [mono_frag_to_string(graph) for graph in graphs]
-    ion_names.append(iupac_names)
-  return ion_names
-
-
 def observed_fragments_checker(possible_fragments, observed_fragments):
   max_overlaps_seen = []
   for cleavage_combo in possible_fragments:
