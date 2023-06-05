@@ -560,7 +560,8 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
   | global_mods_mass (list): masses corresponding to each of the global mods
   | terminals (list): string labels of nodes in terminals
   | inner_mass (float): total mass of non-terminal nodes in subgraph
-  | true_root_node (int): the node label corresponding to the root of the parent glycan\n
+  | true_root_node (int): the node label corresponding to the root of the parent glycan
+  | mode (string): the mode in which the mass spectrometer was run, 'negative' or 'positive'\n
   | Returns:
   | :-
   | Returns a list every single mass of each modification combination for each cross ring combination
@@ -591,7 +592,7 @@ def add_to_subgraph_fragments(subgraph_fragments, nx_mono_list, mass_list):
   """Helper to add lists of subgraphs and their respective masses to a dict\n
   | Arguments:
   | :-
-  | subgraph_fragments (dict): stores lists of subgraphs indexed by their mass
+  | subg_frags (dict): lists of networkx subgraphs indexed by their mass
   | nx_mono_list (list): list of networkx objects to be added to subgraph_fragments
   | mass_list (list): respective masses of the networkx objects to be added to subgraph_fragments\n
   | Returns:
@@ -613,6 +614,7 @@ def get_global_mods(subg, node_dict, mode):
   | :-
   | subg (networkx_object): a subgraph
   | node_dict (dict): a dictionary relating the integer label of each node with the monosaccharide it represents\n
+  | mode (string): the mode in which the mass spectrometer was run, 'negative' or 'positive'\n
   | Returns:
   | :-
   | Returns a a list of modification names
@@ -648,6 +650,15 @@ def mod_count(node_mod, global_mod):
 
 
 def extend_masses(fragment_masses, charge):
+  """Extends a list of masses with the additional masses to include multiply charged fragments in the filter\n
+  | Arguments:
+  | :-
+  | fragment_masses (list): a list of observed masses to be searched for possible fragments
+  | charge (int): the charge to use when calcualting multiply charged masses\n
+  | Returns:
+  | :-
+  | Returns a list containing both the input masses and the other masses at which to search to assign multiply charged fragments to the inital masses
+  """
   if abs(charge) == 1:
     return fragment_masses
   modifier = np.sign(charge)
@@ -663,7 +674,10 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, mass_mode = False, fragmen
   | nx_mono (networkx_object): the original monosaccharide only graph
   | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | mass_mode (bool): whether to constrain subgraph generation by observed masses; default:False
-  | fragment_masses (list): all masses which are to be annotated with a fragment name\n
+  | fragment_masses (list): all masses which are to be annotated with a fragment name
+  | threshold (float): the range around the observed mass in which constrain potential fragments
+  | charge (int): the maximum possible charge on the fragments to be matched
+  | mode (string): the mode in which the mass spectrometer was run, 'negative' or 'positive'\n
   | Returns:
   | :-
   | Returns a dict of lists of networkx subgraphs
@@ -722,6 +736,14 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, mass_mode = False, fragmen
 
 
 def rank_chains(nx_mono):
+  """Ranks each glycan chain (terminal to reducing end) by mass in the form alpha, beta, etc.\n
+  | Arguments:
+  | :-
+  | nx_mono (networkx_object): the original monosaccharide only graph\n
+  | Returns:
+  | :-
+  | A iterable of tuples containing the string rank and a list of integer node labels describing the chain
+  """
   node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
   og_root = [v for v, d in nx_mono.out_degree() if d == 0][0]
   og_leaves = set(v for v, d in nx_mono.in_degree() if d == 0)
@@ -733,6 +755,17 @@ def rank_chains(nx_mono):
 
 
 def domon_costello_to_node_labels(fragment, chain_rank):
+  """Determines the cleavage points on each differnt glycan chain\n
+  | Arguments:
+  | :-
+  | fragment (list): containing underscore separated string forms of Domon-Costello e.g(['Y_1_Alpha'])
+  | chain_rank (dict): a dictionary keyed by rank with each pointing to a list of integer node labels representing the glycan chain\n
+  | Returns:
+  | :-
+  | (1) a dict keyed by integer node label with each pointing to a cleavage type
+  | (2) an integer node label at which the B or C type cleavage occurred, otherwise None 
+  | (3) a string describing the global mass change to the glycan, otherwise None
+  """
   skelly_dict = {}
   global_mod = None
   post_mono = None
@@ -756,6 +789,16 @@ def domon_costello_to_node_labels(fragment, chain_rank):
 
 
 def node_labels_to_domon_costello(cuts, chain_rank, global_mods = {}):
+  """Converts the cleavages, ranks, and global modifications into the Domon & Costello fragment name\n
+  | Arguments:
+  | :-
+  | cuts (list): a list of tuples each containing the cleavage type, and related integer node labels
+  | chain_rank (list): a list of tuples each containing rank and a list of integer node labels representing the glycan chain
+  | global_mods (dict): the output of get_node_attributes(subg, 'global_mod') a dict containng integer node labels each pointing to a global mass change\n
+  | Returns:
+  | :-
+  | Returns a list containing all of the cleavages making up the fragment in Domon-Costello form
+  """
   dc_cuts = []
   for cut in cuts:
     cut_type = cut_type_dict[cut[0]]
@@ -806,6 +849,14 @@ def find_main_chain(subgraph, leaves, root_node):
 
 
 def subgraph_to_label_skeleton(sub_g):
+  """Breaks up a graph object into the skeleton of the IUPAC condensed nomenclature\n
+  | Arguments:
+  | :-
+  | subg (networkx_object): a graph or subgraph of monosaccharides\n
+  | Returns:
+  | :-
+  | Returns a list of integer node labels and branching brackets in the same order as the IUPAC condensed string
+  """
   if len(sub_g.nodes) == 1:
     return [str(x) for x in sub_g.nodes]
   root_node = [k for k, v in sub_g.out_degree if v == 0]
@@ -832,6 +883,15 @@ def subgraph_to_label_skeleton(sub_g):
 
 
 def label_skeleton_to_string(n_skelly, sub_g):
+  """Converts a glycan skeleton into a canonical string representation\n
+  | Arguments:
+  | :-
+  | n_skelly (list): a list of integer node labels and branching brackets in the same order as the IUPAC condensed string
+  | subg (networkx_object): a graph or subgraph of monosaccharides\n
+  | Returns:
+  | :-
+  | Returns an IUPAC condensed representation of the input graph, in the case of fragment graphs it returns the closest canonical string representation
+  """
   bond_dict = nx.get_edge_attributes(sub_g, 'bond_label')
   mono_to_bond = {k[0]: v for k, v in bond_dict.items()}
   string_labels = nx.get_node_attributes(sub_g, 'string_labels')
@@ -844,12 +904,29 @@ def label_skeleton_to_string(n_skelly, sub_g):
 
 
 def mono_frag_to_string(sub_g):
+  """Converts a monsaccharide graph to a string\n
+  | Arguments:
+  | :-
+  | subg (networkx_object): a graph or subgraph of monosaccharides\n
+  | Returns:
+  | :-
+  | Returns an IUPAC condesnsed representation of the input graph, in the case of fragment graphs it returns the closest canonical string representation
+  """
   n_skelly = subgraph_to_label_skeleton(sub_g)
   glycan_string = label_skeleton_to_string(n_skelly, sub_g)
   return glycan_string
 
 
 def domon_costello_to_fragIUPAC(glycan_string, fragment):
+  """Converts a glycan string and a Domon-Costello fragment name into a fragmented version of the orignal string\n
+  | Arguments:
+  | :-
+  | glycan_string (string): glycan in IUPAC-condensed format
+  | fragment (list): underscore separated string form of Domon-Costello e.g(['Y_1_Alpha'])\n
+  | Returns:
+  | :-
+  | Returns the fragmented glycan in a version of IUPAC condensed which is GlycoDraw compatible
+  """
   global_mod = None
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True)
@@ -887,6 +964,14 @@ def domon_costello_to_fragIUPAC(glycan_string, fragment):
 
 
 def domon_costello_to_html(dc_name):
+  """Converts a Domon-Costello fragment name to a prettified HTML string\n
+  | Arguments:
+  | :-
+  | dc_name (list): a list of Domon-Costello cleavage names\n
+  | Returns:
+  | :-
+  | Returns a HTML ready string containing the correctly formatted superscript and subscript elements of the fragment name  
+  """
   html_name = []
   for nom in dc_name:
     html_nom = nom
@@ -946,6 +1031,16 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
 
 
 def mass_match(dc_names, diffs, max_cleavages):
+  """Filters Domon-Costello fragment names by number of cleavages and difference from observed mass\n
+  | Arguments:
+  | :-
+  | dc_names (list): a nested list of Domon-Costello fragment grouped by mass
+  | diffs (list): a nested list of mass differences between the masses of Domon-Costello fragments and the observed masses
+  | max_cleavages (int): the maximum number of permitted cleavages in a fragment\n
+  | Returns:
+  | :-
+  | Returns a list of Domon-Costello fragment names with the smallest mass difference from the observed mass out of those with fewest cleavages   
+  """
   min_diff = 0.01
   for num_cleavages in range(1, max_cleavages+1):
     if any([len(k) == num_cleavages for k in dc_names]):
@@ -955,6 +1050,21 @@ def mass_match(dc_names, diffs, max_cleavages):
 
 
 def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
+  """Searches subg_frags for any fragments which could correspond to the observed mass and its charge\n
+  | Arguments:
+  | :-
+  | subg_frags (dict): lists of networkx subgraphs indexed by their mass
+  | mass (float): the observed mass to match potential fragments against
+  | mass_threshold (float): the range around the observed mass in which to match potential fragments
+  | charge (int): the maximum possible charge on the fragments to be matched\n
+  | Returns:
+  | :-
+  | (1) a list of only the observed mass with length equal to the number of matched outputs 
+  | (2) a list of the theoretical masses of the fragments matched with the observed mass 
+  | (3) a list of each of the differences from the matched fragments and the observed mass
+  | (4) a list of the charge of each matched fragment 
+  | (5) a list of networkx objects of each matched fragment
+  """
   fragment_properties = []
   modifier = np.sign(charge)
   for z in range(1, abs(charge)+1):
@@ -970,6 +1080,15 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
 
 
 def observed_fragments_checker(possible_fragments, observed_fragments):
+  """Calculates for each possible fragment the largest overlap of cleavages with previous fragments\n
+  | Arguments:
+  | :-
+  | possible_fragments (list): a list of Domon-Costello fragment names grouped by mass
+  | observed_fragments (list): a nested list of Domon-Costello fragment names already selected for output\n
+  | Returns:
+  | :-
+  | Returns a list containing integers corresponding to the largest overlap each possible fragment had with all previously observed fragments   
+  """
   max_overlaps_seen = []
   for cleavage_combo in possible_fragments:
     seen_cleavage_overlaps = []
@@ -983,6 +1102,15 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
 
 
 def simplify_fragments(dc_names):
+  """Sorts a list of possible fragments for each observed mass into a list of one fragment per observed mass\n
+  | Arguments:
+  | :-
+  | dc_names (list): a list of Domon-Costello fragment names grouped by mass
+  | observed_fragments (list): a nested list of Domon-Costello fragment names already selected for output\n
+  | Returns:
+  | :-
+  | Returns a nested list with each list containing a single fragment or being empty 
+  """
   observed_frags = []
   for possible_frags in dc_names:
     possible_frags = sorted(possible_frags, key = len)
@@ -1022,7 +1150,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
     libr = lib
   hit_dict = {}
   mode = 'negative' if charge < 0 else 'positive'
-  fragment_masses = sorted(fragment_masses)  # Keep track of intensities
+  fragment_masses = sorted(fragment_masses) 
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
   subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, charge = charge, mode = mode)
