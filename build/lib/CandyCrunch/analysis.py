@@ -667,13 +667,12 @@ def extend_masses(fragment_masses, charge):
   return charged_masses
 
 
-def generate_atomic_frags(nx_mono, max_cleavages = 3, mass_mode = False, fragment_masses = None, threshold=None, charge = 1, mode = 'negative'):
+def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, threshold=None, charge = 1, mode = 'negative'):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
   | nx_mono (networkx_object): the original monosaccharide only graph
   | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
-  | mass_mode (bool): whether to constrain subgraph generation by observed masses; default:False
   | fragment_masses (list): all masses which are to be annotated with a fragment name
   | threshold (float): the range around the observed mass in which constrain potential fragments
   | charge (int): the maximum possible charge on the fragments to be matched
@@ -682,8 +681,9 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, mass_mode = False, fragmen
   | :-
   | Returns a dict of lists of networkx subgraphs
   """
-  if mass_mode:
-    charge_masses = extend_masses(fragment_masses, charge)
+  charge_masses = extend_masses(fragment_masses, charge)
+  threshold = abs(threshold)
+  min_mass = min(charge_masses) - threshold
   # These general features are calculated here to help performance
   true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
   nx_edge_dict = {(node[0], node[1]): node[2] for node in nx_mono.edges(data = True)}
@@ -701,24 +701,20 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, mass_mode = False, fragmen
     inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
     max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18.0105546*len(terminals) 
     max_mass += mono_attributes['Global']['mass']['+Acetate']
-    if mass_mode:
-      if max_mass < min(charge_masses) - threshold:
+    if max_mass < min_mass:
         continue
     terminal_labels = [node_dict[x] for x in terminals]
     global_mods = [None] + get_global_mods(subg, node_dict,mode)
-    
     atomic_mod_dict_subg = atom_mods_init(subg, present_breakages, terminals, terminal_labels)
     mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict)
     mono_mod_perms, atom_dict_perms = generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic_mod_dict_subg)
     permutation_list = product(zip(product(*mono_mod_perms), product(*atom_dict_perms)), global_mods)
-
     mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms, terminal_labels, global_mods) 
     initial_masses = preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, true_root_node, mode)
     fragment_arr = np.array(charge_masses)
     for mass, (node_mod, global_mod) in zip(initial_masses, permutation_list):
-      if mass_mode:
-        if not (abs(fragment_arr - mass) < threshold).any():
-          continue
+      if not (abs(fragment_arr - mass) < threshold).any():
+        continue
       if (m := mod_count(node_mod, global_mod)) <= max_cleavages:
         if m > 1 and global_mod in ['+Acetate','+Na']:
           continue
@@ -1153,7 +1149,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   fragment_masses = sorted(fragment_masses) 
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, mass_mode = True, fragment_masses = fragment_masses, threshold = mass_threshold, charge = charge, mode = mode)
+  subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, charge = charge, mode = mode)
   downstream_values = []
   for observed_mass in fragment_masses:
     fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge)
