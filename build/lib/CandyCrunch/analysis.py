@@ -667,6 +667,28 @@ def extend_masses(fragment_masses, charge):
   return charged_masses
 
 
+def annotate_subgraph(subg,node_mod,global_mod,terminals):
+  """Applies the node, atom, and global modification attributes to a subgraph\n
+  | Arguments:
+  | :-
+  | subg (networkx_object): a graph or subgraph of monosaccharides
+  | node_mod (list): a nested list containing cleavage type at each terminal node and atom dictionary at each terminal node
+  | global_mod (string): the chemical species globally lost or gained by the graph
+  | terminals (list): the range around the observed mass in which constrain potential fragments\n
+  | Returns:
+  | :-
+  | Returns a copy of the input subgraph with networkx node attributes describing the modifications
+  """
+  mod_subg = subg.copy()
+  mono_mods_dict = dict(zip(terminals, node_mod[0]))
+  nx.set_node_attributes(mod_subg, mono_mods_dict, 'mod_labels')
+  atoms_mods_dict = dict(zip(terminals, node_mod[1]))
+  nx.set_node_attributes(mod_subg, atoms_mods_dict, 'atomic_mod_dict')
+  if global_mod:
+    nx.set_node_attributes(mod_subg, [global_mod], 'global_mod')
+  return mod_subg
+
+
 def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, threshold=None, charge = 1, mode = 'negative'):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
@@ -684,17 +706,13 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, th
   charge_masses = extend_masses(fragment_masses, charge)
   threshold = abs(threshold)
   min_mass = min(charge_masses) - threshold
-  # These general features are calculated here to help performance
   true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
   nx_edge_dict = {(node[0], node[1]): node[2] for node in nx_mono.edges(data = True)}
   node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
-  # The first graphs to be added to the output are the global mods of the original input
   subgraph_fragments = {}
-  # The subgraphs are calculated and the entire graph is also added to the list of subgraphs
   subgraphs = enumerate_subgraphs(nx_mono)
   subgraphs.append(nx_mono)
   for subg in subgraphs:
-    # For a subgraph we find all possible node and atom level modification
     present_breakages = get_broken_bonds(subg, nx_mono, nx_edge_dict)
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg, present_breakages, root_node)
@@ -718,16 +736,9 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, th
       if (m := mod_count(node_mod, global_mod)) <= max_cleavages:
         if m > 1 and global_mod in ['+Acetate','+Na']:
           continue
-      # For every modification combination we copy and label the subgraph as such, before calculating its mass and adding it to the output
-        mod_subg = subg.copy()  # Consider subgraph instead
-        mono_mods_dict = dict(zip(terminals, node_mod[0]))
-        nx.set_node_attributes(mod_subg, mono_mods_dict, 'mod_labels')
-        atoms_mods_dict = dict(zip(terminals, node_mod[1]))
-        nx.set_node_attributes(mod_subg, atoms_mods_dict, 'atomic_mod_dict')
-        if global_mod:
-          nx.set_node_attributes(mod_subg, [global_mod], 'global_mod')
-        mod_subg_mass = round(mass, 5)
-        subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments, [mod_subg], [mod_subg_mass])
+        annotated_subg = annotate_subgraph(subg,node_mod,global_mod,terminals)
+        annotated_subg_mass = round(mass, 5)
+        subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments, [annotated_subg], [annotated_subg_mass])
   return subgraph_fragments
 
 
