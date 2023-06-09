@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="400" height="310" viewBox="-350.0 -205.0 400 310">
+<defs>
+<path d="M-100,-50.0 L0,-50.0" stroke-width="4.0" stroke="black" id="d0" />
+<path d="M-200,0 L-100,-50.0" stroke-width="4.0" stroke="black" id="d1" />
+<path d="M-300,0 L-200,0" stroke-width="4.0" stroke="black" id="d2" />
+<path d="M-200,-100 L-100,-50.0" stroke-width="4.0" stroke="black" id="d3" />
+<path d="M-50,-25.0 L50,-25.0" stroke-width="0" id="d4" />
+<path d="M-50,-50.0 L50,-50.0" stroke-width="0" id="d5" />
+<path d="M-150,-25.0 L-50,-25.0" stroke-width="0" id="d6" />
+<path d="M-150,-50.0 L-50,-50.0" stroke-width="0" id="d7" />
+<path d="M-250,25.0 L-150,25.0" stroke-width="0" id="d8" />
+<path d="M-250,0 L-150,0" stroke-width="0" id="d9" />
+</defs>
+<g transform="rotate(0 200.0 155.0)">
+<use xlink:href="#d0" />
+<text font-size="20" font-family="century gothic" text-anchor="middle" valign="middle"><textPath xlink:href="#d0" startOffset="50%">
+<tspan dy="-0.5em">β 4</tspan>
+</textPath></text>
+<use xlink:href="#d1" />
+<text font-size="20" font-family="century gothic" text-anchor="middle" valign="middle"><textPath xlink:href="#d1" startOffset="50%">
+<tspan dy="-0.5em">β 3</tspan>
+</textPath></text>
+<use xlink:href="#d2" />
+<text font-size="20" font-family="century gothic" text-anchor="middle" valign="middle"><textPath xlink:href="#d2" startOffset="50%">
+<tspan dy="-0.5em">β 4</tspan>
+</textPath></text>
+<use xlink:href="#d3" />
+<text font-size="20" font-family="century gothic" text-anchor="middle" valign="middle"><textPath xlink:href="#d3" startOffset="50%">
+<tspan dy="-0.5em">β 6</tspan>
+</textPath></text>
+<circle cx="0" cy="-50.0" r="25.0" fill="#0385AE" stroke-width="2.0" stroke="black" />
+<use xlink:href="#d4" />
+<text font-size="17.5" font-family="century gothic" font-weight="bold" text-anchor="middle"><textPath xlink:href="#d4" startOffset="50%"></textPath></text>
+<use xlink:href="#d5" />
+<text font-size="17.5" font-family="century gothic" font-style="italic" text-anchor="middle"><textPath xlink:href="#d5" startOffset="50%"></textPath></text>
+<circle cx="-100" cy="-50.0" r="25.0" fill="#FCC326" stroke-width="2.0" stroke="black" />
+<use xlink:href="#d6" />
+<text font-size="17.5" font-family="century gothic" font-weight="bold" text-anchor="middle"><textPath xlink:href="#d6" startOffset="50%"></textPath></text>
+<use xlink:href="#d7" />
+<text font-size="17.5" font-family="century gothic" font-style="italic" text-anchor="middle"><textPath xlink:href="#d7" startOffset="50%"></textPath></text>
+<rect x="-225.0" y="-25.0" width="50" height="50" fill="#0385AE" stroke-width="2.0" stroke="black" />
+<use xlink:href="#d8" />
+<text font-size="17.5" font-family="century gothic" font-weight="bold" text-anchor="middle"><textPath xlink:href="#d8" startOffset="50%"></textPath></text>
+<use xlink:href="#d9" />
+<text font-size="17.5" font-family="century gothic" font-style="italic" text-anchor="middle"><textPath xlink:href="#d9" startOffset="50%"></textPath></text>
+<g transform="rotate(0.0 -300 0)">
+<path d="M-300,-25.0 L-300,25.0" stroke-width="2.0" stroke="black" />
+<path d="M-301.0,-25.0 L-280.0,-25.0" stroke-width="2.0" stroke="black" />
+<circle cx="-280.0" cy="0" r="7.5" fill="none" stroke-width="2.0" stroke="black" />
+</g>
+<g transform="rotate(26.56505117707799 -200 -100)">
+<path d="M-200,-125.0 L-200,-75.0" stroke-width="2.0" stroke="black" />
+<path d="M-201.0,-125.0 L-180.0,-125.0" stroke-width="2.0" stroke="black" />
+<circle cx="-180.0" cy="-100" r="7.5" fill="none" stroke-width="2.0" stroke="black" />
+</g>
+</g>
+</svg>
