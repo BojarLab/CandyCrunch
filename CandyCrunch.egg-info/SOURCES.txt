@@ -1,7 +1,11 @@
+LICENSE
+LICENSE.txt
 README.md
 setup.py
 CandyCrunch/__init__.py
 CandyCrunch/analysis.py
+CandyCrunch/candycrunch.pt
+CandyCrunch/glycans.pkl
 CandyCrunch/model.py
 CandyCrunch/prediction.py
 CandyCrunch.egg-info/PKG-INFO

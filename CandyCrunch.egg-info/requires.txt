@@ -2,7 +2,7 @@ glycowork==0.7
 regex
 networkx
 scipy
-torch
+torch==2.0
 numpy_indexed
 seaborn
 pandas

@@ -24,21 +24,19 @@ pip install git+https://github.com/BojarLab/CandyCrunch.git
 pip install 'CandyCrunch[draw] @ git+https://github.com/Bojarlab/CandyCrunch
 ``` 
 #### PyPI:
-> **Warning**
-> This version is not yet published
 ```bash
 pip install CandyCrunch
 ```
 ## `CandyCrunch.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/BojarLab/CandyCrunch/blob/main/CandyCrunch.ipynb)
 If you are looking for a **convenient** and **easy-to-run** version of the code that does not require any local installations, we have also created a Google Colaboratory notebook.  
-The notebook contains and example pipeline ready to run, which can be copied, executed, and customised in any way. 
+The notebook contains an example pipeline ready to run, which can be copied, executed, and customised in any way. 
 
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
 #### `wrap_inference` (in `CandyCrunch.prediction`) <br>
 Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `CandyCrunch`  
   
 Requires at a minimum:
-- a filepath to an mzML/mzXML file or a .xlsx file containting their extracted spectra
+- a filepath to an mzML/mzXML file or a .xlsx file containing their extracted spectra
 - the glycan class measured ("N", "O", "lipid", "free", or "other")
 ```python
 annotated_spectra_df = wrap_inference(C:/myfiles/my_spectra.mzML, glycan_class)
@@ -75,7 +73,7 @@ annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan,fragment_masses=ms
 
 It isn't always easy to quickly visualise the Domon-Costello nomenclature. Here is an example of how we can use GlycoDraw to visualise one of the outputs:
 ```python
-#This will calculate the where on the glycans the fragments occured and return a valid GlycoDraw input
+#This will calculate where on the glycan the fragments occured and return a valid GlycoDraw input
 fragment_iupac = domon_costello_to_fragIUPAC('Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3)]Gal(b1-4)Glc',['Y_3_Beta', 'Y_2_Alpha'])
 
 #Then we can simply draw the result with GlycoDraw
@@ -88,11 +86,11 @@ GlycoDraw(fragment_iupac)
 ## Modules
 #### `prediction` <br>
 - Includes all functions used in `wrap_inference`. 
-- Contains `process_mzML_stack` to extract spectra from .mzML files <br>
+- Contains `process_mzML_stack` and `process_mzXML_stack` to extract spectra from .mzML and .mzXML files <br>
 #### `analysis` <br>
 - Includes all functions used in `CandyCrumbs`.
 - Contains functions to analyze and compare averaged spectra
-- Contains other functions to manipulate glycan string represntations e.g. `domon_costello_to_fragIUPAC` <br>
+- Contains other functions to manipulate glycan string representations, e.g., `domon_costello_to_fragIUPAC` <br>
 #### `model` <br>
 - Includes code for model definition, dataset handling, and data augmentation; only used in the back-end <br>
 

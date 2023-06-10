@@ -22,7 +22,7 @@ setuptools.setup(
     ],
     python_requires='>=3.8',
     install_requires=["glycowork==0.7", "regex", "networkx",
-                      "scipy", "torch", "numpy_indexed",
+                      "scipy", "torch==2.0", "numpy_indexed",
                       "seaborn", "pandas", "statsmodels",
                       "pymzml", "statsmodels", "pyteomics"],
     extras_require={'draw':["glycowork[draw]==0.7"]},
