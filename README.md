@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="/images/candycrunch_logo_light_banner_pt.svg" style="height:50%;width:50%;">
+  <img src="/images/candycrunch_logo_light_banner_pt.svg" style="height:100%;width:100%;">
 </p>
 
 
