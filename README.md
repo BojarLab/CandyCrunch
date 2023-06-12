@@ -1,8 +1,7 @@
 <p align="center">
-  <img src="/images/candycrunch_logo.jpg" style="height:50%;width:50%;">
+  <img src="/images/candycrunch_logo_light_banner_pt.svg" style="height:50%;width:50%;">
 </p>
 
------------------
 
 # CandyCrunch
 
@@ -80,7 +79,7 @@ fragment_iupac = domon_costello_to_fragIUPAC('Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[Gal
 GlycoDraw(fragment_iupac)
 ```
 <p align="center">
-  <img width="460" height="300" src="/images/frag_iupac_demo.svg">
+  <img width="460" height="300" src="/images/frag_iupac_demo_white.svg">
 </p>
 
 ## Modules
