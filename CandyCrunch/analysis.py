@@ -1192,7 +1192,7 @@ def get_unique_subgraphs(nx_mono1, nx_mono2):
   """Gets the subgraphs unique to each of two input graphs\n
   | Arguments:
   | :-
-  | nx_mono1 (networkx object): a stmonosaccharide only graph
+  | nx_mono1 (networkx object): a monosaccharide only graph
   | nx_mono2 (networkx object): a different monosaccharide only graph\n
   | Returns:
   | :-

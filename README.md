@@ -28,7 +28,8 @@ pip install CandyCrunch
 ```
 ## `CandyCrunch.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/BojarLab/CandyCrunch/blob/main/CandyCrunch.ipynb)
 If you are looking for a **convenient** and **easy-to-run** version of the code that does not require any local installations, we have also created a Google Colaboratory notebook.  
-The notebook contains an example pipeline ready to run, which can be copied, executed, and customised in any way. 
+The notebook contains an example pipeline ready to run, which can be copied, executed, and customised in any way.  
+The example file included in the notebook is the same as in `examples/` and is ready for use in the notebook workflow. 
 
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
 #### `wrap_inference` (in `CandyCrunch.prediction`) <br>
@@ -92,6 +93,8 @@ GlycoDraw(fragment_iupac)
 - Contains other functions to manipulate glycan string representations, e.g., `domon_costello_to_fragIUPAC` <br>
 #### `model` <br>
 - Includes code for model definition, dataset handling, and data augmentation; only used in the back-end <br>
+#### `examples` <br>
+- Includes the extracted spectra of an example mzML file from Kouka et al. 2022
 
 ## Citation 
 If you use `CandyCrunch` or any of our datasets in your work, please cite Urban et al., bioRxiv 2023.  
