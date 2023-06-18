@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](https://github.com/bojarlab/candycrunch/blob/main/LICENSE)
 
 ## What is CandyCrunch?
-**CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and and downstream spectrum processing tools. These are further described in our upcoming manuscript (Urban et al., bioRxiv 2023).
+**CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and and downstream spectrum processing tools. These are further described in our manuscript [Urban et al. (2023)](https://www.biorxiv.org/content/10.1101/2023.06.13.544793v1.full) ***Predicting glycan structure from tandem mass spectrometry via deep learning*** on bioRxiv.
 
 ## Install CandyCrunch
 #### Development version:
