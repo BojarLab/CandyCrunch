@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](https://github.com/bojarlab/candycrunch/blob/main/LICENSE)
 
 ## What is CandyCrunch?
-**CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and and downstream spectrum processing tools. These are further described in our manuscript [Urban et al. (2023)](https://www.biorxiv.org/content/10.1101/2023.06.13.544793v1.full) ***Predicting glycan structure from tandem mass spectrometry via deep learning*** on bioRxiv.
+**CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and and downstream spectrum processing tools. These are further described in our manuscript [Urban et al. (2023)](https://www.biorxiv.org/content/10.1101/2023.06.13.544793v1.full) &ndash; ***Predicting glycan structure from tandem mass spectrometry via deep learning*** on bioRxiv.
 
 ## Install CandyCrunch
 #### Development version:
@@ -41,7 +41,20 @@ Requires at a minimum:
 ```python
 annotated_spectra_df = wrap_inference(C:/myfiles/my_spectra.mzML, glycan_class)
 ```
+<details>
+<summary>
+  
+#### This is what a truncated example of `annotated_spectra_df` would look like
+</summary>
 
+|         | predictions                                                                                                                             | composition             |   num_spectra |   charge |    RT | top_fragments                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |   adduct | evidence   |
+|--------:|:----------------------------------------------------------------------------------------------------------------------------------------|:------------------------|--------------:|---------:|------:|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------:|:-----------|
+| 384.157 | [('Gal(b1-3)GalNAc', 0.9625)]                                                                                                           | {'Hex': 1, 'HexNAc': 1} |             8 |       -1 |  6.75 | [204.0202, 222.1731, 156.0888, 179.031, 160.7594, ...]                                                                                                                                                                                                                                                                                                                                                                                                                                                  |      nan | strong     |
+| 425.036 | [('GalNAc(a1-3)GalNAc', 0.7947394540942927), ('GlcNAc(b1-3)GalNAc', 0.17965260545905706), ('HexNAc(?1-3)GalNAc', 0.025607940446650122)] | {'HexNAc': 2}           |             2 |       -1 | 38.88 | [381.005, 389.9802, 406.871, 326.8488, 212.01, ...]                         |      nan | strong     |
+| ... | ...                                                                                                            | ... |            ... |       ... | ... | ... |      ... | ...     |                                                                                                                           | ...                     |           ... |      ... | ...   | ...                                                |      ... | ...     |
+
+</details>
+  
 ## Using CandyCrumbs &ndash; MS2 fragment annotation
 #### `CandyCrumbs` (in `CandyCrunch.analysis`) <br>
 Wrapper function to annotate MS2 fragments using `CandyCrumbs`  
@@ -56,7 +69,10 @@ ms2_fragment_masses = [425.07,443.07,546.19,1216.32]
 annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan,fragment_masses=ms2_fragment_masses,mass_threshold=1)
 ```
 <details>
-<summary>This is what `annotated_fragments_dict` would look like</summary>
+<summary>
+  
+#### This is what `annotated_fragments_dict` would look like
+</summary>
 <pre>{425.07: {'Theoretical fragment masses': [425.12955],
   'Domon-Costello nomenclatures': [['02A_3_Alpha', 'M_H2O']],
   'Fragment charges': [-1]},
