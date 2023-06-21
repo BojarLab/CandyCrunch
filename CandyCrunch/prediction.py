@@ -1,23 +1,30 @@
-import numpy as np
-import pandas as pd
-import numpy_indexed as npi
-from collections import defaultdict
-from itertools import combinations
-from pyteomics import mzxml
-from glycowork.motif.processing import enforce_class, get_lib, expand_lib
-from glycowork.motif.graph import subgraph_isomorphism
-from glycowork.motif.tokenization import mapping_file, glycan_to_composition, glycan_to_mass, mz_to_composition2, composition_to_mass
-from glycowork.network.biosynthesis import construct_network, evoprune_network
-from glycowork.glycan_data.loader import unwrap, stringify_dict, df_glycan
-from CandyCrunch.model import CandyCrunch_CNN, SimpleDataset, transform_mz, transform_prec, transform_rt
-import os
 import ast
 import copy
-import torch
-import pickle
-import pymzml
 import operator
+import os
+import pickle
+from collections import defaultdict
+from itertools import combinations
+
+import numpy as np
+import numpy_indexed as npi
+import pandas as pd
+import pymzml
+import torch
 import torch.nn.functional as F
+from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
+from glycowork.motif.analysis import get_differential_expression
+from glycowork.motif.graph import subgraph_isomorphism
+from glycowork.motif.processing import enforce_class, expand_lib, get_lib
+from glycowork.motif.tokenization import (composition_to_mass,
+                                          glycan_to_composition,
+                                          glycan_to_mass, mapping_file,
+                                          mz_to_composition)
+from glycowork.network.biosynthesis import construct_network, evoprune_network
+from pyteomics import mzxml
+
+from CandyCrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
+                               transform_prec, transform_rt)
 
 this_dir, this_filename = os.path.split(__file__)
 data_path = os.path.join(this_dir, 'glycans.pkl')
@@ -605,7 +612,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
       if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
         truth.append(not any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j, float)]))
       if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
-        truth.append(any(['S' in (mz_to_composition2(t, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
+        truth.append(any(['S' in (mz_to_composition(t, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                   df_use = df_use, filter_out = filter_out, reduced = reduced>0)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
       # Check fragment size distribution
       if c > 1:
@@ -896,7 +903,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   df_out.predictions = [[(gly[0], round(gly[1], 4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
   # Get composition of predictions
   df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions]
-  df_out.composition = [k if isinstance(k, dict) else mz_to_composition2(df_out.index.tolist()[i], mode = mode, mass_tolerance = mass_tolerance,
+  df_out.composition = [k if isinstance(k, dict) else mz_to_composition(df_out.index.tolist()[i], mode = mode, mass_tolerance = mass_tolerance,
                                                                          glycan_class = glycan_class, df_use = df_use, filter_out = filter_out,
                                                                          reduced = reduced > 0) for i, k in enumerate(df_out.composition.values.tolist())]
   df_out.composition = [np.nan if isinstance(k, list) and len(k) < 1 else k[0] if isinstance(k, list) and len(k) > 0 else k for k in df_out.composition]
@@ -1002,3 +1009,46 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   for k in explained.keys():
     df.iat[k, pred_idx] = [(t,) for t in explained[k]]
   return df
+
+
+def calculate_df_vectors(df_out_list: list, labels: list, strong_only=True):
+  df_vectors = []
+  for df_out in df_out_list:
+    temp = df_out
+    if strong_only:
+      temp = df_out[df_out.evidence == 'strong']
+    abundances = [k/sum(temp.num_spectra.values.tolist())*100 for k in temp.num_spectra]
+    top1_predictions = [x[0][0] for x in temp.predictions]
+    temp = pd.DataFrame(abundances).T
+    temp.columns = top1_predictions
+    temp = temp.groupby(axis=1, level=0).sum()
+    if len(temp) < 1:
+      temp = pd.Series(np.nan)
+    df_vectors.append(temp)
+  out = pd.concat(df_vectors, axis = 0, ignore_index=True)
+  out = out.T
+  out.columns = labels
+  out = out.reset_index()
+  return out
+
+
+def prepare_input_files(file_list: list,glycan_class, mode, modification, lc, trap):
+  outputs = [] 
+  for x in file_list:
+    if '.csv' in x:
+      df_out = pd.read_csv(x)
+      df_out['predictions'] = [ast.literal_eval(x) for x in df_out.predictions]
+      outputs.append(df_out)
+    elif any([ext in x for ext in ['.mzML','mzXML','.xlsx']]):
+      df_out = wrap_inference(x, glycan_class=glycan_class, mode = mode, modification = modification, lc = lc, trap = trap)
+      outputs.append(df_out)
+  return outputs
+
+
+def DE_pipeline(control_filenames: list,treatment_filenames: list,glycan_class,strong_only=True, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear'):
+  control_labels = [x.split('/')[-1].split('.')[0] for x in control_filenames]
+  treatment_labels = [x.split('/')[-1].split('.')[0] for x in treatment_filenames]
+  outputs = prepare_input_files(control_filenames+treatment_filenames,glycan_class=glycan_class, mode = mode, modification = modification, lc = lc, trap = trap)
+  df_vectors = calculate_df_vectors(outputs,control_labels+treatment_labels,strong_only=strong_only)
+  de_res = get_differential_expression(df_vectors,control_labels,treatment_labels,paired=True)
+  return de_res
