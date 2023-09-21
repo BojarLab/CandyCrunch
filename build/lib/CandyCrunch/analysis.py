@@ -1,19 +1,18 @@
-import numpy as np
-import pandas as pd
-import networkx as nx
-import networkx.algorithms.isomorphism as iso
-import matplotlib.pyplot as plt
-import random
 import math
-import copy
+import random
 import re
 from collections import Counter
 from itertools import product
 from operator import neg
-from scipy.stats import ttest_ind
-from statsmodels.stats.multitest import multipletests
-from glycowork.motif.processing import bracket_removal, min_process_glycans, cohen_d
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import networkx.algorithms.isomorphism as iso
+import numpy as np
+import pandas as pd
 from glycowork.glycan_data.loader import lib, unwrap
+from glycowork.motif.processing import (bracket_removal, cohen_d,
+                                        min_process_glycans)
 
 mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211,
                                     '04A': 60.0211, '35A': 74.0368, '25A': 104.0473, '02A': 120.0423, 'Gal': 162.0528},
@@ -233,9 +232,8 @@ def mono_graph_to_nx(mono_graph, directed = True, libr = None):
   else:
     gr = nx.Graph()
     gr.add_node(0)
-
-  nx.set_node_attributes(gr, {k: libr.index(node_dict_mono[k]) for k in range(len(node_dict_mono))}, 'labels')
-  nx.set_node_attributes(gr, {k: node_dict_mono[k] for k in range(len(node_dict_mono))}, 'string_labels')
+  nx.set_node_attributes(gr, {k: lib[v] for k,v in node_dict_mono.items()}, 'labels')
+  nx.set_node_attributes(gr, node_dict_mono, 'string_labels')
   nx.set_node_attributes(gr, {k: 'terminal' if gr.degree[k] == 1 else 'internal' for k in gr.nodes()}, 'termini')
   nx.set_node_attributes(gr, {max(gr.nodes): 2},  'reducing_end')
   bond_dict = create_edge_labels(gr, all_dict)
