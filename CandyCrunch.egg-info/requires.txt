@@ -1,4 +1,4 @@
-glycowork==0.7
+glycowork~=0.8.1
 regex
 networkx
 scipy
@@ -12,4 +12,4 @@ statsmodels
 pyteomics
 
 [draw]
-glycowork[draw]==0.7
+glycowork[draw]~=0.8.1
