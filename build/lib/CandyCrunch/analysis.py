@@ -13,6 +13,8 @@ import pandas as pd
 from glycowork.glycan_data.loader import lib, unwrap
 from glycowork.motif.processing import (bracket_removal, cohen_d,
                                         min_process_glycans)
+from scipy.stats import ttest_ind
+from statsmodels.stats.multitest import multipletests
 
 mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211,
                                     '04A': 60.0211, '35A': 74.0368, '25A': 104.0473, '02A': 120.0423, 'Gal': 162.0528},
@@ -1346,7 +1348,7 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
   pvals = multipletests(pvals)[1]
   cohensd = [cohen_d(df_a[:, k], df_b[:, k]) for k in range(max_bin)]
   sig_bins = [k for k in range(max_bin) if pvals[k] < 0.05]
-  sig_bins = [(min_mz+((max_mz-min_mz)/bin_num)*k + remainder[k], pvals[k], cohensd[k]) for k in sig_bins]
+  sig_bins = [(min_mz+((max_mz-min_mz)/bin_num)*k + remainder[k], pvals[k], cohensd[k][0]) for k in sig_bins]
   return sorted(sig_bins, key = lambda x: (x[1], 1/abs(x[2])))
 
 
