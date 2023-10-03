@@ -46,6 +46,7 @@ candycrunch.load_state_dict(sdict)
 candycrunch = candycrunch.eval()
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
+modification_mass_dict = {'reduced':1,'2AA':137.14,'2AB':120.2}
 abbrev_dict = {'S': 'Sulphate', 'P': 'Phosphate', 'Ac': 'Acetate'}
 temperature = torch.Tensor([1.15]).to(device)
 
@@ -335,7 +336,7 @@ def determine_threshold(m):
     return 0.75
 
 
-def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced',
+def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', mass_tag = None,
                double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500):
   """determine whether glycan could explain m/z\n
   | Arguments:
@@ -344,7 +345,8 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
   | glycan (string): glycan in IUPAC-condensed nomenclature
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-  | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
+  | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB, or 'custom'; default:'reduced'
+  | mass_tag (float): label mass to add when calculating possible m/z if modification == 'custom'; default:None
   | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
   | triple_thresh (float): mass threshold over which to consider triply-charged ions; default:1500
   | quadruple_thresh (float): mass threshold over which to consider quadruply-charged ions; default:3500\n
@@ -361,8 +363,10 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
       mz = glycan_to_mass(glycan)
     except:
       return False
-  if modification == 'reduced':
-    mz += 1
+  if modification in modification_mass_dict:
+    mz += modification_mass_dict[modification]
+  if modification == 'custom':
+    mz += mass_tag
   if mode == 'negative':
     og_list = [mz, mz + mass_dict['Acetate']]
   else:
@@ -836,7 +840,7 @@ def load_spectra_filepath(spectra_filepath):
 
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
-                   frag_num = 100, mode = 'negative', modification = 'reduced', lc = 'PGC', trap = 'linear',
+                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
                    taxonomy_class = 'Mammalia', df_use = None):
@@ -851,7 +855,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   | bin_num (int): number of bins for binning; don't change; default: 2048
   | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-  | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
+  | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'; default:'reduced'
   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
   | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
@@ -900,7 +904,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   df_out['predictions'] = [[(preds[k][j], pred_conf[k][j]) for j in range(len(preds[k]))] for k in range(len(preds))]
   # Check correctness of glycan class & mass
   df_out.predictions = [[gly for gly in v if enforce_class(gly[0], glycan_class, gly[1], extra_thresh = extra_thresh) and gly[1] > pred_thresh] for v in df_out.predictions]
-  df_out.predictions = [[(gly[0], round(gly[1], 4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mode = mode)][:5] for v in range(len(df_out))]
+  df_out.predictions = [[(gly[0], round(gly[1], 4)) for gly in df_out.predictions.values.tolist()[v] if mass_check(df_out.index.tolist()[v], gly[0], libr = libr, modification = modification, mass_tag = mass_tag, mode = mode)][:5] for v in range(len(df_out))]
   # Get composition of predictions
   df_out['composition'] = [glycan_to_composition(g[0][0]) if len(g) > 0 and len(g[0]) > 0 else np.nan for g in df_out.predictions]
   df_out.composition = [k if isinstance(k, dict) else mz_to_composition(df_out.index.tolist()[i], mode = mode, mass_tolerance = mass_tolerance,
