@@ -828,7 +828,7 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
 def load_spectra_filepath(spectra_filepath):
   if spectra_filepath.endswith(".xlsx"):
     loaded_file = pd.read_excel(spectra_filepath)
-    loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}' and loaded_file.RT[k] > 2], :]
+    loaded_file = loaded_file.iloc[[k for k in range(len(loaded_file)) if loaded_file.peak_d.values.tolist()[k][-1] == '}'], :]
     loaded_file.peak_d = [ast.literal_eval(k) if k[-1] == '}' else np.nan for k in loaded_file.peak_d]
   elif spectra_filepath.endswith(".mzML"):
     loaded_file = process_mzML_stack(spectra_filepath, intensity = True)
