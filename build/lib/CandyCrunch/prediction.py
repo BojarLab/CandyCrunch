@@ -893,7 +893,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   loaded_file.dropna(subset = ['peak_d'], inplace = True)
   loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass]
   inty = loaded_file.intensity.values.tolist() if intensity else []
-  coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid'])
+  coded_class = {'O':0,'N':1,'free':2,'lipid':2}[glycan_class]
   spec_dic = {loaded_file.reducing_mass.values.tolist()[k]: loaded_file.peak_d.values.tolist()[k] for k in range(len(loaded_file))}
   # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
   keys, values, RT, num_spectra, rep_values, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
