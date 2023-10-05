@@ -210,7 +210,7 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
   | values (list): list of spectra in form peak m/z:intensity
   | rts (list): list of retention times
   | num_spectra (list): list of number of spectra for each cluster
-  | glycan_class (int): 0 = O-linked, 1 = N-linked, 2 = lipid/free, 3 = other
+  | glycan_class (int): 0 = O-linked, 1 = N-linked, 2 = lipid/free
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
@@ -562,7 +562,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
   | Arguments:
   | :-
   | df_out (dataframe): df_out generated within wrap_inference
-  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
+  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
@@ -763,7 +763,7 @@ def make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = 'M
   | Arguments:
   | :-
   | glycans (list): glycans used for training CandyCrunch
-  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
+  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
   | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
   | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
   | taxonomy_class (string): which taxonomic class to use for selecting possible glycans; default:'Mammalia'\n
@@ -851,7 +851,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   | Arguments:
   | :-
   | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", or ".xlsx" pointing to a file containing spectra or preprocessed spectra 
-  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
+  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
   | model (PyTorch): trained CandyCrunch model
   | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
@@ -893,7 +893,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   loaded_file.dropna(subset = ['peak_d'], inplace = True)
   loaded_file.reducing_mass = [k+np.random.uniform(0.00001, 10**(-20)) for k in loaded_file.reducing_mass]
   inty = loaded_file.intensity.values.tolist() if intensity else []
-  coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid']) else 3
+  coded_class = 0 if glycan_class == 'O' else 1 if glycan_class == 'N' else 2 if any([glycan_class == 'free', glycan_class == 'lipid'])
   spec_dic = {loaded_file.reducing_mass.values.tolist()[k]: loaded_file.peak_d.values.tolist()[k] for k in range(len(loaded_file))}
   # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
   keys, values, RT, num_spectra, rep_values, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
@@ -980,7 +980,7 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   | Arguments:
   | :-
   | df_in (pandas dataframe): output file produced by wrap_inference
-  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free", "other"
+  | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'; default:'reduced'\n
