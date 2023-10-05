@@ -46,7 +46,7 @@ candycrunch.load_state_dict(sdict)
 candycrunch = candycrunch.eval()
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
-modification_mass_dict = {'reduced':1,'2AA':137.14,'2AB':120.2}
+modification_mass_dict = {'reduced':1.0078,'2AA':137.14,'2AB':120.2}
 abbrev_dict = {'S': 'Sulphate', 'P': 'Phosphate', 'Ac': 'Acetate'}
 temperature = torch.Tensor([1.15]).to(device)
 
