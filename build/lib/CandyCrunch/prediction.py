@@ -389,7 +389,7 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
     elif mode == 'positive':
       mz_list += [m/4 + 0.75 for m in og_list]
   mz_list += og_list
-  return any([abs(mass-m) < thresh for m in mz_list])
+  return [m for m in mz_list if abs(mass-m) < thresh])
 
 
 def break_alert(t):
@@ -838,6 +838,9 @@ def load_spectra_filepath(spectra_filepath):
     raise FileNotFoundError('Incorrect filepath or extension, please ensure it is in the intended directory and is one of the supported formats')
   return loaded_file
 
+def calculate_ppm_error(theoretical_mass,observed_mass):
+  ppm_error = ((theoretical_mass-observed_mass)/theoretical_mass)* (10**6)
+  return ppm_error
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear',
@@ -932,7 +935,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   # Construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
   if supplement:
     try:
-      df_out = supplement_prediction(df_out, glycan_class, libr = libr, mode = mode, modification = modification)
+      df_out = supplement_prediction(df_out, glycan_class, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag)
       df_out.evidence = ['medium' if isinstance(df_out.evidence.values.tolist()[k], float) and len(df_out.predictions.values.tolist()[k]) > 0 else df_out.evidence.values.tolist()[k] for k in range(len(df_out))]
     except:
       pass
@@ -957,6 +960,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   df_out = canonicalize_biosynthesis(df_out, libr, pred_thresh)
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis = 1, inplace = True)
+  # Calculate  ppm error
+  theoretical_masses = [mass_check(obs_mass, preds[0][0], modification = 'reduced', mass_tag = None, mode = 'negative')[0] for preds,obs_mass in zip(df_out.predictions,df_out.index)]
+  df_out['ppm_error'] = [abs(calculate_ppm_error(theo_mass,obs_mass)) for theo_mass,obs_mass in zip(theoretical_masses,df_out.index)]
   # Clean-up
   df_out.composition = [glycan_to_composition(k[0][0]) if len(k) > 0 else df_out.composition.values.tolist()[i] for i, k in enumerate(df_out.predictions)]
   df_out.charge = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.tolist()[k])*multiplier for k in range(len(df_out))]
@@ -969,7 +975,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     return df_out
 
 
-def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', modification = 'reduced'):
+def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', modification = 'reduced',mass_tag=None):
   """searches for biosynthetic precursors of CandyCrunch predictions that could explain peaks\n
   | Arguments:
   | :-
@@ -1002,7 +1008,7 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
   unexplained_idx = [k for k in range(len(df)) if len(df.predictions.values.tolist()[k]) < 1]
   unexplained = [df.index.tolist()[k] for k in unexplained_idx]
   new_nodes = [k for k in net.nodes() if k not in preds]
-  explained_idx = [np.where([mass_check(j, k, modification = modification, mode = mode) for j in unexplained])[0] for k in new_nodes]
+  explained_idx = [np.where([mass_check(j, k, modification = modification, mode = mode, mass_tag=mass_tag) for j in unexplained])[0] for k in new_nodes]
   explained_idx = [[unexplained_idx[k] for k in j] for j in explained_idx]
   new_nodes = [(new_nodes[k], explained_idx[k]) for k in range(len(new_nodes)) if len(explained_idx[k]) > 0]
   explained = {k: [] for k in list(set(unwrap(explained_idx)))}
