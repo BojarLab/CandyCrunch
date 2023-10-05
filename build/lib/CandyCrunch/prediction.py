@@ -389,7 +389,7 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
     elif mode == 'positive':
       mz_list += [m/4 + 0.75 for m in og_list]
   mz_list += og_list
-  return [m for m in mz_list if abs(mass-m) < thresh])
+  return [m for m in mz_list if abs(mass-m) < thresh]
 
 
 def break_alert(t):
