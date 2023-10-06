@@ -22,6 +22,7 @@ from glycowork.motif.tokenization import (composition_to_mass,
                                           mz_to_composition)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mzxml
+from sklearn.cluster import AgglomerativeClustering
 
 from CandyCrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
                                transform_prec, transform_rt)
@@ -446,8 +447,15 @@ def get_rep_spectra(rt_label_in, intensity = False):
   | (3) list of length of each group of retention times (i.e., number of spectra)
   """
   rt_label = sorted(rt_label_in)
-  tt, tt_len = break_alert_loop(rt_label)
-  medIdx = [t.index(np.percentile(t, 50, interpolation = 'nearest')) for t in tt]
+  if len(rt_label)>1:
+    X = np.array(rt_label)
+    X = X.reshape(-1, 1)
+    clustering = AgglomerativeClustering(n_clusters=None,distance_threshold=0.5).fit(X)
+    unq_labels = set(clustering.labels_)
+    tt, tt_len = [[rt_label[k] for k in range(len(clustering.labels_)) if clustering.labels_[k]==j] for j in unq_labels],[len([k for k in range(len(clustering.labels_)) if clustering.labels_[k]==j]) for j in unq_labels]
+  else:
+    tt, tt_len = [rt_label],[1]
+  medIdx = [t.index(np.percentile(t, 50, method = 'nearest')) for t in tt]
   medIdx = [rt_label_in.index(tt[k][i]) if isinstance(tt[k][i], float) else rt_label_in.index(tt[k][i][0]) for k, i in enumerate(medIdx)]
   if intensity:
     idx_for_inty = [[rt_label_in.index(j) for j in t] for t in tt]
@@ -494,7 +502,7 @@ def build_mean_dic(dicty, rt, intensity):
   # Get m/z, predictions, and prediction confidence of those representative spectra
   keys = [[list(dicty.keys())[k] for k in range(len(labels)) if labels[k] == j] for j in unq_labels]
   keys = [[[keys[k][z] for z in j] if isinstance(j, list) else [keys[k][j]] for j in inty_idx[k]] for k in range(len(keys))]
-  keys = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in keys])
+  keys = unwrap([[np.min(j) for j in k] if isinstance(k[0], list) else [k] for k in keys])
   values = [[list(dicty.values())[k] for k in range(len(labels)) if labels[k] == j] for j in unq_labels]
   rep_values = unwrap([[values[k][j] for j in rt_idx[k]] for k in range(len(values))])
   values = [[[values[k][z] for z in j] if isinstance(j, list) else [values[k][j]] for j in inty_idx[k]] for k in range(len(values))]
@@ -838,9 +846,11 @@ def load_spectra_filepath(spectra_filepath):
     raise FileNotFoundError('Incorrect filepath or extension, please ensure it is in the intended directory and is one of the supported formats')
   return loaded_file
 
+
 def calculate_ppm_error(theoretical_mass,observed_mass):
   ppm_error = ((theoretical_mass-observed_mass)/theoretical_mass)* (10**6)
   return ppm_error
+
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear',
