@@ -961,8 +961,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
   spectra_out = df_out.peak_d.values.tolist()
   df_out.drop(['peak_d'], axis = 1, inplace = True)
   # Calculate  ppm error
-  theoretical_masses = [mass_check(obs_mass, preds[0][0], modification = 'reduced', mass_tag = None, mode = 'negative')[0] for preds,obs_mass in zip(df_out.predictions,df_out.index)]
-  df_out['ppm_error'] = [abs(calculate_ppm_error(theo_mass,obs_mass)) for theo_mass,obs_mass in zip(theoretical_masses,df_out.index)]
+  filtered_theoretical_masses = [mass_check(obs_mass, preds[0][0], modification = modification, mass_tag = mass_tag, mode=mode) for preds,obs_mass in zip(df_out.predictions,df_out.index)]
+  df_out = df_out.iloc[[i for i,x in enumerate(filtered_theoretical_masses) if x], :]
+  df_out['ppm_error'] = [abs(calculate_ppm_error(theo_mass,obs_mass)) for theo_mass,obs_mass in zip([x[0] for x in filtered_theoretical_masses if x],df_out.index)]
   # Clean-up
   df_out.composition = [glycan_to_composition(k[0][0]) if len(k) > 0 else df_out.composition.values.tolist()[i] for i, k in enumerate(df_out.predictions)]
   df_out.charge = [round(composition_to_mass(df_out.composition.values.tolist()[k])/df_out.index.tolist()[k])*multiplier for k in range(len(df_out))]
