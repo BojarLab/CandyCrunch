@@ -3,8 +3,8 @@ import copy
 import operator
 import os
 import pickle
-from collections import defaultdict
 from itertools import combinations
+from collections import defaultdict
 
 import numpy as np
 import numpy_indexed as npi
@@ -71,7 +71,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, and intensity if True
   """
   run = pymzml.run.Reader(filepath)
-  highest_i_dict = defaultdict(dict)
+  highest_i_dict = {}
   rts, intensities, reducing_mass = [], [], []
 
   for spectrum in run:
@@ -81,7 +81,8 @@ def process_mzML_stack(filepath, num_peaks = 1000,
       except:
         continue
       mz_i_dict = {}
-      for mz, i in spectrum.highest_peaks(min(num_peaks, len(spectrum.peaks("raw")))):
+      num_actual_peaks = min(num_peaks, len(spectrum.peaks("raw")))
+      for mz, i in spectrum.highest_peaks(num_actual_peaks):
         mz_i_dict[mz] = i
       if mz_i_dict:
         key = f"{spectrum.ID}_{spectrum.selected_precursors[0]['mz']}"
@@ -116,20 +117,21 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     | :-
     | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, and intensity if True
     """
-    highest_i_dict = defaultdict(dict)
+    highest_i_dict = {}
     rts, intensities, reducing_mass = [], [], []
 
     with mzxml.read(filepath) as reader:
         for spectrum in reader:
             if spectrum['msLevel'] == ms_level:
-                mz_i_dict = {}
-                num_peaks_to_extract = min(num_peaks, len(spectrum['m/z array']))
-                for mz, i in zip(spectrum['m/z array'][:num_peaks_to_extract], spectrum['intensity array'][:num_peaks_to_extract]):
-                    mz_i_dict[mz] = i
+                mz_array = spectrum['m/z array']
+                intensity_array = spectrum['intensity array']
+                num_peaks_to_extract = min(num_peaks, len(mz_array))
+                mz_i_dict = {mz: i for mz, i in zip(mz_array[:num_peaks_to_extract], intensity_array[:num_peaks_to_extract])}
                 if mz_i_dict:
-                    key = f"{spectrum['id']}_{spectrum['precursorMz'][0]['precursorMz']}"
+                    precursor_mz = spectrum['precursorMz'][0]['precursorMz']
+                    key = f"{spectrum['id']}_{precursor_mz}"
                     highest_i_dict[key] = mz_i_dict
-                    reducing_mass.append(float(key.split('_')[-1]))
+                    reducing_mass.append(float(precursor_mz))
                     rts.append(spectrum['retentionTime'])
                     if intensity:
                         inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
@@ -157,18 +159,14 @@ def average_dicts(dicts, mode = 'mean'):
   | :-
   | Returns a single dictionary of form (fragment) m/z : intensity
   """
-  result = {}
+  result = defaultdict(list)
   for d in dicts:
-    for mass, intensity in d.items():
-      if mass in result:
-        result[mass].append(intensity)
-      else:
-        result[mass] = [intensity]
-  for mass, intensities in result.items():
-    if mode == 'mean':
-      result[mass] = sum(intensities) / len(intensities)
+      for mass, intensity in d.items():
+          result[mass].append(intensity)
+  if mode == 'mean':
+      result = {mass: np.mean(intensities) for mass, intensities in result.items()}
     else:
-      result[mass] = max(intensities)
+        result = {mass: max(intensities) for mass, intensities in result.items()}
   return result
 
 
@@ -183,18 +181,18 @@ def bin_intensities(peak_d, frames):
   | (1) a list of binned intensities
   | (2) a list of the difference (bin edge - m/z of highest peak in bin) for each bin
   """
-  out_list = np.zeros(len(frames))
-  out_list2 = np.zeros(len(frames))
-  keys = list(dict.fromkeys(peak_d))
-  filled_bins = np.digitize(np.array(keys, dtype = 'float32'), frames, right = True)
-  mz_remainder = keys-frames[filled_bins-1]
-  unq, ids = np.unique(filled_bins, return_inverse = True)
-  vals = np.array(list(map(peak_d.get, keys)))
-  a2 = mz_remainder[npi.group_by(ids).argmax(vals)[1]]
-  for b, s, m in zip(unq, np.bincount(ids, np.array(list(map(peak_d.get, keys)))), np.bincount(range(len(a2)), a2)):
-    out_list[b-1] = s
-    out_list2[b-1] = m
-  return out_list, out_list2
+  num_frames = len(frames)
+  binned_intensities  = np.zeros(num_frames)
+  mz_diff = np.zeros(num_frames)
+  mzs = np.array(list(peak_d.keys()), dtype = 'float32')
+  intensities = np.array(list(peak_d.values()))
+  bin_indices = np.digitize(mzs, frames, right = True)
+  mz_remainder = mzs - frames[bin_indices - 1]
+  unique_bins, summed_intensities = npi.group_by(bin_indices).sum(intensities)
+  _, max_mz_remainder = npi.group_by(bin_indices).max(mz_remainder)
+  binned_intensities[unique_bins - 1] = summed_intensities
+  mz_diff[unique_bins - 1] = max_mz_remainder
+  return binned_intensities , mz_diff
 
 
 def normalize_dict(peak_d):
