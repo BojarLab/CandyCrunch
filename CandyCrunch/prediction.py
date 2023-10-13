@@ -218,12 +218,13 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
    """
     data = {'reducing_mass': keys, 'RT': rts, 'peak_d': values, 'num_spectra': num_spectra}
     df = pd.DataFrame(data)
-    df.assign(glycan_type = glycan_class,
-              mode = (mode == 'negative').astype(int),
+    df = df.assign(glycan_type = glycan_class,
+              mode = int(mode == 'negative'),
               lc = np.select([lc == 'PGC', lc == 'C18'], [0, 1], 2),
               modification = np.select([modification == 'reduced', modification == 'permethylated'], [0, 1], 2),
               trap = np.select([trap == 'linear', trap == 'orbitrap', trap == 'amazon'], [0, 1, 2], 3),
               inplace = True)
+    df['glycan'] = [0]*len(df)
     # Intensity normalization
     df['peak_d'] = df['peak_d'].apply(normalize_dict)
     # Retention time normalization
@@ -242,7 +243,7 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
     dset = SimpleDataset(X, y, transform_mz = transform_mz, transform_prec = transform_prec, transform_rt = transform_rt)
     dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
     df.set_index('reducing_mass', inplace = True)
-    drop_cols = ['reducing_mass', 'binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification', 'trap', 'glycan', 'glycan_type', 'lc']
+    drop_cols = ['binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification', 'trap', 'glycan', 'glycan_type', 'lc']
     df.drop(drop_cols, axis = 1, inplace = True)
     return dloader, df
 
@@ -416,12 +417,14 @@ def get_rep_spectra(rt_label_in, intensity = False):
    | (2) nested lists of indices for each spectrum group, to group their intensities, if intensity=True; else empty list
    | (3) list of length of each group of retention times (i.e., number of spectra)
    """
-    if len(rt_label_in) <= 1:
-        return [rt_label_in[0]], [], [1] if len(rt_label_in) == 1 else [], [], []
+    if len(rt_label_in) == 0:
+        return [], [], []
+    if len(rt_label_in) == 1:
+        return [0], [0], [1]
     rt_label = sorted(rt_label_in)
     X = np.array(rt_label).reshape(-1, 1)
-    clustering = AgglomerativeClustering(n_clusters = None,distance_threshold = 0.5).fit(X)
-    unq_labels = set(clustering.labels_)
+    clustering = AgglomerativeClustering(n_clusters = None, distance_threshold = 0.5).fit(X)
+    unique_labels = set(clustering.labels_)
     grouped_rt = [
         [rt_label[i] for i, label in enumerate(clustering.labels_) if label == unique_label]
         for unique_label in unique_labels
@@ -467,13 +470,13 @@ def build_mean_dic(dicty, rt, intensity):
     labels = assign_dict_labels(dicty)
     unique_labels = set(labels)
     rt = np.array(rt)[sort_idx]
-    grouped_rt = [rt[labels == label] for label in unique_labels]
+    grouped_rt = [[rt[k] for k in range(len(rt)) if labels[k]==j] for j in unique_labels]
     # Detect retention groups of mass groups & retrieve indices representative spectra
-    rt_idx, inty_idx, num_spectra = list(zip(*[get_rep_spectra(k, intensity = True) for k in grouped_rt]))
+    rt_idx, inty_idx, num_spectra = zip(*[get_rep_spectra(k, intensity = True) for k in grouped_rt])
     num_spectra = unwrap(num_spectra)
     if inty_check:
         intensity = np.array(intensity)[sort_idx]
-        intensity = [intensity[labels == label] for label in unique_labels]
+        intensity = [[intensity[k] for k in range(len(intensity)) if labels[k] == j] for j in unique_labels]
         intensity = [[[intensity[k][z] for z in j] if isinstance(j, list) else [intensity[k][j]] for j in inty_idx[k]] for k in range(len(intensity))]
         intensity = unwrap([[sum(j) for j in k] if isinstance(k[0], list) else [k] for k in intensity])
     # Get m/z, predictions, and prediction confidence of those representative spectra
@@ -484,7 +487,7 @@ def build_mean_dic(dicty, rt, intensity):
     rep_values = unwrap([[values[k][j] for j in rt_idx[k]] for k in range(len(values))])
     values = [[[values[k][z] for z in j] if isinstance(j, list) else [values[k][j]] for j in inty_idx[k]] for k in range(len(values))]
     values = unwrap([[average_dicts(j) for j in k] if isinstance(k[0], list) else [k] for k in values])
-    rts = [[[rt_labels[k][z] for z in j] if isinstance(j, list) else [rt_labels[k][j]] for j in inty_idx[k]] for k in range(len(rt_labels))]
+    rts = [[[grouped_rt[k][z] for z in j] if isinstance(j, list) else [grouped_rt[k][j]] for j in inty_idx[k]] for k in range(len(grouped_rt))]
     rts = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in rts])
     return keys, values, rts, num_spectra, rep_values, intensity if inty_check else []
 
@@ -891,11 +894,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
+    if intensity:
+        loaded_file['intensity'].fillna(0, inplace = True)
     # Prepare file for processing
     loaded_file.dropna(subset = ['peak_d'], inplace = True)
     loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
     inty = loaded_file['intensity'].values if intensity else []
-    coded_class = {'O':0,'N':1,'free':2,'lipid':2}[glycan_class]
+    coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
     keys, values, RT, num_spectra, rep_values, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
