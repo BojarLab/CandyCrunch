@@ -238,8 +238,10 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
     # Dataloader generation
     X = list(zip(df.binned_intensities.values.tolist(), df.mz_remainder.values.tolist(), df.reducing_mass.values.tolist(), df.glycan_type.values.tolist(),
                  df.RT2.values.tolist(), df['mode'].values.tolist(), df.lc.values.tolist(), df.modification.values.tolist(), df.trap.values.tolist()))
-    X = unwrap([[k]*5 for k in X])
-    y = df['glycan'].repeat(5).reset_index(drop = True)
+    y  = df['glycan']
+    if device != 'cpu':
+        X = unwrap([[k]*5 for k in X])
+        y = y.repeat(5).reset_index(drop = True)
     dset = SimpleDataset(X, y, transform_mz = transform_mz, transform_prec = transform_prec, transform_rt = transform_rt)
     dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
     df.set_index('reducing_mass', inplace = True)
@@ -319,7 +321,10 @@ def determine_threshold(m):
    | :-
    | Returns the allowed error (float) to establish equality for m
    """
-    return 0.5 if m < 1500 else 0.75
+    if isinstance(m, np.ndarray):
+        return np.where(m < 1500, 0.5, 0.75)
+    else:
+        return 0.5 if m < 1500 else 0.75
 
 
 def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', mass_tag = None,
@@ -343,7 +348,7 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
     if libr is None:
         libr = lib
     try:
-        mz = glycan_to_mass(glycan, sample_prep='permethylated' if modification == 'permethylated' else None)
+        mz = glycan_to_mass(glycan, sample_prep='permethylated' if modification == 'permethylated' else 'underivatized')
     except:
         return False
     if modification in modification_mass_dict:
@@ -517,10 +522,9 @@ def deduplicate_predictions(df):
                 rest = [i for i in idx if i != winner]
                 if rest:
                     drop_idx.extend(rest)
-                    if 'rel_abundance' in df.columns:
-                        if 'rel_abundance' in df.columns and pred_list[k]:
-                            key = pred_list[k][0][0]
-                            struc_abundance[key] = sum(df.loc[idx, 'rel_abundance'])
+                    if 'rel_abundance' in df.columns and pred_list[k]:
+                        key = pred_list[k][0][0]
+                        struc_abundance[key] = sum(df.loc[df.index[idx], 'rel_abundance'])
     drop_idx = set(drop_idx)
     df.drop(index = [index_list[k] for k in drop_idx], inplace = True)
     if 'rel_abundance' in df.columns:
@@ -908,7 +912,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out['peak_d'] = rep_values
     # Predict glycans from spectra
     preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
-    preds, pred_conf = average_preds(preds, pred_conf)
+    if device != 'cpu':
+        preds, pred_conf = average_preds(preds, pred_conf)
     if intensity:
         df_out['rel_abundance'] = intensity
     df_out['predictions'] = [[(pred, conf) for pred, conf in zip(pred_row, conf_row)] for pred_row, conf_row in zip(preds, pred_conf)]
@@ -985,7 +990,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Calculate  ppm error
     valid_indices, ppm_errors = [], []
     for preds, obs_mass in zip(df_out['predictions'], df_out.index):
-        theo_mass = mass_check(obs_mass, preds[0][0], modification=modification, mass_tag=mass_tag, mode=mode)
+        theo_mass = mass_check(obs_mass, preds[0][0], libr = libr, modification = modification, mass_tag = mass_tag, mode = mode)
         if theo_mass:
             valid_indices.append(True)
             ppm_errors.append(abs(calculate_ppm_error(theo_mass[0], obs_mass)))
