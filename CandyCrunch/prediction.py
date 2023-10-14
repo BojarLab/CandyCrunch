@@ -222,8 +222,7 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
               mode = int(mode == 'negative'),
               lc = np.select([lc == 'PGC', lc == 'C18'], [0, 1], 2),
               modification = np.select([modification == 'reduced', modification == 'permethylated'], [0, 1], 2),
-              trap = np.select([trap == 'linear', trap == 'orbitrap', trap == 'amazon'], [0, 1, 2], 3),
-              inplace = True)
+              trap = np.select([trap == 'linear', trap == 'orbitrap', trap == 'amazon'], [0, 1, 2], 3))
     df['glycan'] = [0]*len(df)
     # Intensity normalization
     df['peak_d'] = df['peak_d'].apply(normalize_dict)
@@ -312,21 +311,6 @@ def assign_dict_labels(dicty):
     return labels
 
 
-def determine_threshold(m):
-    """determine appropriate fluctuation threshold of m/z\n
-   | Arguments:
-   | :-
-   | m (float): an m/z value\n
-   | Returns:
-   | :-
-   | Returns the allowed error (float) to establish equality for m
-   """
-    if isinstance(m, np.ndarray):
-        return np.where(m < 1500, 0.5, 0.75)
-    else:
-        return 0.5 if m < 1500 else 0.75
-
-
 def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', mass_tag = None,
                double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500):
     """determine whether glycan could explain m/z\n
@@ -353,12 +337,12 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
         return False
     if modification in modification_mass_dict:
         mz += modification_mass_dict[modification]
-    if modification == 'custom':
+    elif modification == 'custom':
         mz += mass_tag
     adduct_mass = mass_dict['Acetate'] if mode == 'negative' else mass_dict['Na+']
     og_list = [mz, mz + adduct_mass]
     mz_list = og_list.copy()
-    thresh = determine_threshold(mass)
+    thresh = 0.5
     for z, threshold, charge_adjust in zip(
         [2, 3, 4],
         [double_thresh, triple_thresh, quadruple_thresh],
@@ -451,6 +435,23 @@ def get_rep_spectra(rt_label_in, intensity = False):
         return median_indices_in_input, intensity_indices, group_lengths
     return median_indices_in_input, [], group_lengths
 
+def group_by_labels(data, labels, unique_labels):
+    return [[data[k] for k in range(len(data)) if labels[k] == j] for j in unique_labels]
+
+def process_intensity(intensity, sort_idx, labels, unique_labels, inty_idx):
+    intensity = np.array(intensity)[sort_idx]
+    grouped_intensity = group_by_labels(intensity, labels, unique_labels)
+    processed_intensity = [[[grouped_intensity[k][z] for z in j] if isinstance(j, list) else [grouped_intensity[k][j]] for j in inty_idx[k]] for k in range(len(grouped_intensity))]
+    return unwrap([[sum(j) for j in k] if isinstance(k[0], list) else [k] for k in processed_intensity])
+
+def extract_data(data, labels, unique_labels, inty_idx, func):
+    grouped_data = group_by_labels(data, labels, unique_labels)
+    processed_data = [[[grouped_data[k][z] for z in j] if isinstance(j, list) else [grouped_data[k][j]] for j in inty_idx[k]] for k in range(len(grouped_data))]
+    return unwrap([[func(j) for j in k] if isinstance(k[0], list) else [k] for k in processed_data])
+
+def extract_rep_values(data, labels, unique_labels, rt_idx):
+    grouped_data = group_by_labels(data, labels, unique_labels)
+    return unwrap([[grouped_data[k][j] for j in rt_idx[k]] for k in range(len(grouped_data))])
 
 def build_mean_dic(dicty, rt, intensity):
     """organizes a spectra cluster into an averaged spectrum\n
@@ -475,23 +476,15 @@ def build_mean_dic(dicty, rt, intensity):
     labels = assign_dict_labels(dicty)
     unique_labels = set(labels)
     rt = np.array(rt)[sort_idx]
-    grouped_rt = [[rt[k] for k in range(len(rt)) if labels[k]==j] for j in unique_labels]
+    grouped_rt = group_by_labels(rt, labels, unique_labels)
     # Detect retention groups of mass groups & retrieve indices representative spectra
     rt_idx, inty_idx, num_spectra = zip(*[get_rep_spectra(k, intensity = True) for k in grouped_rt])
     num_spectra = unwrap(num_spectra)
-    if inty_check:
-        intensity = np.array(intensity)[sort_idx]
-        intensity = [[intensity[k] for k in range(len(intensity)) if labels[k] == j] for j in unique_labels]
-        intensity = [[[intensity[k][z] for z in j] if isinstance(j, list) else [intensity[k][j]] for j in inty_idx[k]] for k in range(len(intensity))]
-        intensity = unwrap([[sum(j) for j in k] if isinstance(k[0], list) else [k] for k in intensity])
+    intensity = process_intensity(intensity, sort_idx, labels, unique_labels, inty_idx) if inty_check else []
     # Get m/z, predictions, and prediction confidence of those representative spectra
-    keys = [[list(dicty.keys())[k] for k in range(len(labels)) if labels[k] == j] for j in unique_labels]
-    keys = [[[keys[k][z] for z in j] if isinstance(j, list) else [keys[k][j]] for j in inty_idx[k]] for k in range(len(keys))]
-    keys = unwrap([[np.min(j) for j in k] if isinstance(k[0], list) else [k] for k in keys])
-    values = [[list(dicty.values())[k] for k in range(len(labels)) if labels[k] == j] for j in unique_labels]
-    rep_values = unwrap([[values[k][j] for j in rt_idx[k]] for k in range(len(values))])
-    values = [[[values[k][z] for z in j] if isinstance(j, list) else [values[k][j]] for j in inty_idx[k]] for k in range(len(values))]
-    values = unwrap([[average_dicts(j) for j in k] if isinstance(k[0], list) else [k] for k in values])
+    keys = extract_data(list(dicty.keys()), labels, unique_labels, inty_idx, np.min)
+    values = extract_data(list(dicty.values()), labels, unique_labels, inty_idx, average_dicts)
+    rep_values = extract_rep_values(list(dicty.values()), labels, unique_labels, rt_idx)
     rts = [[[grouped_rt[k][z] for z in j] if isinstance(j, list) else [grouped_rt[k][j]] for j in inty_idx[k]] for k in range(len(grouped_rt))]
     rts = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in rts])
     return keys, values, rts, num_spectra, rep_values, intensity if inty_check else []
@@ -506,30 +499,35 @@ def deduplicate_predictions(df):
    | :-
    | Returns a deduplicated dataframe
    """
-    # Keep track of abundances if relevant
-    if 'rel_abundance' in df.columns:
-        struc_abundance = df.apply(lambda row: (row['predictions'][0][0] if row['predictions'] else "ID" + str(row.name), row['rel_abundance']), axis = 1).to_dict()
-    drop_idx = []
-    pred_list = df['predictions'].tolist()
-    index_list = df.index.tolist()
-    for k in range(len(df)-1):
-        # Basically, if we have the same structure with same mass & charge state twice or more --> just go with the most confident one
-        if k not in drop_idx and pred_list[k]:
-            check = [abs(index_list[k]-index_list[j]) < determine_threshold(index_list[k])+0.5 and pred_list[k][0][0] == pred_list[j][0][0] if len(pred_list[j]) > 0 else False for j in range(len(df))]
-            if any(check):
-                idx = np.where(np.array(check) == True)[0]
-                winner = idx[np.argmax([pred_list[i][0][1] for i in idx])]
-                rest = [i for i in idx if i != winner]
-                if rest:
-                    drop_idx.extend(rest)
-                    if 'rel_abundance' in df.columns and pred_list[k]:
-                        key = pred_list[k][0][0]
-                        struc_abundance[key] = sum(df.loc[df.index[idx], 'rel_abundance'])
-    drop_idx = set(drop_idx)
-    df.drop(index = [index_list[k] for k in drop_idx], inplace = True)
-    if 'rel_abundance' in df.columns:
-        df['rel_abundance'] = df.apply(lambda row: struc_abundance.get(row['predictions'][0][0]) if row['predictions'] else struc_abundance.get("ID" + str(row.name)), axis = 1)
-    return df
+    # Sort by index and 'RT'
+    df.sort_values(by = ['RT'], inplace = True)
+    df.sort_index(inplace = True) 
+    # Initialize an empty DataFrame for deduplicated records
+    dedup_df = pd.DataFrame(columns = df.columns)  
+    # Loop through the DataFrame to find duplicates
+    for idx, row in df.iterrows():
+        # Set a mask for close enough index values and RT values
+        mask = (np.abs(df.index - idx) < 0.5) & (np.abs(df['RT'] - row['RT']) < 1)
+        # Filter DataFrame based on mask
+        sub_df = df[mask]
+        # Get the first prediction from the tuple
+        first_pred = row['predictions'][0][0] if row['predictions'] else None
+        if first_pred is None:
+          continue
+        # Filter sub_df based on the first prediction value
+        pred_mask = sub_df['predictions'].apply(lambda x: x[0][0] if x else None) == first_pred
+        # Choose the row with the max confidence for this prediction
+        max_conf_row = sub_df.loc[pred_mask].iloc[np.argmax([p[0][1] for p in sub_df.loc[pred_mask, 'predictions']])]
+        if 'rel_abundance' in df.columns:
+          # Sum 'rel_abundance' for this subset
+          summed_abundance = np.nansum(sub_df.loc[pred_mask, 'rel_abundance'])
+          # Update 'rel_abundance'
+          max_conf_row['rel_abundance'] = summed_abundance
+        # Store in dedup_df
+        dedup_df = pd.concat([dedup_df, pd.DataFrame([max_conf_row])])
+    # Drop duplicate rows based on index and 'predictions'
+    dedup_df.drop_duplicates(subset=['predictions'], keep = 'first', inplace = True)
+    return dedup_df
 
 
 def combinatorics(comp):
@@ -617,7 +615,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
                 truth.append(False)
             # Check M-adduct for adducts
             if isinstance(df_out.adduct.values.tolist()[k], str):
-                truth.append(any([abs(df_out.index.tolist()[k]-mass_dict[df_out.adduct.values.tolist()[k]]-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:10]]))
+                truth.append(any([abs(df_out.index.tolist()[k]-mass_dict[df_out.adduct.values.tolist()[k]]-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5]]))
             if all(truth):
                 if to_append:
                     keep.append(current_preds[i])
@@ -628,8 +626,8 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
                     pass
                 else:
                     keep.append('remove')
-            df_out.at[k, 'predictions'] = keep
-        return df_out[df_out['predictions'].apply(lambda x: 'remove' not in x[:1])]
+        df_out.iat[k, 0] = keep
+    return df_out[df_out['predictions'].apply(lambda x: 'remove' not in x[:1])]
 
 
 def backfill_missing(df):
@@ -654,7 +652,7 @@ def backfill_missing(df):
             mass_diffs = np.abs(masses - target_mass)
             RT_diffs = np.abs(RTs - target_RT)
             same_compositions = compositions == target_composition
-            idx = np.where((mass_diffs < determine_threshold(masses)) & (RT_diffs < 1) & same_compositions)[0]
+            idx = np.where((mass_diffs < 0.5) & (RT_diffs < 1) & same_compositions)[0]
             if len(idx) > 0:
                 df.iat[k, 0] = predictions[idx[0]]
     return df
@@ -761,9 +759,9 @@ def possibles(df_out, mass_dic, reduced):
             check_mass = index_list[k] - reduced
             diffs = np.abs(mass_keys - check_mass)
             min_diff_index = np.argmin(diffs)
-        if diffs[min_diff_index] < 0.5:
-            possible = mass_dic[mass_keys[min_diff_index]]
-            df_out.iat[k, 0] = [(m,) for m in possible]
+            if diffs[min_diff_index] < 0.5:
+                possible = mass_dic[mass_keys[min_diff_index]]
+                df_out.iat[k, 0] = [(m,) for m in possible]
     return df_out
 
 
@@ -1001,6 +999,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Clean-up
     df_out['composition'] = [glycan_to_composition(k[0][0]) if k else val for k, val in zip(df_out['predictions'], df_out['composition'])]
     df_out['charge'] = round(df_out['composition'].apply(composition_to_mass) / df_out.index) * multiplier
+    df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     # Normalize relative abundances if relevant
     if intensity:
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
@@ -1040,8 +1039,8 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
     unexplained = df.index[unexplained_idx].tolist()
     preds_set = set(preds)
     new_nodes = [k for k in net.nodes() if k not in preds_set]
-    explained_idx = [[unexplained_idx[k] for k in np.where([mass_check(j, node,
-                                                                       modification = modification, mode = mode, mass_tag = mass_tag) for j in unexplained])[0]] for node in new_nodes]
+    explained_idx = [[unexplained_idx[k] for k, check in enumerate([mass_check(j, node, libr = libr,
+                                                                               modification = modification, mode = mode, mass_tag = mass_tag) for j in unexplained]) if check] for node in new_nodes]
     new_nodes = [(node, idx) for node, idx in zip(new_nodes, explained_idx) if idx]
     explained = {k: [] for k in set(unwrap(explained_idx))}
     for node, indices in new_nodes:
@@ -1049,5 +1048,5 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
             explained[index].append(node)
     pred_idx = df.columns.get_loc('predictions')
     for index, values in explained.items():
-        df.iat[index, pred_idx] = [(t,) for t in values]
+        df.iat[index, pred_idx] = [(t,0) for t in values[:5]]
     return df
