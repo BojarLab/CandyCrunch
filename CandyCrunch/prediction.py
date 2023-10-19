@@ -679,7 +679,7 @@ def adduct_detect(df, mode, modification):
     computed_masses = np.array([composition_to_mass(composition) for composition in compositions])
     observed_masses = indices * np.abs(charges) + (np.abs(charges) - 1)
     adduct_check = np.abs(computed_masses + adduct_mass - observed_masses) < 0.5
-    df['adduct'] = np.where(adduct_check, adduct, np.nan)
+    df['adduct'] = np.where(adduct_check, adduct, None)
     return df
 
 
