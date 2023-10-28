@@ -155,11 +155,7 @@ def average_dicts(dicts, mode = 'mean'):
     for d in dicts:
         for mass, intensity in d.items():
             result[mass].append(intensity)
-    if mode == 'mean':
-        result = {mass: np.mean(intensities) for mass, intensities in result.items()}
-    else:
-        result = {mass: max(intensities) for mass, intensities in result.items()}
-    return result
+    return {mass: np.mean(intensities) if mode == 'mean' else max(intensities) for mass, intensities in result.items()}
 
 
 def bin_intensities(peak_d, frames):
@@ -337,7 +333,7 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
         return False
     mz += modification_mass_dict[modification] if modification in modification_mass_dict else mass_tag
     adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
-    og_list = [mz] + [mz + mass_dict[adduct] for adduct in adduct_list]
+    og_list = [mz] + [mz + mass_dict.get(adduct, 999) for adduct in adduct_list]
     mz_list = og_list.copy()
     thresh = 0.5
     for z, threshold, charge_adjust in zip(
