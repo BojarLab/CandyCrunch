@@ -190,15 +190,12 @@ def normalize_dict(peak_d):
     return dict(zip(keys, normalized_values))
 
 
-def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
+def process_for_inference(df, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
                           trap = 'linear', min_mz = 39.714, max_mz = 3000, bin_num = 2048):
     """processes averaged spectra for them being inputs to CandyCrunch\n
    | Arguments:
    | :-
-   | keys (list): list of m/z values
-   | values (list): list of spectra in form peak m/z:intensity
-   | rts (list): list of retention times
-   | num_spectra (list): list of number of spectra for each cluster
+   | df (dataframe): condensed dataframe from condense_dataframe
    | glycan_class (int): 0 = O-linked, 1 = N-linked, 2 = lipid/free
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
@@ -212,8 +209,6 @@ def process_for_inference(keys, values, rts, num_spectra, glycan_class, mode = '
    | (1) a dataloader used for model prediction
    | (2) a preliminary df_out dataframe
    """
-    data = {'reducing_mass': keys, 'RT': rts, 'peak_d': values, 'num_spectra': num_spectra}
-    df = pd.DataFrame(data)
     df = df.assign(glycan_type = glycan_class,
               mode = int(mode == 'negative'),
               lc = np.select([lc == 'PGC', lc == 'C18'], [0, 1], 2),
@@ -346,141 +341,57 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
     return [m for m in mz_list if abs(mass - m) < thresh]
 
 
-def break_alert(t):
-    """split list if there is a discontinuity\n
-   | Arguments:
-   | :-
-   | t (list): list of ordered floats (retention times in this case)\n
-   | Returns:
-   | :-
-   | Returns two lists, that may be split by a discontinuity of > 0.5
-   """
-    for k in range(len(t)-1):
-        try:
-            temp = t[k+1][0] - t[k][0]
-        except:
-            temp = t[k+1] - t[k]
-        if temp > 0.5:
-            return t[:k+1], t[k+1:]
-    return (t,)
+def condense_dataframe(df):
+    # Initialize an empty dictionary to hold the results
+    results_dict = {}
+    clusters= []
+    # Sort the dataframe by 'reducing_mass' and 'RT'
+    df.sort_values(by=['reducing_mass', 'RT'], inplace=True)
+    # Initialize the first cluster
+    first_row = df.iloc[0]
+    clusters.append({
+        'reducing_mass': [first_row['reducing_mass']],
+        'RT': [first_row['RT']],
+        'intensity': [first_row['intensity']],
+        'peak_d': [first_row['peak_d']],
+    })
 
+    # Loop through the sorted dataframe starting from the second row
+    for _, row in df.iloc[1:].iterrows():
+        rm = row['reducing_mass']
+        rt = row['RT']
+        intensity = row['intensity']
+        peak_d = row['peak_d']
+        found = False
+        for cluster in clusters:
+            last_rm = cluster['reducing_mass'][-1]
+            last_rt = cluster['RT'][-1]
+            if abs(last_rm - rm) <= 0.5 and abs(last_rt - rt) <= 1:
+                cluster['reducing_mass'].append(rm)
+                cluster['RT'].append(rt)
+                cluster['intensity'].append(intensity)
+                cluster['peak_d'].append(peak_d)
+                found = True
+                break
+        if not found:
+            clusters.append({
+                'reducing_mass': [rm],
+                'RT': [rt],
+                'intensity': [intensity],
+                'peak_d': [peak_d],
+            })
 
-def break_alert_loop(t):
-    """iteratively split list if there is a discontinuity\n
-   | Arguments:
-   | :-
-   | t (list): list of ordered floats (retention times in this case)\n
-   | Returns:
-   | :-
-   | (1) nested lists of grouped retention times, split by discontinuities
-   | (2) list of length of each group of retention times
-   """
-    out = []
-    out_len = []
-    temp = break_alert(t)
-    out.append(temp[0])
-    out_len.append(len(temp[0]))
-    while len(temp) > 1:
-        temp = break_alert(temp[1])
-        out.append(temp[0])
-        out_len.append(len(temp[0]))
-    return out, out_len
-
-
-def get_rep_spectra(rt_label_in, intensity = False):
-    """select representative spectra from the middle of a peak\n
-   | Arguments:
-   | :-
-   | rt_label_in (list): list of retention times (float)
-   | intensity (bool): whether to use intensity for relative abundance estimation; default: False\n
-   | Returns:
-   | :-
-   | (1) list of indices for the respective representative spectra
-   | (2) nested lists of indices for each spectrum group, to group their intensities, if intensity=True; else empty list
-   | (3) list of length of each group of retention times (i.e., number of spectra)
-   """
-    if len(rt_label_in) == 0:
-        return [], [], []
-    if len(rt_label_in) == 1:
-        return [0], [0], [1]
-    rt_label = sorted(rt_label_in)
-    X = np.array(rt_label).reshape(-1, 1)
-    clustering = AgglomerativeClustering(n_clusters = None, distance_threshold = 0.5).fit(X)
-    unique_labels = set(clustering.labels_)
-    grouped_rt = [
-        [rt_label[i] for i, label in enumerate(clustering.labels_) if label == unique_label]
-        for unique_label in unique_labels
-        ]
-    group_lengths = [len(group) for group in grouped_rt]
-    median_indices = [
-        group.index(np.percentile(group, 50, method = 'nearest'))
-        for group in grouped_rt
-        ]
-    median_indices_in_input = [
-        rt_label_in.index(grouped_rt[i][median_idx])
-        for i, median_idx in enumerate(median_indices)
-        ]
-    if intensity:
-        intensity_indices = [
-            [rt_label_in.index(rt) for rt in group]
-            for group in grouped_rt
-            ]
-        return median_indices_in_input, intensity_indices, group_lengths
-    return median_indices_in_input, [], group_lengths
-
-def group_by_labels(data, labels, unique_labels):
-    return [[data[k] for k in range(len(data)) if labels[k] == j] for j in unique_labels]
-
-def process_intensity(intensity, sort_idx, labels, unique_labels, inty_idx):
-    intensity = np.array(intensity)[sort_idx]
-    grouped_intensity = group_by_labels(intensity, labels, unique_labels)
-    processed_intensity = [[[grouped_intensity[k][z] for z in j] if isinstance(j, list) else [grouped_intensity[k][j]] for j in inty_idx[k]] for k in range(len(grouped_intensity))]
-    return unwrap([[sum(j) for j in k] if isinstance(k[0], list) else [k] for k in processed_intensity])
-
-def extract_data(data, labels, unique_labels, inty_idx, func):
-    grouped_data = group_by_labels(data, labels, unique_labels)
-    processed_data = [[[grouped_data[k][z] for z in j] if isinstance(j, list) else [grouped_data[k][j]] for j in inty_idx[k]] for k in range(len(grouped_data))]
-    return unwrap([[func(j) for j in k] if isinstance(k[0], list) else [k] for k in processed_data])
-
-def extract_rep_values(data, labels, unique_labels, rt_idx):
-    grouped_data = group_by_labels(data, labels, unique_labels)
-    return unwrap([[grouped_data[k][j] for j in rt_idx[k]] for k in range(len(grouped_data))])
-
-def build_mean_dic(dicty, rt, intensity):
-    """organizes a spectra cluster into an averaged spectrum\n
-   | Arguments:
-   | :-
-   | dicty (dict): dictionary of form m/z : spectrum
-   | rt (list): list of retention times
-   | intensity (list): list of intensities\n
-   | Returns:
-   | :-
-   | (1) list of peak m/z
-   | (2) list of spectra, of form peak m/z:intensity
-   | (3) list of retention times
-   | (4) list of number of spectra per spectra cluster
-   | (5) (optional) list of intensities for each spectra cluster
-   """
-    inty_check = len(intensity) > 0
-    # Sort in preparation for discontinuity check; bring everything in same order defined by sort_idx
-    sort_idx = np.argsort(list(dicty.keys()))
-    dicty = dict(sorted(dicty.items()))
-    # Detect mass groups of spectra by scanning for m/z discontinuities > 0.5
-    labels = assign_dict_labels(dicty)
-    unique_labels = set(labels)
-    rt = np.array(rt)[sort_idx]
-    grouped_rt = group_by_labels(rt, labels, unique_labels)
-    # Detect retention groups of mass groups & retrieve indices representative spectra
-    rt_idx, inty_idx, num_spectra = zip(*[get_rep_spectra(k, intensity = True) for k in grouped_rt])
-    num_spectra = unwrap(num_spectra)
-    intensity = process_intensity(intensity, sort_idx, labels, unique_labels, inty_idx) if inty_check else []
-    # Get m/z, predictions, and prediction confidence of those representative spectra
-    keys = extract_data(list(dicty.keys()), labels, unique_labels, inty_idx, np.min)
-    values = extract_data(list(dicty.values()), labels, unique_labels, inty_idx, average_dicts)
-    rep_values = extract_rep_values(list(dicty.values()), labels, unique_labels, rt_idx)
-    rts = [[[grouped_rt[k][z] for z in j] if isinstance(j, list) else [grouped_rt[k][j]] for j in inty_idx[k]] for k in range(len(grouped_rt))]
-    rts = unwrap([[np.mean(j) for j in k] if isinstance(k[0], list) else [k] for k in rts])
-    return keys, values, rts, num_spectra, rep_values, intensity if inty_check else []
+    # Create a condensed dataframe
+    condensed_data = []
+    for cluster in clusters:
+        min_rm = min(cluster['reducing_mass'])
+        mean_rt = np.mean(cluster['RT'])
+        sum_intensity = np.nansum(cluster['intensity'])
+        avg_peak_d = average_dicts(cluster['peak_d'], mode='max')
+        num_spectra = len(cluster['RT'])
+        condensed_data.append([min_rm, mean_rt, sum_intensity, avg_peak_d, num_spectra])
+    condensed_df = pd.DataFrame(condensed_data, columns = ['reducing_mass', 'RT', 'intensity', 'peak_d','num_spectra'])
+    return condensed_df
 
 
 def deduplicate_predictions(df):
@@ -578,7 +489,7 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
         # Check whether it's a glycan spectrum
         top_fragments = np.array(df_out['top_fragments'].iloc[k][:10])
         if not np.any(np.abs(top_fragments[:, None] - cmasses) < 1.5):
-            df_out.at[k, 'predictions'] = ['remove']
+            df_out.iat[k, 0] = ['remove']
             continue
         for i, m in enumerate(current_preds):
             m = m[0]
@@ -896,19 +807,18 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Prepare file for processing
     loaded_file.dropna(subset = ['peak_d'], inplace = True)
     loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
-    inty = loaded_file['intensity'].values if intensity else []
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
-    keys, values, RT, num_spectra, rep_values, intensity = build_mean_dic(spec_dic, loaded_file.RT.values.tolist(), inty)
-    loader, df_out = process_for_inference(keys, values, RT, num_spectra, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, bin_num = bin_num)
-    df_out['peak_d'] = rep_values
+    df_out = condense_dataframe(loaded_file)
+    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, bin_num = bin_num)
+    df_out['peak_d'] = [spec_dic[m] for m in df_out.index]
     # Predict glycans from spectra
     preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
     if device != 'cpu':
         preds, pred_conf = average_preds(preds, pred_conf)
     if intensity:
-        df_out['rel_abundance'] = intensity
+        df_out['rel_abundance'] = df_out['intensity']
     df_out['predictions'] = [[(pred, conf) for pred, conf in zip(pred_row, conf_row)] for pred_row, conf_row in zip(preds, pred_conf)]
     # Check correctness of glycan class & mass
     df_out['predictions'] = [
