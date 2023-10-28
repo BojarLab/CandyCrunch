@@ -311,7 +311,7 @@ def assign_dict_labels(dicty):
     return labels
 
 
-def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', mass_tag = None,
+def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', mass_tag = 0,
                double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500):
     """determine whether glycan could explain m/z\n
    | Arguments:
@@ -321,7 +321,7 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB, or 'custom'; default:'reduced'
-   | mass_tag (float): label mass to add when calculating possible m/z if modification == 'custom'; default:None
+   | mass_tag (float): label mass to add when calculating possible m/z if modification == 'custom'; default:0
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
    | triple_thresh (float): mass threshold over which to consider triply-charged ions; default:1500
    | quadruple_thresh (float): mass threshold over which to consider quadruply-charged ions; default:3500\n
@@ -332,15 +332,12 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
     if libr is None:
         libr = lib
     try:
-        mz = glycan_to_mass(glycan, sample_prep='permethylated' if modification == 'permethylated' else 'underivatized')
+        mz = glycan_to_mass(glycan, sample_prep= modification if modification in ["permethylated", "peracetylated"] else 'underivatized')
     except:
         return False
-    if modification in modification_mass_dict:
-        mz += modification_mass_dict[modification]
-    elif modification == 'custom':
-        mz += mass_tag
-    adduct_mass = mass_dict['Acetate'] if mode == 'negative' else mass_dict['Na+']
-    og_list = [mz, mz + adduct_mass]
+    mz += modification_mass_dict[modification] if modification in modification_mass_dict else mass_tag
+    adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
+    og_list = [mz] + [mz + mass_dict[adduct] for adduct in adduct_list]
     mz_list = og_list.copy()
     thresh = 0.5
     for z, threshold, charge_adjust in zip(
@@ -669,17 +666,19 @@ def adduct_detect(df, mode, modification):
    | :-
    | Returns adduct-filled dataframe
    """
-    adduct = 'Acetate' if mode == 'negative' else 'Na+'
-    adduct_mass = mass_dict[adduct]
-    if modification == 'reduced':
-        adduct_mass += 1.0078
+    adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
     compositions = df['composition'].values
     charges = df['charge'].values
     indices = df.index.values
     computed_masses = np.array([composition_to_mass(composition) for composition in compositions])
     observed_masses = indices * np.abs(charges) + (np.abs(charges) - 1)
-    adduct_check = np.abs(computed_masses + adduct_mass - observed_masses) < 0.5
-    df['adduct'] = np.where(adduct_check, adduct, None)
+    df['adduct'] = None
+    for adduct in adduct_list:
+        adduct_mass = mass_dict.get(adduct, 999)
+        if modification == 'reduced':
+            adduct_mass += 1.0078
+        adduct_check = np.abs(computed_masses + adduct_mass - observed_masses) < 0.5
+        df.loc[adduct_check, 'adduct'] = adduct
     return df
 
 
