@@ -22,7 +22,6 @@ from glycowork.motif.tokenization import (composition_to_mass,
                                           mz_to_composition)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mzxml
-from sklearn.cluster import AgglomerativeClustering
 
 from CandyCrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
                                transform_prec, transform_rt)
@@ -191,7 +190,7 @@ def normalize_dict(peak_d):
 
 
 def process_for_inference(df, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
-                          trap = 'linear', min_mz = 39.714, max_mz = 3000, bin_num = 2048):
+                          trap = 'linear'):
     """processes averaged spectra for them being inputs to CandyCrunch\n
    | Arguments:
    | :-
@@ -200,10 +199,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
-   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
-   | min_mz (float): minimal m/z used for binning; don't change; default:39.714
-   | max_mz (float): maximal m/z used for binning; don't change; default:3000
-   | bin_num (int): number of bins for binning; don't change; default: 2048\n
+   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'\n
    | Returns:
    | :-
    | (1) a dataloader used for model prediction
@@ -215,16 +211,9 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
               modification = np.select([modification == 'reduced', modification == 'permethylated'], [0, 1], 2),
               trap = np.select([trap == 'linear', trap == 'orbitrap', trap == 'amazon'], [0, 1, 2], 3))
     df['glycan'] = [0]*len(df)
-    # Intensity normalization
-    df['peak_d'] = df['peak_d'].apply(normalize_dict)
     # Retention time normalization
     max_rt = max(max(df['RT']), 30)
     df['RT2'] = df['RT'] / max_rt
-    # Intensity binning
-    step = (max_mz - min_mz) / (bin_num - 1)
-    frames = np.array([min_mz + step * i for i in range(bin_num)])
-    binned_data = df['peak_d'].apply(lambda x: bin_intensities(x, frames))
-    df[['binned_intensities', 'mz_remainder']] = pd.DataFrame(binned_data.tolist())
     # Dataloader generation
     X = list(zip(df.binned_intensities.values.tolist(), df.mz_remainder.values.tolist(), df.reducing_mass.values.tolist(), df.glycan_type.values.tolist(),
                  df.RT2.values.tolist(), df['mode'].values.tolist(), df.lc.values.tolist(), df.modification.values.tolist(), df.trap.values.tolist()))
@@ -280,28 +269,6 @@ def get_topk(dataloader, model, glycans, k = 25, temp = False, temperature = tem
     return preds, conf.tolist()
 
 
-def assign_dict_labels(dicty):
-    """bin dictionary items according to key values\n
-   | Arguments:
-   | :-
-   | dicty (dict): dictionary of form m/z : spectrum\n
-   | Returns:
-   | :-
-   | Returns a list of labels used for binning/grouping the dict items
-   """
-    k = 0
-    labels = []
-    prev_key = None
-    for curr_key in dicty.keys():
-        if prev_key is not None and abs(curr_key - prev_key) < 0.5:
-            labels.append(k)
-        else:
-            k += 1
-            labels.append(k)
-        prev_key = curr_key
-    return labels
-
-
 def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', mass_tag = 0,
                double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500):
     """determine whether glycan could explain m/z\n
@@ -341,7 +308,26 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
     return [m for m in mz_list if abs(mass - m) < thresh]
 
 
-def condense_dataframe(df):
+def normalize_array(input_array):
+    array_sum = input_array.sum()
+    return input_array / array_sum
+
+
+def condense_dataframe(df, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
+    """groups spectra and combines the clusters into averaged and binned spectra\n
+    | Arguments:
+    | :-
+    | df (dataframe): dataframe from load_spectra_filepath
+    | min_mz (float): minimal m/z used for binning; don't change; default:39.714
+    | max_mz (float): maximal m/z used for binning; don't change; default:3000
+    | bin_num (int): number of bins for binning; don't change; default: 2048\n
+    | Returns:
+    | :-
+    | Returns a dataframe that has one row per RT-Mass cluster
+    """
+    # Intensity binning
+    step = (max_mz - min_mz) / (bin_num - 1)
+    frames = np.array([min_mz + step * i for i in range(bin_num)])
     # Initialize an empty dictionary to hold the results
     results_dict = {}
     clusters= []
@@ -387,10 +373,14 @@ def condense_dataframe(df):
         min_rm = min(cluster['reducing_mass'])
         mean_rt = np.mean(cluster['RT'])
         sum_intensity = np.nansum(cluster['intensity'])
-        avg_peak_d = average_dicts(cluster['peak_d'], mode='max')
+        binned_intensities, mz_remainder = zip(*[bin_intensities(c, frames) for c in cluster['peak_d']])
+        binned_intensities = np.mean(np.array(binned_intensities), axis = 0)
+        mz_remainder = np.mean(np.array(mz_remainder), axis = 0)
+        # Bin intensity normalization
+        binned_intensities = normalize_array(binned_intensities)
         num_spectra = len(cluster['RT'])
-        condensed_data.append([min_rm, mean_rt, sum_intensity, avg_peak_d, num_spectra])
-    condensed_df = pd.DataFrame(condensed_data, columns = ['reducing_mass', 'RT', 'intensity', 'peak_d','num_spectra'])
+        condensed_data.append([min_rm, mean_rt, sum_intensity, binned_intensities, mz_remainder, num_spectra])
+    condensed_df = pd.DataFrame(condensed_data, columns = ['reducing_mass', 'RT', 'intensity', 'binned_intensities', 'mz_remainder', 'num_spectra'])
     return condensed_df
 
 
@@ -752,9 +742,8 @@ def load_spectra_filepath(spectra_filepath):
     raise FileNotFoundError('Incorrect filepath or extension, please ensure it is in the intended directory and is one of the supported formats')
 
 
-def calculate_ppm_error(theoretical_mass,observed_mass):
-    ppm_error = ((theoretical_mass-observed_mass)/theoretical_mass)* (10**6)
-    return ppm_error
+def calculate_ppm_error(theoretical_mass, observed_mass):
+    return ((theoretical_mass-observed_mass)/theoretical_mass)* (10**6)
 
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
@@ -810,8 +799,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
-    df_out = condense_dataframe(loaded_file)
-    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, bin_num = bin_num)
+    df_out = condense_dataframe(loaded_file, bin_num = bin_num)
+    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap)
     df_out['peak_d'] = [spec_dic[m] for m in df_out.index]
     # Predict glycans from spectra
     preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
