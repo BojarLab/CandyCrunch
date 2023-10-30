@@ -370,8 +370,14 @@ def condense_dataframe(df, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
     # Create a condensed dataframe
     condensed_data = []
     for cluster in clusters:
-        min_rm = min(cluster['reducing_mass'])
-        mean_rt = np.mean(cluster['RT'])
+        highest_intensity_index = np.argmax(cluster['intensity'])
+        highest_intensity = cluster['intensity'][highest_intensity_index]
+        if highest_intensity > 0:
+            min_rm = cluster['reducing_mass'][highest_intensity_index]
+            mean_rt = cluster['RT'][highest_intensity_index]
+        else:
+            min_rm = min(cluster['reducing_mass'])
+            mean_rt = np.mean(cluster['RT'])
         sum_intensity = np.nansum(cluster['intensity'])
         binned_intensities, mz_remainder = zip(*[bin_intensities(c, frames) for c in cluster['peak_d']])
         binned_intensities = np.mean(np.array(binned_intensities), axis = 0)
@@ -793,6 +799,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     if intensity:
         loaded_file['intensity'].fillna(0, inplace = True)
+    else:
+        loaded_file['intensity'] = [0]*len(loaded_file)
     # Prepare file for processing
     loaded_file.dropna(subset = ['peak_d'], inplace = True)
     loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
