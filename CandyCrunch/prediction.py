@@ -313,29 +313,6 @@ def normalize_array(input_array):
     return input_array / array_sum
 
 
-def group_RT_by_intensity(df):
-    """groups retention times up to one minute above each RT at the local largest ion intensity\n 
-    | Arguments:
-    | :-
-    | df (dataframe): dataframe containing spectra within the same reducing mass grouping
-    | Returns:
-    | :-
-    | Returns the same dataframe with a column containing the RT group for each spectrum
-    """
-    breaks = []
-    current_peak = (df.iloc[0].at['RT'],df.iloc[0].at['intensity'])
-    for retention_time,intensity in zip(df.RT,df.intensity):
-      if retention_time - current_peak[0] < 1:
-        current_peak = max([current_peak,(retention_time,intensity)],key = lambda x: x[1])
-        breaks.append(False)
-      else:
-        current_peak = (retention_time,intensity)
-        breaks.append(True)
-    df= df.assign(RT_group = breaks)
-    df= df.assign(RT_group = df.RT_group.cumsum())
-    return df
-
-
 def condense_dataframe(df, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
     """groups spectra and combines the clusters into averaged and binned spectra\n
     | Arguments:
@@ -354,28 +331,51 @@ def condense_dataframe(df, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
     # Initialize an empty dictionary to hold the results
     results_dict = {}
     clusters= []
-    intensity_presence = any(df.intensity)
-    # Sort the dataframe by 'reducing_mass' and group reducing masses
-    df = df.sort_values('reducing_mass')
-    df = df.assign(mass_group = (abs(df.reducing_mass - df.reducing_mass.shift(1)) > 0.5).cumsum())
+    # Sort the dataframe by 'reducing_mass' and 'RT'
+    df['rounded_reducing_mass'] = np.round(df['reducing_mass'] * 2) / 2
+    df['rounded_RT'] = np.round(df['RT'], 1)
+    df.sort_values(by = ['rounded_reducing_mass', 'rounded_RT'], inplace = True)
+    df.drop(['rounded_reducing_mass', 'rounded_RT'], axis = 1, inplace = True)
+    # Initialize the first cluster
+    first_row = df.iloc[0]
+    clusters.append({
+        'reducing_mass': [first_row['reducing_mass']],
+        'RT': [first_row['RT']],
+        'intensity': [first_row['intensity']],
+        'peak_d': [first_row['peak_d']],
+        'max_intensity': [first_row['intensity']]
+    })
 
-    # Sort the dataframe by both grouped mass and 'RT', then group rentention times
-    df = df.sort_values(['mass_group','RT'])
-    if intensity_presence:
-      # Assign retention time groups based on precursor ion intensity peaks
-      for _, mass_group_df in df.groupby('mass_group'):
-        mass_group_df = group_RT_by_intensity(mass_group_df)
-        if len(set(mass_group_df.RT_group)) == 1:
-          clusters.append(mass_group_df.to_dict(orient='list'))
-        else:
-          for _, final_group_df in mass_group_df.groupby('RT_group'):
-            clusters.append(final_group_df.to_dict(orient='list'))
-    else:
-      #Assign retention time groups based on gaps between RT values
-      df = df.assign(RT_group = abs(df.RT - df.RT.shift(1)) > 1)
-      df = df.assign(RT_group = df.groupby('mass_group')['RT_group'].cumsum())
-      for _, final_group_df in df.groupby(['mass_group','RT_group']):
-        clusters.append(final_group_df.to_dict(orient='list'))
+    # Loop through the sorted dataframe starting from the second row
+    for _, row in df.iloc[1:].iterrows():
+        rm = row['reducing_mass']
+        rt = row['RT']
+        intensity = row['intensity']
+        peak_d = row['peak_d']
+        found = False
+        for cluster in clusters:
+            last_max = cluster['max_intensity'][-1]
+            if last_max > 0:
+                idx = np.argmax(cluster['max_intensity'])
+                last_rm, last_rt = cluster['reducing_mass'][idx], cluster['RT'][idx]
+            else:
+                last_rm, last_rt = cluster['reducing_mass'][-1], cluster['RT'][-1]
+            if abs(last_rm - rm) <= 0.5 and abs(last_rt - rt) <= 1:
+                cluster['reducing_mass'].append(rm)
+                cluster['RT'].append(rt)
+                cluster['intensity'].append(intensity)
+                cluster['peak_d'].append(peak_d)
+                cluster['max_intensity'].append(intensity if intensity > last_max else last_max)
+                found = True
+                break
+        if not found:
+            clusters.append({
+                'reducing_mass': [rm],
+                'RT': [rt],
+                'intensity': [intensity],
+                'peak_d': [peak_d],
+                'max_intensity': [intensity],
+            })
 
     # Create a condensed dataframe
     condensed_data = []
