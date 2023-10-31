@@ -37,7 +37,7 @@ Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `C
   
 Requires at a minimum:
 - a filepath to an mzML/mzXML file or a .xlsx file containing their extracted spectra
-- the glycan class measured ("N", "O", "lipid", "free", or "other")
+- the glycan class measured ("N", "O", "lipid", "free")
 ```python
 annotated_spectra_df = wrap_inference(C:/myfiles/my_spectra.mzML, glycan_class)
 ```
