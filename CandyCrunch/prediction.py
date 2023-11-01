@@ -858,8 +858,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
     if device != 'cpu':
         preds, pred_conf = average_preds(preds, pred_conf)
-    if intensity:
-        df_out['rel_abundance'] = df_out['intensity']
+    df_out['rel_abundance'] = df_out['intensity']
     df_out['predictions'] = [[(pred, conf) for pred, conf in zip(pred_row, conf_row)] for pred_row, conf_row in zip(preds, pred_conf)]
     # Check correctness of glycan class & mass
     df_out['predictions'] = [
@@ -885,9 +884,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         for comp, idx in zip(df_out['composition'], df_out.index)
         ]
     df_out['RT'] = df_out['RT'].round(2)
-    cols = ['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d']
-    if intensity:
-        cols.append('rel_abundance')
+    cols = ['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d','rel_abundance']
     df_out = df_out[cols]
     # Fill up possible gaps of singly-/doubly-charged spectra of the same structure
     df_out = backfill_missing(df_out)
@@ -950,6 +947,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Normalize relative abundances if relevant
     if intensity:
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
+    else:
+        df_out.drop(['rel_abundance'], axis = 1, inplace = True)
     return (df_out, spectra_out) if spectra else df_out
 
 
