@@ -766,7 +766,7 @@ def combine_charge_states(df_out):
     """looks for several charges at the same RT with the same top prediction and combines their relative abundances\n
     | Arguments:
     | :-
-    | df_out (dataframe): prediction dataframe generated within wrap_inference
+    | df_out (dataframe): prediction dataframe generated within wrap_inference\n
     | Returns:
     | :-
     | Returns prediction dataframe where the singly-charged state now carries the sum of abundances
@@ -836,8 +836,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     reduced = 1.0078 if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
-    if loaded_file['RT'].max() > 2:
+    if loaded_file['RT'].max() > 20:
       loaded_file = loaded_file[loaded_file['RT'] >= 2].reset_index(drop = True)
+    if loaded_file['RT'].max() > 40:
+      loaded_file = loaded_file[loaded_file['RT'] < 0.9*loaded_file['RT'].max()].reset_index(drop = True)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     if intensity:
         loaded_file['intensity'].fillna(0, inplace = True)
