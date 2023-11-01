@@ -366,6 +366,9 @@ def condense_dataframe(df, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
                 cluster['intensity'].append(intensity)
                 cluster['peak_d'].append(peak_d)
                 cluster['max_intensity'].append(intensity if intensity > last_max else last_max)
+                if len(cluster['intensity']) == 3:
+                  if cluster['intensity'][0] > cluster['intensity'][1] > cluster['intensity'][2]:
+                    cluster = None
                 found = True
                 break
         if not found:
