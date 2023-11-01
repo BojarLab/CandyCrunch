@@ -762,6 +762,36 @@ def calculate_ppm_error(theoretical_mass, observed_mass):
     return ((theoretical_mass-observed_mass)/theoretical_mass)* (10**6)
 
 
+def combine_charge_states(df_out):
+    """looks for several charges at the same RT with the same top prediction and combines their relative abundances\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): prediction dataframe generated within wrap_inference
+    | Returns:
+    | :-
+    | Returns prediction dataframe where the singly-charged state now carries the sum of abundances
+    """
+    df_out['top_pred'] = [k[0][0] if len(k) > 0 else np.nan for k in df_out.predictions]
+    repeated_top_pred = df_out['top_pred'].value_counts()
+    repeated_top_pred = repeated_top_pred[repeated_top_pred > 1].index.tolist()
+    filtered_top_pred = []
+    for pred in repeated_top_pred:
+        charge_values = df_out[df_out['top_pred'] == pred]['charge']
+        if abs(charge_values.max() - charge_values.min()) >= 1:
+            filtered_top_pred.append(pred)
+    df_filtered = df_out[df_out['top_pred'].isin(filtered_top_pred)].copy()
+    for pred in filtered_top_pred:
+        idx = df_filtered.index[len(df_filtered) - 1 - df_filtered.top_pred.values.tolist()[::-1].index(pred)]
+        idx_rt = df_filtered.loc[idx, 'RT']
+        for k, row in df_filtered[:idx-1][::-1].iterrows():
+            if row['top_pred'] == pred and abs(row['RT'] -idx_rt) < 1:
+                df_filtered.at[idx, 'rel_abundance'] += row['rel_abundance']
+                df_filtered.drop(k, inplace = True)
+    df_out = pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index()
+    df_out.drop(['top_pred'], axis = 1 , inplace = True)
+    return df_out
+
+
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear',
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
@@ -806,6 +836,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     reduced = 1.0078 if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
+    if loaded_file['RT'].max() > 2:
+      loaded_file = loaded_file[loaded_file['RT'] >= 2].reset_index(drop = True)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     if intensity:
         loaded_file['intensity'].fillna(0, inplace = True)
@@ -912,6 +944,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out['composition'] = [glycan_to_composition(k[0][0]) if k else val for k, val in zip(df_out['predictions'], df_out['composition'])]
     df_out['charge'] = round(df_out['composition'].apply(composition_to_mass) / df_out.index) * multiplier
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
+    df_out = combine_charge_states(df_out)
     # Normalize relative abundances if relevant
     if intensity:
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
