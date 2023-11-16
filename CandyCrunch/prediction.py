@@ -78,23 +78,23 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 temp = spectrum.highest_peaks(2)
             except:
                 continue
-        mz_i_dict = {}
-        num_actual_peaks = min(num_peaks, len(spectrum.peaks("raw")))
-        for mz, i in spectrum.highest_peaks(num_actual_peaks):
-            mz_i_dict[mz] = i
-        if mz_i_dict:
-            key = f"{spectrum.ID}_{spectrum.selected_precursors[0]['mz']}"
-            highest_i_dict[key] = mz_i_dict
-            reducing_mass.append(float(key.split('_')[-1]))
-            rts.append(spectrum.scan_time_in_minutes())
-        if intensity:
-            inty = spectrum.selected_precursors[0].get('i', np.nan)
-            intensities.append(inty)
-        df_out = pd.DataFrame({
-            'reducing_mass': reducing_mass,
-            'peak_d': list(highest_i_dict.values()),
-            'RT': rts,
-            })
+            mz_i_dict = {}
+            num_actual_peaks = min(num_peaks, len(spectrum.peaks("raw")))
+            for mz, i in spectrum.highest_peaks(num_actual_peaks):
+                mz_i_dict[mz] = i
+            if mz_i_dict:
+                key = f"{spectrum.ID}_{spectrum.selected_precursors[0]['mz']}"
+                highest_i_dict[key] = mz_i_dict
+                reducing_mass.append(float(key.split('_')[-1]))
+                rts.append(spectrum.scan_time_in_minutes())
+            if intensity:
+                inty = spectrum.selected_precursors[0].get('i', np.nan)
+                intensities.append(inty)
+    df_out = pd.DataFrame({
+        'reducing_mass': reducing_mass,
+        'peak_d': list(highest_i_dict.values()),
+        'RT': rts,
+        })
     if intensity:
         df_out['intensity'] = intensities
     return df_out
