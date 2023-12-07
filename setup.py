@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="CandyCrunch",
-    version="0.2.1",
+    version="0.2.2",
     author="Daniel Bojar",
     author_email="daniel.bojar@gu.se",
     description="Package for predicting glycan structure from LC-MS/MS data",

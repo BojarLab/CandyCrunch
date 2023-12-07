@@ -1,4 +1,4 @@
-glycowork~=0.8.1
+glycowork~=1.0.1
 regex
 networkx
 scipy
@@ -10,6 +10,9 @@ statsmodels
 pymzml
 statsmodels
 pyteomics
+lxml
+torchvision
+openpyxl
 
 [draw]
 glycowork[draw]~=0.8.1
