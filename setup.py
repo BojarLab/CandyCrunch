@@ -25,6 +25,6 @@ setuptools.setup(
                       "scipy", "torch~=2.0", "numpy_indexed",
                       "seaborn", "pandas", "statsmodels",
                       "pymzml", "statsmodels", "pyteomics",
-                      "lxml", "torchvision"],
+                      "lxml", "torchvision", "openpyxl"],
     extras_require={'draw':["glycowork[draw]~=0.8.1"]},
 )
