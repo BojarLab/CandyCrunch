@@ -2,6 +2,7 @@ import ast
 import copy
 import operator
 import os
+import re
 import pickle
 from itertools import combinations
 from collections import defaultdict
@@ -621,38 +622,58 @@ def average_preds(preds, conf, k = 5):
     return out_p, out_c
 
 
-def impute(df_out):
-    """searches for specific isomers that could be added to the prediction dataframe\n
+def generate_variants(sequence):
+    """generates all possible Neu5Ac/Neu5Gc substitutions of sequence\n
    | Arguments:
    | :-
-   | df_out (dataframe): prediction dataframe generated within wrap_inference\n
+   | sequence (string): glycan in IUPAC-condensed nomenclature\n
+   | Returns:
+   | :-
+   | Returns a list of sequences with possible Neu5Ac/Neu5Gc substitutions
+   """
+   # Identify all occurrences of Neu5Ac and Neu5Gc
+   occurrences = [(m.start(), m.group()) for m in re.finditer(r'Neu5(Ac|Gc)', sequence)]
+   # Generate all combinations of substitutions
+   variants = [sequence]
+   for index, original in occurrences:
+       new_variants = []
+       for variant in variants:
+           if original == 'Neu5Ac':
+               # Replace Neu5Ac with Neu5Gc and adjust the mass
+               new_variant = variant[:index] + 'Neu5Gc' + variant[index + 6:]
+          else:
+              # Replace Neu5Gc with Neu5Ac and adjust the mass
+              new_variant = variant[:index] + 'Neu5Ac' + variant[index + 6:]
+          new_variants.append(new_variant)
+       variants.extend(new_variants)
+   return variants
+
+
+def impute(df_out, libr = None, mode = 'negative', modification = 'reduced', mass_tag = 0):
+   """searches for specific isomers that could be added to the prediction dataframe\n
+   | Arguments:
+   | :-
+   | df_out (dataframe): prediction dataframe generated within wrap_inference
+   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+   | mode (string): mass spectrometry mode, either 'negative' or 'positive'
+   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'
+   | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None\n
    | Returns:
    | :-
    | Returns prediction dataframe with imputed predictions (if possible)
    """
-    predictions_list = df_out.predictions.values.tolist()
-    index_list = df_out.index.tolist()
-    charge_list = df_out.charge.values.tolist()
-    composition_list = df_out.composition.values.tolist()
-    for k in range(len(df_out)):
-        pred_k = predictions_list[k]
-        index_k = index_list[k]
-        charge_k = charge_list[k]
-        if len(pred_k) > 0:
-            for j in range(len(df_out)):
-                pred_j = predictions_list[j]
-                index_j = index_list[j]
-                charge_j = charge_list[j]
-                composition_j = composition_list[j]
-                if len(pred_j) < 1:
-                    charge_max_k = max([abs(charge_k), 1])
-                    # Condition for 'Neu5Gc'
-                    if abs(index_k + (16.0051 / charge_max_k) - index_j) < 0.5 and 'Neu5Gc' in composition_j.keys():
-                        df_out.iat[j, 0] = [(m[0].replace('Neu5Ac', 'Neu5Gc', 1),) for m in pred_k]
-                    # Condition for 'Neu5Ac'
-                    elif abs(index_k - (16.0051 / charge_max_k) - index_j) < 0.5 and 'Neu5Ac' in composition_j.keys():
-                        df_out.iat[j, 0] = [(m[0].replace('Neu5Gc', 'Neu5Ac', 1),) for m in pred_k]
-    return df_out
+   libr = lib if libr is None else libr
+   predictions_list = df_out.predictions.values.tolist()
+   index_list = df_out.index.tolist()
+   seqs = [p[0][0] for p in predictions_list if p and ("Neu5Ac" in p[0][0] or "Neu5Gc" in p[0][0])]
+   variants = set(unwrap([generate_variants(s) for s in seqs]))
+   for i, k in enumerate(predictions_list):
+       if len(k) < 1:
+           for v in variants:
+               if mass_check(index_list[i], v, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag):
+                   df_out.iat[i, 0] = [(v, )]
+                   break
+   return df_out
 
 
 def possibles(df_out, mass_dic, reduced):
@@ -812,6 +833,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'; default:'reduced'
+   | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
@@ -914,7 +936,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             pass
     # Check for Neu5Ac-Neu5Gc swapped structures and search for glycans within SugarBase that could explain some of the spectra
     if experimental:
-        df_out = impute(df_out)
+        df_out = impute(df_out, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag)
         mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_class)
         df_out = possibles(df_out, mass_dic, reduced)
         df_out['evidence'] = [
