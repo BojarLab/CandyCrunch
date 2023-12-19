@@ -314,11 +314,13 @@ def normalize_array(input_array):
     return input_array / array_sum
 
 
-def condense_dataframe(df, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
+def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
     """groups spectra and combines the clusters into averaged and binned spectra\n
     | Arguments:
     | :-
     | df (dataframe): dataframe from load_spectra_filepath
+    | mz_diff (float): mass tolerance for assigning spectra to the same peak; default:0.5
+    | rt_diff (float): retention time tolerance (in minutes) for assigning spectra to the same peak; default:1.0
     | min_mz (float): minimal m/z used for binning; don't change; default:39.714
     | max_mz (float): maximal m/z used for binning; don't change; default:3000
     | bin_num (int): number of bins for binning; don't change; default: 2048\n
@@ -361,7 +363,7 @@ def condense_dataframe(df, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
                 last_rm, last_rt = cluster['reducing_mass'][idx], cluster['RT'][idx]
             else:
                 last_rm, last_rt = cluster['reducing_mass'][-1], cluster['RT'][-1]
-            if abs(last_rm - rm) <= 0.5 and abs(last_rt - rt) <= 1:
+            if abs(last_rm - rm) <= mz_diff and abs(last_rt - rt) <= rt_diff:
                 cluster['reducing_mass'].append(rm)
                 cluster['RT'].append(rt)
                 cluster['intensity'].append(intensity)
@@ -817,7 +819,7 @@ def combine_charge_states(df_out):
 
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
-                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear',
+                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
                    taxonomy_class = 'Mammalia', df_use = None):
@@ -836,6 +838,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
+   | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0
+   | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered; default:0
+   | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0
    | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
    | temperature (float): the temperature factor used to calibrate logits; default:1.15
    | spectra (bool): whether to also output the actual spectra used for prediction; default:False
@@ -861,9 +866,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     reduced = 1.0078 if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
-    if loaded_file['RT'].max() > 20:
+    if rt_min:
+      loaded_file = loaded_file[loaded_file['RT'] >= rt_min].reset_index(drop = True)
+    elif loaded_file['RT'].max() > 20:
       loaded_file = loaded_file[loaded_file['RT'] >= 2].reset_index(drop = True)
-    if loaded_file['RT'].max() > 40:
+    if rt_max:
+      loaded_file = loaded_file[loaded_file['RT'] <= rt_max].reset_index(drop = True)
+    elif loaded_file['RT'].max() > 40:
       loaded_file = loaded_file[loaded_file['RT'] < 0.9*loaded_file['RT'].max()].reset_index(drop = True)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     if intensity:
@@ -876,7 +885,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
-    df_out = condense_dataframe(loaded_file, bin_num = bin_num)
+    df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap)
     df_out['peak_d'] = [spec_dic[m] for m in df_out.index]
     # Predict glycans from spectra
