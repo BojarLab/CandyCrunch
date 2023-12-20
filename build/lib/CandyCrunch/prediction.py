@@ -406,11 +406,13 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     return condensed_df
 
 
-def deduplicate_predictions(df):
+def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0):
     """removes/unifies duplicate predictions\n
    | Arguments:
    | :-
-   | df (dataframe): df_out generated within wrap_inference\n
+   | df (dataframe): df_out generated within wrap_inference
+   | mz_diff (float): mass tolerance for assigning spectra to the same peak; default:0.5
+   | rt_diff (float): retention time tolerance (in minutes) for assigning spectra to the same peak; default:1.0\n
    | Returns:
    | :-
    | Returns a deduplicated dataframe
@@ -423,7 +425,7 @@ def deduplicate_predictions(df):
     # Loop through the DataFrame to find duplicates
     for idx, row in df.iterrows():
         # Set a mask for close enough index values and RT values
-        mask = (np.abs(df.index - idx) < 0.5) & (np.abs(df['RT'] - row['RT']) < 1)
+        mask = (np.abs(df.index - idx) < mz_diff) & (np.abs(df['RT'] - row['RT']) < rt_diff)
         # Filter DataFrame based on mask
         sub_df = df[mask]
         # Get the first prediction from the tuple
@@ -931,7 +933,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out,
                            modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
     # Deduplicate identical predictions for different spectra
-    df_out = deduplicate_predictions(df_out)
+    df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
     df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
     # Construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
     if supplement:
@@ -978,6 +980,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out['charge'] = round(df_out['composition'].apply(composition_to_mass) / df_out.index) * multiplier
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
+    # placeholder for GlyTouCan IDs
+    df_out["GlyTouCan_ID"] = np.nan
     # Normalize relative abundances if relevant
     if intensity:
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
@@ -986,7 +990,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     return (df_out, spectra_out) if spectra else df_out
 
 
-def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', modification = 'reduced',mass_tag=None):
+def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', modification = 'reduced', mass_tag = None):
     """searches for biosynthetic precursors of CandyCrunch predictions that could explain peaks\n
    | Arguments:
    | :-
@@ -994,7 +998,8 @@ def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', m
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'; default:'reduced'\n
+   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'; default:'reduced'
+   | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None\n
    | Returns:
    | :-
    | Returns dataframe with supplemented predictions based on biosynthetic network
