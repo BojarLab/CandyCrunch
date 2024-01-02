@@ -136,3 +136,40 @@ def get_category_means(candidate_categories,categories):
     for cand_cats in candidate_categories:
         category_means.append({cat:np.mean([p for q in categories[cat] for p in q]) for cat in cand_cats})
     return category_means
+
+def load_ms2_spectra(directory,filename_label_map):
+    loaded_spectra_list = []
+    for filename,(condition_label,replicate_label) in filename_label_map.items():
+        loaded_spectra = pd.read_excel(directory+filename)
+        split_filename = filename.split('.')[0]
+        loaded_spectra = loaded_spectra.assign(condition_label = [condition_label for x in loaded_spectra.reducing_mass])
+        loaded_spectra = loaded_spectra.assign(replicate_label = [replicate_label for x in loaded_spectra.reducing_mass])
+        loaded_spectra_list.append(loaded_spectra)
+    return pd.concat(loaded_spectra_list,ignore_index=True)  
+
+def assign_RT_group(single_mass_df,RT_gap):
+    single_mass_df = single_mass_df.assign(RT_group = abs(single_mass_df.RT - single_mass_df.RT.shift(1)) > RT_gap)
+    single_mass_df = single_mass_df.assign(RT_group = single_mass_df['RT_group'].cumsum())
+    return single_mass_df
+
+def assign_mass_groups(all_ms2_spectra):
+    all_ms2_spectra = all_ms2_spectra.assign(mass_group = all_ms2_spectra.reducing_mass.round(0))
+    return all_ms2_spectra
+
+def assign_categories(all_ms2_spectra,filename_label_map,masses = None):
+    all_mass_dfs = []
+    if not masses:
+        search_masses = all_ms2_spectra.reducing_mass.round(0).unique()
+    else:
+        search_masses = masses
+    for search_mass in search_masses:
+        mass_group_dfs = []
+        for condition_label in sorted({x[0] for x in filename_label_map.values()}):
+            for replicate_label in [rep for cond,rep in filename_label_map.values() if cond == condition_label]:
+                mass_group = all_ms2_spectra[(all_ms2_spectra['reducing_mass'].astype(float).round(0) == search_mass)&(all_ms2_spectra['condition_label'] == condition_label)&(all_ms2_spectra['replicate_label'] == replicate_label)].copy(deep=True)
+                mass_group = mass_group.sort_values('RT')
+                mass_group = assign_RT_group(mass_group,0.8)
+                mass_group_dfs.append(mass_group)
+        cats_mass_dfs = mass_dfs_to_categories(mass_group_dfs,2.5)
+        all_mass_dfs.append(cats_mass_dfs)
+    return pd.concat([p for q in all_mass_dfs for p in q])  
