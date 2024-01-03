@@ -1,6 +1,9 @@
-import numpy as np
 from collections import Counter
 import itertools
+import numpy as np
+import pandas as pd
+from glycowork.motif.processing import enforce_class
+from prediction import average_dicts,mass_check,process_for_inference,get_topk,average_preds
 
 def add_new_category(categories,cluster):
     new_id = max([x for x in categories])
@@ -172,4 +175,65 @@ def assign_categories(all_ms2_spectra,filename_label_map,masses = None):
                 mass_group_dfs.append(mass_group)
         cats_mass_dfs = mass_dfs_to_categories(mass_group_dfs,2.5)
         all_mass_dfs.append(cats_mass_dfs)
-    return pd.concat([p for q in all_mass_dfs for p in q])  
+    return pd.concat([p for q in all_mass_dfs for p in q])
+
+def normalise_spectrum(peak_dict):
+    dict_total = sum(peak_dict.values())
+    normalised_peak_dict = {k:v for k,v in (pd.Series(peak_dict) / dict_total).items()}
+    return normalised_peak_dict  
+
+def group_df_by_category(single_mass_df):
+    mean_RT = single_mass_df[['reducing_mass','category_label','RT']].groupby('category_label').mean()
+    count_RT = single_mass_df[['reducing_mass','category_label','RT']].groupby('category_label').count()
+    sum_RT = single_mass_df[['intensity','category_label']].groupby('category_label').sum()
+    grouped_categories = pd.concat([mean_RT,sum_RT,count_RT],axis=1).iloc[:,:-1]
+    grouped_categories.columns = ['reducing_mass','RT','intensity','num_spectra']
+    return grouped_categories
+
+def average_category_dicts(single_mass_df):
+    category_averaged_dicts = {}
+    for x in single_mass_df['category_label'].unique():
+        current_cat = single_mass_df[single_mass_df['category_label'] == x]
+        cat_dicts = [y for y in current_cat.peak_d]
+        averaged_dict = average_dicts(cat_dicts)
+        category_averaged_dicts[x] = averaged_dict
+    return category_averaged_dicts
+
+def group_category_spectra(single_mass_df):
+    cat_avg_dicts = average_category_dicts(single_mass_df)
+    single_mass_df = group_df_by_category(single_mass_df)
+    single_mass_df = single_mass_df.assign(peak_d = [cat_avg_dicts[x] for x in single_mass_df.index])
+    return single_mass_df
+
+def generate_valid_predictions(single_mass_df,preds_out,glycan_class,modification='reduced',mode='negative'):
+    candidates = [[y for y in preds_out[idx][:5] if mass_check(mass, y, modification = modification, mode = mode)] for mass,idx in zip(single_mass_df.reducing_mass,single_mass_df.index)]
+    candidates = [[y for y in x if enforce_class(y,glycan_class)] for x in candidates]
+    return candidates
+
+def select_unique_predictions_by_abundance(candidate_predictions):
+    final_predictions = []
+    for category_num in range(len(candidate_predictions)):
+        if candidate_predictions[category_num]:
+            final_prediction = candidate_predictions[category_num][0]
+        else:
+            final_prediction = None
+        candidate_predictions = [[y for y in x if y!=final_prediction] for x in candidate_predictions]
+        final_predictions.append(final_prediction)
+    return final_predictions
+
+def grouped_df_to_preds(grouped_df,glycan_class):
+    inf_loader, inf_df_out = process_for_inference(grouped_df.reducing_mass,grouped_df.peak_d,grouped_df.RT,grouped_df.num_spectra,glycan_class=glycan_class)
+    preds, pred_conf = get_topk(inf_loader, candycrunch, glycans, temp = True, temperature = temperature)
+    preds, pred_conf = average_preds(preds, pred_conf)
+    return preds,pred_conf
+
+def filter_grouped_df_predictions(grouped_df,preds):
+    filtered_preds_df = grouped_df.copy(deep=True)
+    filtered_preds_df = filtered_preds_df.reset_index()
+    filtered_preds_df = filtered_preds_df[(filtered_preds_df.RT>5)&(filtered_preds_df.RT<40)]
+    filtered_preds_df = filtered_preds_df.sort_values('num_spectra',ascending=False)
+    valid_predictions = generate_valid_predictions(filtered_preds_df,preds,'O')
+    unique_predictions = select_unique_predictions_by_abundance(valid_predictions)
+    filtered_preds_df['final_predictions'] = unique_predictions
+    filtered_preds_df = filtered_preds_df[~filtered_preds_df.final_predictions.isnull()]
+    return filtered_preds_df
