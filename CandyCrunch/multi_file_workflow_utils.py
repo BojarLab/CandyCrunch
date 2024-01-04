@@ -262,3 +262,30 @@ def concat_to_annotation_table(concat_df,label_column,intensity_column):
     ant_table = ant_table.set_index('cols').T
     ant_table.index.name = 'Glycan'
     return ant_table.reset_index()
+
+def get_glycan_plot_df(annotation_table,species_name):
+    plot_df = annotation_table[annotation_table.Glycan == species_name].T.reset_index()
+    plot_df = plot_df.iloc[3:]
+    plot_df['condition_label'] = [int(x.split('_')[0].split('condition')[1]) for x in plot_df['cols']]
+    plot_df['replicate_label'] = [int(x.split('_')[1].split('rep')[1]) for x in plot_df['cols']]
+    plot_df = plot_df.rename(columns={plot_df.columns[1]: "intensity" })
+    plot_df = plot_df[['intensity','condition_label','replicate_label']]
+    plot_df = plot_df.sort_values('condition_label')
+    plot_df = plot_df.dropna()
+    return plot_df
+
+def plot_glycan_abundance(plot_df):
+    norm_df = plot_df.groupby('condition_label').mean()[['intensity']]
+    norm_df = norm_df.reset_index()
+    norm_df['condition_label'] = norm_df['condition_label'].astype(int)
+    norm_df = norm_df.sort_values('condition_label')
+    fig, ax = plt.subplots()
+    ax.axvspan(0, 12, alpha=0.3, color='navy')
+    ax.axvspan(24, 36, alpha=0.3, color='navy')
+    sem_df = plot_df.groupby('condition_label').std()[['intensity']]/np.sqrt(plot_df.groupby('condition_label').count()[['intensity']])
+    sem_df = sem_df.reset_index()
+    sem_df['condition_label'] = sem_df['condition_label'].astype(int)
+    sem_df = sem_df.sort_values('condition_label')
+    ax.errorbar(norm_df.condition_label,norm_df.intensity, yerr=sem_df.intensity/2,solid_capstyle='projecting',capsize=3,color = 'purple')
+    ax.grid(alpha=0.5, linestyle=':')
+    plt.show()
