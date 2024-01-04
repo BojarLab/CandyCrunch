@@ -249,3 +249,16 @@ def categories_df_to_unique_predictions(df_out_categories,masses):
         filtered_grouped_df = filter_grouped_df_predictions(grouped_df,p1)
         all_filtered_dfs.append(filtered_grouped_df)
     return pd.concat(all_filtered_dfs,ignore_index=True)
+
+def concat_to_annotation_table(concat_df,label_column,intensity_column):
+    annotation_dfs = []
+    for category in concat_df[label_column].unique().tolist():
+        single_category_df = concat_df[concat_df[label_column] == category][['reducing_mass','RT',intensity_column,'replicate_label','condition_label']].groupby(['replicate_label','condition_label']).sum()[[intensity_column]]
+        single_category_df = single_category_df.rename(columns = {intensity_column:category})
+        annotation_dfs.append(single_category_df)
+    ant_table = pd.concat(annotation_dfs,axis=1).reset_index()
+    ant_table['cols'] = [f'condition{x}_rep{y}' for x,y in zip(ant_table.condition_label,ant_table.replicate_label)]
+    ant_table = ant_table[[x for x in ant_table.columns if 'label' not in x]]
+    ant_table = ant_table.set_index('cols').T
+    ant_table.index.name = 'Glycan'
+    return ant_table.reset_index()
