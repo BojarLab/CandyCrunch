@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from glycowork.motif.processing import enforce_class
 from prediction import average_dicts,mass_check,process_for_inference,get_topk,average_preds
+from prediction import candycrunch,glycans,temperature
 
 def add_new_category(categories,cluster):
     new_id = max([x for x in categories])
@@ -237,3 +238,14 @@ def filter_grouped_df_predictions(grouped_df,preds):
     filtered_preds_df['final_predictions'] = unique_predictions
     filtered_preds_df = filtered_preds_df[~filtered_preds_df.final_predictions.isnull()]
     return filtered_preds_df
+
+def categories_df_to_unique_predictions(df_out_categories,masses):
+    all_filtered_dfs = []
+    for search_mass in masses:
+        single_mass_df = df_out_categories[df_out_categories.mass_label == search_mass].copy(deep=True)
+        print(len(single_mass_df))
+        grouped_df = group_category_spectra(single_mass_df)
+        p1,c1 = grouped_df_to_preds(grouped_df,0)
+        filtered_grouped_df = filter_grouped_df_predictions(grouped_df,p1)
+        all_filtered_dfs.append(filtered_grouped_df)
+    return pd.concat(all_filtered_dfs,ignore_index=True)
