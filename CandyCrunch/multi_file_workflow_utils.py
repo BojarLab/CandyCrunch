@@ -5,6 +5,7 @@ import pandas as pd
 from glycowork.motif.processing import enforce_class
 from prediction import average_dicts,mass_check,process_for_inference,get_topk,average_preds
 from prediction import candycrunch,glycans,temperature
+import matplotlib.pyplot as plt
 
 def add_new_category(categories,cluster):
     new_id = max([x for x in categories])
@@ -170,7 +171,7 @@ def assign_categories(all_ms2_spectra,filename_label_map,masses = None):
         mass_group_dfs = []
         for condition_label in sorted({x[0] for x in filename_label_map.values()}):
             for replicate_label in [rep for cond,rep in filename_label_map.values() if cond == condition_label]:
-                mass_group = all_ms2_spectra[(all_ms2_spectra['reducing_mass'].astype(float).round(0) == search_mass)&(all_ms2_spectra['condition_label'] == condition_label)&(all_ms2_spectra['replicate_label'] == replicate_label)].copy(deep=True)
+                mass_group = all_ms2_spectra[(all_ms2_spectra['mass_label'] == search_mass)&(all_ms2_spectra['condition_label'] == condition_label)&(all_ms2_spectra['replicate_label'] == replicate_label)].copy(deep=True)
                 mass_group = mass_group.sort_values('RT')
                 mass_group = assign_RT_group(mass_group,0.8)
                 mass_group_dfs.append(mass_group)
@@ -189,6 +190,8 @@ def group_df_by_category(single_mass_df):
     sum_RT = single_mass_df[['intensity','category_label']].groupby('category_label').sum()
     grouped_categories = pd.concat([mean_RT,sum_RT,count_RT],axis=1).iloc[:,:-1]
     grouped_categories.columns = ['reducing_mass','RT','intensity','num_spectra']
+    if 'mass_label' in single_mass_df.columns:
+        grouped_categories['mass_label'] = single_mass_df['mass_label'].tolist()[0]
     return grouped_categories
 
 def average_category_dicts(single_mass_df):
