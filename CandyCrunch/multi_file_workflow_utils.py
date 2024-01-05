@@ -3,6 +3,7 @@ import itertools
 import numpy as np
 import pandas as pd
 from glycowork.motif.processing import enforce_class
+from glycowork.motif.tokenization import composition_to_mass
 from prediction import average_dicts,mass_check,process_for_inference,get_topk,average_preds
 from prediction import candycrunch,glycans,temperature
 import matplotlib.pyplot as plt
@@ -160,6 +161,13 @@ def assign_RT_group(single_mass_df,RT_gap):
 def assign_mass_groups(all_ms2_spectra):
     all_ms2_spectra = all_ms2_spectra.assign(mass_group = all_ms2_spectra.reducing_mass.round(0))
     return all_ms2_spectra
+
+def generate_basic_human_masses(max_monosaccharides):
+    #Could probably replace this with a sugarbase search
+    masses_list = []
+    for i in range(1,max_monosaccharides+1):
+        masses_list.extend([(composition_to_mass(Counter(x))+1,x) for x in itertools.combinations_with_replacement(['Hex','HexNAc','Neu5Ac','dHex','Neu5Gc'],i)])
+    return masses_list
 
 def assign_categories(all_ms2_spectra,filename_label_map,masses = None):
     all_mass_dfs = []
