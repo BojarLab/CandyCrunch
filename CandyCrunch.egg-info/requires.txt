@@ -15,4 +15,4 @@ torchvision
 openpyxl
 
 [draw]
-glycowork[draw]~=0.8.1
+glycowork[draw]~=1.0.1

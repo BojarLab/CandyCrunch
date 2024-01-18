@@ -6,6 +6,7 @@ CandyCrunch/__init__.py
 CandyCrunch/analysis.py
 CandyCrunch/candycrunch.pt
 CandyCrunch/glycans.pkl
+CandyCrunch/glytoucan_mapping.pkl
 CandyCrunch/model.py
 CandyCrunch/prediction.py
 CandyCrunch.egg-info/PKG-INFO

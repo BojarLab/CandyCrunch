@@ -26,5 +26,5 @@ setuptools.setup(
                       "seaborn", "pandas", "statsmodels",
                       "pymzml", "statsmodels", "pyteomics",
                       "lxml", "torchvision", "openpyxl"],
-    extras_require={'draw':["glycowork[draw]~=0.8.1"]},
+    extras_require={'draw':["glycowork[draw]~=1.0.1"]},
 )

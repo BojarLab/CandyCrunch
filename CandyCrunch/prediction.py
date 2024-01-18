@@ -30,6 +30,8 @@ from CandyCrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
 this_dir, this_filename = os.path.split(__file__)
 data_path = os.path.join(this_dir, 'glycans.pkl')
 glycans = pickle.load(open(data_path, 'rb'))
+data_path = os.path.join(this_dir, 'glytoucan_mapping.pkl')
+glytoucan_mapping = pickle.load(open(data_path, 'rb'))
 lib = get_lib(glycans)
 
 fp_in = "drive/My Drive/CandyCrunch/"
@@ -981,7 +983,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
     # placeholder for GlyTouCan IDs
-    df_out["GlyTouCan_ID"] = np.nan
+    df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in df_out["predictions"]]
     # Normalize relative abundances if relevant
     if intensity:
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
