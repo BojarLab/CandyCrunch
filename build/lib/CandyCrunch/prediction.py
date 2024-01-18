@@ -635,49 +635,49 @@ def generate_variants(sequence):
    | :-
    | Returns a list of sequences with possible Neu5Ac/Neu5Gc substitutions
    """
-   # Identify all occurrences of Neu5Ac and Neu5Gc
-   occurrences = [(m.start(), m.group()) for m in re.finditer(r'Neu5(Ac|Gc)', sequence)]
-   # Generate all combinations of substitutions
-   variants = [sequence]
-   for index, original in occurrences:
-       new_variants = []
-       for variant in variants:
-           if original == 'Neu5Ac':
-               # Replace Neu5Ac with Neu5Gc and adjust the mass
-               new_variant = variant[:index] + 'Neu5Gc' + variant[index + 6:]
-          else:
-              # Replace Neu5Gc with Neu5Ac and adjust the mass
-              new_variant = variant[:index] + 'Neu5Ac' + variant[index + 6:]
-          new_variants.append(new_variant)
-       variants.extend(new_variants)
-   return variants
+    # Identify all occurrences of Neu5Ac and Neu5Gc
+    occurrences = [(m.start(), m.group()) for m in re.finditer(r'Neu5(Ac|Gc)', sequence)]
+    # Generate all combinations of substitutions
+    variants = [sequence]
+    for index, original in occurrences:
+        new_variants = []
+        for variant in variants:
+            if original == 'Neu5Ac':
+                # Replace Neu5Ac with Neu5Gc and adjust the mass
+                new_variant = variant[:index] + 'Neu5Gc' + variant[index + 6:]
+            else:
+                # Replace Neu5Gc with Neu5Ac and adjust the mass
+                new_variant = variant[:index] + 'Neu5Ac' + variant[index + 6:]
+            new_variants.append(new_variant)
+        variants.extend(new_variants)
+    return variants
 
 
 def impute(df_out, libr = None, mode = 'negative', modification = 'reduced', mass_tag = 0):
-   """searches for specific isomers that could be added to the prediction dataframe\n
-   | Arguments:
-   | :-
-   | df_out (dataframe): prediction dataframe generated within wrap_inference
-   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
-   | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'
-   | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None\n
-   | Returns:
-   | :-
-   | Returns prediction dataframe with imputed predictions (if possible)
-   """
-   libr = lib if libr is None else libr
-   predictions_list = df_out.predictions.values.tolist()
-   index_list = df_out.index.tolist()
-   seqs = [p[0][0] for p in predictions_list if p and ("Neu5Ac" in p[0][0] or "Neu5Gc" in p[0][0])]
-   variants = set(unwrap([generate_variants(s) for s in seqs]))
-   for i, k in enumerate(predictions_list):
-       if len(k) < 1:
-           for v in variants:
-               if mass_check(index_list[i], v, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag):
-                   df_out.iat[i, 0] = [(v, )]
-                   break
-   return df_out
+    """searches for specific isomers that could be added to the prediction dataframe\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): prediction dataframe generated within wrap_inference
+    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'
+    |   modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'
+    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None\n
+    | Returns:
+    | :-
+    | Returns prediction dataframe with imputed predictions (if possible)
+    """
+    libr = lib if libr is None else libr
+    predictions_list = df_out.predictions.values.tolist()
+    index_list = df_out.index.tolist()
+    seqs = [p[0][0] for p in predictions_list if p and ("Neu5Ac" in p[0][0] or "Neu5Gc" in p[0][0])]
+    variants = set(unwrap([generate_variants(s) for s in seqs]))
+    for i, k in enumerate(predictions_list):
+        if len(k) < 1:
+            for v in variants:
+                if mass_check(index_list[i], v, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag):
+                    df_out.iat[i, 0] = [(v, )]
+                    break
+    return df_out
 
 
 def possibles(df_out, mass_dic, reduced):
