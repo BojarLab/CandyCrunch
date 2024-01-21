@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: CandyCrunch
-Version: 0.2.2
+Version: 0.3.0
 Summary: Package for predicting glycan structure from LC-MS/MS data
 Home-page: https://github.com/BojarLab/CandyCrunch
 Author: Daniel Bojar

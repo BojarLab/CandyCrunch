@@ -1,8 +1,8 @@
-glycowork~=1.0.1
+glycowork~=1.1.0
 regex
 networkx
 scipy
-torch~=2.0
+torch~=2.1
 numpy_indexed
 seaborn
 pandas
@@ -15,4 +15,4 @@ torchvision
 openpyxl
 
 [draw]
-glycowork[draw]~=1.0.1
+glycowork[draw]~=1.1.0
