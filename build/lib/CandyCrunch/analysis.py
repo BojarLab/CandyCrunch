@@ -11,8 +11,13 @@ import networkx.algorithms.isomorphism as iso
 import numpy as np
 import pandas as pd
 from glycowork.glycan_data.loader import lib, unwrap
-from glycowork.motif.processing import (bracket_removal, cohen_d,
+from glycowork.motif.processing import (bracket_removal,
                                         min_process_glycans)
+try:
+  from glycowork.glycan_data.stats import cohen_d
+except ModuleNotFoundError:
+  from glycowork.motif.processing import cohen_d
+
 from scipy.stats import ttest_ind
 from statsmodels.stats.multitest import multipletests
 
