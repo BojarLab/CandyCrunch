@@ -826,7 +826,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
-                   taxonomy_class = 'Mammalia', df_use = None):
+                   taxonomy_class = 'Mammalia', df_use = None, plot_glycans = False):
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
@@ -856,7 +856,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
    | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'
-   | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan\n
+   | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
+   | plot_glycans (bool): whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions; default:False\n
    | Returns:
    | :-
    | Returns dataframe of predictions for spectra in file
@@ -865,8 +866,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     if libr is None:
         libr = lib
     if df_use is None:
-        df_use = copy.deepcopy(df_glycan[(df_glycan.glycan_type==glycan_class) & (df_glycan.Class.str.contains(taxonomy_class))])
-        df_use['Composition'] = df_use['Composition'].apply(ast.literal_eval)
+        df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type==glycan_class])
+        df_use = df_use[df_use['Class'].apply(lambda x: taxonomy_class in x)]
     reduced = 1.0078 if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
@@ -989,6 +990,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
     else:
         df_out.drop(['rel_abundance'], axis = 1, inplace = True)
+    df_out.index.name = "m/z"
+    if plot_glycans:
+        from glycowork.motif.draw import plot_glycans_excel
+        plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_number = 1)
     return (df_out, spectra_out) if spectra else df_out
 
 

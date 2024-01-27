@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--supplement', help='Whether to use biosynthetic modeling for zero-shot prediction', type=bool, required=False)
     parser.add_argument('--experimental', help='Whether to use database searches for zero-shot prediction', type=bool, required=False)
     parser.add_argument('--taxonomy_class', help='Taxonomic class to restrict database searches to', type=str, required=False)
+    parser.add_argument('--plot_glycans', help='Whether to save an output.xlsx file with SNFG glycan images for all top1 predictions', type=bool, required=False)
     parser.add_argument('--output', help='Output CSV file path', type=str, required=True)
 
     args = parser.parse_args()
