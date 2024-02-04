@@ -694,6 +694,7 @@ def possibles(df_out, mass_dic, reduced):
    | Returns prediction dataframe with imputed predictions (if possible)
    """
     predictions_list = df_out.predictions.values.tolist()
+    top1_preds = set([k[0][0] for k in predictions_list if k and k[0]])
     index_list = df_out.index.tolist()
     mass_keys = np.array(list(mass_dic.keys()))
     for k in range(len(df_out)):
@@ -703,7 +704,7 @@ def possibles(df_out, mass_dic, reduced):
             min_diff_index = np.argmin(diffs)
             if diffs[min_diff_index] < 0.5:
                 possible = mass_dic[mass_keys[min_diff_index]]
-                df_out.iat[k, 0] = [(m,) for m in possible]
+                df_out.iat[k, 0] = [(m,) for m in possible if m not in top1_preds]
     return df_out
 
 
