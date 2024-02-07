@@ -628,7 +628,7 @@ def average_preds(preds, conf, k = 5):
     return out_p, out_c
 
 
-def generate_variants(sequence):
+def generate_variants_ac_gc(sequence):
     """generates all possible Neu5Ac/Neu5Gc substitutions of sequence\n
    | Arguments:
    | :-
@@ -645,25 +645,54 @@ def generate_variants(sequence):
         new_variants = []
         for variant in variants:
             if original == 'Neu5Ac':
-                # Replace Neu5Ac with Neu5Gc and adjust the mass
+                # Replace Neu5Ac with Neu5Gc
                 new_variant = variant[:index] + 'Neu5Gc' + variant[index + 6:]
             else:
-                # Replace Neu5Gc with Neu5Ac and adjust the mass
+                # Replace Neu5Gc with Neu5Ac
                 new_variant = variant[:index] + 'Neu5Ac' + variant[index + 6:]
             new_variants.append(new_variant)
         variants.extend(new_variants)
     return variants
 
 
-def impute(df_out, libr = None, mode = 'negative', modification = 'reduced', mass_tag = 0):
+def generate_variants_6S(sequence):
+    """generates all possible GlcNAc/GlcNAc6S substitutions of sequence\n
+   | Arguments:
+   | :-
+   | sequence (string): glycan in IUPAC-condensed nomenclature\n
+   | Returns:
+   | :-
+   | Returns a list of sequences with possible GlcNAc/GlcNAc6S substitutions
+   """
+    # Identify all occurrences of GlcNAc and GlcNAc6S
+    occurrences = [(m.start(), m.group()) for m in re.finditer(r'GlcNAc(6S){,1}\(b1\-6\)', sequence)]
+    # Generate all combinations of substitutions
+    variants = [sequence]
+    for index, original in occurrences:
+        new_variants = []
+        for variant in variants:
+            if original == 'GlcNAc(b1-6)':
+                # Replace GlcNAc with GlcNAc6S
+                new_variant = variant[:index] + 'GlcNAc6S(b1-6)' + variant[index + 12:]
+            else:
+                # Replace GlcNAc6S with GlcNAc
+                new_variant = variant[:index] + 'GlcNAc(b1-6)' + variant[index + 14:]
+            new_variants.append(new_variant)
+        variants.extend(new_variants)
+    return variants
+
+
+def impute(df_out, libr = None, mode = 'negative', modification = 'reduced', mass_tag = 0,
+           glycan_class = "O"):
     """searches for specific isomers that could be added to the prediction dataframe\n
     | Arguments:
     | :-
     | df_out (dataframe): prediction dataframe generated within wrap_inference
     | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    |   modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'
-    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None\n
+    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', or 'other'/'none'
+    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
+    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"\n
     | Returns:
     | :-
     | Returns prediction dataframe with imputed predictions (if possible)
@@ -672,7 +701,10 @@ def impute(df_out, libr = None, mode = 'negative', modification = 'reduced', mas
     predictions_list = df_out.predictions.values.tolist()
     index_list = df_out.index.tolist()
     seqs = [p[0][0] for p in predictions_list if p and ("Neu5Ac" in p[0][0] or "Neu5Gc" in p[0][0])]
-    variants = set(unwrap([generate_variants(s) for s in seqs]))
+    variants = set(unwrap([generate_variants_ac_gc(s) for s in seqs]))
+    if glycan_class == "O":
+      seqs = [p[0][0] for p in predictions_list if p and ("GlcNAc6S(b1-6)" in p[0][0] or "GlcNAc(b1-6)" in p[0][0])]
+      variants.update(set(unwrap([generate_variants_6S(s) for s in seqs])))
     for i, k in enumerate(predictions_list):
         if len(k) < 1:
             for v in variants:
@@ -1037,7 +1069,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             pass
     # Check for Neu5Ac-Neu5Gc swapped structures and search for glycans within SugarBase that could explain some of the spectra
     if experimental:
-        df_out = impute(df_out, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag)
+        df_out = impute(df_out, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag, glycan_class = glycan_class)
         df_out = filter_delayed_rts(df_out)
         df_out = Ac_follows_Gc(df_out)
         mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_class)
