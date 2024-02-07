@@ -823,6 +823,92 @@ def combine_charge_states(df_out):
     return df_out
 
 
+def Ac_follows_Gc(df_out):
+    """function to inform Neu5Ac isomer deduplication based on Neu5Gc isomers\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): prediction dataframe generated within wrap_inference\n
+    | Returns:
+    | :-
+    | Returns prediction dataframe in which, if possible, Neu5Ac isomers have been deduplicated
+    """
+    # Add a helper column for easier manipulation, if not already present
+    if "Original_Prediction" not in df_out.columns:
+        df_out["Original_Prediction"] = df_out["predictions"].apply(
+            lambda x: x[0][0] if x else None
+        )
+    # Iterate through unique Gc predictions
+    for gc_pred in df_out[df_out["Original_Prediction"].str.contains("Neu5Gc", na=False)][
+        "Original_Prediction"
+    ].unique():
+        ac_pred = gc_pred.replace("Neu5Gc", "Neu5Ac")
+        # Filter rows for current Ac and Gc pair
+        gc_rows = df_out[df_out["Original_Prediction"] == gc_pred]
+        ac_rows = df_out[df_out["Original_Prediction"] == ac_pred]
+        # Continue if either Ac or Gc rows are empty
+        if gc_rows.empty or ac_rows.empty:
+            continue
+        # For simplicity, use the first Gc row's RT as reference
+        gc_rt = gc_rows.iloc[0]["RT"]
+        # Determine canonical Ac rows: Ac rows within ±1.0 RT of Gc
+        ac_rows["RT_diff"] = np.abs(ac_rows["RT"] - gc_rt)
+        canonical_ac_indices = ac_rows[(ac_rows["RT_diff"] <= 1.0)].index
+        # Update non-canonical Ac rows
+        for idx, row in ac_rows.iterrows():
+            if idx not in canonical_ac_indices and len(row["predictions"]) > 1:
+                df_out.at[idx, "predictions"] = row["predictions"][1:]
+        # Clean up temporary RT_diff column
+        df_out.drop(columns=["RT_diff"], inplace=True, errors="ignore")
+    # Remove the helper column
+    df_out.drop(columns=["Original_Prediction"], inplace=True, errors="ignore")
+    return df_out
+
+
+def filter_delayed_rts(df_out):
+    """function to filter out duplicates if they come toward the end of the run\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): prediction dataframe generated within wrap_inference\n
+    | Returns:
+    | :-
+    | Returns prediction dataframe in which, if possible, fake isomers have been deduplicated
+    """
+    # Create an empty list to store indices of rows to discard
+    rows_to_discard = []
+    # Group by m/z with a tolerance of +/- 0.5 and identical top1 predictions
+    for mz_val in df_out.index.unique():
+        mz_group = df_out.loc[
+            (df_out.index >= mz_val - 0.5) & (df_out.index <= mz_val + 0.5)
+        ]
+        # Further group by top1 prediction
+        for top1_pred, group in mz_group.groupby(
+            lambda idx: mz_group.loc[idx, "predictions"][0][0]
+            if mz_group.loc[idx, "predictions"]
+            else None
+        ):
+            if group.empty:
+                continue
+            # Sort the group by RT to easily find the first instance
+            group_sorted = group.sort_values(by="RT")
+            first_rt = group_sorted.iloc[0]["RT"]
+            # Find rows with RT more than 10 units after the first instance
+            delayed_rows = group_sorted[group_sorted["RT"] > first_rt + 10]
+            # Calculate the confidence * num_spectra for each row and find the maximum in the group
+            group["conf_times_num_spectra"] = group.apply(
+                lambda row: row["predictions"][0][1] * row["num_spectra"], axis=1
+            )
+            max_conf_times_num_spectra = group["conf_times_num_spectra"].max()
+            # Check each delayed row against the maximum value
+            for idx, row in delayed_rows.iterrows():
+                if row["predictions"][0][1] * row["num_spectra"] < max_conf_times_num_spectra:
+                    rows_to_discard.append(idx)
+            # Clean up temporary column
+            group.drop(columns=["conf_times_num_spectra"], inplace=True, errors="ignore")
+    # Discard the marked rows
+    df_out_filtered = df_out.drop(rows_to_discard)
+    return df_out_filtered
+
+
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
@@ -952,6 +1038,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Check for Neu5Ac-Neu5Gc swapped structures and search for glycans within SugarBase that could explain some of the spectra
     if experimental:
         df_out = impute(df_out, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag)
+        df_out = filter_delayed_rts(df_out)
+        df_out = Ac_follows_Gc(df_out)
         mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_class)
         df_out = possibles(df_out, mass_dic, reduced)
         df_out['evidence'] = [
