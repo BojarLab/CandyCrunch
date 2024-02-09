@@ -13,7 +13,6 @@ import pandas as pd
 from glycowork.glycan_data.loader import lib, unwrap
 from glycowork.motif.processing import (bracket_removal,
                                         min_process_glycans)
-
 try:
   from glycowork.glycan_data.stats import cohen_d
 except ModuleNotFoundError:
@@ -39,17 +38,17 @@ mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.99
                           'atoms': {'03X': [1, 2, 3], '02X': [1, 2], '15X': [1], '13A': [2, 3], '24A': [3, 4],
                                     '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], 'Hex': [1, 2, 3, 4, 5, 6]}},
                   'GalNAc': {'mass': {'04A': 60.0211, '24A': 60.0211, '35A': 74.0368, '03A': 90.0317, '25A': 104.0473,
-                                      '02A': 120.0423, 'GalNAc': 203.0794},
+                                      '02A': 120.0423, '24X': 143, 'GalNAc': 203.0794},
                              'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                       '02A': [3, 4, 5, 6], 'GalNAc': [1, 2, 3, 4, 5, 6]}},
-                  'GlcNAc': {'mass': {'04A': 60.0211, '24A': 60.0211, '35A': 74.0368, '03A': 90.0317, '25A': 104.0473,
-                                      '02A': 120.0423, 'GlcNAc': 203.0794},
+                                       '02A': [3, 4, 5, 6], '24X': [1,2,5,6], 'GalNAc': [1, 2, 3, 4, 5, 6]}},
+                  'GlcNAc': {'mass': {'04A': 60.0211, '24A': 60.0213, '35A': 74.0368, '03A': 90.0317, '25A': 104.0473,
+                                      '02A': 120.0423, '24X': 143, 'GlcNAc': 203.0794},
                              'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                       '02A': [3, 4, 5, 6], 'GlcNAc': [1, 2, 3, 4, 5, 6]}},
+                                       '02A': [3, 4, 5, 6],  '24X': [1,2,5,6], 'GlcNAc': [1, 2, 3, 4, 5, 6]}},
                   'HexNAc': {'mass': {'04A': 60.0211, '24A': 60.0211, '35A': 74.0368, '03A': 90.0317, '25A': 104.0473,
-                                      '02A': 120.0423, 'HexNAc': 203.0794},
+                                      '02A': 120.0423, '24X': 143, 'HexNAc': 203.0794},
                              'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                       '02A': [3, 4, 5, 6], 'HexNAc': [1, 2, 3, 4, 5, 6]}},
+                                       '02A': [3, 4, 5, 6], '24X': [1,2,5,6], 'HexNAc': [1, 2, 3, 4, 5, 6]}},
                   'Neu5Ac': {'mass': {'02X': 70.0055, '04X': 170.0453, 'Neu5Ac': 291.0954},
                              'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], 'Neu5Ac': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
                   'Neu5Gc': {'mass': {'02X': 70.0055, '04X': 186.0402, 'Neu5Gc': 307.0903},
@@ -121,10 +120,11 @@ mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.99
                    }
 
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond']}
-cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B', '13A': '13A', '24A': '24A',
-                 '04A': '04A', '35A': '35A', '03A': '03A', '25A': '25A', '02A': '02A', '02X': '02X', '04X': '04X'}
-A_cross_rings = {'13A', '24A', '04A', '35A', '03A', '25A', '02A'}
-X_cross_rings = {'02X', '04X'}
+cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B',
+                 '13A': '13A', '24A': '24A', '04A': '04A', '35A': '35A', '03A': '03A', '25A': '25A', '02A': '02A',
+                 '02X': '02X', '04X': '04X', '03X': '03X', '15X': '15X', '24X': '24X'}
+A_cross_rings = {c for c in cut_type_dict if c[-1] == 'A'}
+X_cross_rings = {c for c in cut_type_dict if c[-1] == 'X'}
 ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta']
 
 
@@ -1046,23 +1046,18 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
   return ion_names
 
 
-def mass_match(dc_names, diffs, max_cleavages):
+def priority_filter(dc_names, diffs):
   """Filters Domon-Costello fragment names by number of cleavages and difference from observed mass\n
   | Arguments:
   | :-
   | dc_names (list): a nested list of Domon-Costello fragment grouped by mass
-  | diffs (list): a nested list of mass differences between the masses of Domon-Costello fragments and the observed masses
-  | max_cleavages (int): the maximum number of permitted cleavages in a fragment\n
+  | diffs (list): a nested list of mass differences between the masses of Domon-Costello fragments and the observed masses\n
   | Returns:
   | :-
-  | Returns a list of Domon-Costello fragment names with the smallest mass difference from the observed mass out of those with fewest cleavages   
+  | Returns a list of Domon-Costello fragment names sorted by number of cleavages and the observed mass difference   
   """
-  min_diff = 0.01
-  for num_cleavages in range(1, max_cleavages+1):
-    if any([len(k) == num_cleavages for k in dc_names]):
-      frags, frag_diffs = zip(*[(dc_names[k], diffs[k]) for k in range(len(dc_names)) if len(dc_names[k]) == num_cleavages])
-      return [frags[k] for k in np.where((np.array(frag_diffs) < min(frag_diffs)+min_diff) & (np.array(frag_diffs) > min(frag_diffs)-min_diff))[0].tolist()]
-  return []
+  sorted_frags = sorted(list(zip(dc_names,diffs)),key=lambda x:(len(x[0]),x[1]))
+  return [f[0] for f in sorted_frags]
 
 
 def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
@@ -1176,15 +1171,13 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
     fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge)
     dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1])
     downstream_values.append((*fragment_properties,dc_names))
-  filtered_dc_names = [x[5] for x in downstream_values]
+  filtered_dc_names = [priority_filter(x[5], x[2]) if x[0] else [] for x in downstream_values]
   if simplify:
-    filtered_dc_names = [mass_match(x[5], x[2],max_cleavages) for x in downstream_values]
     filtered_dc_names = simplify_fragments(filtered_dc_names)
-  filtered_dc_names = [x[:5] for x in filtered_dc_names]
-  for i,filtered_dc_names in enumerate(filtered_dc_names):
-    filtered_properties = list(zip(*downstream_values[i]))
-    if filtered_properties:
-      final_hits = [x for x in filtered_properties if x[5] in filtered_dc_names]
+  for i,frag_dc_names in enumerate(filtered_dc_names):
+    if frag_dc_names:
+      filtered_properties = list(zip(*downstream_values[i]))
+      final_hits = [[y for y in filtered_properties if y[5]==x][0] for x in frag_dc_names][:5]
       final_hits = [list(x) for x in list(zip(*final_hits))]
       hit_dict[fragment_masses[i]] = {'Theoretical fragment masses':final_hits[1],'Domon-Costello nomenclatures':final_hits[5], 'Fragment charges':final_hits[3]}
       if iupac:
