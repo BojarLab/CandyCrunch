@@ -296,18 +296,16 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
         mz = glycan_to_mass(glycan, sample_prep= modification if modification in ["permethylated", "peracetylated"] else 'underivatized')
     except:
         return False
-    mz += modification_mass_dict[modification] if modification in modification_mass_dict else mass_tag
+    mz += modification_mass_dict.get(modification, mass_tag)
     adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
     og_list = [mz] + [mz + mass_dict.get(adduct, 999) for adduct in adduct_list]
-    mz_list = og_list.copy()
+    charge_adjustments = [-0.5, -0.66, -0.75] if mode == 'negative' else [0.5, 0.66, 0.75]
+    thresholds = [double_thresh, triple_thresh, quadruple_thresh]
+    mz_list = og_list + [
+        (m / z + charge_adjust) for z, threshold, charge_adjust in zip([2, 3, 4], thresholds, charge_adjustments)
+        for m in og_list if m > threshold
+    ]
     thresh = 0.5
-    for z, threshold, charge_adjust in zip(
-        [2, 3, 4],
-        [double_thresh, triple_thresh, quadruple_thresh],
-        [-0.5, -0.66, -0.75] if mode == 'negative' else [0.5, 0.66, 0.75]
-        ):
-        if mz > threshold:
-            mz_list += [(m / z + charge_adjust) for m in og_list]
     return [m for m in mz_list if abs(mass - m) < thresh]
 
 
@@ -1104,7 +1102,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out['charge'] = round(df_out['composition'].apply(composition_to_mass) / df_out.index) * multiplier
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
-    # placeholder for GlyTouCan IDs
+    # Map GlyTouCan IDs
     df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in df_out["predictions"]]
     # Normalize relative abundances if relevant
     if intensity:
