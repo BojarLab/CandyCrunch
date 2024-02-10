@@ -939,6 +939,175 @@ def filter_delayed_rts(df_out):
     return df_out_filtered
 
 
+def filter_rts(loaded_file,rt_min,rt_max):
+    if rt_min:
+      loaded_file = loaded_file[loaded_file['RT'] >= rt_min].reset_index(drop = True)
+    elif loaded_file['RT'].max() > 20:
+      loaded_file = loaded_file[loaded_file['RT'] >= 2].reset_index(drop = True)
+    if rt_max:
+      loaded_file = loaded_file[loaded_file['RT'] <= rt_max].reset_index(drop = True)
+    elif loaded_file['RT'].max() > 40:
+      loaded_file = loaded_file[loaded_file['RT'] < 0.9*loaded_file['RT'].max()].reset_index(drop = True)
+    return loaded_file
+
+
+def get_helper_vars(libr,df_use,modification,mode,taxonomy_class,glycan_class):
+    if libr is None:
+        libr = lib
+    if df_use is None:
+        df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type==glycan_class])
+        df_use = df_use[df_use['Class'].apply(lambda x: taxonomy_class in x)]
+    reduced = 1.0078 if modification == 'reduced' else 0
+    multiplier = -1 if mode == 'negative' else 1
+    return libr,df_use,reduced,multiplier
+
+
+def spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass_tolerance,bin_num=2048):
+    loaded_file = load_spectra_filepath(spectra_filepath)
+    loaded_file = filter_rts(loaded_file,rt_min,rt_max)
+    intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
+    if intensity:
+        loaded_file['intensity'].fillna(0, inplace = True)
+    else:
+        loaded_file['intensity'] = [0]*len(loaded_file)
+    # Prepare file for processing
+    loaded_file.dropna(subset = ['peak_d'], inplace = True)
+    loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
+    spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
+    # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
+    df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
+    # df_out.set_index('reducing_mass', inplace = True,drop=False)
+    df_out['peak_d'] = [spec_dic[m] for m in df_out['reducing_mass']]
+    return df_out
+
+
+def assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh):
+    coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
+    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap)
+    # Predict glycans from spectra
+    preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
+    if device != 'cpu':
+        preds, pred_conf = average_preds(preds, pred_conf)
+    df_out['rel_abundance'] = df_out['intensity']
+    df_out['predictions'] = [[(pred, conf) for pred, conf in zip(pred_row, conf_row)] for pred_row, conf_row in zip(preds, pred_conf)]
+    # Check correctness of glycan class & mass
+    df_out['predictions'] = [
+        [(g[0], round(g[1], 4)) for g in preds if
+         enforce_class(g[0], glycan_class, g[1], extra_thresh = extra_thresh) and
+         g[1] > pred_thresh and
+         mass_check(mass, g[0], libr = libr, modification = modification, mass_tag = mass_tag, mode = mode)][:5]
+        for preds, mass in zip(df_out.predictions, df_out.index)
+        ]
+    return df_out
+
+def augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic):
+    # Construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
+    if supplement:
+        try:
+            preds_lib = get_lib([x[0] for y in df_out.predictions.tolist() for x in y])
+            df_out = supplement_prediction(df_out, glycan_class, libr = preds_lib, mode = mode, modification = modification, mass_tag = mass_tag)
+            df_out['evidence'] = [
+                'medium' if pd.isna(evidence) and preds else evidence
+                for evidence, preds in zip(df_out['evidence'], df_out['predictions'])
+                ]
+        except:
+            pass
+    # Check for Neu5Ac-Neu5Gc swapped structures and search for glycans within SugarBase that could explain some of the spectra
+    if experimental:
+        df_out = impute(df_out, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag, glycan_class = glycan_class)
+        try:
+            df_out = filter_delayed_rts(df_out)
+            df_out = Ac_follows_Gc(df_out)
+        except ValueError:
+            pass
+        mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_class)
+        df_out = possibles(df_out, mass_dic, reduced)
+        df_out['evidence'] = [
+            'weak' if pd.isna(evidence) and preds else evidence
+            for evidence, preds in zip(df_out['evidence'], df_out['predictions'])
+            ]
+    # Filter out wrong predictions via diagnostic ions etc.
+    if supplement or experimental:
+        df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
+        df_out['predictions'] = [[(k[0].replace('-ol', '').replace('1Cer', ''), k[1]) if len(k) > 1 else (k[0].replace('-ol', '').replace('1Cer', ''),) for k in j] if j else j for j in df_out['predictions']]
+    return df_out
+    
+def prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,
+                               filter_out,reduced,multiplier,libr,modification,
+                               rt_diff,frag_num):
+    df_out['composition'] = [glycan_to_composition(g[0][0]) if g and g[0] else np.nan for g in df_out.predictions]
+    df_out.composition = [
+        k if isinstance(k, dict) else mz_to_composition(m, mode = mode, mass_tolerance = mass_tolerance,
+                                                        glycan_class = glycan_class, df_use = df_use, filter_out = filter_out,
+                                                        reduced = reduced > 0)
+        for k, m in zip(df_out['composition'], df_out.index)
+        ]
+    df_out.composition = [np.nan if isinstance(k, list) and not k else k[0] if isinstance(k, list) and len(k) > 0 else k for k in df_out['composition']]
+    df_out.dropna(subset = ['composition'], inplace = True)
+    # Calculate precursor ion charge
+    df_out['charge'] = [
+        round(composition_to_mass(comp) / idx) * multiplier
+        for comp, idx in zip(df_out['composition'], df_out.index)
+        ]
+    df_out['RT'] = df_out['RT'].round(2)
+    cols = ['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d','rel_abundance']
+    df_out = df_out[cols]
+    # Fill up possible gaps of singly-/doubly-charged spectra of the same structure
+    df_out = backfill_missing(df_out)
+    # Extract & sort the top 100 fragments by intensity
+    df_out['top_fragments'] = [
+        [round(frag[0], 4) for frag in sorted(peak_d.items(), key = lambda x: x[1], reverse = True)[:frag_num]]
+        for peak_d in df_out['peak_d']
+        ]
+    # Filter out wrong predictions via diagnostic ions etc.
+    df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out,
+                           modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
+    # Deduplicate identical predictions for different spectra
+    df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
+    df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
+    return df_out
+    
+    
+def finalise_predictions(df_out,libr,get_missing,pred_thresh,mode,modification,mass_tag,multiplier,plot_glycans,spectra_filepath,spectra):
+    # Keep or remove spectra that still lack a prediction after all this
+    if not get_missing:
+        df_out = df_out[df_out['predictions'].str.len() > 0]
+    # Reprioritize predictions based on how well they are explained by biosynthetic precursors in the same file (e.g., core 1 O-glycan making extended core 1 O-glycans more likely)
+    try:
+        df_out = canonicalize_biosynthesis(df_out, libr, pred_thresh)
+    except ValueError:
+        pass
+    spectra_out = df_out.pop('peak_d').values.tolist()
+    # Calculate  ppm error
+    valid_indices, ppm_errors = [], []
+    for preds, obs_mass in zip(df_out['predictions'], df_out.index):
+        theo_mass = mass_check(obs_mass, preds[0][0], libr = libr, modification = modification, mass_tag = mass_tag, mode = mode)
+        if theo_mass:
+            valid_indices.append(True)
+            ppm_errors.append(abs(calculate_ppm_error(theo_mass[0], obs_mass)))
+        else:
+            valid_indices.append(False)
+    df_out = df_out[valid_indices]
+    df_out['ppm_error'] = ppm_errors
+    # Clean-up
+    df_out['composition'] = [glycan_to_composition(k[0][0]) if k else val for k, val in zip(df_out['predictions'], df_out['composition'])]
+    df_out['charge'] = round(df_out['composition'].apply(composition_to_mass) / df_out.index) * multiplier
+    df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
+    df_out = combine_charge_states(df_out)
+    # Map GlyTouCan IDs
+    df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in df_out["predictions"]]
+    # Normalize relative abundances if relevant
+    if not all(np.array(df_out['rel_abundance'])==0):
+        df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
+    else:
+        df_out.drop(['rel_abundance'], axis = 1, inplace = True)
+    df_out.index.name = "m/z"
+    if plot_glycans:
+        from glycowork.motif.draw import plot_glycans_excel
+        plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_number = 0)
+    return (df_out, spectra_out) if spectra else df_out
+
+
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
@@ -988,14 +1157,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     reduced = 1.0078 if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
-    if rt_min:
-      loaded_file = loaded_file[loaded_file['RT'] >= rt_min].reset_index(drop = True)
-    elif loaded_file['RT'].max() > 20:
-      loaded_file = loaded_file[loaded_file['RT'] >= 2].reset_index(drop = True)
-    if rt_max:
-      loaded_file = loaded_file[loaded_file['RT'] <= rt_max].reset_index(drop = True)
-    elif loaded_file['RT'].max() > 40:
-      loaded_file = loaded_file[loaded_file['RT'] < 0.9*loaded_file['RT'].max()].reset_index(drop = True)
+    loaded_file = filter_rts(loaded_file,rt_min,rt_max)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     if intensity:
         loaded_file['intensity'].fillna(0, inplace = True)
@@ -1114,6 +1276,239 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         from glycowork.motif.draw import plot_glycans_excel
         plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_number = 0)
     return (df_out, spectra_out) if spectra else df_out
+
+def wrap_inference_split(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
+                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
+                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
+                   filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
+                   taxonomy_class = 'Mammalia', df_use = None, plot_glycans = False):
+    print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
+    libr,df_use,reduced,multiplier = get_helper_vars(libr,df_use,modification,mode,taxonomy_class,glycan_class)
+    df_out = spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass_tolerance)
+    df_out = assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh)
+    df_out = prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,filter_out,reduced,multiplier,libr,modification,rt_diff,frag_num)
+    df_out = augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic)
+    inference_out = finalise_predictions(df_out,libr,get_missing,pred_thresh,mode,modification,mass_tag,multiplier,plot_glycans,spectra_filepath,spectra)
+    return inference_out
+
+
+def wrap_inference_batch(spectra_filepath_list, glycan_class, model = candycrunch, glycans = glycans, libr = None, intra_cat_thresh=3,top_n_isomers= 3, bin_num = 2048,
+                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
+                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
+                   filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
+                   taxonomy_class = 'Mammalia', df_use = None, plot_glycans = False):
+    print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
+    libr,df_use,reduced,multiplier = get_helper_vars(libr,df_use,modification,mode,taxonomy_class,glycan_class)
+    inference_dfs = {}
+    for spectra_filepath in spectra_filepath_list:
+        file_label = spectra_filepath.split('/')[-1].split('.')[0]
+        df_out = spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass_tolerance)
+        # assigned_cats = assign_categories(df_out,filename_label_map,[x for x in annotation_table.mass.dropna().unique()],intra_cat_thresh,maximise_cat_size=maximise_cat_size)
+        df_out = assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh)
+        df_out['mass_label'] = np.round(df_out.index * 2) / 2
+        df_out = df_out.assign(condition_label = spectra_filepath.split('/')[-1].split('.')[0])
+        inference_dfs[file_label] = df_out
+    assigned_cats = assign_categories(pd.concat([x for x in inference_dfs.values()]),intra_cat_thresh=intra_cat_thresh,maximise_cat_size=True) 
+    smoothed_category_predictions = assign_modal_category_prediction(assigned_cats)
+    prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions,top_n=top_n_isomers)
+    for file_label in prevailing_category_predictions.condition_label.unique():
+        df_out = prevailing_category_predictions[prevailing_category_predictions['condition_label'] == file_label]
+        df_out = prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,filter_out,reduced,multiplier,libr,modification,rt_diff,frag_num)
+    # return inference_dfs,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic
+        df_out = augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic)
+        df_out = finalise_predictions(df_out,libr,get_missing,pred_thresh,mode,modification,mass_tag,multiplier,plot_glycans,spectra_filepath,spectra)
+        inference_dfs[file_label] = df_out
+    return inference_dfs
+
+
+def filter_top_n_isomers(df_in,top_n=3):
+    df_out = df_in.copy(deep=True)
+    df_out['paired_categories'] = [(x,y) for x,y in zip(df_out.mass_label,df_out.category_label)]
+    grouped_bc = df_out[['mass_label','category_label','condition_label']].groupby(['mass_label','category_label']).nunique()
+    df_out['file_presences'] = df_out['paired_categories'].map(grouped_bc['condition_label'].to_dict())
+    permitted_mass_cats_df = df_out.sort_values(['mass_label','file_presences'],ascending=False).groupby(['mass_label','top1_pred'],as_index=False).first(top_n)
+    permitted_mass_cats = list(zip(permitted_mass_cats_df.mass_label,permitted_mass_cats_df.category_label))
+    df_out = df_out[df_out['paired_categories'].isin(permitted_mass_cats)]
+    return df_out
+
+def assign_modal_category_prediction(assigned_cats):
+    assigned_cats['top1_pred'] = [x[0][0] if x else None for x in assigned_cats['predictions']]
+    most_common_group_preds = dict(assigned_cats[['mass_label','category_label','top1_pred']].groupby(['mass_label','category_label']).value_counts())
+    most_common_mapping = {} 
+    unq_groups = set([(x[0],x[1]) for x in most_common_group_preds])
+    for unq in unq_groups:
+        prevalence_sort = sorted([(k,v) for k,v in most_common_group_preds.items() if (k[0],k[1]) == unq],key=lambda x:x[1])
+        mode_pred = prevalence_sort[-1]
+        most_common_mapping[(mode_pred[0][0],mode_pred[0][1])] = mode_pred[0][2]
+    assigned_cats['top1_pred'] = [most_common_mapping[(ml,cl)] if tp else None for ml,cl,tp in zip(assigned_cats.mass_label,assigned_cats.category_label,assigned_cats.top1_pred)]
+    assigned_cats['predictions'] = [[(top1_p,0.888)]+preds[1:] if preds else [] for top1_p,preds in zip(assigned_cats.top1_pred,assigned_cats.predictions)]
+    return assigned_cats
+
+def assign_categories(all_ms2_spectra,intra_cat_thresh = 3,maximise_cat_size=True):
+    all_mass_dfs = []
+    for search_mass in all_ms2_spectra.mass_label.unique():
+        mass_group_dfs = []
+        for condition_label in all_ms2_spectra.condition_label.unique():
+            mass_group = all_ms2_spectra[(all_ms2_spectra['mass_label'] == search_mass)&(all_ms2_spectra['condition_label'] == condition_label)].copy(deep=True)
+            mass_group = mass_group.assign(RT_group = [i for i in range(len(mass_group))])
+            mass_group_dfs.append(mass_group)
+        cats_mass_dfs = mass_dfs_to_categories(mass_group_dfs,intra_cat_thresh,maximise_cat_size=maximise_cat_size)
+        all_mass_dfs.append(cats_mass_dfs)
+    return pd.concat([p for q in all_mass_dfs for p in q])
+
+
+def mass_dfs_to_categories(mass_range_dfs,inter_sample_thresh,maximise_cat_size=True):
+    RT_groups = create_RT_groups(mass_range_dfs)
+    categories = initialise_categories(RT_groups)
+    categories = expand_RT_categories(RT_groups,categories,inter_sample_thresh,maximise_cat_size=maximise_cat_size)
+    sample_cats = RT_cats_to_sample_cats(categories,RT_groups)
+    cat_dfs = sample_categories_to_df(sample_cats,mass_range_dfs)
+    return cat_dfs
+
+
+def create_RT_groups(mass_range_dfs):
+    all_sample_RT_groups = []
+    for sample_df in mass_range_dfs:
+        RT_groups = []
+        for RT_group in sample_df.groupby('RT_group').agg(list).RT:
+            RT_groups.append(RT_group)
+        all_sample_RT_groups.append(RT_groups)
+    return all_sample_RT_groups
+
+
+def initialise_categories(all_sample_RT_groups):
+    categories = {0:[]}
+    for x in all_sample_RT_groups[0]:
+        add_new_category(categories,x)
+    return categories
+
+
+def add_new_category(categories,cluster):
+    new_id = max([x for x in categories])
+    categories[new_id+1] = []
+    categories[new_id+1].append(cluster)
+    return categories
+
+
+def expand_RT_categories(all_sample_RT_groups,categories,inter_sample_thresh,maximise_cat_size=False):
+    for i,sample in enumerate(all_sample_RT_groups[1:]):
+        all_candidate_categories = calculate_candidate_clusters(sample,categories,inter_sample_thresh)
+        orphan_idxs = []
+        for idx,(orphan_cluster,empty_candidates) in enumerate(zip(sample,all_candidate_categories)):
+            if len(empty_candidates) == 0:
+                add_new_category(categories,orphan_cluster)
+                orphan_idxs.append(idx)
+        sample = [x for u,x in enumerate(sample) if u not in orphan_idxs]
+        all_candidate_categories = [x for u,x in enumerate(all_candidate_categories) if u not in orphan_idxs]
+        settle_category_conflict(sample,all_candidate_categories,categories)
+        while [x for x in all_candidate_categories if len(x) ==1]:
+            for clusters,cand_categories in zip(sample,all_candidate_categories):
+                if len(cand_categories) == 1:
+                    categories[list(cand_categories)[0]].append(clusters)
+                    all_candidate_categories = [x - cand_categories for x in all_candidate_categories]
+        valid_idxs = [i for i,x in enumerate(all_candidate_categories) if x]
+        sample = [x for u,x in enumerate(sample) if u in valid_idxs]
+        all_candidate_categories = [x for u,x in enumerate(all_candidate_categories) if u in valid_idxs]
+        if [x for x in all_candidate_categories if x]:
+            if maximise_cat_size:
+                optim_cats = find_closest_categories_largest(sample,all_candidate_categories,categories)
+            else: 
+                optim_cats = find_closest_categories(sample,all_candidate_categories,categories)
+            for cluster,optim_cat in zip(sample,optim_cats):
+                if optim_cat:
+                    categories[optim_cat].append(cluster)
+                else:
+                    add_new_category(categories,cluster)
+    return categories
+
+def calculate_candidate_clusters(sample,categories,inter_sample_thresh):
+    all_candidate_categories = []
+    for cluster in sample:
+        candidate_categories = set()
+        for category,cat_pop in categories.items():
+            if cat_pop:
+                if abs(np.mean(cluster)-np.mean([p for q in cat_pop for p in q])) < inter_sample_thresh:
+                    candidate_categories.add(category)
+        all_candidate_categories.append(candidate_categories)
+    return all_candidate_categories
+
+def settle_category_conflict(sample,cand_categories,categories):
+    for cat in set().union(*cand_categories):
+        if len([x for x in cand_categories if x == {cat}]) >1:
+            closest_cluster_idx = np.argmin([abs(np.mean([p for q in categories[cat] for p in q])-np.mean(j)) for j in sample])
+            categories[cat].append(sample[closest_cluster_idx])
+            for other_cluster in [x for i,x in enumerate(sample) if i != closest_cluster_idx]:
+                categories = add_new_category(categories,other_cluster)
+    return categories
+
+
+def find_closest_categories_largest(sample,sample_candidates,categories):
+    cat_means = get_category_means([sorted(x) for x in sample_candidates],categories)
+    cluster_means = [x[0] for x in sample]
+    cat_mean_diffs = []
+    for cluster_mean,cat_mean in zip(cluster_means,cat_means):
+        cat_mean_diffs.append({k:abs(v-cluster_mean) for k,v in cat_mean.items()})
+    cats_out = [set() for m in cluster_means]
+    selected_RTs = []
+    sorted_categories = dict(sorted(categories.items(),key = lambda x:len(x[1]),reverse=True))
+    for cat in sorted_categories:
+        closest_RTs = sorted([(diffs[cat],sample_RT) for diffs,sample_RT in zip(cat_mean_diffs,cluster_means) if cat in diffs if sample_RT not in selected_RTs])
+        if not closest_RTs:
+            continue
+        selected_RT = closest_RTs[0][1]
+        selected_RTs.append(selected_RT)
+        cats_out[cluster_means.index(selected_RT)] = cat
+    return cats_out
+
+
+def find_closest_categories(sample,sample_candidates,categories):
+    cat_means = get_category_means([sorted(x) for x in sample_candidates],categories)
+    cluster_means = sample
+    cat_mean_diffs = []
+    for cluster_mean,cat_mean in zip(cluster_means,cat_means):
+        cat_mean_diffs.append({k:abs(v-cluster_mean) for k,v in cat_mean.items()})
+    disallowed_list = []
+    chosen_list = []
+    sorted_idx = [sorted(cat_mean_diffs,key = lambda x: min([y for y in x.values()])).index(x) for i,x in enumerate(cat_mean_diffs)]
+    for cat_cands in sorted(cat_mean_diffs,key = lambda x: min([y for y in x.values()])):
+        sorted_cands = sorted(cat_cands.items(),key=lambda x:x[1])
+        filtered_cands = [x for x in sorted_cands if x[0] not in disallowed_list]
+        if filtered_cands:
+            chosen_cand = filtered_cands[0]
+            chosen_list.append(chosen_cand)
+            disallowed_list.append(chosen_cand[0])
+        else:
+            chosen_list.append((set(),None))
+    cats_out = [x[0] for x in chosen_list]
+    cats_out = [cats_out[x] for x in sorted_idx]
+    return cats_out
+
+
+def get_category_means(candidate_categories,categories):
+    category_means = []
+    for cand_cats in candidate_categories:
+        category_means.append({cat:np.mean([p for q in categories[cat] for p in q]) for cat in cand_cats})
+    return category_means 
+
+
+def RT_cats_to_sample_cats(RT_categories,RT_groups):
+    sample_group_categories = {x:[] for x in RT_categories}
+    for k,v in RT_categories.items():
+        for cluster in v:
+            for i,x in enumerate(RT_groups):
+                if cluster in x:
+                    sample_group_categories[k].append((i,x.index(cluster)))
+    return sample_group_categories
+
+
+def sample_categories_to_df(sample_group_categories,mass_range_df):
+    category_dfs = []
+    for cat,group in sample_group_categories.items():
+        for x in group:
+            cat_df = mass_range_df[x[0]][mass_range_df[x[0]]['RT_group'] == x[1]]
+            cat_df = cat_df.assign(category_label = [cat for x in cat_df['RT']])
+            category_dfs.append(cat_df)
+    return category_dfs
 
 
 def supplement_prediction(df_in, glycan_class, libr = None, mode = 'negative', modification = 'reduced', mass_tag = None):
