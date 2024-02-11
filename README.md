@@ -17,7 +17,7 @@
 pip install git+https://github.com/BojarLab/CandyCrunch.git
 ``` 
 #### Development version bundled with GlycoDraw:
-> **Note**
+> [!NOTE]  
 > The Operating System specific installations for GlycoDraw are still required, read more in the [GlycoDraw installation guide](https://bojarlab.github.io/glycowork/examples.html#glycodraw-code-snippets)
 ```bash
 pip install 'CandyCrunch[draw] @ git+https://github.com/Bojarlab/CandyCrunch
@@ -31,26 +31,123 @@ If you are looking for a **convenient** and **easy-to-run** version of the code 
 The notebook contains an example pipeline ready to run, which can be copied, executed, and customised in any way.  
 The example file included in the notebook is the same as in `examples/` and is ready for use in the notebook workflow. 
 
+## Using CandyCrunch &ndash; Command line interface:
+If you would like to run our main inference function from the command line, you can do so using the `cli.py` file included in this repository.
+
+**Requires at a minimum:**
+- a python interpreter acessible from the command line version >=3.8 <br />
+<pre>
+--spectra_filepath,type=string: a filepath to an mzML/mzXML file or a .xlsx file <br />
+--glycan_class, type=string: the glycan class measured ("N", "O", "lipid"/"free") <br />
+--output, type=string: an output filepath ending with `.csv` or `.xlsx`
+</pre>
+
+<details>
+<summary>
+
+#### Optional arguments:
+</summary>
+<pre>
+--mode, type=string: mass spectrometry mode; options are 'negative' or 'positive'; default: 'negative' <br />
+--modification, type=string: chemical derivatization of glycans; options are “reduced”, “permethylated”, “2AA”, “2AB” or “custom”; default:”reduced”
+| 
+|--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
+--lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
+--trap, type=string: type of mass detector used; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear' <br />
+--rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 <br />
+--rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 <br />
+--rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
+--spectra, type=float: whether to also output the actual spectra used for prediction; default:False <br />
+--get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False
+|
+|--filter_out, type=set: only if get_missing = "True", set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />  
+--mass_tolerance, type=float: permitted variation in Da, to still consider two masses to stem from the same molecule.; default:0.5 <br />
+--supplement, type=bool: whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True <br />
+--experimental, type=bool: whether to impute missing predictions via database searches etc.; default:True
+|
+|--taxonomy_class, type=string: only if experimental = "True", which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia' <br />
+--plot_glycans, type=bool: whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions, will be saved in the same folder as spectra_filepath; default:False
+</pre>
+</details>
+
+#### Basic usage
+> [!IMPORTANT]  
+> Users must install CandyCrunch using pip before running the commands below
+To be run once:
+```console
+/Users/xurbja $ git clone https://github.com/BojarLab/CandyCrunch.git
+```
+To be run for inference
+```console
+/Users/xurbja $ python3 CandyCrunch/CandyCrunch/cli.py --spectra_filepath path_to_my_files/file.mzML -- glycan_class 'O' --output path_to_my_outputs/output_file.xlsx 
+```
+
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
 #### `wrap_inference` (in `CandyCrunch.prediction`) <br>
 Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `CandyCrunch`  
   
-Requires at a minimum:
-- a filepath to an mzML/mzXML file or a .xlsx file containing their extracted spectra
-- the glycan class measured ("N", "O", "lipid", "free")
-```python
-annotated_spectra_df = wrap_inference(C:/myfiles/my_spectra.mzML, glycan_class)
-```
+Requires at a minimum:  
+<pre>
+- spectra_filepath, type = string: a filepath to an mzML/mzXML file or a .xlsx file <br />
+- glycan_class,type = string: the glycan class measured ("N", "O", "lipid"/"free")
+</pre>
+mzML/mzXML files are internally processed into extracted spectra. xlsx files need to be already extracted in the format as the example file in `examples/`.
 <details>
 <summary>
-  
+
+#### Optional arguments:
+</summary>
+<pre>
+model, type=Pytorch object: loaded from a checkpoint of a trained CandyCrunch model  <br />
+glycans, type=list: ordered list of glycans used to train CandyCrunch which can be predicted by the model <br />
+libr, type=list: library of monosaccharides, used as a mapping index to ensure unique graph construction <br />
+bin_num, type=list: number of bins to separate the ms2 spectrum into <br />
+frag_num, type=list: number of top fragments to show in df_out per spectrum; default:100 <br />
+mode, type=string: mass spectrometry mode; options are 'negative' or 'positive'; default: 'negative' <br />
+modification, type=string: chemical derivatization of glycans; options are “reduced”, “permethylated”, “2AA”, “2AB” or “custom”; default:”reduced”
+| 
+|--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
+lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
+trap, type=string: type of mass detector used; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear' <br />
+rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 <br />
+rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 <br />
+rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
+pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
+temperature, type=float: the temperature factor used to calibrate logits; default:1.15 <br />
+spectra, type=float: whether to also output the actual spectra used for prediction; default:False <br />
+get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False
+|
+|--filter_out, type=set: only if get_missing = "True", set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
+mass_tolerance, type=float: permitted variation in Da, to still consider two masses to stem from the same molecule.; default:0.5 <br />
+extra_thresh, type=float: prediction confidence threshold at which to allow cross-class predictions (e.g., predicting N-glycans in O-glycan samples); default:0.2 <br />
+supplement, type=bool: whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True <br />
+experimental, type=bool: whether to impute missing predictions via database searches etc.; default:True
+|
+|--mass_dic, type=dict: only if experimental = "True", dictionary of form mass : list of glycans; will be generated internally 
+|
+|--taxonomy_class, type=string: only if experimental = "True", which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia' 
+|
+|--df_use, type=DataFrame: only if experimental = "True", sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan <br />
+plot_glycans, type=bool: whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions, will be saved in the same folder as spectra_filepath; default:False 
+
+</pre>
+</details>
+
+#### Basic usage
+```python
+annotated_spectra_df = wrap_inference("C:/myfiles/my_spectra.mzML", glycan_class)
+```
+
+<details>
+<summary>
+
 #### This is what a truncated example of `annotated_spectra_df` would look like
 </summary>
 
 |         | predictions                                                                                                                             | composition             |   num_spectra |   charge |    RT | top_fragments                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |   adduct | evidence   |
 |--------:|:----------------------------------------------------------------------------------------------------------------------------------------|:------------------------|--------------:|---------:|------:|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------:|:-----------|
 | 384.157 | [('Gal(b1-3)GalNAc', 0.9625)]                                                                                                           | {'Hex': 1, 'HexNAc': 1} |             8 |       -1 |  6.75 | [204.0202, 222.1731, 156.0888, 179.031, 160.7594, ...]                                                                                                                                                                                                                                                                                                                                                                                                                                                  |      nan | strong     |
-| 425.036 | [('GalNAc(a1-3)GalNAc', 0.7947394540942927), ('GlcNAc(b1-3)GalNAc', 0.17965260545905706), ('HexNAc(?1-3)GalNAc', 0.025607940446650122)] | {'HexNAc': 2}           |             2 |       -1 | 38.88 | [381.005, 389.9802, 406.871, 326.8488, 212.01, ...]                         |      nan | strong     |
+| 425.036 | [('GalNAc(a1-3)GalNAc', 0.7947394540942927), ('GlcNAc(b1-3)GalNAc', 0.17965260545905706), ('HexNAc(?1-3)GalNAc', 0.025607940446650122)] | {'HexNAc': 2}           |             2 |       -1 | 15.88 | [381.005, 389.9802, 406.871, 326.8488, 212.01, ...]                         |      nan | strong     |
 | ... | ...                                                                                                            | ... |            ... |       ... | ... | ... |      ... | ...     |                                                                                                                           | ...                     |           ... |      ... | ...   | ...                                                |      ... | ...     |
 
 </details>
@@ -59,15 +156,35 @@ annotated_spectra_df = wrap_inference(C:/myfiles/my_spectra.mzML, glycan_class)
 #### `CandyCrumbs` (in `CandyCrunch.analysis`) <br>
 Wrapper function to annotate MS2 fragments using `CandyCrumbs`  
   
-Requires at a minimum:
-- a hypothesized glycan structure
-- a list of peak m/z values
-- a mass threshold
+#### Requires at a minimum:
+<pre>
+- glycan_string, type=string: a glycan in IUPAC-condensed format <br />
+- fragment_masses, type=list: all observed masses which are to be annotated with a possible fragment names <br />
+- mass_threshold, type=float: the maximum tolerated mass difference betweem observed masses and possible fragments 
+</pre>
 ```python
 condensed_iupac_glycan = 'Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3)]Gal(b1-4)Glc'
 ms2_fragment_masses = [425.07,443.07,546.19,1216.32]
 annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan,fragment_masses=ms2_fragment_masses,mass_threshold=1)
 ```
+
+
+<details>
+<summary>
+
+#### Optional arguments:
+</summary>
+<pre>
+max_cleavages, type=int: maximum number of allowed concurrent cleavages per possible fragment; default:3 <br />
+simplify, type=bool: whether to select a single fragment for each mass based on mass difference, number of cleavages, and other fragments; default:True <br />
+charge, type=int: the charge state of the precursor ion (singly-charged, doubly-charged, etc.); default:-1 <br />
+label_mass, type=float: mass of the glycan label or reducing end modification; default:2.0156 <br />
+iupac, type=bool: whether to also return the fragment sequence in IUPAC-condensed nomenclature; default:False <br />
+libr, type=list: library of monosaccharides, used as a mapping index to ensure unique graph construction 
+</pre>
+</details>
+
+
 <details>
 <summary>
   
