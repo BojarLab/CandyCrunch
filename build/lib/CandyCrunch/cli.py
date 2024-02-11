@@ -29,8 +29,10 @@ def main():
     args = parser.parse_args()
     args_dict = {k:v for k, v in vars(args).items() if v is not None and k != "output"}
     df_out = wrap_inference(**args_dict)
-    df_out.to_csv(args.output)
-
+    if args.output.endswith('.csv'):
+        df_out.to_csv(args.output)
+    if args.output.endswith('.xlsx') and not args.plot_glycans:
+        df_out.to_excel(args.output)
 
 if __name__ == '__main__':
     main()

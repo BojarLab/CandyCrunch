@@ -999,39 +999,8 @@ def assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,
         for preds, mass in zip(df_out.predictions, df_out.index)
         ]
     return df_out
-
-def augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic):
-    # Construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
-    if supplement:
-        try:
-            preds_lib = get_lib([x[0] for y in df_out.predictions.tolist() for x in y])
-            df_out = supplement_prediction(df_out, glycan_class, libr = preds_lib, mode = mode, modification = modification, mass_tag = mass_tag)
-            df_out['evidence'] = [
-                'medium' if pd.isna(evidence) and preds else evidence
-                for evidence, preds in zip(df_out['evidence'], df_out['predictions'])
-                ]
-        except:
-            pass
-    # Check for Neu5Ac-Neu5Gc swapped structures and search for glycans within SugarBase that could explain some of the spectra
-    if experimental:
-        df_out = impute(df_out, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag, glycan_class = glycan_class)
-        try:
-            df_out = filter_delayed_rts(df_out)
-            df_out = Ac_follows_Gc(df_out)
-        except ValueError:
-            pass
-        mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_class)
-        df_out = possibles(df_out, mass_dic, reduced)
-        df_out['evidence'] = [
-            'weak' if pd.isna(evidence) and preds else evidence
-            for evidence, preds in zip(df_out['evidence'], df_out['predictions'])
-            ]
-    # Filter out wrong predictions via diagnostic ions etc.
-    if supplement or experimental:
-        df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
-        df_out['predictions'] = [[(k[0].replace('-ol', '').replace('1Cer', ''), k[1]) if len(k) > 1 else (k[0].replace('-ol', '').replace('1Cer', ''),) for k in j] if j else j for j in df_out['predictions']]
-    return df_out
     
+
 def prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,
                                filter_out,reduced,multiplier,libr,modification,
                                rt_diff,frag_num):
@@ -1065,6 +1034,39 @@ def prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,
     # Deduplicate identical predictions for different spectra
     df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
     df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
+    return df_out
+
+
+def augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic):
+    # Construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
+    if supplement:
+        try:
+            preds_lib = get_lib([x[0] for y in df_out.predictions.tolist() for x in y])
+            df_out = supplement_prediction(df_out, glycan_class, libr = preds_lib, mode = mode, modification = modification, mass_tag = mass_tag)
+            df_out['evidence'] = [
+                'medium' if pd.isna(evidence) and preds else evidence
+                for evidence, preds in zip(df_out['evidence'], df_out['predictions'])
+                ]
+        except:
+            pass
+    # Check for Neu5Ac-Neu5Gc swapped structures and search for glycans within SugarBase that could explain some of the spectra
+    if experimental:
+        df_out = impute(df_out, libr = libr, mode = mode, modification = modification, mass_tag = mass_tag, glycan_class = glycan_class)
+        try:
+            df_out = filter_delayed_rts(df_out)
+            df_out = Ac_follows_Gc(df_out)
+        except ValueError:
+            pass
+        mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_class)
+        df_out = possibles(df_out, mass_dic, reduced)
+        df_out['evidence'] = [
+            'weak' if pd.isna(evidence) and preds else evidence
+            for evidence, preds in zip(df_out['evidence'], df_out['predictions'])
+            ]
+    # Filter out wrong predictions via diagnostic ions etc.
+    if supplement or experimental:
+        df_out = domain_filter(df_out, glycan_class, libr = libr, mode = mode, filter_out = filter_out, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use)
+        df_out['predictions'] = [[(k[0].replace('-ol', '').replace('1Cer', ''), k[1]) if len(k) > 1 else (k[0].replace('-ol', '').replace('1Cer', ''),) for k in j] if j else j for j in df_out['predictions']]
     return df_out
     
     
@@ -1104,7 +1106,7 @@ def finalise_predictions(df_out,libr,get_missing,pred_thresh,mode,modification,m
     df_out.index.name = "m/z"
     if plot_glycans:
         from glycowork.motif.draw import plot_glycans_excel
-        plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_number = 0)
+        plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_num = 0)
     return (df_out, spectra_out) if spectra else df_out
 
 
@@ -1127,7 +1129,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
-   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
+   | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0
    | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered; default:0
    | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0
@@ -1274,14 +1276,50 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out.index.name = "m/z"
     if plot_glycans:
         from glycowork.motif.draw import plot_glycans_excel
-        plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_number = 0)
+        plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_num = 0)
     return (df_out, spectra_out) if spectra else df_out
+
 
 def wrap_inference_split(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
                    filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
                    taxonomy_class = 'Mammalia', df_use = None, plot_glycans = False):
+    """wrapper function to get & curate CandyCrunch predictions\n
+   | Arguments:
+   | :-
+   | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", or ".xlsx" pointing to a file containing spectra or preprocessed spectra 
+   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
+   | model (PyTorch): trained CandyCrunch model
+   | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
+   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+   | bin_num (int): number of bins for binning; don't change; default: 2048
+   | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
+   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
+   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'; default:'reduced'
+   | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
+   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
+   | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
+   | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0
+   | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered; default:0
+   | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0
+   | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
+   | temperature (float): the temperature factor used to calibrate logits; default:1.15
+   | spectra (bool): whether to also output the actual spectra used for prediction; default:False
+   | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
+   | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
+   | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); default:0.2
+   | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
+   | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
+   | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
+   | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
+   | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'
+   | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
+   | plot_glycans (bool): whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions; default:False\n
+   | Returns:
+   | :-
+   | Returns dataframe of predictions for spectra in file
+   """
     print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     libr,df_use,reduced,multiplier = get_helper_vars(libr,df_use,modification,mode,taxonomy_class,glycan_class)
     df_out = spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass_tolerance)
@@ -1303,7 +1341,6 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, model = candycrunc
     for spectra_filepath in spectra_filepath_list:
         file_label = spectra_filepath.split('/')[-1].split('.')[0]
         df_out = spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass_tolerance)
-        # assigned_cats = assign_categories(df_out,filename_label_map,[x for x in annotation_table.mass.dropna().unique()],intra_cat_thresh,maximise_cat_size=maximise_cat_size)
         df_out = assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh)
         df_out['mass_label'] = np.round(df_out.index * 2) / 2
         df_out = df_out.assign(condition_label = spectra_filepath.split('/')[-1].split('.')[0])
@@ -1314,7 +1351,6 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, model = candycrunc
     for file_label in prevailing_category_predictions.condition_label.unique():
         df_out = prevailing_category_predictions[prevailing_category_predictions['condition_label'] == file_label]
         df_out = prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,filter_out,reduced,multiplier,libr,modification,rt_diff,frag_num)
-    # return inference_dfs,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic
         df_out = augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic)
         df_out = finalise_predictions(df_out,libr,get_missing,pred_thresh,mode,modification,mass_tag,multiplier,plot_glycans,spectra_filepath,spectra)
         inference_dfs[file_label] = df_out
@@ -1331,6 +1367,7 @@ def filter_top_n_isomers(df_in,top_n=3):
     df_out = df_out[df_out['paired_categories'].isin(permitted_mass_cats)]
     return df_out
 
+
 def assign_modal_category_prediction(assigned_cats):
     assigned_cats['top1_pred'] = [x[0][0] if x else None for x in assigned_cats['predictions']]
     most_common_group_preds = dict(assigned_cats[['mass_label','category_label','top1_pred']].groupby(['mass_label','category_label']).value_counts())
@@ -1343,6 +1380,7 @@ def assign_modal_category_prediction(assigned_cats):
     assigned_cats['top1_pred'] = [most_common_mapping[(ml,cl)] if tp else None for ml,cl,tp in zip(assigned_cats.mass_label,assigned_cats.category_label,assigned_cats.top1_pred)]
     assigned_cats['predictions'] = [[(top1_p,0.888)]+preds[1:] if preds else [] for top1_p,preds in zip(assigned_cats.top1_pred,assigned_cats.predictions)]
     return assigned_cats
+
 
 def assign_categories(all_ms2_spectra,intra_cat_thresh = 3,maximise_cat_size=True):
     all_mass_dfs = []
@@ -1421,6 +1459,7 @@ def expand_RT_categories(all_sample_RT_groups,categories,inter_sample_thresh,max
                     add_new_category(categories,cluster)
     return categories
 
+
 def calculate_candidate_clusters(sample,categories,inter_sample_thresh):
     all_candidate_categories = []
     for cluster in sample:
@@ -1431,6 +1470,7 @@ def calculate_candidate_clusters(sample,categories,inter_sample_thresh):
                     candidate_categories.add(category)
         all_candidate_categories.append(candidate_categories)
     return all_candidate_categories
+
 
 def settle_category_conflict(sample,cand_categories,categories):
     for cat in set().union(*cand_categories):
