@@ -953,6 +953,22 @@ def filter_rts(loaded_file,rt_min,rt_max):
 
 
 def get_helper_vars(libr,df_use,modification,mode,taxonomy_class,glycan_class):
+    """generates variables used for inference\n
+    | Arguments:
+    | :-
+    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
+    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'
+    | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True
+    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"\n
+    | Returns:
+    | :-
+    | (1) a library of monosaccharides
+    | (2) a sugarbase-like database of glycans with species associations
+    | (3) mass to add to glycans based on given modification 
+    | (4) sign of ion mode
+    """
     if libr is None:
         libr = lib
     if df_use is None:
@@ -964,6 +980,19 @@ def get_helper_vars(libr,df_use,modification,mode,taxonomy_class,glycan_class):
 
 
 def spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass_tolerance,bin_num=2048):
+    """Loads and clusters spectra into distinct mass and RT groups\n
+    | Arguments:
+    | :-
+    | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", or ".xlsx" pointing to a file containing spectra or preprocessed spectra 
+    | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered
+    | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered
+    | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak
+    | mass_tolerance (float): the general mass tolerance that is used for composition matching
+    | bin_num (int): number of bins for binning; don't change; default: 2048\n
+    | Returns:
+    | :-
+    | Returns a preliminary df_out dataframe of clustered spectra with no predictions 
+    """
     loaded_file = load_spectra_filepath(spectra_filepath)
     loaded_file = filter_rts(loaded_file,rt_min,rt_max)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
@@ -983,6 +1012,26 @@ def spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass
 
 
 def assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh):
+    """generates dataframe initial predictions\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): a preliminary df_out dataframe of clustered spectra with no predictions 
+    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
+    | model (PyTorch): trained CandyCrunch model
+    | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
+    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'
+    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'
+    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'
+    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'
+    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
+    | pred_thresh (float): prediction confidence threshold used for filtering
+    | temperature (float): the temperature factor used to calibrate logits
+    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples)\n
+    | Returns:
+    | :-
+    | Returns a preliminary df_out dataframe with initial predictions 
+    """
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap)
     # Predict glycans from spectra
@@ -1005,6 +1054,25 @@ def assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,
 def prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,
                                filter_out,reduced,multiplier,libr,modification,
                                rt_diff,frag_num):
+    """filters initial predictions\n
+    | Arguments:
+    | :-
+    | df_out (dataframe) a preliminary df_out dataframe with initial predictions
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'
+    | mass_tolerance (float): the general mass tolerance that is used for composition matching
+    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
+    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
+    | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
+    | reduced (float): mass to add to glycans based on given modification 
+    | multiplier (int): sign of ion mode
+    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'
+    | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak
+    | frag_num (int): how many top fragments to show in df_out per spectrum\n
+    | Returns:
+    | :-
+    | Returns a dataframe of filtered predictions 
+    """
     df_out['composition'] = [glycan_to_composition(g[0][0]) if g and g[0] else np.nan for g in df_out.predictions]
     df_out.composition = [
         k if isinstance(k, dict) else mz_to_composition(m, mode = mode, mass_tolerance = mass_tolerance,
@@ -1039,6 +1107,27 @@ def prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,
 
 
 def augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic):
+    """adds and reorders predictions based on possible structures\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): a dataframe of filtered predictions
+    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks
+    | experimental (bool): whether to impute missing predictions via database searches etc.
+    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
+    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
+    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'; default:'reduced'
+    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
+    | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
+    | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'
+    | reduced (float): mass to add to glycans based on given modification 
+    | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
+    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally\n
+    | Returns:
+    | :-
+    | Returns a dataframe of predictions 
+    """
     # Construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
     if supplement:
         try:
@@ -1072,6 +1161,24 @@ def augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,
     
     
 def finalise_predictions(df_out,libr,get_missing,pred_thresh,mode,modification,mass_tag,multiplier,plot_glycans,spectra_filepath,spectra):
+    """Cleans up incorrect structure predictions and formats dataframe\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): a dataframe of augmented predictions
+    | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
+    | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition
+    | pred_thresh (float): prediction confidence threshold used for filtering
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'
+    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'
+    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
+    | multiplier (int): sign of ion mode
+    | plot_glycans (bool): whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions
+    | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", or ".xlsx" pointing to a file containing spectra or preprocessed spectra 
+    | spectra (bool): whether to also output the actual spectra used for prediction; default:False\n
+    | Returns:
+    | :-
+    | Returns a dataframe of corrected predictions 
+    """
     # Keep or remove spectra that still lack a prediction after all this
     if not get_missing:
         df_out = df_out[df_out['predictions'].str.len() > 0]
@@ -1279,56 +1386,6 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         from glycowork.motif.draw import plot_glycans_excel
         plot_glycans_excel(df_out, '/'.join(spectra_filepath.split("\\")[:-1])+'/', glycan_col_num = 0)
     return (df_out, spectra_out) if spectra else df_out
-
-
-def wrap_inference_split(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
-                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
-                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2,
-                   filter_out = {'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
-                   taxonomy_class = 'Mammalia', df_use = None, plot_glycans = False):
-    """wrapper function to get & curate CandyCrunch predictions\n
-   | Arguments:
-   | :-
-   | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", or ".xlsx" pointing to a file containing spectra or preprocessed spectra 
-   | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
-   | model (PyTorch): trained CandyCrunch model
-   | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
-   | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
-   | bin_num (int): number of bins for binning; don't change; default: 2048
-   | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
-   | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated', '2AA', '2AB' or 'custom'; default:'reduced'
-   | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
-   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
-   | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
-   | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0
-   | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered; default:0
-   | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0
-   | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
-   | temperature (float): the temperature factor used to calibrate logits; default:1.15
-   | spectra (bool): whether to also output the actual spectra used for prediction; default:False
-   | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
-   | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
-   | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); default:0.2
-   | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
-   | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
-   | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
-   | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
-   | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'
-   | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
-   | plot_glycans (bool): whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions; default:False\n
-   | Returns:
-   | :-
-   | Returns dataframe of predictions for spectra in file
-   """
-    print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
-    libr,df_use,reduced,multiplier = get_helper_vars(libr,df_use,modification,mode,taxonomy_class,glycan_class)
-    df_out = spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass_tolerance)
-    df_out = assign_predictions(df_out,glycan_class,model,glycans,libr,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh)
-    df_out = prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,filter_out,reduced,multiplier,libr,modification,rt_diff,frag_num)
-    df_out = augment_predictions(df_out,supplement,experimental,glycan_class,libr,df_use,mode,modification,mass_tag,filter_out,taxonomy_class,reduced,mass_tolerance,mass_dic)
-    inference_out = finalise_predictions(df_out,libr,get_missing,pred_thresh,mode,modification,mass_tag,multiplier,plot_glycans,spectra_filepath,spectra)
-    return inference_out
 
 
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh ,top_n_isomers, model = candycrunch, glycans = glycans, libr = None, bin_num = 2048,
