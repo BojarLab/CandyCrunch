@@ -20,7 +20,7 @@ pip install git+https://github.com/BojarLab/CandyCrunch.git
 > [!NOTE]  
 > The Operating System specific installations for GlycoDraw are still required, read more in the [GlycoDraw installation guide](https://bojarlab.github.io/glycowork/examples.html#glycodraw-code-snippets)
 ```bash
-pip install 'CandyCrunch[draw] @ git+https://github.com/Bojarlab/CandyCrunch
+pip install 'CandyCrunch[draw] @ git+https://github.com/Bojarlab/CandyCrunch'
 ``` 
 #### PyPI:
 ```bash
@@ -34,7 +34,7 @@ The example file included in the notebook is the same as in `examples/` and is r
 ## Using CandyCrunch &ndash; Command line interface:
 If you would like to run our main inference function from the command line, you can do so using the `cli.py` file included in this repository.
 
-**Requires at a minimum:**
+#### Requires at a minimum:
 - a python interpreter acessible from the command line version >=3.8 <br />
 <pre>
 --spectra_filepath,type=string: a filepath to an mzML/mzXML file or a .xlsx file <br />
@@ -83,10 +83,10 @@ To be run for inference
 ```
 
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
-#### `wrap_inference` (in `CandyCrunch.prediction`) <br>
+### `wrap_inference` (in `CandyCrunch.prediction`) <br>
 Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `CandyCrunch`  
   
-Requires at a minimum:  
+#### Requires at a minimum:  
 <pre>
 - spectra_filepath, type = string: a filepath to an mzML/mzXML file or a .xlsx file <br />
 - glycan_class,type = string: the glycan class measured ("N", "O", "lipid"/"free")
@@ -151,9 +151,45 @@ annotated_spectra_df = wrap_inference("C:/myfiles/my_spectra.mzML", glycan_class
 | ... | ...                                                                                                            | ... |            ... |       ... | ... | ... |      ... | ...     |                                                                                                                           | ...                     |           ... |      ... | ...   | ...                                                |      ... | ...     |
 
 </details>
+
+### `wrap_inference_batch` (in `CandyCrunch.prediction`) <br>
+Wrapper function to predict glycan structures from multiple LC-MS/MS files using CandyCrunch. <br />
+This function similarly to `wrap_inference` except a list of filenames is provided and a dictionary of output DataFrames is returned, one for each input file, keyed by their filenames.  <br />
+Glycan predictions are assigned to groups based on the most common prediction in the group across files. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
+
+The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_threshold.  
+The largest group of spectra across files at each composition is selected.  If groups are assigned different structres then the largest groups of the first n isomers will be selected <br />
+
+#### Requires at a minimum:  
+<pre>
+- spectra_filepath_list, type = list: list of filepaths to mzML/mzXML file and/or a .xlsx files <br />
+- glycan_class, type = string: the glycan class measured ("N", "O", "lipid"/"free") <br />
+- intra_cat_threshold, type = float: minutes the RT of a structure can differ from the mean of a group. <br />
+- top_n_isomers, type = int: number of different isomer groups at each composition to retain. 
+</pre>
+
+#### Optional arguments:
+See `wrap_inference`  <br />  
+<br />  
+```python
+spectra_filepath_list = ["C:/myfiles/my_spectra_exp1.mzML","C:/myfiles/my_spectra_exp2.mzML",
+                          "C:/myfiles/my_spectra_exp3.mzML","C:/myfiles/my_spectra_exp4.mzML"]
+results_dict = wrap_inference_batch(spectra_filepath_list, 'O', 1.75, 2)
+```
+<details>
+<summary>
   
+#### This is what `results_dict` would look like
+</summary>
+<pre>{'my_spectra_exp1: pd.DataFrame(...),
+ 'my_spectra_exp2: pd.DataFrame(...),
+ 'my_spectra_exp3: pd.DataFrame(...),
+ 'my_spectra_exp4: pd.DataFrame(...)}
+</details>
+
+
 ## Using CandyCrumbs &ndash; MS2 fragment annotation
-#### `CandyCrumbs` (in `CandyCrunch.analysis`) <br>
+### `CandyCrumbs` (in `CandyCrunch.analysis`) <br>
 Wrapper function to annotate MS2 fragments using `CandyCrumbs`  
   
 #### Requires at a minimum:
@@ -167,7 +203,6 @@ condensed_iupac_glycan = 'Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3
 ms2_fragment_masses = [425.07,443.07,546.19,1216.32]
 annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan,fragment_masses=ms2_fragment_masses,mass_threshold=1)
 ```
-
 
 <details>
 <summary>
