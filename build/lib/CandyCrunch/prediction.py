@@ -90,9 +90,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 highest_i_dict[key] = mz_i_dict
                 reducing_mass.append(float(key.split('_')[-1]))
                 rts.append(spectrum.scan_time_in_minutes())
-            if intensity:
-                inty = spectrum.selected_precursors[0].get('i', np.nan)
-                intensities.append(inty)
+                if intensity:
+                    inty = spectrum.selected_precursors[0].get('i', np.nan)
+                    intensities.append(inty)
     df_out = pd.DataFrame({
         'reducing_mass': reducing_mass,
         'peak_d': list(highest_i_dict.values()),
