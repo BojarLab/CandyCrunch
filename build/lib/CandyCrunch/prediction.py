@@ -418,10 +418,9 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0):
    | Returns a deduplicated dataframe
    """
     # Sort by index and 'RT'
-    df.sort_values(by = ['RT'], inplace = True)
+    df.sort_values(by = 'RT', inplace = True)
     df.sort_index(inplace = True) 
-    # Initialize an empty DataFrame for deduplicated records
-    dedup_df = pd.DataFrame(columns = df.columns)  
+    max_conf_rows = []
     # Loop through the DataFrame to find duplicates
     for idx, row in df.iterrows():
         # Set a mask for close enough index values and RT values
@@ -441,8 +440,10 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0):
           summed_abundance = np.nansum(sub_df.loc[pred_mask, 'rel_abundance'])
           # Update 'rel_abundance'
           max_conf_row['rel_abundance'] = summed_abundance
-        # Store in dedup_df
-        dedup_df = pd.concat([dedup_df, pd.DataFrame([max_conf_row])])
+        # Store in max_conf_rows
+        max_conf_rows.append(max_conf_row)
+    dedup_df = pd.DataFrame(max_conf_rows,columns = df.columns)
+    dedup_df = dedup_df.astype(dict(df.dtypes))
     # Drop duplicate rows based on index and 'predictions'
     dedup_df.drop_duplicates(subset=['predictions'], keep = 'first', inplace = True)
     return dedup_df
@@ -881,7 +882,7 @@ def Ac_follows_Gc(df_out):
         # For simplicity, use the first Gc row's RT as reference
         gc_rt = gc_rows.iloc[0]["RT"]
         # Determine canonical Ac rows: Ac rows within ±1.0 RT of Gc
-        ac_rows["RT_diff"] = np.abs(ac_rows["RT"] - gc_rt)
+        ac_rows = ac_rows.assign(RT_diff = np.abs(ac_rows["RT"] - gc_rt))
         canonical_ac_indices = ac_rows[(ac_rows["RT_diff"] <= 1.0)].index
         # Update non-canonical Ac rows
         for idx, row in ac_rows.iterrows():
