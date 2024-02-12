@@ -32,10 +32,9 @@ The notebook contains an example pipeline ready to run, which can be copied, exe
 The example file included in the notebook is the same as in `examples/` and is ready for use in the notebook workflow. 
 
 ## Using CandyCrunch &ndash; Command line interface:
-If you would like to run our main inference function from the command line, you can do so using the `cli.py` file included in this repository.
+If you would like to run our main inference function from the command line, you can do so using the `candycrunch_predict` command included in this repository.
 
 #### Requires at a minimum:
-- a python interpreter acessible from the command line version >=3.8 <br />
 <pre>
 --spectra_filepath,type=string: a filepath to an mzML/mzXML file or a .xlsx file <br />
 --glycan_class, type=string: the glycan class measured ("N", "O", "lipid"/"free") <br />
@@ -73,13 +72,8 @@ If you would like to run our main inference function from the command line, you 
 #### Basic usage
 > [!IMPORTANT]  
 > Users must install CandyCrunch using pip before running the commands below
-To be run once:
 ```console
-/Users/xurbja $ git clone https://github.com/BojarLab/CandyCrunch.git
-```
-To be run for inference
-```console
-/Users/xurbja $ python3 CandyCrunch/CandyCrunch/cli.py --spectra_filepath path_to_my_files/file.mzML --glycan_class 'O' --output path_to_my_outputs/output_file.csv 
+/Users/xurbja $ candycrunch_predict --spectra_filepath path_to_my_files/file.mzML --glycan_class 'O' --output path_to_my_outputs/output_file.csv 
 ```
 
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
