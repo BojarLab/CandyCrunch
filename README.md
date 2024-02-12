@@ -79,7 +79,7 @@ To be run once:
 ```
 To be run for inference
 ```console
-/Users/xurbja $ python3 CandyCrunch/CandyCrunch/cli.py --spectra_filepath path_to_my_files/file.mzML -- glycan_class 'O' --output path_to_my_outputs/output_file.xlsx 
+/Users/xurbja $ python3 CandyCrunch/CandyCrunch/cli.py --spectra_filepath path_to_my_files/file.mzML --glycan_class 'O' --output path_to_my_outputs/output_file.csv 
 ```
 
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
