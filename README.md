@@ -5,7 +5,7 @@
 
 # CandyCrunch
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7940047.svg)](https://doi.org/10.5281/zenodo.7940047)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7940046.svg)](https://doi.org/10.5281/zenodo.7940046)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](https://github.com/bojarlab/candycrunch/blob/main/LICENSE)
 
 ## What is CandyCrunch?
