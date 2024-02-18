@@ -63,6 +63,18 @@ mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.99
                           'atoms': {'Fuc': [1, 2, 3, 4, 5, 6]}},
                   'dHex': {'mass': {'dHex': 146.0579},
                            'atoms': {'dHex': [1, 2, 3, 4, 5, 6]}},
+                  'Xyl': {'mass': {'01A': 102.0326, '02A': 72.022, '03A': 42.011,
+                                   '12X': 102.0326, '03X': 72.022, '02X': 42.011, 'Xyl':	132.0423},
+                          'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5],
+                                    '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Xyl': [1, 2, 3, 4, 5]}},
+                  'Ara': {'mass': {'01A': 102.0326, '02A': 72.022, '03A': 42.011,
+                                   '12X': 102.0326, '03X': 72.022, '02X': 42.011, 'Ara':	132.0423},
+                          'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5],
+                                    '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Ara': [1, 2, 3, 4, 5]}},
+                  'Pen': {'mass': {'01A': 102.0326, '02A': 72.022, '03A': 42.011,
+                                   '12X': 102.0326, '03X': 72.022, '02X': 42.011, 'Pen':	132.0423},
+                          'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5],
+                                    '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Pen': [1, 2, 3, 4, 5]}},
                   'GlcNAc6S': {'mass': {'04A': 139.9779, '24A': 60.0211, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041,
                                         '02A': 199.9991, 'GlcNAc6S': 283.0362},
                                'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
@@ -122,7 +134,7 @@ mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.99
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond']}
 cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B',
                  '13A': '13A', '24A': '24A', '04A': '04A', '35A': '35A', '03A': '03A', '25A': '25A', '02A': '02A',
-                 '02X': '02X', '04X': '04X', '03X': '03X', '15X': '15X', '24X': '24X'}
+                 '02X': '02X', '04X': '04X', '03X': '03X', '15X': '15X', '24X': '24X','12X': '12X','03X': '03X'}
 A_cross_rings = {c for c in cut_type_dict if c[-1] == 'A'}
 X_cross_rings = {c for c in cut_type_dict if c[-1] == 'X'}
 ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta']
@@ -721,13 +733,14 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, th
   subgraph_fragments = {}
   subgraphs = enumerate_subgraphs(nx_mono)
   subgraphs.append(nx_mono)
+  max_global_mass = max(mono_attributes['Global']['mass'].values())
   for subg in subgraphs:
     present_breakages = get_broken_bonds(subg, nx_mono, nx_edge_dict)
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg, present_breakages, root_node)
     inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
     max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18.0105546*len(terminals) 
-    max_mass += mono_attributes['Global']['mass']['+Acetate']
+    max_mass += max_global_mass
     if max_mass < min_mass:
         continue
     terminal_labels = [node_dict[x] for x in terminals]
