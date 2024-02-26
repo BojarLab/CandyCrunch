@@ -13,6 +13,7 @@ import pandas as pd
 from glycowork.glycan_data.loader import lib, unwrap
 from glycowork.motif.processing import (bracket_removal,
                                         min_process_glycans)
+from glycowork.motif.tokenization import map_to_basic
 try:
   from glycowork.glycan_data.stats import cohen_d
 except ModuleNotFoundError:
@@ -21,30 +22,10 @@ except ModuleNotFoundError:
 from scipy.stats import ttest_ind
 from statsmodels.stats.multitest import multipletests
 
-mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211,
-                                    '04A': 60.0211, '35A': 74.0368, '25A': 104.0473, '02A': 120.0423, 'Gal': 162.0528},
-                           'atoms': {'03X': [1, 2, 3], '02X': [1, 2], '15X': [1], '13A': [2, 3], '24A': [3, 4],
-                                     '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], 'Gal': [1, 2, 3, 4, 5, 6]}},
-                  'Glc': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211,
-                                   '04A': 60.0211, '35A': 74.0368, '25A': 104.0473, '02A': 120.0423, 'Glc': 162.0528},
-                          'atoms': {'03X': [1, 2, 3], '02X': [1, 2], '15X': [1], '13A': [2, 3], '24A': [3, 4],
-                                    '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], 'Glc': [1, 2, 3, 4, 5, 6]}},
-                  'Man': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211,
-                                   '04A': 60.0211, '35A': 74.0368, '25A': 104.0473, '02A': 120.0423, 'Man': 162.0528},
-                          'atoms': {'03X': [1, 2, 3], '02X': [1, 2], '15X': [1], '13A': [2, 3], '24A': [3, 4],
-                                    '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], 'Man': [1, 2, 3, 4, 5, 6]}},
-                  'Hex': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211,
+mono_attributes = {'Hex': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211,
                                    '04A': 60.0211, '35A': 74.0368, '25A': 104.0473, '02A': 120.0423, 'Hex': 162.0528},
                           'atoms': {'03X': [1, 2, 3], '02X': [1, 2], '15X': [1], '13A': [2, 3], '24A': [3, 4],
                                     '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], 'Hex': [1, 2, 3, 4, 5, 6]}},
-                  'GalNAc': {'mass': {'04A': 60.0211, '24A': 60.0211, '35A': 74.0368, '03A': 90.0317, '25A': 104.0473,
-                                      '02A': 120.0423, '24X': 143, 'GalNAc': 203.0794},
-                             'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                       '02A': [3, 4, 5, 6], '24X': [1,2,5,6], 'GalNAc': [1, 2, 3, 4, 5, 6]}},
-                  'GlcNAc': {'mass': {'04A': 60.0211, '24A': 60.0211, '35A': 74.0368, '03A': 90.0317, '25A': 104.0473,
-                                      '02A': 120.0423, '24X': 143, 'GlcNAc': 203.0794},
-                             'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                       '02A': [3, 4, 5, 6],  '24X': [1,2,5,6], 'GlcNAc': [1, 2, 3, 4, 5, 6]}},
                   'HexNAc': {'mass': {'04A': 60.0211, '24A': 60.0211, '35A': 74.0368, '03A': 90.0317, '25A': 104.0473,
                                       '02A': 120.0423, '24X': 143, 'HexNAc': 203.0794},
                              'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
@@ -55,42 +36,14 @@ mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.99
                              'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], 'Neu5Gc': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
                   'Kdn': {'mass': {'02X': 70.0055, '04X': 129.0188, 'Kdn': 250.0689},
                           'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], 'Kdn': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
-                  'GlcA': {'mass': {'GlcA': 176.03209},
-                           'atoms': {'GlcA': [1, 2, 3, 4, 5, 6]}},
                   'HexA': {'mass': {'HexA': 176.03209},
                            'atoms': {'HexA': [1, 2, 3, 4, 5, 6]}},
-                  'Fuc': {'mass': {'Fuc': 146.0579},
-                          'atoms': {'Fuc': [1, 2, 3, 4, 5, 6]}},
                   'dHex': {'mass': {'dHex': 146.0579},
                            'atoms': {'dHex': [1, 2, 3, 4, 5, 6]}},
-                  'Xyl': {'mass': {'01A': 102.0326, '02A': 72.022, '03A': 42.011,
-                                   '12X': 102.0326, '03X': 72.022, '02X': 42.011, 'Xyl':	132.0423},
-                          'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5],
-                                    '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Xyl': [1, 2, 3, 4, 5]}},
-                  'Ara': {'mass': {'01A': 102.0326, '02A': 72.022, '03A': 42.011,
-                                   '12X': 102.0326, '03X': 72.022, '02X': 42.011, 'Ara':	132.0423},
-                          'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5],
-                                    '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Ara': [1, 2, 3, 4, 5]}},
                   'Pen': {'mass': {'01A': 102.0326, '02A': 72.022, '03A': 42.011,
                                    '12X': 102.0326, '03X': 72.022, '02X': 42.011, 'Pen':	132.0423},
                           'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5],
                                     '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Pen': [1, 2, 3, 4, 5]}},
-                  'GlcNAc6S': {'mass': {'04A': 139.9779, '24A': 60.0211, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041,
-                                        '02A': 199.9991, 'GlcNAc6S': 283.0362},
-                               'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                         '02A': [3, 4, 5, 6], 'GlcNAc6S': [1, 2, 3, 4, 5, 6]}},
-                  'GlcNAcOS': {'mass': {'04A': 139.9779, '24A': 139.9779, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041,
-                                        '02A': 199.9991, 'GlcNAcOS': 283.0362},
-                               'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6],
-                                         '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], 'GlcNAcOS': [1, 2, 3, 4, 5, 6]}},
-                  'GalNAc6S': {'mass': {'04A': 139.9779, '24A': 60.0211, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041,
-                                        '02A': 199.9991, 'GalNAc6S': 283.0362},
-                               'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                         '02A': [3, 4, 5, 6], 'GalNAc6S': [1, 2, 3, 4, 5, 6]}},
-                  'GalNAcOS': {'mass': {'04A': 139.9779, '24A': 139.9779, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041,
-                                        '02A': 199.9991, 'GalNAcOS': 283.0362},
-                               'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                         '02A': [3, 4, 5, 6], 'GalNAcOS': [1, 2, 3, 4, 5, 6]}},
                   'HexNAc6S': {'mass': {'04A': 139.9779, '24A': 60.0211, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041,
                                         '02A': 199.9991, 'HexNAc6S': 283.0362},
                                'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
@@ -99,36 +52,21 @@ mono_attributes = {'Gal': {'mass': {'03X': 72.0211, '02X': 42.0105, '15X': 27.99
                                         '02A': 199.9991, 'HexNAcOS': 283.0362},
                                'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6],
                                          '02A': [3, 4, 5, 6], 'HexNAcOS': [1, 2, 3, 4, 5, 6]}},
-                  'Gal6S': {'mass': {'13A': 60.0211, '24A': 60.0211, '04A': 139.9779, '35A': 153.9936, '25A': 184.0041,
-                                     '02A': 199.9991, 'Gal6S': 242.0096},
+                  'Hex6S': {'mass': {'13A': 60.0211, '24A': 60.0211, '04A': 139.9779, '35A': 153.9936, '25A': 184.0041,
+                                     '02A': 199.9991, 'Hex6S': 242.0096},
                             'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
                                       '02A': [3, 4, 5, 6], 'Gal6S': [1, 2, 3, 4, 5, 6]}},
-                  'Gal3S': {'mass': {'13A': 139.9779, '24A': 139.9779, '04A': 60.0211, '35A': 74.0368, '25A': 184.0041,
-                                     '02A': 199.9991, 'Gal3S': 242.0096},
+                  'Hex3S': {'mass': {'13A': 139.9779, '24A': 139.9779, '04A': 60.0211, '35A': 74.0368, '25A': 184.0041,
+                                     '02A': 199.9991, 'Hex3S': 242.0096},
                             'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
                                       '02A': [3, 4, 5, 6], 'Gal3S': [1, 2, 3, 4, 5, 6]}},
-                  'GalOS': {'mass': {'13A': 60.0211, '24A': 139.9779, '04A': 139.9779, '35A': 153.9936, '25A': 184.0041,
-                                     '02A': 199.9991, 'GalOS': 242.0096},
-                            'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                      '02A': [3, 4, 5, 6], 'GalOS': [1, 2, 3, 4, 5, 6]}},
-                  'Glc6S': {'mass': {'13A': 60.0211, '24A': 60.0211, '04A': 139.9779, '35A': 153.9568, '25A': 184.0041,
-                                     '02A': 199.9991, 'Glc6S': 242.0096},
-                            'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                      '02A': [3, 4, 5, 6], 'Glc6S': [1, 2, 3, 4, 5, 6]}},
-                  'Glc3S': {'mass': {'13A': 139.9779, '24A': 139.9779, '04A': 60.0211, '35A': 74.0368, '25A': 184.0041,
-                                     '02A': 199.9991, 'Glc3S': 242.0096},
-                            'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                      '02A': [3, 4, 5, 6], 'Glc3S': [1, 2, 3, 4, 5, 6]}},
-                  'GlcOS': {'mass': {'13A': 60.0211, '24A': 139.9779, '04A': 139.9779, '35A': 153.9936, '25A': 184.0041,
-                                     '02A': 199.9991, 'GlcOS': 242.0096},
-                            'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                     '02A': [3, 4, 5, 6], 'GlcOS': [1, 2, 3, 4, 5, 6]}},
                   'HexOS': {'mass': {'13A': 60.0211, '24A': 139.9779, '04A': 139.9779, '35A': 153.9936, '25A': 184.0041,
                                      '02A': 199.9991, 'HexOS': 242.0096},
                             'atoms': {'13A': [2, 3], '24A': [3, 4], '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                                      '02A': [3, 4, 5, 6], 'HexOS': [1, 2, 3, 4, 5, 6]}},
+                                      '02A': [3, 4, 5, 6], 'GalOS': [1, 2, 3, 4, 5, 6]}},
                   'Global': {'mass': {'H2O': -18.0105546, 'CH2O': -30.0106, 'C2H2O': -42.0106, 'CO2': -43.9898, 'C2H4O2': -60.0211,
-                                      'SO4': -79.9568, 'C3H8O4': -108.0423, '+Acetate': +42.0106, '+Na': +22.989218}}
+                                      'SO4': -79.9568, 'C3H8O4': -108.0423, '+Acetonitrile': +42.0106, '+Acetate': 59.013851, '+Na': +22.989218,
+                                      '+K': 38.963707}}
                    }
 
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond']}
@@ -390,6 +328,7 @@ def calculate_mass(nx_mono):
   | Returns a float of the monoisotopic mass of the glycan or fragment in negative mode
   """
   comp = nx.get_node_attributes(nx_mono, 'string_labels')
+  comp = {k: map_to_basic(v) for k, v in comp.items()}
   mono_mods = nx.get_node_attributes(nx_mono, 'mod_labels')
   atom_dict = nx.get_node_attributes(nx_mono, 'atomic_mod_dict')
   all_atom_mods = Counter([m for d in [v.values() for v in atom_dict.values()] for m in d if m != 0])
@@ -425,6 +364,7 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
   """
   atomic_mod_dict = {}
   for terminal, terminal_label in zip(terminals, terminal_labels):
+    terminal_label = map_to_basic(terminal_label)
     atomic_mod_dict[terminal] = {y: 0 for y in mono_attributes[terminal_label]['atoms'][terminal_label]}
 
   for bond, bond_label in present_breakages.items():
@@ -463,7 +403,7 @@ def get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict
     elif subg.degree()[node] > 1:
       terminal_mods.append([label])
     else:
-      terminal_mods.append([x for x in mono_attributes[label]['mass'] if x in X_cross_rings or x == label])
+      terminal_mods.append([x for x in mono_attributes[map_to_basic(label)]['mass'] if x in X_cross_rings or x == label])
   return terminal_mods
 
 
@@ -480,10 +420,11 @@ def get_valid_A_frags(subg, node, label, nx_edge_dict):
   | Returns a list of names of possible modifications
   """
   valid_A_mods_list = []
-  A_mods_list = [x for x in mono_attributes[label]['mass'] if x in A_cross_rings or x == label]
+  idx_label = map_to_basic(label)
+  A_mods_list = [x for x in mono_attributes[idx_label]['mass'] if x in A_cross_rings or x == label]
   node_in_edges = [x for x in subg.in_edges(node)]
   for mod in A_mods_list:
-    if not set([int(nx_edge_dict[bond]['bond_label'][-1]) for bond in node_in_edges if nx_edge_dict[bond]['bond_label'][-1] != '?']) <= set(mono_attributes[label]['atoms'][mod]):
+    if not set([int(nx_edge_dict[bond]['bond_label'][-1]) for bond in node_in_edges if nx_edge_dict[bond]['bond_label'][-1] != '?']) <= set(mono_attributes[idx_label]['atoms'][mod]):
       pass
     else:
       valid_A_mods_list.append(mod)
@@ -521,6 +462,7 @@ def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic
   """
   all_terminal_perms, all_mono_mods = [], []
   for node, label, mono_mods in zip(terminals, terminal_labels, mono_mods_list):
+    label = map_to_basic(label)
     possible_node_atoms = [{k: v for k, v in atomic_mod_dict_subg[node].items() if k in mono_attributes[label]['atoms'][mod]} for mod in mono_mods]
     all_atom_dict_perms, all_mono_mod_perms = [], []
     for i, atom_dict in enumerate(possible_node_atoms):
@@ -549,6 +491,7 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
   all_mono_mod_masses = []
   for node, label in zip(all_mono_mods, terminal_labels):
     node_mod_masses = []
+    label = map_to_basic(label)
     for mod in node:
       mass = mono_attributes[label]['mass'][mod]
       node_mod_masses.append(mass)
@@ -646,8 +589,10 @@ def get_global_mods(subg, node_dict, mode):
     global_mods.remove('SO4')
   if mode == 'negative':
     global_mods.remove('+Na')
+    global_mods.remove('+K')
   if mode == 'positive':
     global_mods.remove('+Acetate')
+    global_mods.remove('+Acetonitrile')
   return global_mods
 
 
@@ -738,8 +683,8 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, th
     present_breakages = get_broken_bonds(subg, nx_mono, nx_edge_dict)
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg, present_breakages, root_node)
-    inner_mass = sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in subg.nodes() if m not in terminals])
-    max_mass = inner_mass + sum([mono_attributes[node_dict[m]]['mass'][node_dict[m]] for m in terminals]) + 18.0105546*len(terminals) 
+    inner_mass = sum([mono_attributes[map_to_basic(node_dict[m])]['mass'][map_to_basic(node_dict[m])] for m in subg.nodes() if m not in terminals])
+    max_mass = inner_mass + sum([mono_attributes[map_to_basic(node_dict[m])]['mass'][map_to_basic(node_dict[m])] for m in terminals]) + 18.0105546*len(terminals) 
     max_mass += max_global_mass
     if max_mass < min_mass:
         continue
@@ -756,7 +701,7 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, th
       if not (abs(fragment_arr - mass) < threshold).any():
         continue
       if (m := mod_count(node_mod, global_mod)) <= max_cleavages:
-        if m > 1 and global_mod in ['+Acetate','+Na']:
+        if m > 1 and global_mod in ['+Acetate', '+Acetonitrile', '+Na', '+K']:
           continue
         annotated_subg = annotate_subgraph(subg,node_mod,global_mod,terminals)
         annotated_subg_mass = round(mass, 5)
@@ -779,7 +724,7 @@ def rank_chains(nx_mono):
   leaf_chains = []
   for og_leaf in og_leaves:
     leaf_chains.append(nx.shortest_path(nx_mono, source = og_leaf))
-  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains], key = lambda x: sum([mono_attributes[node_dict[n]]['mass'][node_dict[n]] for n in x]), reverse = True)
+  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains], key = lambda x: sum([mono_attributes[map_to_basic(node_dict[n])]['mass'][map_to_basic(node_dict[n])] for n in x]), reverse = True)
   return zip(ranks, main_chains)
 
 
