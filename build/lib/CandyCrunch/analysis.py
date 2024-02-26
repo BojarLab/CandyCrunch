@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from glycowork.glycan_data.loader import lib, unwrap
 from glycowork.motif.processing import (bracket_removal,
-                                        min_process_glycans)
+                                        min_process_glycans, rescue_glycans)
 from glycowork.motif.tokenization import map_to_basic
 try:
   from glycowork.glycan_data.stats import cohen_d
@@ -1097,6 +1097,7 @@ def simplify_fragments(dc_names):
   return observed_frags
 
 
+@rescue_glycans
 def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
                 max_cleavages = 3, simplify = True, charge = -1, label_mass = 2.0156,
                 iupac = False, intensities = None):
