@@ -128,34 +128,26 @@ def glycan_to_graph_monos(glycan):
   bond_proc = min_process_glycans([glycan])[0]
   mono_proc = bond_proc[::2]
 
-  all_mask_dic = {k: bond_proc[k] for k in range(len(bond_proc))}
-  mono_mask_dic = {k: mono_proc[k] for k in range(len(mono_proc))}
+  all_mask_dic = {k: v for k, v in enumerate(bond_proc)}
+  mono_mask_dic = {k: v for k, v in enumerate(mono_proc)}
   for k, j in mono_mask_dic.items():
     glycan = glycan.replace(j, str(k), 1)
   glycan = ''.join(re.split(r'[()]', glycan)[::2])
   adj_matrix = np.zeros((len(mono_proc), len(mono_proc)), dtype = int)
 
   for k in range(len(mono_mask_dic)):
-    for j in range(len(mono_mask_dic)):
-      if k < j:
-        if k >= 100:
-          adjustment = 2
-        elif k >= 10:
-          adjustment = 1
-        else:
-          adjustment = 0
-        k_idx, j_idx = glycan.find(str(k), k),glycan.find(str(j), j)
-        glycan_part = glycan[k_idx+1:j_idx]
-
+    for j in range(k + 1, len(mono_mask_dic)):
+      adjustment = 2 if k >= 100 else 1 if k >= 10 else 0
+      k_idx, j_idx = glycan.find(str(k), k),glycan.find(str(j), j)
+      glycan_part = glycan[k_idx+1:j_idx]
+      if evaluate_adjacency_monos(glycan_part, adjustment):
+        adj_matrix[k, j] = 1
+        continue
+      if len(bracket_removal(glycan_part)) <= 1+adjustment:
+        glycan_part = bracket_removal(glycan_part)
         if evaluate_adjacency_monos(glycan_part, adjustment):
           adj_matrix[k, j] = 1
           continue
-
-        if len(bracket_removal(glycan_part)) <= 1+adjustment:
-          glycan_part = bracket_removal(glycan_part)
-          if evaluate_adjacency_monos(glycan_part, adjustment):
-            adj_matrix[k, j] = 1
-            continue
 
   return mono_mask_dic, adj_matrix, all_mask_dic
 
@@ -170,11 +162,7 @@ def create_edge_labels(gr, all_dict):
   | :-
   | Returns a dict mapping each gr edge to its bond label
   """
-  edge_dict = {}
-  for e in gr.edges:
-    edge_dict[e] = {'bond_label': all_dict[(e[0]*2)+1]}
-
-  return edge_dict
+  return {(e[0], e[1]): {'bond_label': all_dict[(e[0]*2)+1]} for e in gr.edges}
 
 
 def mono_graph_to_nx(mono_graph, directed = True, libr = None):
@@ -190,15 +178,11 @@ def mono_graph_to_nx(mono_graph, directed = True, libr = None):
   """
   if libr is None:
     libr = lib
-  if directed:
-    template = nx.DiGraph
-  else:
-    template = nx.Graph
-  node_dict_mono = mono_graph[0]
-  all_dict = mono_graph[2]
+  template = nx.DiGraph if directed else nx.Graph
+  node_dict_mono, adj_matrix, all_dict = mono_graph
 
   if len(node_dict_mono) > 1:
-    gr = nx.from_numpy_array(mono_graph[1], create_using = template)
+    gr = nx.from_numpy_array(adj_matrix, create_using = template)
     for n1, n2, d in gr.edges(data = True):
       del d['weight']
   else:
@@ -477,7 +461,7 @@ def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic
   all_terminal_perms, all_mono_mods = [], []
   for node, label, mono_mods in zip(terminals, terminal_labels, mono_mods_list):
     label = map_to_basic(label)
-    possible_node_atoms = [{k: v for k, v in atomic_mod_dict_subg[node].items() if k in mono_attributes[label]['atoms'][mod]} for mod in mono_mods]
+    possible_node_atoms = [{k: v for k, v in atomic_mod_dict_subg[node].items() if k in mono_attributes[label]['atoms'][map_to_basic(mod)]} for mod in mono_mods]
     all_atom_dict_perms, all_mono_mod_perms = [], []
     for i, atom_dict in enumerate(possible_node_atoms):
       dict_perms = create_dict_perms(atom_dict)
@@ -507,7 +491,7 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
     node_mod_masses = []
     label = map_to_basic(label)
     for mod in node:
-      mass = mono_attributes[label]['mass'][mod]
+      mass = mono_attributes[label]['mass'][map_to_basic(mod)]
       node_mod_masses.append(mass)
     all_mono_mod_masses.append(node_mod_masses)
 
@@ -670,7 +654,7 @@ def annotate_subgraph(subg,node_mod,global_mod,terminals):
   return mod_subg
 
 
-def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, threshold=None, label_mass=2.0156, charge = -1, mode = 'negative'):
+def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, threshold=None, label_mass=2.0156, charge = -1):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
@@ -679,8 +663,7 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, th
   | fragment_masses (list): all masses which are to be annotated with a fragment name
   | threshold (float): the range around the observed mass in which constrain potential fragments
   | label_mass (float): mass of the glycan label or reducing end modification; default:2.0156
-  | charge (int): the maximum possible charge on the fragments to be matched; default:-1
-  | mode (string): the mode in which the mass spectrometer was run, 'negative' or 'positive'\n
+  | charge (int): the maximum possible charge on the fragments to be matched; default:-1\n
   | Returns:
   | :-
   | Returns a dict of lists of networkx subgraphs
@@ -1136,11 +1119,10 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   if libr is None:
     libr = lib
   hit_dict = {}
-  mode = 'negative' if charge < 0 else 'positive'
   fragment_masses = sorted(fragment_masses) 
   mono_graph = glycan_to_graph_monos(glycan_string)
   nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
-  subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, label_mass = label_mass, charge = charge, mode = mode)
+  subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, label_mass = label_mass, charge = charge)
   downstream_values = []
   for observed_mass in fragment_masses:
     fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge)
