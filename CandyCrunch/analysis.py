@@ -339,10 +339,7 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
       atomic_mod_dict[bond[0]][red_breakage] = 2
     else:
       # Current improvised way of providing '?' support
-      try:
-        breakage = int(bond_label[-1])
-      except:
-        breakage = random.choice([2, 3, 4, 5, 6])
+      breakage = int(bond_label[-1]) if bond_label[-1].isdigit() else random.choice([2, 3, 4, 5, 6])
       atomic_mod_dict[bond[1]][breakage] = 1
   return atomic_mod_dict
 
@@ -363,13 +360,14 @@ def get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict
   """
   terminal_mods = []
   for node, label in zip(terminals, terminal_labels):
+    basic_label = map_to_basic(label)
     if node == root_node:
       valid_A_frags = get_valid_A_frags(subg, node, label, nx_edge_dict)
       terminal_mods.append(valid_A_frags)
     elif subg.degree()[node] > 1:
       terminal_mods.append([label])
     else:
-      terminal_mods.append([x for x in mono_attributes[map_to_basic(label)]['mass'] if x in X_cross_rings or x == label])
+      terminal_mods.append([x for x in mono_attributes[basic_label]['mass'] if x in X_cross_rings or x == label])
   return terminal_mods
 
 
@@ -388,12 +386,11 @@ def get_valid_A_frags(subg, node, label, nx_edge_dict):
   valid_A_mods_list = []
   idx_label = map_to_basic(label)
   A_mods_list = [x for x in mono_attributes[idx_label]['mass'] if x in A_cross_rings or x == label]
-  node_in_edges = [x for x in subg.in_edges(node)]
-  for mod in A_mods_list:
-    if not set([int(nx_edge_dict[bond]['bond_label'][-1]) for bond in node_in_edges if nx_edge_dict[bond]['bond_label'][-1] != '?']) <= set(mono_attributes[idx_label]['atoms'][mod]):
-      pass
-    else:
-      valid_A_mods_list.append(mod)
+  bond_numbers = set(int(nx_edge_dict[bond]['bond_label'][-1])
+                     for bond in subg.in_edges(node)
+                     if nx_edge_dict[bond]['bond_label'][-1].isdigit())
+  valid_A_mods_list = [mod for mod in A_mods_list
+                       if bond_numbers <= set(mono_attributes[idx_label]['atoms'][mod])]
   return valid_A_mods_list
 
 
@@ -408,8 +405,8 @@ def create_dict_perms(dicty):
   """
   dict_perms = []
   modded_atoms = [k for k, v in dicty.items() if v in bond_type_helper]
-  for mod_prod in product(*[bond_type_helper[dicty[y]] for y in modded_atoms]):
-    dict_perms.append({**dicty, **dict(zip(modded_atoms, mod_prod))})
+  perms = product(*(bond_type_helper[dicty[y]] for y in modded_atoms))
+  dict_perms = [{**dicty, **dict(zip(modded_atoms, perm))} for perm in perms]
   return dict_perms
 
 
@@ -454,23 +451,14 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
   | (2) a list of all possible mass combinations for each bond fragmentation combination
   | (3) a list of masses corresponding to each of the global mods
   """
-  all_mono_mod_masses = []
-  for node, label in zip(all_mono_mods, terminal_labels):
-    node_mod_masses = []
-    label = map_to_basic(label)
-    for mod in node:
-      mass = mono_attributes[label]['mass'][map_to_basic(mod)]
-      node_mod_masses.append(mass)
-    all_mono_mod_masses.append(node_mod_masses)
+  all_mono_mod_masses = [[mono_attributes[map_to_basic(label)]['mass'][map_to_basic(mod)] for mod in mods] for mods, label in zip(all_mono_mods, terminal_labels)]
 
   all_atom_dict_masses = []
   for node in all_terminal_perms:
     node_dict_masses = []
     for mod in node:
       present_atom_mods = [x for x in mod.values() if x in ['no_bond', 'red_bond']]
-      mass = -18.0105546*len([x for x in present_atom_mods if x == 'no_bond'])
-      mass += +18.0105546*len([x for x in present_atom_mods if x == 'red_bond'])
-      node_dict_masses.append(mass)
+      node_dict_masses.append(sum(-18.0105546 if v == 'no_bond' else 18.0105546 for v in present_atom_mods))
     all_atom_dict_masses.append(node_dict_masses)
 
   global_mods_mass = [mono_attributes['Global']['mass'][x] for x in global_mods[1:]]
@@ -479,7 +467,7 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
 
 
 def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass, terminals,
-                                  inner_mass, true_root_node, label_mass, mode):
+                                  inner_mass, true_root_node, label_mass, charge):
   """Determines the mass of every permutation of monosaccharide, atom, and global modification\n
   | Arguments:
   | :-
@@ -490,30 +478,21 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
   | inner_mass (float): total mass of non-terminal nodes in subgraph
   | true_root_node (int): the node label corresponding to the root of the parent glycan
   | label_mass (float): mass of the glycan label or reducing end modification
-  | mode (string): the mode in which the mass spectrometer was run, 'negative' or 'positive'\n
+  | charge (int): assumed charge of glycan\n
   | Returns:
   | :-
   | Returns a list every single mass of each modification combination for each cross ring combination
   """
-  if mode == 'negative':
-    mode_mass = -1.0078
-  elif mode == 'positive':
-    mode_mass = +1.0078
+  mode_mass = -1.0078 if charge < 0 else 1.0078
   masses_list = []
-  root_presence = False
-  if true_root_node in terminals:
-    root_presence = True
-    root_node_idx = terminals.index(true_root_node)
+  root_presence = true_root_node in terminals
+  root_node_idx = terminals.index(true_root_node) if root_presence else -1
   for mod_combo, atom_combo in zip(mono_mods_mass, atom_mods_mass):
-    mass = inner_mass+mode_mass
-    mass += sum(mod_combo)+sum(atom_combo)
-    if root_presence:
-      if mod_combo[root_node_idx] not in A_cross_rings:
-        mass += 18.0105546+label_mass
+    mass = inner_mass + mode_mass + sum(mod_combo) + sum(atom_combo)
+    if root_presence and mod_combo[root_node_idx] not in A_cross_rings:
+      mass += 18.0105546 + label_mass
     masses_list.append(mass)
-    for mod_mass in global_mods_mass:
-      modded_mass = mass + mod_mass
-      masses_list.append(modded_mass)
+    masses_list.extend([mass + mod_mass for mod_mass in global_mods_mass])
   return masses_list
 
 
@@ -529,38 +508,33 @@ def add_to_subgraph_fragments(subgraph_fragments, nx_mono_list, mass_list):
   | Returns an updated subgraph_fragments dict
   """
   for nx_mono, mass in zip(nx_mono_list, mass_list):
-    if mass not in subgraph_fragments:
-      subgraph_fragments[mass] = [nx_mono]
-    else:
-      subgraph_fragments[mass].append(nx_mono)
-
+    subgraph_fragments.setdefault(mass, []).append(nx_mono)
   return subgraph_fragments
 
 
-def get_global_mods(subg, node_dict, mode):
+def get_global_mods(subg, node_dict, charge):
   """Returns the valid list of global modifications for a given subgraph\n
   | Arguments:
   | :-
   | subg (networkx_object): a subgraph
   | node_dict (dict): a dictionary relating the integer label of each node with the monosaccharide it represents\n
-  | mode (string): the mode in which the mass spectrometer was run, 'negative' or 'positive'\n
+  | charge (int): the assumed charge of the glycan\n
   | Returns:
   | :-
   | Returns a a list of modification names
   """
   global_mods = sorted([x for x in mono_attributes['Global']['mass']])
-  if not any(k in [node_dict[x] for x in subg.nodes()] for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
+  node_labels = ''.join(node_dict[x] for x in subg.nodes())
+  if not any(k in node_labels for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
     global_mods.remove('CO2')
-  if 'S' not in ''.join([node_dict[x] for x in subg.nodes()]):
+  if 'S' not in node_labels:
     global_mods.remove('SO4')
-  if 'P' not in ''.join([node_dict[x] for x in subg.nodes()]):
+  if 'P' not in node_labels:
     global_mods.remove('PO4')
-  if mode == 'negative':
-    global_mods.remove('+Na')
-    global_mods.remove('+K')
-  if mode == 'positive':
-    global_mods.remove('+Acetate')
-    global_mods.remove('+Acetonitrile')
+  positive_mods = {'+Na', '+K'}
+  negative_mods = {'+Acetate', '+Acetonitrile'}
+  mods_to_remove = positive_mods if charge < 0 else negative_mods
+  global_mods = [mod for mod in global_mods if mod not in mods_to_remove]
   return global_mods
 
 
@@ -574,9 +548,7 @@ def mod_count(node_mod, global_mod):
   | :-
   | Returns a sum of modifications
   """
-  c = 0
-  if global_mod is not None:
-    c += 1
+  c = 1 if global_mod is not None else 0
   c += sum([1 for k in node_mod[0] if k in A_cross_rings or k in X_cross_rings])
   c += sum([1 for k in unwrap([list(n.values()) for n in node_mod[1]]) if isinstance(k, str)])
   return c
@@ -587,7 +559,7 @@ def extend_masses(fragment_masses, charge):
   | Arguments:
   | :-
   | fragment_masses (list): a list of observed masses to be searched for possible fragments
-  | charge (int): the charge to use when calcualting multiply charged masses\n
+  | charge (int): the charge to use when calculating multiply charged masses\n
   | Returns:
   | :-
   | Returns a list containing both the input masses and the other masses at which to search to assign multiply charged fragments to the inital masses
@@ -596,7 +568,7 @@ def extend_masses(fragment_masses, charge):
     return fragment_masses
   modifier = np.sign(charge)
   for z in range(2, abs(charge)+1):
-    charged_masses = fragment_masses + [(k*z)-(z*modifier-modifier) for k in fragment_masses]
+    charged_masses = fragment_masses + [(k*z) - (z - 1.0078)*modifier for k in fragment_masses]
   return charged_masses
 
 
@@ -613,16 +585,15 @@ def annotate_subgraph(subg,node_mod,global_mod,terminals):
   | Returns a copy of the input subgraph with networkx node attributes describing the modifications
   """
   mod_subg = subg.copy()
-  mono_mods_dict = dict(zip(terminals, node_mod[0]))
-  nx.set_node_attributes(mod_subg, mono_mods_dict, 'mod_labels')
-  atoms_mods_dict = dict(zip(terminals, node_mod[1]))
-  nx.set_node_attributes(mod_subg, atoms_mods_dict, 'atomic_mod_dict')
+  nx.set_node_attributes(mod_subg, dict(zip(terminals, node_mod[0])), 'mod_labels')
+  nx.set_node_attributes(mod_subg, dict(zip(terminals, node_mod[1])), 'atomic_mod_dict')
   if global_mod:
     nx.set_node_attributes(mod_subg, [global_mod], 'global_mod')
   return mod_subg
 
 
-def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, threshold=None, label_mass=2.0156, charge = -1):
+def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = [],
+                          threshold = 0.5, label_mass = 2.0156, charge = -1):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
@@ -642,27 +613,27 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = None, th
   true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
   nx_edge_dict = {(node[0], node[1]): node[2] for node in nx_mono.edges(data = True)}
   node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
+  node_dict_basic = {k: map_to_basic(v) for k, v in node_dict.items()}
   subgraph_fragments = {}
-  subgraphs = enumerate_subgraphs(nx_mono)
-  subgraphs.append(nx_mono)
+  subgraphs = enumerate_subgraphs(nx_mono) + [nx_mono]
   max_global_mass = max(mono_attributes['Global']['mass'].values())
   for subg in subgraphs:
     present_breakages = get_broken_bonds(subg, nx_mono, nx_edge_dict)
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     terminals = get_terminals(subg, present_breakages, root_node)
-    inner_mass = sum([mono_attributes[map_to_basic(node_dict[m])]['mass'][map_to_basic(node_dict[m])] for m in subg.nodes() if m not in terminals])
-    max_mass = inner_mass + sum([mono_attributes[map_to_basic(node_dict[m])]['mass'][map_to_basic(node_dict[m])] for m in terminals]) + 18.0105546*len(terminals) 
+    inner_mass = sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in subg.nodes() if m not in terminals])
+    max_mass = inner_mass + sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in terminals]) + 18.0105546*len(terminals) 
     max_mass += max_global_mass
-    if max_mass < min_mass:
+    if max_mass < min_mass - threshold:
         continue
     terminal_labels = [node_dict[x] for x in terminals]
-    global_mods = [None] + get_global_mods(subg, node_dict,mode)
+    global_mods = [None] + get_global_mods(subg, node_dict,charge)
     atomic_mod_dict_subg = atom_mods_init(subg, present_breakages, terminals, terminal_labels)
     mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict)
     mono_mod_perms, atom_dict_perms = generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic_mod_dict_subg)
     permutation_list = product(zip(product(*mono_mod_perms), product(*atom_dict_perms)), global_mods)
     mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms, terminal_labels, global_mods) 
-    initial_masses = preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, true_root_node, label_mass, mode)
+    initial_masses = preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, true_root_node, label_mass, charge)
     fragment_arr = np.array(charge_masses)
     for mass, (node_mod, global_mod) in zip(initial_masses, permutation_list):
       if not (abs(fragment_arr - mass) < threshold).any():
@@ -711,21 +682,23 @@ def domon_costello_to_node_labels(fragment, chain_rank):
   global_mod = None
   post_mono = None
   for cut in fragment:
-    if cut[0] == 'M':
+    if cut.startswith('M'):
       global_mod = cut.split('_')[-1]
       continue
-    split_cut = cut.split('_')
-    chain = chain_rank[split_cut[2]]
-    if split_cut[0][-1] in {'Y', 'Z'}:
-      mono = chain[::-1][int(split_cut[1])]
-    elif split_cut[0][-1] == 'X':
-      mono = chain[::-1][int(split_cut[1])-1]
-    elif split_cut[0][-1] in {'B', 'C'}:
-      mono = chain[int(split_cut[1])]
-      post_mono = chain[int(split_cut[1])-1]
-    elif split_cut[0][-1] == 'A':
-      mono = chain[int(split_cut[1])-1]
-    skelly_dict[mono] = split_cut[0]
+    cut_type, cut_num, chain_label = cut.split('_')
+    cut_type_last_char = cut_type[-1]
+    cut_num = int(cut_num)
+    chain = chain_rank[chain_label]
+    if cut_type_last_char in 'YZ':
+      mono = chain[::-1][cut_num]
+    elif cut_type_last_char == 'X':
+      mono = chain[::-1][cut_num-1]
+    elif cut_type_last_char in 'BC':
+      mono = chain[cut_num]
+      post_mono = chain[cut_num-1]
+    elif cut_type_last_char == 'A':
+      mono = chain[cut_num-1]
+    skelly_dict[mono] = cut_type
   return skelly_dict, post_mono, global_mod
 
 
@@ -735,7 +708,7 @@ def node_labels_to_domon_costello(cuts, chain_rank, global_mods = {}):
   | :-
   | cuts (list): a list of tuples each containing the cleavage type, and related integer node labels
   | chain_rank (list): a list of tuples each containing rank and a list of integer node labels representing the glycan chain
-  | global_mods (dict): the output of get_node_attributes(subg, 'global_mod') a dict containng integer node labels each pointing to a global mass change\n
+  | global_mods (dict): the output of get_node_attributes(subg, 'global_mod') a dict containing integer node labels each pointing to a global mass change\n
   | Returns:
   | :-
   | Returns a list containing all of the cleavages making up the fragment in Domon-Costello form
@@ -752,13 +725,11 @@ def node_labels_to_domon_costello(cuts, chain_rank, global_mods = {}):
     elif cut_type[-1] in {'X'}:
       cut_rank, cut_chain = [(rank, chain) for rank, chain in chain_rank if cut[1] in chain][0]
       cut_number = cut_chain[::-1].index(cut[1])+1
-    dc_cuts.append('_'.join((cut_type, str(cut_number), cut_rank)))
+    dc_cuts.append(f"{cut_type}_{cut_number}_{cut_rank}")
   if global_mods:
-      global_mods = list(global_mods.values())
-      dc_cuts.append('_'.join(('M', global_mods[0][0])))
-  if not dc_cuts:
-    dc_cuts = ['M']
-  return dc_cuts
+      global_mods = list(global_mods.values())[0][0]
+      dc_cuts.append(f"M_{global_mods}")
+  return dc_cuts or ['M']
 
 
 def find_main_chain(subgraph, leaves, root_node):
@@ -773,12 +744,10 @@ def find_main_chain(subgraph, leaves, root_node):
   | Returns a list of integer node labels representing the inputs main chain
   """
   bond_dict = nx.get_edge_attributes(subgraph, 'bond_label')
-  main_chains = []
-  for leaf in leaves:
-    for path in nx.all_simple_paths(subgraph, source = leaf, target = root_node):
-      main_chains.append(path)
-  main_chain_len = max([len(x) for x in main_chains])
-  main_chains = [k for k in main_chains if len(k) == main_chain_len]
+  all_paths = [path for leaf in leaves for path in nx.all_simple_paths(subgraph, source = leaf, target = root_node)]
+  main_chain = max(all_paths, key = len)
+  main_chain_len = len(main_chain)
+  main_chains = [k for k in all_paths if len(k) == main_chain_len]
   for i in range(main_chain_len)[::-1]:
     step = [c[i] for c in main_chains]
     if len(set(step)) == 1:
@@ -799,9 +768,8 @@ def subgraph_to_label_skeleton(sub_g):
   | Returns a list of integer node labels and branching brackets in the same order as the IUPAC condensed string
   """
   if len(sub_g.nodes) == 1:
-    return [str(x) for x in sub_g.nodes]
-  root_node = [k for k, v in sub_g.out_degree if v == 0]
-  root_node = root_node[0]
+    return [str(next(iter(sub_g.nodes)))]
+  root_node = next(k for k, v in sub_g.out_degree if v == 0)
   leaves = [v for v, d in sub_g.in_degree() if d == 0]
   main_chain = []
   n_skelly = []
@@ -845,17 +813,15 @@ def label_skeleton_to_string(n_skelly, sub_g):
 
 
 def mono_frag_to_string(sub_g):
-  """Converts a monsaccharide graph to a string\n
+  """Converts a monosaccharide graph to a string\n
   | Arguments:
   | :-
   | subg (networkx_object): a graph or subgraph of monosaccharides\n
   | Returns:
   | :-
-  | Returns an IUPAC condesnsed representation of the input graph, in the case of fragment graphs it returns the closest canonical string representation
+  | Returns an IUPAC condensed representation of the input graph, in the case of fragment graphs it returns the closest canonical string representation
   """
-  n_skelly = subgraph_to_label_skeleton(sub_g)
-  glycan_string = label_skeleton_to_string(n_skelly, sub_g)
-  return glycan_string
+  return label_skeleton_to_string(subgraph_to_label_skeleton(sub_g), sub_g)
 
 
 def domon_costello_to_fragIUPAC(glycan_string, fragment):
@@ -963,9 +929,8 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
             cuts.append((atom_mod, cut_node[0], node))
         if atom_mod in {'red_bond', 'red_no_bond'}:
           cuts.append((atom_mod, node))
-    cross_rings = [(k, v) for k, v in mono_mod_dict.items() if (k, v) not in node_dict.items()]
-    for node, mod in cross_rings:
-        cuts.append((mod, node))
+    cross_rings = [(v, k) for k, v in mono_mod_dict.items() if (k, v) not in node_dict.items()]
+    cuts.extend(cross_rings)
     dc_cuts = node_labels_to_domon_costello(cuts, chain_rank, global_mods = global_mods)
     ion_names.append((dc_cuts))
   return ion_names
@@ -981,7 +946,7 @@ def priority_filter(dc_names, diffs):
   | :-
   | Returns a list of Domon-Costello fragment names sorted by number of cleavages and the observed mass difference   
   """
-  sorted_frags = sorted(list(zip(dc_names,diffs)),key=lambda x:(len(x[0]),x[1]))
+  sorted_frags = sorted(list(zip(dc_names, diffs)), key = lambda x:(len(x[0]), x[1]))
   return [f[0] for f in sorted_frags]
 
 
@@ -1004,11 +969,11 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
   fragment_properties = []
   modifier = np.sign(charge)
   for z in range(1, abs(charge)+1):
-    charged_mass = (mass*z)-(z*modifier-modifier)
-    for k in subg_frags:
-      if abs(charged_mass-k) < mass_threshold:
-        for graph in subg_frags[k]:
-          fragment_properties.append((mass, k, abs(charged_mass-k), modifier*z, graph))
+    charged_mass = (mass*z) - (z - 1.0078)*modifier
+    for frag_mass, graphs in subg_frags.items():
+      if abs(charged_mass - frag_mass) < mass_threshold:
+        for graph in graphs:
+          fragment_properties.append((mass, frag_mass, abs(charged_mass - frag_mass), modifier*z, graph))
   if fragment_properties:
     return list(zip(*fragment_properties)) 
   else:
@@ -1025,16 +990,7 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
   | :-
   | Returns a list containing integers corresponding to the largest overlap each possible fragment had with all previously observed fragments   
   """
-  max_overlaps_seen = []
-  for cleavage_combo in possible_fragments:
-    seen_cleavage_overlaps = []
-    for obs in observed_fragments:
-      if not obs:
-        seen_cleavage_overlaps.append(0)
-        continue  
-      seen_cleavage_overlaps.append(len(set(cleavage_combo) & set(obs[0])))
-    max_overlaps_seen.append(max(seen_cleavage_overlaps, default = 0))
-  return max_overlaps_seen
+  return [max(len(set(pf) & set(of[0])) for of in observed_fragments if of) for pf in possible_fragments]
 
 
 def simplify_fragments(dc_names):
@@ -1054,13 +1010,11 @@ def simplify_fragments(dc_names):
       observed_frags.append([])
     elif len(possible_frags[0]) == 1:
       observed_frags.append([possible_frags[0]])
-      continue
     else:
       frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
       max_overlaps_seen = (observed_fragments_checker(frag_options, observed_frags))
       max_overlap_idx = np.argsort(max_overlaps_seen, kind = 'stable')[-1]
       observed_frags.append([frag_options[max_overlap_idx]])
-      continue
   return observed_frags
 
 
