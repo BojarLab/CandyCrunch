@@ -316,38 +316,6 @@ def get_terminals(subg, present_breakages, root_node):
   return terminals
 
 
-def calculate_mass(nx_mono):
-  """Calculates the mass of a networkx glycan\n
-  | Arguments:
-  | :-
-  | nx_mono (networkx_object): the original monosaccharide only graph\n
-  | Returns:
-  | :-
-  | Returns a float of the monoisotopic mass of the glycan or fragment in negative mode
-  """
-  comp = nx.get_node_attributes(nx_mono, 'string_labels')
-  comp = {k: map_to_basic(v) for k, v in comp.items()}
-  mono_mods = nx.get_node_attributes(nx_mono, 'mod_labels')
-  atom_dict = nx.get_node_attributes(nx_mono, 'atomic_mod_dict')
-  all_atom_mods = Counter([m for d in [v.values() for v in atom_dict.values()] for m in d if m != 0])
-  reducing_end = nx.get_node_attributes(nx_mono, 'reducing_end')
-
-  mass = sum([mono_attributes[v]['mass'][v] for k, v in comp.items() if k not in mono_mods])-1.0078
-  mass += sum([mono_attributes[comp[k]]['mass'][v] for k, v in mono_mods.items() if v in mono_attributes[comp[k]]['mass']])
-  mass += sum([mono_attributes[comp[k]]['mass'][v] for k, v in mono_mods.items() if v not in mono_attributes[comp[k]]['mass']])
-  mass += -18.0105546*all_atom_mods['no_bond']
-  mass += +18.0105546*all_atom_mods['red_bond']
-
-  if reducing_end:
-    if mono_mods:
-      reducing_end_node = next(iter(reducing_end))
-      if mono_mods[reducing_end_node] == comp[reducing_end_node]:
-        mass += 18.0105546+(2*1.0078)
-      else:
-        mass += 18.0105546
-  return mass
-
-
 def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
   """Creates the initial nested dict of each terminal node with floating bonds labelled 1 and the reducing end floating bond labelled 2\n
   | Arguments:

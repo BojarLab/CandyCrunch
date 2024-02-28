@@ -273,7 +273,7 @@ def get_topk(dataloader, model, glycans, k = 25, temp = False, temperature = tem
 
 
 def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'reduced', mass_tag = 0,
-               double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500):
+               double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500, mass_thresh = 0.5):
     """determine whether glycan could explain m/z\n
    | Arguments:
    | :-
@@ -285,7 +285,8 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
    | mass_tag (float): label mass to add when calculating possible m/z if modification == 'custom'; default:0
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
    | triple_thresh (float): mass threshold over which to consider triply-charged ions; default:1500
-   | quadruple_thresh (float): mass threshold over which to consider quadruply-charged ions; default:3500\n
+   | quadruple_thresh (float): mass threshold over which to consider quadruply-charged ions; default:3500
+   | mass_thresh (float): maximum allowed mass difference to return True; default:0.5\n
    | Returns:
    | :-
    | Returns True if glycan could explain mass and False if not
@@ -293,7 +294,7 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
     if libr is None:
         libr = lib
     try:
-        mz = glycan_to_mass(glycan, sample_prep= modification if modification in ["permethylated", "peracetylated"] else 'underivatized')
+        mz = glycan_to_mass(glycan, sample_prep= modification if modification in ["permethylated", "peracetylated"] else 'underivatized') if isinstance(glycan, str) else glycan
     except:
         return False
     mz += modification_mass_dict.get(modification, mass_tag)
@@ -305,8 +306,7 @@ def mass_check(mass, glycan, libr = None, mode = 'negative', modification = 'red
         (m / z + charge_adjust) for z, threshold, charge_adjust in zip([2, 3, 4], thresholds, charge_adjustments)
         for m in og_list if m > threshold
     ]
-    thresh = 0.5
-    return [m for m in mz_list if abs(mass - m) < thresh]
+    return [m for m in mz_list if abs(mass - m) < mass_thresh]
 
 
 def normalize_array(input_array):
@@ -503,7 +503,15 @@ def domain_filter(df_out, glycan_class, libr = None, mode = 'negative', modifica
         to_append = len(df_out['predictions'].iloc[k]) > 0
         # Check whether it's a glycan spectrum
         top_fragments = np.array(df_out['top_fragments'].iloc[k][:10])
-        if not np.any(np.abs(top_fragments[:, None] - cmasses) < 1.5):
+        found_match = False  # Flag to track whether a match is found
+        for top_fragment in top_fragments:
+            for cmass in cmasses:
+                if mass_check(top_fragment, cmass, mass_thresh = 1.5):
+                    found_match = True
+                    break  # Stop comparing once the first True value is found
+            if found_match:
+                break
+        if not found_match:
             df_out.iat[k, 0] = ['remove']
             continue
         for i, m in enumerate(current_preds):
