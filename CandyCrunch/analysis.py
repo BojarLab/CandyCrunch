@@ -991,7 +991,7 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
   | :-
   | Returns a list containing integers corresponding to the largest overlap each possible fragment had with all previously observed fragments   
   """
-  return [max(len(set(pf) & set(of[0])) for of in observed_fragments if of) for pf in possible_fragments]
+  return [sum(len(set(pf) & set(of)) for of in observed_fragments if of) for pf in possible_fragments]
 
 
 def simplify_fragments(dc_names):
