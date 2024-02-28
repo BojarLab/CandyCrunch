@@ -626,7 +626,7 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = [],
     max_mass += max_global_mass
     if max_mass < min_mass - threshold:
         continue
-    terminal_labels = [node_dict[x] for x in terminals]
+    terminal_labels = [node_dict_basic[x] for x in terminals]
     global_mods = [None] + get_global_mods(subg, node_dict,charge)
     atomic_mod_dict_subg = atom_mods_init(subg, present_breakages, terminals, terminal_labels)
     mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict)
@@ -914,6 +914,7 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
   """
   ion_names = []
   node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
+  node_dict = {k: map_to_basic(v) for k, v in node_dict.items()}
   chain_rank = list(rank_chains(nx_mono))
 
   for subg in subgs:
