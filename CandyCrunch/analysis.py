@@ -991,7 +991,10 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
   | :-
   | Returns a list containing integers corresponding to the largest overlap each possible fragment had with all previously observed fragments   
   """
-  return [sum(len(set(pf) & set(of)) for of in observed_fragments if of) for pf in possible_fragments]
+  if observed_fragments and observed_fragments[0] and observed_fragments[0][0] and isinstance(observed_fragments[0][0], list):
+    observed_fragments = unwrap(observed_fragments)
+  sums = [sum(len(set(pf) & set(of)) for of in observed_fragments if of) for pf in possible_fragments]
+  return [sums[i] - 1 if 'M' in ''.join(f) else sums[i] for i, f in enumerate(possible_fragments)]
 
 
 def simplify_fragments(dc_names):
