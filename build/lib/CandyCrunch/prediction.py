@@ -801,7 +801,7 @@ def canonicalize_biosynthesis(df_out, libr, pred_thresh):
             p_list = list(p)
             if len(p_list) == 1:
                 p_list.append(0)
-            p_list[1] += 0.1 * sum(subgraph_isomorphism(p_list[0], t, libr = libr, wildcards_ptm = True) for t in rest_top1 if t != p_list[0])
+            p_list[1] += 0.1 * sum(subgraph_isomorphism(p_list[0], t, wildcards_ptm = True) for t in rest_top1 if t != p_list[0])
             new_preds.append(tuple(p_list))
         new_preds.sort(key = lambda x: x[1], reverse = True)
         total = sum(p[1] for p in new_preds)
