@@ -14,10 +14,7 @@ from glycowork.glycan_data.loader import lib, unwrap
 from glycowork.motif.processing import (bracket_removal,
                                         min_process_glycans, rescue_glycans)
 from glycowork.motif.tokenization import map_to_basic
-try:
-  from glycowork.glycan_data.stats import cohen_d
-except ModuleNotFoundError:
-  from glycowork.motif.processing import cohen_d
+from glycowork.glycan_data.stats import cohen_d
 
 from scipy.stats import ttest_ind
 from statsmodels.stats.multitest import multipletests
@@ -338,7 +335,7 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
   """
   atomic_mod_dict = {}
   for terminal, terminal_label in zip(terminals, terminal_labels):
-    terminal_label = map_to_basic(terminal_label)
+    terminal_label = map_to_basic(terminal_label, obfuscate_ptm = False)
     atomic_mod_dict[terminal] = {y: 0 for y in mono_attributes[terminal_label]['atoms'][terminal_label]}
 
   for bond, bond_label in present_breakages.items():
@@ -368,7 +365,7 @@ def get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict
   """
   terminal_mods = []
   for node, label in zip(terminals, terminal_labels):
-    basic_label = map_to_basic(label)
+    basic_label = map_to_basic(label, obfuscate_ptm = False)
     if node == root_node:
       valid_A_frags = get_valid_A_frags(subg, node, label, nx_edge_dict)
       terminal_mods.append(valid_A_frags)
@@ -392,7 +389,7 @@ def get_valid_A_frags(subg, node, label, nx_edge_dict):
   | Returns a list of names of possible modifications
   """
   valid_A_mods_list = []
-  idx_label = map_to_basic(label)
+  idx_label = map_to_basic(label, obfuscate_ptm = False)
   A_mods_list = [x for x in mono_attributes[idx_label]['mass'] if x in A_cross_rings or x == label]
   bond_numbers = set(int(nx_edge_dict[bond]['bond_label'][-1])
                      for bond in subg.in_edges(node)
@@ -433,8 +430,8 @@ def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic
   """
   all_terminal_perms, all_mono_mods = [], []
   for node, label, mono_mods in zip(terminals, terminal_labels, mono_mods_list):
-    label = map_to_basic(label)
-    possible_node_atoms = [{k: v for k, v in atomic_mod_dict_subg[node].items() if k in mono_attributes[label]['atoms'][map_to_basic(mod)]} for mod in mono_mods]
+    label = map_to_basic(label, obfuscate_ptm = False)
+    possible_node_atoms = [{k: v for k, v in atomic_mod_dict_subg[node].items() if k in mono_attributes[label]['atoms'][map_to_basic(mod, obfuscate_ptm = False)]} for mod in mono_mods]
     all_atom_dict_perms, all_mono_mod_perms = [], []
     for i, atom_dict in enumerate(possible_node_atoms):
       dict_perms = create_dict_perms(atom_dict)
@@ -459,7 +456,7 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
   | (2) a list of all possible mass combinations for each bond fragmentation combination
   | (3) a list of masses corresponding to each of the global mods
   """
-  all_mono_mod_masses = [[mono_attributes[map_to_basic(label)]['mass'][map_to_basic(mod)] for mod in mods] for mods, label in zip(all_mono_mods, terminal_labels)]
+  all_mono_mod_masses = [[mono_attributes[map_to_basic(label, obfuscate_ptm = False)]['mass'][map_to_basic(mod, obfuscate_ptm = False)] for mod in mods] for mods, label in zip(all_mono_mods, terminal_labels)]
 
   all_atom_dict_masses = []
   for node in all_terminal_perms:
@@ -621,7 +618,7 @@ def generate_atomic_frags(nx_mono, max_cleavages = 3, fragment_masses = [],
   true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
   nx_edge_dict = {(node[0], node[1]): node[2] for node in nx_mono.edges(data = True)}
   node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
-  node_dict_basic = {k: map_to_basic(v) for k, v in node_dict.items()}
+  node_dict_basic = {k: map_to_basic(v, obfuscate_ptm = False) for k, v in node_dict.items()}
   subgraph_fragments = {}
   subgraphs = enumerate_subgraphs(nx_mono) + [nx_mono]
   max_global_mass = max(mono_attributes['Global']['mass'].values())
@@ -670,7 +667,8 @@ def rank_chains(nx_mono):
   leaf_chains = []
   for og_leaf in og_leaves:
     leaf_chains.append(nx.shortest_path(nx_mono, source = og_leaf))
-  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains], key = lambda x: sum([mono_attributes[map_to_basic(node_dict[n])]['mass'][map_to_basic(node_dict[n])] for n in x]), reverse = True)
+  main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains],
+                       key = lambda x: sum([mono_attributes[map_to_basic(node_dict[n], obfuscate_ptm = False)]['mass'][map_to_basic(node_dict[n], obfuscate_ptm = False)] for n in x]), reverse = True)
   return zip(ranks, main_chains)
 
 
@@ -922,7 +920,7 @@ def subgraphs_to_domon_costello(nx_mono, subgs):
   """
   ion_names = []
   node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
-  node_dict = {k: map_to_basic(v) for k, v in node_dict.items()}
+  node_dict = {k: map_to_basic(v, obfuscate_ptm = False) for k, v in node_dict.items()}
   chain_rank = list(rank_chains(nx_mono))
 
   for subg in subgs:
@@ -1031,7 +1029,7 @@ def simplify_fragments(dc_names):
 
 
 @rescue_glycans
-def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
+def CandyCrumbs(glycan_string, fragment_masses, mass_threshold,
                 max_cleavages = 3, simplify = True, charge = -1, label_mass = 2.0156,
                 iupac = False, intensities = None):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
@@ -1040,7 +1038,6 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   | glycan_string (string): glycan in IUPAC-condensed format
   | fragment_masses (list): all masses which are to be annotated with a fragment name
   | mass_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments
-  | libr (list): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used
   | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | simplify (bool): whether to try condensing fragment options to the most likely option; default:True
   | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:-1
@@ -1050,12 +1047,10 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold, libr = None,
   | :-
   | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
   """
-  if libr is None:
-    libr = lib
   hit_dict = {}
   fragment_masses = sorted(fragment_masses) 
   mono_graph = glycan_to_graph_monos(glycan_string)
-  nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = libr)
+  nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = lib)
   subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, label_mass = label_mass, charge = charge)
   downstream_values = []
   for observed_mass in fragment_masses:

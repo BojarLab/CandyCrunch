@@ -1,4 +1,4 @@
-glycowork~=1.1.0
+glycowork~=1.2.0
 regex
 networkx
 scipy
@@ -15,4 +15,4 @@ torchvision
 openpyxl
 
 [draw]
-glycowork[draw]~=1.1.0
+glycowork[draw]~=1.2.0
