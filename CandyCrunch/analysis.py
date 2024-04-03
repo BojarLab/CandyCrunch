@@ -10,7 +10,7 @@ import networkx as nx
 import networkx.algorithms.isomorphism as iso
 import numpy as np
 import pandas as pd
-from glycowork.glycan_data.loader import lib, unwrap
+from glycowork.glycan_data.loader import unwrap
 from glycowork.motif.processing import (bracket_removal,
                                         min_process_glycans, rescue_glycans)
 from glycowork.motif.tokenization import map_to_basic
@@ -170,19 +170,16 @@ def create_edge_labels(gr, all_dict):
   return {(e[0], e[1]): {'bond_label': all_dict[(e[0]*2)+1]} for e in gr.edges}
 
 
-def mono_graph_to_nx(mono_graph, directed = True, libr = None):
+def mono_graph_to_nx(mono_graph, directed = True):
   """Modified version of glycan_to_nxGraph, converts a mono adjacency matrix into a networkx graph, adds bonds as edge labels, and terminal,reducing end labels\n
   | Arguments:
   | :-
   | mono_graph (string): output of glycan_to_graph_monos
-  | directed (bool): if True, creates a directed graph with bonds pointing from leaf to reducing end ; default:True
-  | libr (dict): library of monosaccharides; if you have one use it, otherwise a comprehensive lib will be used\n
+  | directed (bool): if True, creates a directed graph with bonds pointing from leaf to reducing end ; default:True\n
   | Returns:
   | :-
   | Returns networkx graph object of a glycan made up of only monosaccharides
   """
-  if libr is None:
-    libr = lib
   template = nx.DiGraph if directed else nx.Graph
   node_dict_mono, adj_matrix, all_dict = mono_graph
 
@@ -193,7 +190,6 @@ def mono_graph_to_nx(mono_graph, directed = True, libr = None):
   else:
     gr = nx.Graph()
     gr.add_node(0)
-  nx.set_node_attributes(gr, {k: lib[v] for k,v in node_dict_mono.items()}, 'labels')
   nx.set_node_attributes(gr, node_dict_mono, 'string_labels')
   nx.set_node_attributes(gr, {k: 'terminal' if gr.degree[k] == 1 else 'internal' for k in gr.nodes()}, 'termini')
   nx.set_node_attributes(gr, {max(gr.nodes): 2},  'reducing_end')
@@ -1050,7 +1046,7 @@ def CandyCrumbs(glycan_string, fragment_masses, mass_threshold,
   hit_dict = {}
   fragment_masses = sorted(fragment_masses) 
   mono_graph = glycan_to_graph_monos(glycan_string)
-  nx_mono = mono_graph_to_nx(mono_graph, directed = True, libr = lib)
+  nx_mono = mono_graph_to_nx(mono_graph, directed = True)
   subg_frags = generate_atomic_frags(nx_mono, max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, label_mass = label_mass, charge = charge)
   downstream_values = []
   for observed_mass in fragment_masses:
