@@ -9,15 +9,17 @@ from training_utils import *
 from sklearn.metrics import pairwise_distances
 
 print("Reading data")
-with open("X_train_CC2_230927-nomaldi.pkl", "rb") as file:
+#Train and test data can be found on zenodo at https://doi.org/10.5281/zenodo.7940046
+#Please modify the filepaths below to point to your downloaded files
+with open("X_train.pkl", "rb") as file:
   X_train = pickle.load(file)
-with open("X_test_CC2_230927-nomaldi.pkl", "rb") as file:
+with open("X_test.pkl", "rb") as file:
   X_test = pickle.load(file)
-with open("y_train_CC2_230927-nomaldi.pkl", "rb") as file:
+with open("y_train.pkl", "rb") as file:
   y_train = pickle.load(file)
-with open("y_test_CC2_230927-nomaldi.pkl", "rb") as file:
+with open("y_test.pkl", "rb") as file:
   y_test = pickle.load(file)
-with open("glycans_CC2_230927-nomaldi.pkl", "rb") as file:
+with open("glycans.pkl", "rb") as file:
   glycans = pickle.load(file) 
 
 print("Preparing dataloaders")
