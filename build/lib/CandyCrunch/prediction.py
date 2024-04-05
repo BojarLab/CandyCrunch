@@ -92,6 +92,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 if intensity:
                     inty = spectrum.selected_precursors[0].get('i', np.nan)
                     intensities.append(inty)
+    # Sort the highest_i_dict by values
+    for key in highest_i_dict.keys():
+        highest_i_dict[key] = dict(sorted(highest_i_dict[key].items(), key = lambda x: x[1], reverse = True))
     df_out = pd.DataFrame({
         'reducing_mass': reducing_mass,
         'peak_d': list(highest_i_dict.values()),
@@ -132,6 +135,9 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                     if intensity:
                         inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
                         intensities.append(inty)
+    # Sort the highest_i_dict by values
+    for key in highest_i_dict.keys():
+        highest_i_dict[key] = dict(sorted(highest_i_dict[key].items(), key = lambda x: x[1], reverse = True))
     df_out = pd.DataFrame({
         'reducing_mass': reducing_mass, 
         'peak_d': list(highest_i_dict.values()), 
