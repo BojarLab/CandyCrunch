@@ -183,6 +183,8 @@ def bin_intensities(peak_d, frames):
     intensities = np.array(list(peak_d.values()))
     bin_indices = np.digitize(mzs, frames, right = True)
     mz_remainder = mzs - frames[bin_indices - 1]
+    max_intensities = npi.group_by(bin_indices-1).max(intensities)
+    mz_remainder = mz_remainder*np.in1d(intensities, max_intensities)
     unique_bins, summed_intensities = npi.group_by(bin_indices).sum(intensities)
     _, max_mz_remainder = npi.group_by(bin_indices).max(mz_remainder)
     binned_intensities[unique_bins - 1] = summed_intensities
