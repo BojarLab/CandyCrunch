@@ -302,7 +302,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_t
     except:
         return False
     mz += modification_mass_dict.get(modification, mass_tag)
-    adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
+    adduct_list = ['Acetonitrile', 'Acetate', 'Formate', 'HCO3-'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
     og_list = [mz] + [mz + mass_dict.get(adduct, 999) for adduct in adduct_list]
     charge_adjustments = [-0.5, -0.66, -0.75] if mode == 'negative' else [0.5, 0.66, 0.75]
     thresholds = [double_thresh, triple_thresh, quadruple_thresh]
