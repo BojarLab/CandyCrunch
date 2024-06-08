@@ -21,12 +21,12 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     python_requires='>=3.8',
-    install_requires=["glycowork~=1.2.0", "regex", "networkx",
+    install_requires=["glycowork~=1.3.0", "regex", "networkx",
                       "scipy", "torch~=2.1", "numpy_indexed",
                       "seaborn", "pandas", "statsmodels",
                       "pymzml", "statsmodels", "pyteomics",
                       "lxml", "torchvision", "openpyxl"],
-    extras_require={'draw':["glycowork[draw]~=1.2.0"]},
+    extras_require={'draw':["glycowork[draw]~=1.3.0"]},
     entry_points={
         'console_scripts': [
             'candycrunch_predict=CandyCrunch.cli:main',
