@@ -999,6 +999,17 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge):
     return [[], [], [], [], []]
 
 
+def flatten_list(nested_list):
+  """Recursively flattens a nested list."""
+  flat_list = []
+  for item in nested_list:
+    if isinstance(item, list):
+      flat_list.extend(flatten_list(item))
+    else:
+      flat_list.append(item)
+  return flat_list
+
+
 def observed_fragments_checker(possible_fragments, observed_fragments):
   """Calculates for each possible fragment the largest overlap of cleavages with previous fragments\n
   | Arguments:
@@ -1009,8 +1020,9 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
   | :-
   | Returns a list containing integers corresponding to the largest overlap each possible fragment had with all previously observed fragments   
   """
-  if observed_fragments and observed_fragments[0] and observed_fragments[0][0] and isinstance(observed_fragments[0][0], list):
-    observed_fragments = unwrap(observed_fragments)
+  #if observed_fragments and observed_fragments[0] and observed_fragments[0][0] and isinstance(observed_fragments[0][0], list):
+  #  observed_fragments = unwrap(observed_fragments)
+  observed_fragments = flatten_list(observed_fragments)
   sums = [sum(len(set(pf) & set(of)) for of in observed_fragments if of) for pf in possible_fragments]
   return [sums[i] - 1 if 'M' in ''.join(f) else sums[i] for i, f in enumerate(possible_fragments)]
 
