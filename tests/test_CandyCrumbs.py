@@ -1,5 +1,5 @@
 import unittest
-from analysis import CandyCrumbs
+from CandyCrunch.analysis import CandyCrumbs
 
 class TestCandyCrunch(unittest.TestCase):
     def test_candy_crumbs(self):
@@ -57,7 +57,7 @@ class TestCandyCrunch(unittest.TestCase):
         total_score = 0
         for test_dict in test_dicts:
             result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], 0.2, charge=test_dict['charge'],label_mass=test_dict['label_mass'])
-            
+
             total_annotations = len(test_dict['annotations'])
             correct_annotations = 0
             
@@ -79,7 +79,7 @@ class TestCandyCrunch(unittest.TestCase):
         self.assertGreaterEqual(total_score, threshold, 
                                 f"Performance below acceptable threshold. Score: {total_score:.2f}, Threshold: {threshold}")
         
-        print(f"Test passed. Score: {total_score:.2f}")
+        print(f"Test passed. Score: {total_score:.2f}, Threshold: {threshold}")
 
 if __name__ == '__main__':
     unittest.main()
