@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="CandyCrunch",
-    version="0.4.1",
+    version="0.5.0",
     author="Daniel Bojar",
     author_email="daniel.bojar@gu.se",
     description="Package for predicting glycan structure from LC-MS/MS data",
@@ -21,12 +21,12 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     python_requires='>=3.8',
-    install_requires=["glycowork~=1.3.0", "regex", "networkx",
+    install_requires=["glycowork[draw] @ git+https://github.com/BojarLab/glycowork.git@dev",
+                      "regex", "networkx",
                       "scipy", "torch~=2.1", "numpy_indexed",
                       "seaborn", "pandas", "statsmodels",
                       "pymzml", "statsmodels", "pyteomics",
                       "lxml", "torchvision", "openpyxl"],
-    extras_require={'draw':["glycowork[draw]~=1.3.0"]},
     entry_points={
         'console_scripts': [
             'candycrunch_predict=CandyCrunch.cli:main',

@@ -41,7 +41,7 @@ mono_attributes = {'Hex': {'mass': {'03X': 72.0211, '02X': 42.0106, '15X': 27.99
                              'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], '24X': [1, 2, 3, 6, 7, 8, 9], '02A': [4, 5, 6, 7, 8, 9],
                                        '04A': [6, 7, 8, 9], '24A': [4, 5], 'Neu5Gc': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
                    'Neu5Ac8S': {'mass': {'02X': 70.0055, '04X': 170.0453, '24X': 271.0124, '02A': 301.0467,
-                                      '04A': 201.0069 , '24A': 100.0398, 'Neu5Ac8S': 371.0522 },
+                                      '04A': 201.0069 , '24A': 100.0398, 'Neu5Ac8S': 371.0522},
                              'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], '24X': [1, 2, 3, 6, 7, 8, 9], '02A': [4, 5, 6, 7, 8, 9],
                                        '04A': [6, 7, 8, 9], '24A': [4, 5], 'Neu5Ac8S': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
                   'Neu5Gc8S': {'mass': {'02X': 70.0055, '04X': 186.0402, '24X': 271.0124 , '02A': 317.0416,
@@ -115,7 +115,7 @@ ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta']
 
 AA_masses = {'A':71.0371,'R':156.1011,'N':114.0429,'D':115.0269,
 'C':103.0091,'E':129.0425,'Q':128.0585,'G':57.0214,'H':137.0589,
-'I':113.0840,'L':113.0840,'K':128.0949,'M':131.0404,'F':147.0684,
+'I':113.0840,'L':113.0840,'K':128.0949,'k':357.25783,'M':131.0404,'F':147.0684,
 'P':97.0527,'S':87.0320,'T':101.0476,'W':186.0793,'Y':163.0633,'V':99.0684}
 tester_ma_addition = {k:{'mass':{k:v},'atoms':{k:[1,2,3,4,5,6]}} for k,v in AA_masses.items()}
 mono_attributes = mono_attributes|tester_ma_addition
@@ -165,9 +165,11 @@ def glycan_to_graph_monos(glycan):
   adj_matrix = np.zeros((len(mono_proc), len(mono_proc)), dtype = int)
 
   for k in mono_mask_dic:
+    adjustment = 2 if k >= 100 else 1 if k >= 10 else 0
     for j in range(k + 1, len(mono_mask_dic)):
-      adjustment = 2 if k >= 100 else 1 if k >= 10 else 0
-      k_idx, j_idx = glycan.find(str(k), k),glycan.find(str(j), j)
+      min_idx_k = k+(10*max((k//10)-1,0))
+      min_idx_j = j+(10*max((j//10)-1,0))
+      k_idx, j_idx = glycan.find(str(k), min_idx_k),glycan.find(str(j), min_idx_j)
       glycan_part = glycan[k_idx+1:j_idx]
       if evaluate_adjacency_monos(glycan_part, adjustment):
         adj_matrix[k, j] = 1
@@ -1251,7 +1253,7 @@ def glycopeptide_string_to_input(gpep_string):
             input_dict['glycans'] = [chem_string]
             return input_dict
         else:
-            input_dict['peptide'] = [chem_string]
+            input_dict['peptide'] = chem_string
             return input_dict
     else:
         input_dict['peptide'] = ''.join(split_string[::2])

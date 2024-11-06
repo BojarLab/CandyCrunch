@@ -59,9 +59,6 @@ class SimpleDataset(torch.utils.data.Dataset):
     self.x = x
     self.y = y
     self.transform_mz = transform_mz
-    self.transform_prec = transform_prec
-    self.transform_prec_neg = transform_prec_neg
-    self.transform_prec_pos = transform_prec_pos
     self.transform_rt = transform_rt
 
   def __len__(self):
@@ -73,23 +70,16 @@ class SimpleDataset(torch.utils.data.Dataset):
       mz = self.transform_mz(mz)
     mz_r = self.x[index][1]
     prec = self.x[index][2]
-    if self.transform_prec:
-      prec = self.transform_prec(prec)
     glycan_type = self.x[index][3]
     RT = self.x[index][4]
     if self.transform_rt:
       RT = self.transform_rt(RT)
     mode = self.x[index][5]
-    if any([self.transform_prec_neg, self.transform_prec_pos]):
-      if mode == 0:
-        prec = self.transform_prec_neg(prec)
-      else:
-        prec = self.transform_prec_pos(prec)
     lc = self.x[index][6]
     modification = self.x[index][7]
     trap = self.x[index][8]
     out = self.y[index]
-    return torch.FloatTensor(mz), torch.FloatTensor(mz_r), torch.FloatTensor([prec]), torch.LongTensor([glycan_type]), torch.FloatTensor([RT]), torch.LongTensor([mode]), torch.LongTensor([lc]), torch.LongTensor([modification]), torch.LongTensor([trap]), torch.LongTensor([out])
+    return torch.FloatTensor(mz), torch.FloatTensor(mz_r), torch.FloatTensor(prec), torch.LongTensor([glycan_type]), torch.FloatTensor([RT]), torch.LongTensor([mode]), torch.LongTensor([lc]), torch.LongTensor([modification]), torch.LongTensor([trap]), torch.LongTensor([out])
 
 
 class ResUnit(nn.Module):
@@ -134,7 +124,7 @@ class CandyCrunch_CNN(torch.nn.Module):
     self.input_dim = input_dim
 
     self.mz_lin1 = torch.nn.Linear(input_dim, 2*hidden_dim)
-    self.prec_lin1 = torch.nn.Linear(1, 24)
+    self.prec_lin1 = torch.nn.Linear(12, 24)
     self.rt_lin1 = torch.nn.Linear(1, 24)
     self.comb_lin1 = torch.nn.Linear(2*hidden_dim+24+24+24+24+24+24+24, 2*512)
     self.comb_lin2 = torch.nn.Linear(2*512, 2*256)
