@@ -507,7 +507,7 @@ def temporary_root_calc_func(glyco_pep):
         return True,red_end
 
 def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass, terminals,
-                                  inner_mass, bonus_root_mass, bonus_root_node,label_mass, charge,mono_mod_perms):
+                                  inner_mass, bonus_root_mass, bonus_root_node,mass_tag, charge,mono_mod_perms):
   """Determines the mass of every permutation of monosaccharide, atom, and global modification\n
   | Arguments:
   | :-
@@ -517,7 +517,7 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
   | terminals (list): string labels of nodes in terminals
   | inner_mass (float): total mass of non-terminal nodes in subgraph
   | true_root_node (int): the node label corresponding to the root of the parent glycan
-  | label_mass (float): mass of the glycan label or reducing end modification
+  | mass_tag (float): mass of the glycan label or reducing end modification
   | charge (int): assumed charge of glycan\n
   | Returns:
   | :-
@@ -534,7 +534,7 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
     if bonus_root_mass:
       mod_label = mono_mod_names[perm_number]
       if mod_label[root_node_idx] not in A_cross_rings:
-        mass += 18.0105546 + label_mass
+        mass += 18.0105546 + mass_tag
     masses_list.append(mass)
     masses_list.extend([mass + mod_mass for mod_mass in global_mods_mass])
   return masses_list
@@ -635,7 +635,7 @@ def annotate_subgraph(subg,node_mod,global_mod,terminals):
   return mod_subg
 
 def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = 3, fragment_masses = [],
-                          threshold = 0.5, label_mass = 2.0156, charge = -1):
+                          threshold = 0.5, mass_tag = None, charge = -1):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
@@ -646,12 +646,14 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
   | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | fragment_masses (list): all masses which are to be annotated with a fragment name
   | threshold (float): the range around the observed mass in which constrain potential fragments
-  | label_mass (float): mass of the glycan label or reducing end modification; default:2.0156
+  | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
   | charge (int): the maximum possible charge on the fragments to be matched; default:-1\n
   | Returns:
   | :-
   | Returns a dict of lists of networkx subgraphs
   """
+  if not mass_tag:
+    mass_tag = 2.0156
   charge_masses = np.array(extend_masses(fragment_masses, charge))
   threshold = abs(threshold)
   true_root_node = [v for v,d in nx_mono.out_degree() if d==0][0]
@@ -688,7 +690,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict, allowed_X_cleavages)
     mono_mod_perms, atom_dict_perms = generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic_mod_dict_subg)
     mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms, terminal_labels, subg_global_mods)
-    initial_masses = np.array(preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, bonus_root_mass, bonus_root_node, label_mass, charge, mono_mod_perms))
+    initial_masses = np.array(preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, bonus_root_mass, bonus_root_node, mass_tag, charge, mono_mod_perms))
     valid_idx = np.where(check_masses(charge_masses, initial_masses, threshold))[0]
     if valid_idx.size == 0:
       continue
@@ -1263,7 +1265,7 @@ def glycopeptide_string_to_input(gpep_string):
 
 @rescue_glycans
 def CandyCrumbs(input_string, fragment_masses, mass_threshold,
-                max_cleavages = 3, simplify = True, charge = -1, label_mass = 2.0156,
+                max_cleavages = 3, simplify = True, charge = -1, mass_tag = None,
                 iupac = False, intensities = None, disable_global_mods=False, disable_X_cross_rings=False):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
@@ -1274,7 +1276,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
   | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
   | simplify (bool): whether to try condensing fragment options to the most likely option; default:True
   | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:-1
-  | label_mass (float): mass of the glycan label or reducing end modification; default:2.0156
+  | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
   | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False\n
   | Returns:
   | :-
@@ -1286,7 +1288,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
   nx_mono,pep_gr = input_to_graph(input_dict)
   global_mods,special_residues = get_initial_global_mods(nx_mono, charge,disable_global_mods = disable_global_mods)
   allowed_X_cleavages = [] if disable_X_cross_rings else X_cross_rings
-  subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, label_mass = label_mass, charge = charge)
+  subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, mass_tag = mass_tag, charge = charge)
   downstream_values = []
   if input_dict['peptide']:
     peptide=True
