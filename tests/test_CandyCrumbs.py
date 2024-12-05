@@ -56,7 +56,7 @@ class TestCandyCrunch(unittest.TestCase):
         ]
         total_score = 0
         for test_dict in test_dicts:
-            result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], 0.2, charge=test_dict['charge'],label_mass=test_dict['label_mass'])
+            result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], 0.2, charge=test_dict['charge'],mass_tag=test_dict['label_mass'])
 
             total_annotations = len(test_dict['annotations'])
             correct_annotations = 0
