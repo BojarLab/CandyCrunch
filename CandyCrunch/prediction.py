@@ -483,6 +483,7 @@ def create_struct_map(df_glycan,glycan_class,filter_out=None,phylo_level = 'King
     processed_df_use = processed_df_use.sort_values('ref_counts',ascending=False)
     df_use_unq_comps = processed_df_use.groupby('comp_str').first()
     common_struct_map = dict(zip(df_use_unq_comps.index,df_use_unq_comps.glycan))
+    common_struct_map = {k:v.replace('-ol', '').replace('1Cer', '') for k,v in common_struct_map.items()}
     return common_struct_map,processed_df_use
 
 
@@ -521,7 +522,7 @@ def assign_annotation_scores_pooled(df_in,multiplier,mass_tag):
             tester_mass_scores=score_top_frag_masses(cc_out)
             row_scores = [sum([tester_mass_scores[x] for x in y])/sum(comp.values()) for y in rounded_mass_rows]
             df_in.loc[df_in['candidate_structure'] == struct,'annotation_score'] = row_scores
-        except IndexError:
+        except (IndexError,KeyError) as e:
             pass
     return df_in
 
