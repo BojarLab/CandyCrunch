@@ -1,11 +1,12 @@
 import ast
 import copy
-import operator
 import os
 import re
 import pickle
 from itertools import combinations
 from collections import defaultdict
+import json
+from typing import Dict
 
 import numpy as np
 import numpy_indexed as npi
@@ -14,13 +15,12 @@ import pymzml
 import torch
 import torch.nn.functional as F
 from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
-from glycowork.motif.analysis import get_differential_expression
 from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.motif.processing import enforce_class
 from glycowork.motif.tokenization import (composition_to_mass,
                                           glycan_to_composition,
                                           glycan_to_mass, mapping_file,
-                                          mz_to_composition)
+                                          mz_to_composition,structure_to_basic)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mzxml
 
@@ -190,7 +190,7 @@ def bin_intensities(peak_d, frames):
     bin_indices = np.digitize(mzs, frames, right = True)
     mz_remainder = mzs - frames[bin_indices - 1]
     max_intensities = npi.group_by(bin_indices-1).max(intensities)
-    mz_remainder = mz_remainder*np.in1d(intensities, max_intensities)
+    mz_remainder = mz_remainder*np.isin(intensities, max_intensities)
     unique_bins, summed_intensities = npi.group_by(bin_indices).sum(intensities)
     _, max_mz_remainder = npi.group_by(bin_indices).max(mz_remainder)
     binned_intensities[unique_bins - 1] = summed_intensities
@@ -407,8 +407,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         else:
             min_rm = min(cluster['reducing_mass'])
             mean_rt = np.mean(cluster['RT'])
-        peaks = average_dicts(cluster['peak_d'],round_dp=1)
-        peaks = dict(sorted(peaks.items(), key = lambda x: x[1], reverse = True))
+        peaks = average_dict_cluster(cluster['peak_d'],mass_tolerance=(mz_diff/2))
         sum_intensity = np.nansum(cluster['intensity'])
         binned_intensities, mz_remainder = zip(*[bin_intensities(c, frames) for c in cluster['peak_d']])
         binned_intensities = np.mean(np.array(binned_intensities), axis = 0)
@@ -420,6 +419,62 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     condensed_df = pd.DataFrame(condensed_data, columns = ['reducing_mass', 'RT', 'intensity','peak_d', 'binned_intensities', 'mz_remainder', 'num_spectra'])
     return condensed_df
 
+def average_dict_cluster(spectra_list, mass_tolerance=0.05):
+    """
+    Get top fragments from multiple MS2 spectra using 1D clustering.
+    
+    Parameters:
+    -----------
+    spectra_list : list of dict
+        List of dictionaries where keys are masses and values are intensities
+    k : int
+        Number of top fragments to return
+    mass_tolerance : float
+        Mass tolerance for grouping similar masses
+        
+    Returns:
+    --------
+    dict
+        Dictionary of top k masses and their summed intensities
+    """
+    # Extract and sort all masses and intensities
+    mass_intensity_pairs = []
+    for spectrum in spectra_list:
+        mass_intensity_pairs.extend(spectrum.items())
+    
+    # Sort by mass for efficient clustering
+    sorted_pairs = sorted(mass_intensity_pairs, key=lambda x: x[0])
+    
+    # Group similar masses
+    clusters = defaultdict(list)
+    if not sorted_pairs:
+        return {}
+    
+    current_group = [sorted_pairs[0]]
+    group_start_mass = sorted_pairs[0][0]
+    
+    # Single pass clustering
+    for mass, intensity in sorted_pairs[1:]:
+        if mass - group_start_mass <= mass_tolerance:
+            current_group.append((mass, intensity))
+        else:
+            # Calculate weighted average mass for current group
+            masses, intensities = zip(*current_group)
+            weighted_mass = np.average(masses, weights=intensities)
+            clusters[weighted_mass] = sum(intensities)
+            
+            # Start new group
+            current_group = [(mass, intensity)]
+            group_start_mass = mass
+    
+    # Handle last group
+    if current_group:
+        masses, intensities = zip(*current_group)
+        weighted_mass = np.average(masses, weights=intensities)
+        clusters[weighted_mass] = sum(intensities)
+    
+    # Return top k clusters by intensity
+    return dict(sorted(clusters.items(), key=lambda x: x[1], reverse=True))
 
 def comp_to_str_comp(comp):
     sc = sorted(comp)
@@ -481,18 +536,32 @@ def create_struct_map(df_glycan,glycan_class,filter_out=None,phylo_level = 'King
     processed_df_use = processed_df_use.assign(ref_counts=processed_df_use.loc[:,'ref'].map(len)+processed_df_use.loc[:,'tissue_ref'].map(len)+processed_df_use.loc[:,'disease_ref'].map(len))
     processed_df_use = processed_df_use[~(processed_df_use['glycan'].str.contains("}"))]
     processed_df_use = processed_df_use.sort_values('ref_counts',ascending=False)
+    processed_df_use = processed_df_use.assign(topology= [structure_to_basic(x) for x in processed_df_use['glycan']])
+    processed_df_use = processed_df_use.assign(glycan=[x.replace('-ol', '').replace('1Cer', '') for x in processed_df_use.glycan])
+    small_comps = [x for x in processed_df_use['comp_str'] if x if sum([int(p[-1]) for p in x.split('$')])<6]
+    small_comps = processed_df_use[processed_df_use['comp_str'].isin(small_comps)]
+    df_use_unq_topos = small_comps.groupby('topology').first().groupby('comp_str').agg(list)
+    topology_map = dict(zip(df_use_unq_topos.index,df_use_unq_topos.glycan))
     df_use_unq_comps = processed_df_use.groupby('comp_str').first()
     common_struct_map = dict(zip(df_use_unq_comps.index,df_use_unq_comps.glycan))
-    common_struct_map = {k:v.replace('-ol', '').replace('1Cer', '') for k,v in common_struct_map.items()}
-    return common_struct_map,processed_df_use
+    return common_struct_map,processed_df_use,topology_map
 
 
-def assign_candidate_structures(df_in,df_glycan_in,comp_struct_map,mass_tolerance,mode,mass_tag):
+def assign_candidate_structures(df_in,df_glycan_in,comp_struct_map,topo_struct_map,mass_tolerance,mode,mass_tag):
     red_masses = np.array(df_in.reducing_mass)
     comps_out = calculate_file_comps(red_masses,mass_tolerance,df_glycan_in,mass_tag,mode=mode)
     df_in['composition'] = [x[0] for x in comps_out]
     df_in['charge'] = [x[1] if x[0] else None for x in comps_out]
-    df_in['candidate_structure'] = [[comp_struct_map[comp_to_str_comp(y)] for y in x] if x else x for x in df_in.composition]
+    # This is so that I can explode the df by composition and candidate structure (definitely a more concise way of doing this)
+    candidate_data = []
+    for matched_comps_str,matched_comps in [([comp_to_str_comp(y) for y in x],x) if x else (x,x) for x in df_in.composition]:
+        if not matched_comps:
+            candidate_data.append(([None], [None]))
+        else:
+            structures = [s for comp_str in matched_comps_str for s in topo_struct_map.get(comp_str, [comp_struct_map[comp_str]])]
+            compositions = [comp for comp,comp_str in zip(matched_comps,matched_comps_str) for _ in topo_struct_map.get(comp_str, [comp_struct_map[comp_str]])]
+            candidate_data.append((structures, compositions))
+    df_in['candidate_structure'], df_in['composition'] = zip(*candidate_data)
     df_in = df_in.explode(['composition','candidate_structure']).reset_index(names='spec_id')
     df_in['compositional_vector'] = [comp_to_input_vect(x) if x else None for x in df_in.composition]
     return df_in
@@ -511,22 +580,26 @@ def filter_top_frag_annotations(ccrumbs_out):
     return filtered_annotations
 
 
-def assign_annotation_scores_pooled(df_in,multiplier,mass_tag):
+def assign_annotation_scores_pooled(df_in,multiplier,mass_tag,mass_tolerance):
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
     for struct,comp in zip(unq_structs.candidate_structure,unq_structs.composition):
         try:
             rounded_mass_rows = [[np.round(y,1) for y in x][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
             row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
             unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
-            cc_out = CandyCrumbs(struct, unq_rounded_masses,0.6,simplify=False,charge=multiplier*int(row_charge),disable_global_mods=True, disable_X_cross_rings=True,max_cleavages=3,mass_tag=mass_tag)
+            cc_out = CandyCrumbs(struct, unq_rounded_masses,mass_tolerance,simplify=False,charge=int(multiplier*abs(row_charge)),disable_global_mods=True,max_cleavages=3,mass_tag=mass_tag)
             tester_mass_scores=score_top_frag_masses(cc_out)
             row_scores = [sum([tester_mass_scores[x] for x in y])/sum(comp.values()) for y in rounded_mass_rows]
+            secondary_mass_scores = score_top_frag_masses(cc_out,simple_frags_only=True)
+            secondary_row_scores =  [sum([secondary_mass_scores[x] for x in y]) for y in [p[:3] for p in rounded_mass_rows]]
             df_in.loc[df_in['candidate_structure'] == struct,'annotation_score'] = row_scores
-        except (IndexError,KeyError) as e:
+            df_in.loc[df_in['candidate_structure'] == struct,'annotation_score2'] = secondary_row_scores
+        except (IndexError,KeyError,AttributeError) as e:
+            print('crumbs_failed:',struct)
             pass
     return df_in
 
-def score_top_frag_masses(ccrumbs_out):
+def score_top_frag_masses(ccrumbs_out,simple_frags_only=False):
     mass_scores = {}
     for k,v in ccrumbs_out.items():
         if v:
@@ -534,6 +607,12 @@ def score_top_frag_masses(ccrumbs_out):
             for ant in v['Domon-Costello nomenclatures']:
                 prefs = [a.split('_')[0][-1] for a in ant]
                 if 'A' in prefs or 'X' in prefs:
+                    if len(prefs)>1:
+                        continue
+                if 'M' in prefs:
+                    if len(prefs)>2:
+                        continue
+                if simple_frags_only:
                     if len(prefs)>1:
                         continue
                 filtered_annotations.append(ant)
@@ -761,60 +840,35 @@ def average_preds(preds, conf, k = 5):
         out_c.append(list(combs.values()))
     return out_p, out_c
 
+def get_all_variants(iupac_string, pattern1, pattern2):
+    def rreplace(iupac_string, pattern, replacement, count):
+        return replacement.join(iupac_string.rsplit(pattern, count))
 
-def generate_variants_ac_gc(sequence):
-    """generates all possible Neu5Ac/Neu5Gc substitutions of sequence\n
-   | Arguments:
-   | :-
-   | sequence (string): glycan in IUPAC-condensed nomenclature\n
-   | Returns:
-   | :-
-   | Returns a list of sequences with possible Neu5Ac/Neu5Gc substitutions
-   """
-    # Identify all occurrences of Neu5Ac and Neu5Gc
-    occurrences = [(m.start(), m.group()) for m in re.finditer(r'Neu5(Ac|Gc)', sequence)]
-    # Generate all combinations of substitutions
-    variants = [sequence]
-    for index, original in occurrences:
-        new_variants = []
-        for variant in variants:
-            if original == 'Neu5Ac':
-                # Replace Neu5Ac with Neu5Gc
-                new_variant = variant[:index] + 'Neu5Gc' + variant[index + 6:]
-            else:
-                # Replace Neu5Gc with Neu5Ac
-                new_variant = variant[:index] + 'Neu5Ac' + variant[index + 6:]
-            new_variants.append(new_variant)
-        variants.extend(new_variants)
-    return variants
-
-
-def generate_variants_6S(sequence):
-    """generates all possible GlcNAc/GlcNAc6S substitutions of sequence\n
-   | Arguments:
-   | :-
-   | sequence (string): glycan in IUPAC-condensed nomenclature\n
-   | Returns:
-   | :-
-   | Returns a list of sequences with possible GlcNAc/GlcNAc6S substitutions
-   """
-    # Identify all occurrences of GlcNAc and GlcNAc6S
-    occurrences = [(m.start(), m.group()) for m in re.finditer(r'GlcNAc(6S){,1}\(b1\-6\)', sequence)]
-    # Generate all combinations of substitutions
-    variants = [sequence]
-    for index, original in occurrences:
-        new_variants = []
-        for variant in variants:
-            if original == 'GlcNAc(b1-6)':
-                # Replace GlcNAc with GlcNAc6S
-                new_variant = variant[:index] + 'GlcNAc6S(b1-6)' + variant[index + 12:]
-            else:
-                # Replace GlcNAc6S with GlcNAc
-                new_variant = variant[:index] + 'GlcNAc(b1-6)' + variant[index + 14:]
-            new_variants.append(new_variant)
-        variants.extend(new_variants)
-    return variants
-
+    """Generate all combinations of pattern1/replacement substitutions using forward/reverse replacements"""
+    pattern1_count = iupac_string.count(pattern1)
+    all_variants= {iupac_string}
+    
+    # Try all combinations of front and back replacements for initial pattern
+    for fwd_count in range(pattern1_count + 1):
+        variant = iupac_string.replace(pattern1, pattern2, fwd_count)
+        all_variants.add(variant)
+        # For remaining occurrences, try replacing from the back
+        remaining = pattern1_count - fwd_count
+        for reverse_count in range(1, remaining + 1):
+            all_variants.add(rreplace(variant, pattern1, pattern2, reverse_count))
+    
+    # Now do the same process for each string, replacing back in the opposite direction
+    final_strings = all_variants.copy()
+    for current_variant in all_variants:
+        pattern2_count = current_variant.count(pattern2)
+        for fwd_count in range(pattern2_count + 1):
+            variant = current_variant.replace(pattern2, pattern1, fwd_count)
+            final_strings.add(variant)
+            remaining = pattern2_count - fwd_count
+            for reverse_count in range(1, remaining + 1):
+                final_strings.add(rreplace(variant, pattern2, pattern1, reverse_count))
+    
+    return sorted(final_strings)
 
 def impute(df_out, pred_thresh,mode = 'negative', modification = 'reduced', mass_tag = 0,
            glycan_class = "O"):
@@ -833,10 +887,10 @@ def impute(df_out, pred_thresh,mode = 'negative', modification = 'reduced', mass
     predictions_list = df_out.predictions.values.tolist()
     index_list = df_out.index.tolist()
     seqs = [p[0][0] for p in predictions_list if p and ("Neu5Ac" in p[0][0] or "Neu5Gc" in p[0][0])]
-    variants = set(unwrap([generate_variants_ac_gc(s) for s in seqs]))
+    variants = set(unwrap([get_all_variants(s,'Neu5Ac','Neu5Gc') for s in seqs]))
     if glycan_class == "O":
       seqs = [p[0][0] for p in predictions_list if p and ("GlcNAc6S(b1-6)" in p[0][0] or "GlcNAc(b1-6)" in p[0][0])]
-      variants.update(set(unwrap([generate_variants_6S(s) for s in seqs])))
+      variants.update(set(unwrap([get_all_variants(s,'GlcNAc6S(b1-6)','GlcNAc(b1-6)') for s in seqs])))
     for i, k in enumerate(predictions_list):
         if len(k) < 1:
             for v in variants:
@@ -941,6 +995,29 @@ def canonicalize_biosynthesis(df_out, pred_thresh):
     return df_out.loc[df_out.index.sort_values(), :]
 
 
+class DictStorage:
+    @staticmethod
+    def serialize_dict(d: Dict) -> str:
+        """Convert float dictionary to JSON string with string keys"""
+        return json.dumps({str(k): v for k, v in d.items()})
+
+    @staticmethod
+    def deserialize_dict(s: str) -> Dict[float, float]:
+        """Convert JSON string back to dictionary with float types"""
+        return {float(k): v for k, v in json.loads(s).items()}
+
+    def store(self, df: pd.DataFrame, dict_col: str, filepath: str) -> None:
+        """Store DataFrame with dictionary column as CSV"""
+        df = df.copy()
+        df[dict_col] = df[dict_col].apply(self.serialize_dict)
+        df.to_csv(filepath, index=False)
+
+    def read(self, filepath: str, dict_col: str) -> pd.DataFrame:
+        """Read CSV and convert dictionary column back to dicts"""
+        df = pd.read_csv(filepath)
+        df[dict_col] = df[dict_col].apply(self.deserialize_dict)
+        return df
+
 def load_spectra_filepath(spectra_filepath):
     if spectra_filepath.endswith(".mzML"):
         return process_mzML_stack(spectra_filepath, intensity = True)
@@ -954,6 +1031,10 @@ def load_spectra_filepath(spectra_filepath):
         mask = loaded_file['peak_d'].str.endswith('}', na = False)
         loaded_file = loaded_file[mask]
         loaded_file['peak_d'] = loaded_file['peak_d'].apply(ast.literal_eval)
+        return loaded_file
+    if spectra_filepath.endswith('.csv'):
+        storage = DictStorage()
+        loaded_file = storage.read(spectra_filepath, 'peak_d')
         return loaded_file
     raise FileNotFoundError('Incorrect filepath or extension, please ensure it is in the intended directory and is one of the supported formats')
 
@@ -1402,9 +1483,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
     df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
-    common_structure_map,df_use = create_struct_map(df_use,glycan_class,filter_out = filter_out,phylo_level = taxonomy_level,phylo_filter= taxonomy_filter)
-    df_out = assign_candidate_structures(df_out,df_use,common_structure_map,mass_tolerance,mode,mass_tag)
-    df_out = assign_annotation_scores_pooled(df_out,multiplier,mass_tag)
+    common_structure_map,df_use,topo_struct_map = create_struct_map(df_use,glycan_class,filter_out = filter_out,phylo_level = taxonomy_level,phylo_filter= taxonomy_filter)
+    df_out = assign_candidate_structures(df_out,df_use,common_structure_map,topo_struct_map,mass_tolerance,mode,mass_tag)
+    df_out = assign_annotation_scores_pooled(df_out,multiplier,mass_tag,mass_tolerance)
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop=True)
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap)
     df_out['peak_d'] = [spec_dic[m] for m in df_out.index]
@@ -1434,7 +1515,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                            modification = modification, mass_tolerance = mass_tolerance, df_use = df_use).reset_index()
     df_out = df_out.sort_values(['spec_id','annotation_score'],ascending=False).groupby('spec_id').first()
     df_out = df_out[df_out['annotation_score']>crumbs_thresh].drop(columns = ['candidate_structure']).set_index('reducing_mass')
-    df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d', 'rel_abundance','top_fragments']]
+    df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d','annotation_score','annotation_score2','rel_abundance','top_fragments']]
     # Deduplicate identical predictions for different spectra
     df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
     df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
