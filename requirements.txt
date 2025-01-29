@@ -3,7 +3,7 @@ matplotlib==3.9.2
 networkx==3.3
 numpy==2.1.1
 numpy_indexed==0.3.7
-pandas==2.2.2
+pandas==2.1.4
 pymzml==2.5.6
 pyteomics==4.7.1
 pytest==8.3.2
