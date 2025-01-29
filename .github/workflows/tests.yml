@@ -23,4 +23,6 @@ jobs:
         pip install -r requirements.txt
         pip install pytest tabulate
     - name: CandyCrumbs tests
-      run: pytest -vs
+      run: |
+        cd tests
+        pytest -vs
