@@ -26,7 +26,7 @@ from pyteomics import mzxml
 
 from CandyCrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
                                transform_prec, transform_rt)
-from analysis import CandyCrumbs
+from CandyCrunch.analysis import CandyCrumbs
 
 this_dir, this_filename = os.path.split(__file__)
 data_path = os.path.join(this_dir, 'glycans.pkl')
@@ -285,8 +285,8 @@ def get_topk(dataloader, model, glycans, k = 25, temp = False, temperature = tem
     return preds, conf.tolist()
 
 
-def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_tag = None,
-               double_thresh = 900, triple_thresh = 1500, quadruple_thresh = 3500, mass_thresh = 0.5):
+def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_tag = None, double_thresh = 900,
+               triple_thresh = 1500, quadruple_thresh = 3500, mass_thresh = 0.5,permitted_charges = [1,2,3,4]):
     """determine whether glycan could explain m/z\n
    | Arguments:
    | :-
@@ -298,11 +298,14 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_t
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
    | triple_thresh (float): mass threshold over which to consider triply-charged ions; default:1500
    | quadruple_thresh (float): mass threshold over which to consider quadruply-charged ions; default:3500
-   | mass_thresh (float): maximum allowed mass difference to return True; default:0.5\n
+   | mass_thresh (float): maximum allowed mass difference to return True; default:0.5
+   | permitted_charges (list): charges of ions used to check mass against; default:[1,2,3,4]\n
    | Returns:
    | :-
    | Returns True if glycan could explain mass and False if not
    """
+    threshold_dict = {2:double_thresh, 3:triple_thresh, 4:quadruple_thresh}
+    greater_charges = [x for x in permitted_charges if x>1]
     try:
         mz = glycan_to_mass(glycan, sample_prep= modification if modification in ["permethylated", "peracetylated"] else 'underivatized') if isinstance(glycan, str) else glycan
     except:
@@ -313,10 +316,11 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_t
     mz += mass_tag
     adduct_list = ['Acetonitrile', 'Acetate', 'Formate', 'HCO3-'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
     og_list = [mz] + [mz + mass_dict.get(adduct, 999) for adduct in adduct_list]
-    charge_adjustments = [-0.5, -0.66, -0.75] if mode == 'negative' else [0.5, 0.66, 0.75]
-    thresholds = [double_thresh, triple_thresh, quadruple_thresh]
-    mz_list = og_list + [
-        (m / z + charge_adjust) for z, threshold, charge_adjust in zip([2, 3, 4], thresholds, charge_adjustments)
+    single_list = og_list if 1 in permitted_charges else []
+    charge_adjustments = [-(1-(1/x)) for x in greater_charges] if mode == 'negative' else [(1-(1/x)) for x in greater_charges]
+    thresholds = [threshold_dict[x] for x in greater_charges]
+    mz_list = single_list + [
+        (m / z + charge_adjust) for z, threshold, charge_adjust in zip(greater_charges, thresholds, charge_adjustments)
         for m in og_list if m > threshold
     ]
     return [m for m in mz_list if abs(mass - m) < mass_thresh]
@@ -567,27 +571,16 @@ def assign_candidate_structures(df_in,df_glycan_in,comp_struct_map,topo_struct_m
     return df_in
 
 
-def filter_top_frag_annotations(ccrumbs_out):
-    filtered_annotations = []
-    for k,v in ccrumbs_out.items():
-        if v:
-            for ant in [a for a in v['Domon-Costello nomenclatures'] if len(a)<3]:
-                prefs = [a.split('_')[0][-1] for a in ant]
-                if 'A' in prefs or 'X' in prefs:
-                    if len(prefs)>1:
-                        continue
-                filtered_annotations.append(ant)
-    return filtered_annotations
-
-
 def assign_annotation_scores_pooled(df_in,multiplier,mass_tag,mass_tolerance):
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
     for struct,comp in zip(unq_structs.candidate_structure,unq_structs.composition):
         try:
+            if '][GlcNAc(b1-4)]' in struct:
+                continue
             rounded_mass_rows = [[np.round(y,1) for y in x][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
             row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
             unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
-            cc_out = CandyCrumbs(struct, unq_rounded_masses,mass_tolerance,simplify=False,charge=int(multiplier*abs(row_charge)),disable_global_mods=True,max_cleavages=3,mass_tag=mass_tag)
+            cc_out = CandyCrumbs(struct, unq_rounded_masses,mass_tolerance,simplify=False,charge=int(multiplier*abs(row_charge)),disable_global_mods=True,disable_X_cross_rings=True,max_cleavages=2,mass_tag=mass_tag)
             tester_mass_scores=score_top_frag_masses(cc_out)
             row_scores = [sum([tester_mass_scores[x] for x in y])/sum(comp.values()) for y in rounded_mass_rows]
             secondary_mass_scores = score_top_frag_masses(cc_out,simple_frags_only=True)
@@ -886,6 +879,7 @@ def impute(df_out, pred_thresh,mode = 'negative', modification = 'reduced', mass
     """
     predictions_list = df_out.predictions.values.tolist()
     index_list = df_out.index.tolist()
+    charge_list = df_out.charge.tolist()
     seqs = [p[0][0] for p in predictions_list if p and ("Neu5Ac" in p[0][0] or "Neu5Gc" in p[0][0])]
     variants = set(unwrap([get_all_variants(s,'Neu5Ac','Neu5Gc') for s in seqs]))
     if glycan_class == "O":
@@ -894,7 +888,7 @@ def impute(df_out, pred_thresh,mode = 'negative', modification = 'reduced', mass
     for i, k in enumerate(predictions_list):
         if len(k) < 1:
             for v in variants:
-                if mass_check(index_list[i], v, mode = mode, modification = modification, mass_tag = mass_tag):
+                if mass_check(index_list[i], v, mode = mode, modification = modification, mass_tag = mass_tag,permitted_charges=[abs(charge_list[i])]):
                     df_out.iat[i, 0] = [(v, pred_thresh)]
                     break
     return df_out
@@ -1861,10 +1855,11 @@ def supplement_prediction(df_in, glycan_class, mode = 'negative', modification =
         net = evoprune_network(net)
     unexplained_idx = [idx for idx, pred in enumerate(df['predictions']) if not pred]
     unexplained = df.index[unexplained_idx].tolist()
+    charges = df.charge[unexplained_idx].tolist()
     preds_set = set(preds)
     new_nodes = [k for k in net.nodes() if k not in preds_set]
     explained_idx = [[unexplained_idx[k] for k, check in enumerate([mass_check(j, node,
-                                                                               modification = modification, mode = mode, mass_tag = mass_tag) for j in unexplained]) if check] for node in new_nodes]
+                                                                               modification = modification, mode = mode, mass_tag = mass_tag,permitted_charges=[abs(c)]) for j,c in zip(unexplained,charges)]) if check] for node in new_nodes]
     new_nodes = [(node, idx) for node, idx in zip(new_nodes, explained_idx) if idx]
     explained = {k: [] for k in set(unwrap(explained_idx))}
     for node, indices in new_nodes:

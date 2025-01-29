@@ -668,6 +668,9 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
   nx_deg = nx_mono.degree
   for i,subg in enumerate(subgraphs):
     terminals = get_terminals(nx_deg,subg)
+    new_terminals = [x for x in terminals if x not in all_other_terminals]
+    if len(new_terminals)>max_cleavages:
+      continue
     other_terminals = [x for x in subg.nodes if x in all_other_terminals and x not in terminals] 
     terminals = terminals+other_terminals
     inner_mass = sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in subg.nodes() if m not in terminals])
