@@ -11,18 +11,29 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10"]
+    
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python
-      uses: actions/setup-python@v2
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
       with:
-        python-version: '3.12'
+        python-version: ${{ matrix.python-version }}
+    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest tabulate
-    - name: CandyCrumbs tests
+        pip install ".[draw]"
+        pip install -r requirements-dev.txt
+    
+    - name: Run tests with pytest
       run: |
-        cd tests
-        pytest -vs
+	pytest --cov=CandyCrunch -vs
+    
+    - name: Code formatting check
+      run: |
+        black --check .
+        isort --check .
