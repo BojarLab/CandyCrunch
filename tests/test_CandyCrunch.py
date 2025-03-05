@@ -72,10 +72,12 @@ def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
     tp = len(np.where(new_md['correct_preds'] == True)[0])
     fp = len(np.where((new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
     fn = len(np.where((new_md['glycan'].notnull())&(new_md['correct_preds'] == False))[0])
+    peaks_not_picked = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].isnull()))[0])
+    incorrect_predictions = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].notnull())&(new_md['correct_preds'] == False))[0])
     Precision = (tp / (tp + fp)+1e-4)+1e-4
     Recall = (tp / (tp + fn)+1e-4)+1e-4
     F1_score = 2 * (Precision * Recall) / (Precision + Recall)
-    return F1_score,Precision,Recall,tp,fp,fn
+    return F1_score,Precision,Recall,peaks_not_picked,incorrect_predictions,tp,fp,fn
 
 def posthoc_process_df(df_in,posthoc_params):
     for arg in posthoc_params:
@@ -113,7 +115,7 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
     test_dict = test_params['test_dict']
     test_files = test_params['test_dict'].get('test_files',None)
     if not test_files:
-        test_files = [x for x in os.listdir(f"./data/{test_dict['name']}") if 'df_mz' not in x]
+        test_files = [x for x in os.listdir(f"./data/{test_dict['name']}") if 'df_mz' not in x if not x.startswith(".")]
     for filename in test_files:
         inference_params = {k:v for k,v in test_params.items() if 'posthoc' not in k if k!= 'test_dict'}
         posthoc_params = {k:v for k,v in test_params.items() if 'posthoc' in k}
@@ -133,6 +135,8 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
         print('True Positives',eval_scores[-3])
         print('False Positives',eval_scores[-2])
         print('False Negatives',eval_scores[-1])
+        print('incorrect_preds',eval_scores[-4])
+        print('peaks_not_picked',eval_scores[-5])
         test_outputs.append(eval_scores)
         print(f'file_score:{eval_scores[0]}')
         result_collector.add_result(test_params, eval_scores[0])
