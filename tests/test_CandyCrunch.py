@@ -1,6 +1,7 @@
 import pytest
 import unittest
 import os
+import pathlib
 import sys
 from tabulate import tabulate
 import numpy as np
@@ -11,12 +12,13 @@ from glycowork.motif.graph import compare_glycans
 from itertools import product
 import time
 
-TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+BASE_DIR = pathlib.Path(__file__).parent.parent  # Go up one level from the test file
+TEST_DATA_DIR = BASE_DIR / "tests" / "data"
 TEST_DICTS = [
     {'name':'milk','args': {'glycan_class':'free'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000350','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"./data/GPST000350/") if 'O.' in x],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000350','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"./data/GPST000350/") if 'N' in x],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000017','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'test_files':[x for x in os.listdir(f"./data/GPST000017/") if 'PGMb' not in x if 'JC' in x],'mass_threshold':0.5, 'RT_threshold':2},
+    {'name':'GPST000350','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'O.' in x],'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000350','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'N' in x],'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000017','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000017/") if 'PGMb' not in x if 'JC' in x],'mass_threshold':0.5, 'RT_threshold':2},
     {'name':'GPST000029','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
     {'name':'PMC8950484_CHO','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
     {'name':'GPST000307','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1}
@@ -115,20 +117,20 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
     test_dict = test_params['test_dict']
     test_files = test_params['test_dict'].get('test_files',None)
     if not test_files:
-        test_files = [x for x in os.listdir(f"./data/{test_dict['name']}") if 'df_mz' not in x if not x.startswith(".")]
+        test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{test_dict['name']}") if 'df_mz' not in x if not x.startswith(".")]
     for filename in test_files:
         inference_params = {k:v for k,v in test_params.items() if 'posthoc' not in k if k!= 'test_dict'}
         posthoc_params = {k:v for k,v in test_params.items() if 'posthoc' in k}
         print(filename)
         print(inference_params|posthoc_params)
         start_time = time.time()
-        preds_out = wrap_inference(f"./data/{test_dict['name']}/{filename}",**test_dict['args'],
+        preds_out = wrap_inference(f"{TEST_DATA_DIR}/{test_dict['name']}/{filename}",**test_dict['args'],
                                    **inference_params)
         end_time = time.time()  # End timing
         execution_time = end_time - start_time
         print(f"\nTest execution time: {execution_time:.2f} seconds")  # Print execution time
         preds_out = posthoc_process_df(preds_out,posthoc_params)
-        loaded_gt = pd.read_csv(f"./data/{test_dict['name']}/df_mz_{test_dict['name']}.csv")
+        loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{test_dict['name']}/df_mz_{test_dict['name']}.csv")
         col_name  =  filename.split(".")[0]
         rt_col_name = 'RT' if 'RT' in loaded_gt.columns else col_name+'_RT'
         eval_scores = evaluate_predictions(preds_out,loaded_gt[loaded_gt[col_name]>0].dropna(subset='glycan'),rt_col_name,test_dict['mass_threshold'],test_dict['RT_threshold'])

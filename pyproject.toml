@@ -32,19 +32,21 @@ dependencies = [
     "lxml",
     "torchvision",
     "openpyxl",
+    "tabulate"
 ]
 
 [project.urls]
 Homepage = "https://github.com/BojarLab/CandyCrunch"
 
 [project.optional-dependencies]
-draw = ["glycowork[draw]~=1.3.0"]
+draw = ["glycowork[draw]~=1.5.0"]
 
 [project.scripts]
 candycrunch_predict = "CandyCrunch.cli:main"
 
 [tool.setuptools]
 include-package-data = true
+packages = ["CandyCrunch"]
 
 [tool.setuptools.package-data]
-"" = ["*.csv", "*.pkl", "*.jpg", "*.pt"]
+"*" = ["*.csv", "*.pkl", "*.jpg", "*.pt"]
