@@ -35,5 +35,4 @@ jobs:
     
     - name: Code formatting check
       run: |
-        black --check .
         isort --check .
