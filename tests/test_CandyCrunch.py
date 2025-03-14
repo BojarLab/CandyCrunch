@@ -92,7 +92,7 @@ def posthoc_process_df(df_in,posthoc_params):
             df_in = df_in[(df_in[df_arg]>posthoc_params[arg])]
     return df_in 
 
-AVG_THRESHOLD = 0.2
+AVG_THRESHOLD = 0.1
 
 extra_param_dict = {
         'test_dict': TEST_DICTS,
