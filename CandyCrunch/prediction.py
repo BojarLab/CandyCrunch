@@ -1617,7 +1617,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
 
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers, model=candycrunch, glycans=glycans, bin_num=2048,
                    frag_num=100, mode='negative', modification='reduced', mass_tag=None, lc='PGC', trap='linear', rt_min=0, rt_max=0, rt_diff=1.0,
-                   pred_thresh=0.01, temperature=temperature, spectra=False, get_missing=False, mass_tolerance=0.5, extra_thresh=0.2, crumbs_thresh=0.5,
+                   pred_thresh=0.01, temperature=temperature, spectra=False, get_missing=False, mass_tolerance=0.5, extra_thresh=0.2, crumbs_thresh=2,
                    filter_out={'Ac', 'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement=True, experimental=True, mass_dic=None,
                    taxonomy_level='Class', taxonomy_filter='Mammalia', df_use=None, plot_glycans=False):
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
