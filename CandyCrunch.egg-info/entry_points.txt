@@ -1,2 +1,0 @@
-[console_scripts]
-candycrunch_predict = CandyCrunch.cli:main
