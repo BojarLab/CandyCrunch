@@ -21,7 +21,8 @@ TEST_DICTS = [
     {'name':'GPST000017','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000017/") if 'PGMb' not in x if 'JC' in x],'mass_threshold':0.5, 'RT_threshold':2},
     {'name':'GPST000029','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
     {'name':'PMC8950484_CHO','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000307','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1}
+    {'name':'GPST000307','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000487','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")],'mass_threshold':0.5, 'RT_threshold':1}
 
 ]
 
@@ -49,7 +50,7 @@ def match_spectra(array1, array2, mass_threshold=0.3, rt_threshold=0.9):
                 matches.append((i, best_match))
     
     return matches
-
+    
 def add_pred_column(df_in,col_name,matches,pred_df,rt_col):
     df_in[col_name] = None
     for gt_idx,pred_idx in matches:
@@ -61,10 +62,10 @@ def add_pred_column(df_in,col_name,matches,pred_df,rt_col):
 def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
     assert len(predictions)>0
     if len(predictions)==0:
-        print('emtpy preds')
+        print('empty preds')
         return 0,0,0,0,0,0
-    predictions['converted_masses'] = [(m_z*abs(charge))-(abs(charge)*(1.0078)-1.0078)*-1 for m_z,charge in zip(predictions.reset_index()['m/z'],predictions['charge'])]
-    pairs = predictions.reset_index()[['converted_masses','RT']].round(2).values
+    predictions['converted_masses'] = [m_z for m_z,charge in zip(predictions.reset_index()['m/z'],predictions['charge'])]
+    pairs = predictions.reset_index()[['m/z','RT']].round(2).values
     gt_pairs = gt.reset_index()[['Mass',rt_col]].round(2).values
     matched_pairs = match_spectra(gt_pairs, pairs,mass_threshold=mass_thresh,rt_threshold=RT_thresh)
     merge_df = gt[['Mass',rt_col,'glycan']].reset_index(drop=True)
@@ -91,15 +92,14 @@ def posthoc_process_df(df_in,posthoc_params):
             df_in = df_in[(df_in[df_arg]>posthoc_params[arg])]
     return df_in 
 
-THRESHOLD = 0.1
+THRESHOLD = 0.09
 AVG_THRESHOLD = 0.2
 
 extra_param_dict = {
         'test_dict': TEST_DICTS,
         'supplement': [True],
         'experimental': [True],
-        'crumbs_thresh': [1],
-        'posthoc_annotation_score2':[0],
+        'crumbs_thresh': [2],
         'posthoc_lowerthan_ppm_error':[300]
     }
 
@@ -117,7 +117,8 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
     test_dict = test_params['test_dict']
     test_files = test_params['test_dict'].get('test_files',None)
     if not test_files:
-        test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{test_dict['name']}") if 'df_mz' not in x if not x.startswith(".")]
+        test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{test_dict['name']}")]
+    test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
     for filename in test_files:
         inference_params = {k:v for k,v in test_params.items() if 'posthoc' not in k if k!= 'test_dict'}
         posthoc_params = {k:v for k,v in test_params.items() if 'posthoc' in k}
@@ -125,7 +126,7 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
         print(inference_params|posthoc_params)
         start_time = time.time()
         preds_out = wrap_inference(f"{TEST_DATA_DIR}/{test_dict['name']}/{filename}",**test_dict['args'],
-                                   **inference_params)
+                                **inference_params)
         end_time = time.time()  # End timing
         execution_time = end_time - start_time
         print(f"\nTest execution time: {execution_time:.2f} seconds")  # Print execution time
