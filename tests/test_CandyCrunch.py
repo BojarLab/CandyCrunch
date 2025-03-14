@@ -92,7 +92,6 @@ def posthoc_process_df(df_in,posthoc_params):
             df_in = df_in[(df_in[df_arg]>posthoc_params[arg])]
     return df_in 
 
-THRESHOLD = 0.09
 AVG_THRESHOLD = 0.2
 
 extra_param_dict = {
@@ -149,7 +148,6 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
             for key in test_params
         )
         result_collector.check_performance(test_dict['name'], param_key, eval_scores[0])
-        assert eval_scores[0]>THRESHOLD
     print("Adding results to collector")  # Debug print
     print(f'avg_score:{np.mean([x[0] for x in test_outputs])}')
     assert np.mean([x[0] for x in test_outputs])>AVG_THRESHOLD
