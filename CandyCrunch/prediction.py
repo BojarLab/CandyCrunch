@@ -629,7 +629,7 @@ def assign_annotation_scores_pooled(df_in,multiplier,mass_tag,mass_tolerance):
             unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
             cc_out = CandyCrumbs(struct, unq_rounded_masses,mass_tolerance,simplify=False,charge=int(multiplier*abs(row_charge)),disable_global_mods=True,disable_X_cross_rings=True,max_cleavages=2,mass_tag=mass_tag)
             tester_mass_scores=score_top_frag_masses(cc_out)
-            row_scores = [sum([tester_mass_scores[x] for x in y])/np.sqrt(sum(comp.values())) for y in rounded_mass_rows]
+            row_scores = [sum([tester_mass_scores[x] for x in y]) for y in rounded_mass_rows]
             df_in.loc[df_in['candidate_structure'] == struct,'annotation_score'] = row_scores
         except (IndexError,KeyError,AttributeError) as e:
             pass
@@ -1463,7 +1463,7 @@ def finalise_predictions(df_out,get_missing,pred_thresh,mode,modification,mass_t
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, bin_num = 2048,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
-                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 0.5,
+                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh=300,
                    filter_out = {'Ac','Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
                    taxonomy_level='Class',taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False):
     """wrapper function to get & curate CandyCrunch predictions\n
@@ -1517,7 +1517,6 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     loaded_file.dropna(subset = ['peak_d'], inplace = True)
     loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
-    spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
     df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
     common_structure_map,df_use,topo_struct_map = create_struct_map(df_use,glycan_class,filter_out = filter_out,phylo_level = taxonomy_level,phylo_filter= taxonomy_filter)
@@ -1598,6 +1597,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             valid_indices.append(True)
     df_out = df_out[valid_indices]
     df_out.loc[df_out['predictions'].str.len() > 0,'ppm_error'] = ppm_errors
+    df_out = df_out[df_out['ppm_error']<ppm_thresh]
     # Clean-up
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
