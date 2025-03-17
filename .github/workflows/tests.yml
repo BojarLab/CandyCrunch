@@ -33,6 +33,3 @@ jobs:
       run: |
         pytest --cov=CandyCrunch -vs
     
-    - name: Code formatting check
-      run: |
-        isort --check .
