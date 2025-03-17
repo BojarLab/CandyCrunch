@@ -8,7 +8,7 @@ import numpy as np
 from collections import defaultdict
 
 from CandyCrunch.prediction import *
-from glycowork.motif.graph import compare_glycans
+from glycowork.motif.graph import compare_glycans,get_possible_topologies,graph_to_string
 from itertools import product
 import time
 
@@ -22,7 +22,8 @@ TEST_DICTS = [
     {'name':'GPST000029','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
     {'name':'PMC8950484_CHO','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
     {'name':'GPST000307','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000487','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")],'mass_threshold':0.5, 'RT_threshold':1}
+    {'name':'GPST000487','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")],'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000134','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia','mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1],'mass_threshold':0.5, 'RT_threshold':1}
 
 ]
 
@@ -70,7 +71,17 @@ def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
     matched_pairs = match_spectra(gt_pairs, pairs,mass_threshold=mass_thresh,rt_threshold=RT_thresh)
     merge_df = gt[['Mass',rt_col,'glycan']].reset_index(drop=True)
     new_md = add_pred_column(merge_df,'batch_pred',matched_pairs,predictions.reset_index(),rt_col)
-    correct_preds = [compare_glycans(x,y) if (isinstance(x,str) and isinstance(y,str)) else False for x,y in zip(new_md['glycan'],new_md['batch_pred'])]
+    # correct_preds = [compare_glycans(x,y) if (isinstance(x,str) and isinstance(y,str)) else False for x,y in zip(new_md['glycan'],new_md['batch_pred'])]
+    correct_preds = []
+    for gt_glycan, pred_glycan in zip(new_md['glycan'],new_md['batch_pred']):
+        if not (isinstance(gt_glycan,str) and isinstance(pred_glycan,str)):
+            correct_preds.append(False)
+            continue
+        if '{' in gt_glycan:
+            possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan)]
+            correct_preds.append(any([compare_glycans(p,pred_glycan) for p in possible_structures]))
+        else:
+            correct_preds.append(compare_glycans(gt_glycan,pred_glycan))
     new_md['correct_preds'] = correct_preds
     tp = len(np.where(new_md['correct_preds'] == True)[0])
     fp = len(np.where((new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
@@ -92,14 +103,12 @@ def posthoc_process_df(df_in,posthoc_params):
             df_in = df_in[(df_in[df_arg]>posthoc_params[arg])]
     return df_in 
 
-AVG_THRESHOLD = 0.1
+AVG_THRESHOLD = 0.05
 
 extra_param_dict = {
         'test_dict': TEST_DICTS,
         'supplement': [True],
-        'experimental': [True],
-        'crumbs_thresh': [2],
-        'posthoc_lowerthan_ppm_error':[300]
+        'experimental': [True]
     }
 
 test_params = [
