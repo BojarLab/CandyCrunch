@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "CandyCrunch"
-version = "0.5.2"
+version = "0.5.3"
 description = "Package for predicting glycan structure from LC-MS/MS data"
 readme = "README.md"
 authors = [
@@ -18,7 +18,7 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-    "glycowork~=1.5.0",
+    "glycowork[draw]~=1.5.0",
     "regex",
     "networkx",
     "scipy",
