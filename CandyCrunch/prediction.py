@@ -1429,7 +1429,6 @@ def finalise_predictions(df_out,get_missing,pred_thresh,mode,modification,mass_t
         df_out = canonicalize_biosynthesis(df_out, pred_thresh)
     except ValueError:
         pass
-    spectra_out = df_out.pop('peak_d').values.tolist()
     # Calculate  ppm error
     valid_indices, ppm_errors = [], []
     df_out = df_out[df_out['predictions'].apply(len)>0]
@@ -1454,6 +1453,7 @@ def finalise_predictions(df_out,get_missing,pred_thresh,mode,modification,mass_t
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
     else:
         df_out.drop(['rel_abundance'], axis = 1, inplace = True)
+    spectra_out = df_out.pop('peak_d').values.tolist()
     df_out.index.name = "m/z"
     if plot_glycans:
         from glycowork.motif.draw import plot_glycans_excel
@@ -1582,7 +1582,6 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_out = df_out[df_out['predictions'].str.len() > 0]
     # Reprioritize predictions based on how well they are explained by biosynthetic precursors in the same file (e.g., core 1 O-glycan making extended core 1 O-glycans more likely)
     df_out = canonicalize_biosynthesis(df_out, pred_thresh)
-    spectra_out = df_out.pop('peak_d').values.tolist()
     # Calculate  ppm error
     valid_indices, ppm_errors = [], []
     for preds, obs_mass in zip(df_out['predictions'], df_out.index):
@@ -1608,6 +1607,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
     else:
         df_out.drop(['rel_abundance'], axis = 1, inplace = True)
+    spectra_out = df_out.pop('peak_d').values.tolist()
     df_out.index.name = "m/z"
     if plot_glycans:
         from glycowork.motif.draw import plot_glycans_excel
@@ -1732,8 +1732,9 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                        mode, modification, mass_tag, filter_out, taxonomy_filter,
                                        reduced, mass_tolerance, mass_dic)
         # Finalize predictions
-        df_out = finalise_predictions(df_out, get_missing, pred_thresh, mode, modification,
-                                     mass_tag, multiplier, plot_glycans, file_label, spectra)
+        if len(df_out)>0:
+            df_out = finalise_predictions(df_out, get_missing, pred_thresh, mode, modification,
+                                        mass_tag, multiplier, plot_glycans, file_label, spectra)
         inference_dfs[file_label] = df_out
     all_outputs = pd.concat(inference_dfs.values())
     combined_batch = all_outputs.pivot_table(index='top1_pred',columns='condition_label',values='rel_abundance',aggfunc='sum')
