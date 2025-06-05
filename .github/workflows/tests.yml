@@ -31,5 +31,5 @@ jobs:
     
     - name: Run tests with pytest
       run: |
-        pytest --cov=CandyCrunch -vs
+        pytest --cov=candycrunch -vs
     
