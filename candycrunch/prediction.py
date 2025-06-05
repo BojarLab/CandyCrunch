@@ -24,9 +24,9 @@ from glycowork.motif.tokenization import (composition_to_mass,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mzxml
 
-from CandyCrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
+from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
                                transform_prec, transform_rt)
-from CandyCrunch.analysis import CandyCrumbs
+from candycrunch.analysis import CandyCrumbs
 
 this_dir, this_filename = os.path.split(__file__)
 data_path = os.path.join(this_dir, 'glycans.pkl')
