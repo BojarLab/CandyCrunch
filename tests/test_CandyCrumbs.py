@@ -1,6 +1,6 @@
 import pytest
 import unittest
-from CandyCrunch.analysis import CandyCrumbs
+from candycrunch.analysis import CandyCrumbs
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
 'charge': -2,

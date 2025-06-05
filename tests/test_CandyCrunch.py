@@ -7,7 +7,7 @@ from tabulate import tabulate
 import numpy as np
 from collections import defaultdict
 
-from CandyCrunch.prediction import *
+from candycrunch.prediction import *
 from glycowork.motif.graph import compare_glycans,get_possible_topologies,graph_to_string
 from itertools import product
 import time

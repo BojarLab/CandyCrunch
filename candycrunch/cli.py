@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-from CandyCrunch.prediction import wrap_inference
+from candycrunch.prediction import wrap_inference
 
 def main():
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')

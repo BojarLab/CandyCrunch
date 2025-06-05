@@ -1,7 +1,7 @@
 import pickle
 import pandas as pd
 
-from CandyCrunch.model import (SimpleDataset,CandyCrunch_CNN,transform_mz,transform_prec,transform_rt)
+from candycrunch.model import (SimpleDataset,CandyCrunch_CNN,transform_mz,transform_prec,transform_rt)
 from glycowork.motif.annotate import annotate_dataset,get_k_saccharides
 from glycowork.motif.processing import get_lib
 from glycowork.motif.tokenization import get_stem_lib,glycan_to_composition
