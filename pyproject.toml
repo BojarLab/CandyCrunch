@@ -10,10 +10,10 @@ readme = "README.md"
 authors = [
     {name = "Daniel Bojar", email = "daniel.bojar@gu.se"},
 ]
-license = {text = "MIT"}
+license = "MIT" 
+license-files = ["LICENSE"] 
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 requires-python = ">=3.9"
@@ -24,6 +24,7 @@ dependencies = [
     "networkx",
     "scipy",
     "torch~=2.1",
+    "torchmetrics",
     "numpy_indexed",
     "seaborn",
     "pandas",
@@ -45,8 +46,11 @@ Homepage = "https://github.com/BojarLab/CandyCrunch"
 candycrunch_predict = "candycrunch.cli:main"
 
 [tool.setuptools]
-include-package-data = true
+include-package-data = false
 packages = ["candycrunch"]
 
 [tool.setuptools.package-data]
-"*" = ["*.csv", "*.pkl", "*.jpg", "*.pt"]
+candycrunch = ["*.csv", "*.pkl", "*.jpg", "*.pt"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["tests*", "*.ipynb"]
