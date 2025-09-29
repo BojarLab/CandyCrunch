@@ -259,12 +259,3 @@ GlycoDraw(fragment_iupac)
 ## Citation 
 If you use `CandyCrunch` or any of our datasets in your work, please cite Urban et al., bioRxiv 2023.  
 The data used to train `CandyCrunch` can be found at Zenodo, under [doi:10.5281/zenodo.7940047](https://zenodo.org/record/7940047)
-
-#### Preparing your own training data
-- `full_dataset.xlsx` (distributed alongside the Zenodo bundle) is the averaged, clustered output produced by `condense_dataframe`. Each row represents a mass/RT cluster with its associated spectrum stored in `peak_d`.
-- To create CandyCrunch-ready pickles from a new experiment, follow the same pipeline used for inference:
-  1. Load your raw export (`.mzML`, `.mzXML`, or `.xlsx`) with `load_spectra_filepath`.
-  2. Cluster and bin spectra via `condense_dataframe` (or start from an equivalent `full_dataset.xlsx`).
-  3. Generate compositions and annotation scores using `assign_annotation_scores_pooled` together with your ground-truth glycans.
-  4. Turn the combined dataframe into model inputs by calling `process_for_inference`, which yields tuples of `(binned_intensities, mz_remainder, glycan_type, RT2, mode, lc, modification, trap)` identical to the training pickles.
-  5. Serialize the resulting `X` list and `y` labels with `pickle.dump` so they can be consumed by the example training script (`training/training_script.py`).
