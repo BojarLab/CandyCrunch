@@ -94,7 +94,6 @@ mzML/mzXML files are internally processed into extracted spectra. xlsx files nee
 <pre>
 model, type=Pytorch object: loaded from a checkpoint of a trained CandyCrunch model  <br />
 glycans, type=list: ordered list of glycans used to train CandyCrunch which can be predicted by the model <br />
-libr, type=list: library of monosaccharides, used as a mapping index to ensure unique graph construction <br />
 bin_num, type=list: number of bins to separate the ms2 spectrum into <br />
 frag_num, type=list: number of top fragments to show in df_out per spectrum; default:100 <br />
 mode, type=string: mass spectrometry mode; options are 'negative' or 'positive'; default: 'negative' <br />
@@ -209,7 +208,6 @@ simplify, type=bool: whether to select a single fragment for each mass based on 
 charge, type=int: the charge state of the precursor ion (singly-charged, doubly-charged, etc.); default:-1 <br />
 label_mass, type=float: mass of the glycan label or reducing end modification; default:2.0156 <br />
 iupac, type=bool: whether to also return the fragment sequence in IUPAC-condensed nomenclature; default:False <br />
-libr, type=list: library of monosaccharides, used as a mapping index to ensure unique graph construction 
 </pre>
 </details>
 
