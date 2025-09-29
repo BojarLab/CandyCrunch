@@ -111,7 +111,7 @@ cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B
                  '02X': '02X', '03X': '03X', '04X': '04X', '12X': '12X', '13X': '13X', '14X': '14X', '15X': '15X', '24X': '24X', '35X': '35X'}
 A_cross_rings = {c for c in cut_type_dict if c[-1] == 'A'}
 X_cross_rings = {c for c in cut_type_dict if c[-1] == 'X'}
-ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta']
+ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota','Kappa', 'Lambda','Mu']
 
 AA_masses = {'A':71.0371,'R':156.1011,'N':114.0429,'D':115.0269,
 'C':103.0091,'E':129.0425,'Q':128.0585,'G':57.0214,'H':137.0589,
@@ -120,6 +120,45 @@ AA_masses = {'A':71.0371,'R':156.1011,'N':114.0429,'D':115.0269,
 tester_ma_addition = {k:{'mass':{k:v},'atoms':{k:[1,2,3,4,5,6]}} for k,v in AA_masses.items()}
 mono_attributes = mono_attributes|tester_ma_addition
 bond_masses = {'red_bond':18.010,'no_bond':-18.010,'peptide_b':-18.010,'peptide_c':-1,'peptide_z':-16,'peptide_a':-46}
+
+def _get_permethylated_attributes(attributes):
+    """Creates a modified copy of mono_attributes for permethylation."""
+    permethylated_attr = copy.deepcopy(attributes)
+    methyl_mass = 14.01565  # Mass of CH3 - H
+
+    # Number of reactive sites (OH, NH, COOH) for permethylation
+    methylation_sites = {
+        'Hex': 4, 'dHex': 3, 'Pen': 3,
+        'HexNAc': 4, # 3 OH + 1 NH
+        'HexA': 4, # 3 OH + 1 COOH
+        'Neu5Ac': 6, # 3 OH + 1 NH + 1 COOH + 1 OH on glycerol tail
+        'Neu5Gc': 6, # 4 OH + 1 NH + 1 COOH
+        'Kdn': 5, # 4 OH + 1 COOH
+        'HexS': 3, # Assuming S replaces an OH
+        'HexNAcOS': 3, # Assuming S replaces an OH
+        'HexP': 3 # Assuming P replaces an OH
+    }
+
+    for mono_key, mono_vals in permethylated_attr.items():
+        # Use map_to_basic to identify the core monosaccharide type
+        base_type = map_to_basic(mono_key, obfuscate_ptm=False)
+        sites = methylation_sites.get(base_type, 0)
+        
+        if not sites:
+            continue
+
+        # Adjust site count for modifications that replace a hydroxyl group
+        if 'S' in mono_key and 'OS' not in mono_key:
+            sites -= 1
+        if 'P' in mono_key:
+            sites -= 1
+        
+        # Apply the mass increase to the full monosaccharide mass
+        if sites > 0 and mono_key in mono_vals.get('mass', {}):
+            mono_vals['mass'][mono_key] += sites * methyl_mass
+                    
+    return permethylated_attr
+
 
 def evaluate_adjacency_monos(glycan_part, adjustment):
   """Modified version of evaluate_adjacency to check glycoletter adjacency for monosaccharide only strings\n
@@ -371,7 +410,7 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
   return atomic_mod_dict
 
 
-def get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict, allowed_X_cleavages):
+def get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict, allowed_X_cleavages,mono_attributes_in =mono_attributes):
   """Determines all possible cross-ring modifications for each node label in terminals\n
   | Arguments:
   | :-
@@ -394,7 +433,7 @@ def get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict
     elif subg.degree()[node] > 1:
       terminal_mods.append([label])
     else:
-      terminal_mods.append([x for x in mono_attributes[basic_label]['mass'] if x in allowed_X_cleavages or x == basic_label])
+      terminal_mods.append([x for x in mono_attributes_in[basic_label]['mass'] if x in allowed_X_cleavages or x == basic_label])
   return terminal_mods
 
 
@@ -464,7 +503,7 @@ def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic
   return all_mono_mods, all_terminal_perms
 
 
-def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, global_mods):
+def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, global_mods,mono_attributes_in= mono_attributes):
   """Determines the masses of all possible monosaccharide modifications and their respective atom level representations\n
   | Arguments:
   | :-
@@ -478,7 +517,7 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
   | (2) a list of all possible mass combinations for each bond fragmentation combination
   | (3) a list of masses corresponding to each of the global mods
   """
-  all_mono_mod_masses = [[mono_attributes[map_to_basic(label, obfuscate_ptm = False)]['mass'][map_to_basic(mod, obfuscate_ptm = False)] for mod in mods] for mods, label in zip(all_mono_mods, terminal_labels)]
+  all_mono_mod_masses = [[mono_attributes_in[map_to_basic(label, obfuscate_ptm = False)]['mass'][map_to_basic(mod, obfuscate_ptm = False)] for mod in mods] for mods, label in zip(all_mono_mods, terminal_labels)]
 
   all_atom_dict_masses = []
   for node in all_terminal_perms:
@@ -488,7 +527,7 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
       node_dict_masses.append(sum(present_atom_mods))
     all_atom_dict_masses.append(node_dict_masses)
 
-  global_mods_mass = [mono_attributes['Global']['mass'][x] for x in global_mods[1:]]
+  global_mods_mass = [mono_attributes_in['Global']['mass'][x] for x in global_mods[1:]]
 
   return product(*all_mono_mod_masses), product(*all_atom_dict_masses), global_mods_mass
 
@@ -635,7 +674,7 @@ def annotate_subgraph(subg,node_mod,global_mod,terminals):
   return mod_subg
 
 def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = 3, fragment_masses = [],
-                          threshold = 0.5, mass_tag = None, charge = -1):
+                          threshold = 0.5, mass_tag = None, charge = -1,permethylated=False):
   """Calculates the graph and mass of all possible fragments of the input\n
   | Arguments:
   | :-
@@ -652,7 +691,8 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
   | :-
   | Returns a dict of lists of networkx subgraphs
   """
-  if not mass_tag:
+  effective_mono_attributes = _get_permethylated_attributes(mono_attributes) if permethylated else mono_attributes
+  if mass_tag is None:
     mass_tag = 2.0156
   charge_masses = np.array(extend_masses(fragment_masses, charge))
   threshold = abs(threshold)
@@ -663,8 +703,8 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
   node_dict_basic = {k: map_to_basic(v, obfuscate_ptm = False) for k, v in node_dict.items()}
   subgraph_fragments = {}
   subgraphs = enumerate_subgraphs(nx_mono) + [nx_mono]
-  max_global_mass = max(mono_attributes['Global']['mass'].values())
-  min_global_mass = min(mono_attributes['Global']['mass'].values())
+  max_global_mass = max(effective_mono_attributes['Global']['mass'].values())
+  min_global_mass = min(effective_mono_attributes['Global']['mass'].values())
   nx_deg = nx_mono.degree
   for i,subg in enumerate(subgraphs):
     terminals = get_terminals(nx_deg,subg)
@@ -673,8 +713,10 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
       continue
     other_terminals = [x for x in subg.nodes if x in all_other_terminals and x not in terminals] 
     terminals = terminals+other_terminals
-    inner_mass = sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in subg.nodes() if m not in terminals])
-    max_graph_mass = inner_mass + sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in terminals]) + 18.0105546*len(terminals)
+    inner_mass = sum([effective_mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in subg.nodes() if m not in terminals])
+    if permethylated:
+        inner_mass -= subg.number_of_edges()*14.01565
+    max_graph_mass = inner_mass + sum([effective_mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in terminals]) + 18.0105546*len(terminals)
     max_graph_mass += max_global_mass
     min_graph_mass = inner_mass + min_global_mass
     avg_graph_mass = (min_graph_mass+max_graph_mass)/2
@@ -690,10 +732,12 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     present_breakages = get_broken_bonds(subg, nx_mono, nx_edge_dict)
     root_node = [v for v, d in subg.out_degree() if d == 0][0]
     atomic_mod_dict_subg = atom_mods_init(subg, present_breakages, terminals, terminal_labels)
-    mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict, allowed_X_cleavages)
+    mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict, allowed_X_cleavages,mono_attributes_in=effective_mono_attributes)
     mono_mod_perms, atom_dict_perms = generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic_mod_dict_subg)
-    mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms, terminal_labels, subg_global_mods)
+    mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms, terminal_labels, subg_global_mods,mono_attributes_in=effective_mono_attributes)
     initial_masses = np.array(preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, bonus_root_mass, bonus_root_node, mass_tag, charge, mono_mod_perms))
+    if permethylated:
+        initial_masses = initial_masses - subg.number_of_edges()*14.01565 
     valid_idx = np.where(check_masses(charge_masses, initial_masses, threshold))[0]
     if valid_idx.size == 0:
       continue
@@ -1269,7 +1313,7 @@ def glycopeptide_string_to_input(gpep_string):
 @rescue_glycans
 def CandyCrumbs(input_string, fragment_masses, mass_threshold,
                 max_cleavages = 3, simplify = True, charge = -1, mass_tag = None,
-                iupac = False, intensities = None, disable_global_mods=False, disable_X_cross_rings=False):
+                iupac = False, intensities = None, disable_global_mods=False, disable_X_cross_rings=False,permethylated=False):
   """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
   | Arguments:
   | :-
@@ -1291,7 +1335,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
   nx_mono,pep_gr = input_to_graph(input_dict)
   global_mods,special_residues = get_initial_global_mods(nx_mono, charge,disable_global_mods = disable_global_mods)
   allowed_X_cleavages = [] if disable_X_cross_rings else X_cross_rings
-  subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, mass_tag = mass_tag, charge = charge)
+  subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,max_cleavages = max_cleavages, fragment_masses = fragment_masses, threshold = mass_threshold, mass_tag = mass_tag, charge = charge,permethylated=permethylated)
   downstream_values = []
   if input_dict['peptide']:
     peptide=True
