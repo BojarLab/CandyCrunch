@@ -1065,9 +1065,37 @@ def load_spectra_filepath(spectra_filepath):
         return loaded_file
     if spectra_filepath.endswith(".xlsx"):
         loaded_file = pd.read_excel(spectra_filepath)
-        mask = loaded_file['peak_d'].str.endswith('}', na = False)
-        loaded_file = loaded_file[mask]
-        loaded_file['peak_d'] = loaded_file['peak_d'].apply(ast.literal_eval)
+
+        def parse_peak_dict(value):
+            def convert_dict(d):
+                converted = {}
+                for k, v in d.items():
+                    try:
+                        key = float(k)
+                        val = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    converted[key] = val
+                return converted if converted else None
+
+            if isinstance(value, dict):
+                return convert_dict(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                if 'np.float64' in text:
+                    text = re.sub(r'np\.float64\(([^)]+)\)', r'\1', text)
+                try:
+                    parsed = ast.literal_eval(text)
+                except (SyntaxError, ValueError):
+                    return None
+                if isinstance(parsed, dict):
+                    return convert_dict(parsed)
+            return None
+
+        loaded_file['peak_d'] = loaded_file['peak_d'].apply(parse_peak_dict)
+        loaded_file = loaded_file[loaded_file['peak_d'].notnull()].reset_index(drop=True)
         return loaded_file
     if spectra_filepath.endswith('.csv'):
         storage = DictStorage()
