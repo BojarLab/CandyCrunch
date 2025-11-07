@@ -7,7 +7,8 @@ Mass,RT,glycan,JC_141128PGMa,JC_100302PGMb,JC_180323Saliva01,JC_180323Saliva02,a
 587.42,15.85,GlcNAc(a1-4)Gal(b1-3)GalNAc,1,1,0,0,
 587.33,11.3,Gal(b1-4)GlcNAc(b1-3)GalNAc,0,0,1,1,
 587.33,11.69,Gal(b1-3)GlcNAc(b1-3)GalNAc,0,0,1,1,
-667.33,18.44,Gal(b1-3)[GlcNAc6S(b1-6)]GalNAc,1,1,0,0,
+667.33,18.44,Gal(b1-3)[GlcNAc6S(b1-6)]GalNAc,0,1,0,0,1
+667.33,19.64,Gal(b1-3)[GlcNAc6S(b1-6)]GalNAc,1,,,,1
 667.33,12.98,GalOS(b1-3/4)GlcNAc(b1-3)GalNAc,0,0,1,1,
 667.33,13.89,GalOS(b1-3/4)GlcNAc(b1-3)GalNAc,0,0,1,1,
 675.42,16.64,Gal(b1-3)[Neu5Ac(a2-6)]GalNAc,1,1,1,1,
