@@ -3,7 +3,6 @@ import copy
 import os
 import re
 import pickle
-from itertools import combinations
 from collections import defaultdict
 import json
 from typing import Dict, List, Tuple, Optional
@@ -42,7 +41,7 @@ if torch.cuda.is_available():
     device = "cuda:0"
 
 sdict = os.path.join(this_dir, 'candycrunch.pt')
-sdict = torch.load(sdict, map_location = device)
+sdict = torch.load(sdict, map_location = device, weights_only = True)
 sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
 candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans)).to(device)
 candycrunch.load_state_dict(sdict)
@@ -283,6 +282,16 @@ def get_topk(dataloader, model, glycans, k = 25, temp = False, temperature = tem
         start_idx = end_idx
     preds = [[glycans[i] for i in j] for j in preds]
     return preds, conf.tolist()
+
+
+comp_cache = {}
+def get_comp(glycan):
+    if glycan not in comp_cache:
+      try:
+        comp_cache[glycan] = glycan_to_composition(glycan)
+      except Exception:
+        comp_cache[glycan] = {}
+    return comp_cache[glycan]
 
 
 def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_tag = None, double_thresh = 900,
@@ -601,7 +610,7 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
                 if any(abs(candidate_mass - x) <= mass_tolerance for x in processed):
                     continue
                 if abs(candidate_mass - next_mass - spacing) <= mass_tolerance:
-                    if validate_pattern and not (candidate_intensity <= charge_pattern[-1][1] * 1.2 or 
+                    if validate_pattern and not (candidate_intensity <= charge_pattern[-1][1] * 1.20 or 
                                               candidate_intensity >= charge_pattern[-1][1] * 0.05):
                         continue
                     charge_pattern.append((candidate_mass, candidate_intensity))
@@ -702,26 +711,6 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0):
     return dedup_df
 
 
-def combinatorics(comp):
-    """given a composition, create a crude approximation of possible B/C/Y/Z fragments\n
-   | Arguments:
-   | :-
-   | comp (dict): composition in dictionary form\n
-   | Returns:
-   | :-
-   | Returns a list of rough masses to check against fragments
-   """
-    clist = unwrap([[k]*v for k, v in comp.items()])
-    verbose_clist = [abbrev_dict[x] if x in abbrev_dict else x for x in clist]
-    masses = set()
-    for i in range(1, len(verbose_clist) + 1):
-        for comb in combinations(verbose_clist, i):
-            mass = sum(mass_dict.get(k, 0) for k in comb)
-            masses.add(mass)
-            masses.add(mass + 18.01056)
-    return list(masses)
-
-
 def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduced',
                   mass_tolerance = 0.5, filter_out = set(), df_use = None):
     """filters out false-positive predictions\n
@@ -783,7 +772,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 truth.append(False)
             # Check M-adduct for adducts
             if isinstance(df_out.adduct.values.tolist()[k], str):
-                truth.append(any([abs(df_out.index.tolist()[k]-mass_dict[df_out.adduct.values.tolist()[k]]-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5]]))
+                truth.append(any([abs(df_out.index.tolist()[k] - mass_dict.get(df_out.adduct.values.tolist()[k], 999) - j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5]]))
             if all(truth):
                 if to_append:
                     keep.append(current_preds[i])
@@ -982,7 +971,7 @@ def make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = 'M
     mass_dic = {9999: []}
     for k in exp_glycans:
         try:
-            composition = glycan_to_composition(k)
+            composition = get_comp(k)
             if not filter_out.intersection(composition.keys()):
                 mass = glycan_to_mass(k)
                 mass_dic.setdefault(mass, []).append(k)
@@ -1346,7 +1335,7 @@ def prediction_post_processing(df_out,mode,mass_tolerance,glycan_class,df_use,
     | :-
     | Returns a dataframe of filtered predictions 
     """
-    df_out['composition'] = [glycan_to_composition(g[0][0]) if g and g[0] else np.nan for g in df_out.predictions]
+    df_out['composition'] = [get_comp(g[0][0]) if g and g[0] else np.nan for g in df_out.predictions]
     df_out.composition = [
         k if isinstance(k, dict) else mz_to_composition(m, mode = mode, mass_tolerance = mass_tolerance,
                                                         glycan_class = glycan_class, df_use = df_use, filter_out = filter_out,
@@ -1470,7 +1459,7 @@ def finalise_predictions(df_out,get_missing,pred_thresh,mode,modification,mass_t
     df_out = df_out[valid_indices]
     df_out['ppm_error'] = ppm_errors
     # Clean-up
-    df_out['composition'] = [glycan_to_composition(k[0][0]) if k else val for k, val in zip(df_out['predictions'], df_out['composition'])]
+    df_out['composition'] = [get_comp(k[0][0]) if k else val for k, val in zip(df_out['predictions'], df_out['composition'])]
     df_out['charge'] = round(df_out['composition'].apply(composition_to_mass) / df_out.index) * multiplier
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
@@ -1563,7 +1552,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         [(g[0], round(g[1], 4)) for g in preds if
          enforce_class(g[0], glycan_class, g[1], extra_thresh = extra_thresh) and
          g[1] > pred_thresh and
-         glycan_to_composition(g[0]) == comp][:5]
+         get_comp(g[0]) == comp][:5]
         for preds, comp in zip(df_out.predictions, df_out.composition)
         ]
     df_out['charge'] = [c * multiplier for c in df_out['charge']]
@@ -1716,7 +1705,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             [(g[0], round(g[1], 4)) for g in preds if
              enforce_class(g[0], glycan_class, g[1], extra_thresh=extra_thresh) and
              g[1] > pred_thresh and
-             glycan_to_composition(g[0]) == comp][:5]
+             get_comp(g[0]) == comp][:5]
             for preds, comp in zip(df_out.predictions, df_out.composition)
         ]
         df_out['charge'] = [c * multiplier for c in df_out['charge']]
