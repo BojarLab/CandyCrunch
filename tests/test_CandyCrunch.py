@@ -16,18 +16,20 @@ BASE_DIR = pathlib.Path(__file__).parent.parent  # Go up one level from the test
 TEST_DATA_DIR = BASE_DIR / "tests" / "data"
 TEST_DICTS = [
     {'name':'milk','args': {'glycan_class':'free'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000350','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'O.' in x],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000350','args': {'glycan_class':'N','taxonomy_level':'Class','taxonomy_filter':'Mammalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'N' in x],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000017','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000017/") if 'PGMb' not in x if 'JC' in x],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000029','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'PMC8950484_CHO','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000307','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000487','args': {'glycan_class':'N','taxonomy_level':'Class','taxonomy_filter':'Mammalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000134','args': {'glycan_class':'N','taxonomy_level':'Class','taxonomy_filter':'Mammalia','mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1],'mass_threshold':0.5, 'RT_threshold':1}
-
+    {'name':'GPST000350','args': {'glycan_class':'O'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'O.' in x]},
+    {'name':'GPST000350','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'N' in x]},
+    {'name':'GPST000017','args': {'glycan_class':'O'}, 'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000017/") if 'PGMb' not in x if 'JC' in x]},
+    {'name':'GPST000029','args': {'glycan_class':'O'}},
+    {'name':'PMC8950484_CHO','args': {'glycan_class':'O'}},
+    {'name':'GPST000307','args': {'glycan_class':'O'}},
+    {'name':'GPST000487','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")]},
+    {'name':'GPST000134','args': {'glycan_class':'N', 'mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1]}
 ]
+AVG_THRESHOLD = 0.05
+MASS_TOLERANCE = 0.5
+RT_TOLERANCE = 1.0
 
-def match_spectra(array1, array2, mass_threshold=0.3, rt_threshold=0.9, array2_alt=None):
+def match_spectra(array1, array2, mass_threshold=MASS_TOLERANCE, rt_threshold=RT_TOLERANCE, array2_alt=None):
     matches = []
     used_predictions = set()
     for i, (mass1, rt1) in enumerate(array1):
@@ -108,8 +110,6 @@ def posthoc_process_df(df_in,posthoc_params):
             df_in = df_in[(df_in[df_arg]>posthoc_params[arg])]
     return df_in 
 
-AVG_THRESHOLD = 0.05
-
 extra_param_dict = {
         'test_dict': TEST_DICTS,
         'supplement': [True],
@@ -147,7 +147,7 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
         loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{test_dict['name']}/df_mz_{test_dict['name']}.csv")
         col_name  =  filename.split(".")[0]
         rt_col_name = 'RT' if 'RT' in loaded_gt.columns else col_name+'_RT'
-        eval_scores = evaluate_predictions(preds_out,loaded_gt[loaded_gt[col_name]>0].dropna(subset='glycan'),rt_col_name,test_dict['mass_threshold'],test_dict['RT_threshold'])
+        eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name]>0].dropna(subset='glycan'), rt_col_name, MASS_TOLERANCE, RT_TOLERANCE)
         print('True Positives',eval_scores[-3])
         print('False Positives',eval_scores[-2])
         print('False Negatives',eval_scores[-1])
