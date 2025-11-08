@@ -16,14 +16,14 @@ BASE_DIR = pathlib.Path(__file__).parent.parent  # Go up one level from the test
 TEST_DATA_DIR = BASE_DIR / "tests" / "data"
 TEST_DICTS = [
     {'name':'milk','args': {'glycan_class':'free'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000350','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'O.' in x],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000350','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'N' in x],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000017','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000017/") if 'PGMb' not in x if 'JC' in x],'mass_threshold':0.5, 'RT_threshold':2},
-    {'name':'GPST000029','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'PMC8950484_CHO','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000307','args': {'glycan_class':'O','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000487','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")],'mass_threshold':0.5, 'RT_threshold':1},
-    {'name':'GPST000134','args': {'glycan_class':'N','taxonomy_level':'Kingdom','taxonomy_filter':'Animalia','mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1],'mass_threshold':0.5, 'RT_threshold':1}
+    {'name':'GPST000350','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'O.' in x],'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000350','args': {'glycan_class':'N','taxonomy_level':'Class','taxonomy_filter':'Mammalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'N' in x],'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000017','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000017/") if 'PGMb' not in x if 'JC' in x],'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000029','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'PMC8950484_CHO','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000307','args': {'glycan_class':'O','taxonomy_level':'Class','taxonomy_filter':'Mammalia'}, 'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000487','args': {'glycan_class':'N','taxonomy_level':'Class','taxonomy_filter':'Mammalia'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")],'mass_threshold':0.5, 'RT_threshold':1},
+    {'name':'GPST000134','args': {'glycan_class':'N','taxonomy_level':'Class','taxonomy_filter':'Mammalia','mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1],'mass_threshold':0.5, 'RT_threshold':1}
 
 ]
 
