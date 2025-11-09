@@ -29,6 +29,25 @@ AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
 
+#TEMPORARY; will be in glycowork>1.6.4
+from scipy.spatial.distance import cosine
+from typing import Union, Optional
+from glycowork.motif.annotate import annotate_dataset
+import networkx as nx
+
+def get_glycan_similarity(
+  glycan1: Union[str, nx.DiGraph],
+  glycan2: Union[str, nx.DiGraph],
+  motifs: Optional[pd.DataFrame] = None,
+  termini_list: List = [],
+  gmotifs: Optional[List[nx.DiGraph]] = None
+  ) -> float:
+  "Calculates cosine similarity between two glycans based on their motif count fingerprints"
+  fp = annotate_dataset([glycan1, glycan2], motifs = motifs, feature_set = ['known', 'exhaustive', 'terminal'])
+  return 1 - cosine(fp.iloc[0].values, fp.iloc[1].values)
+#TEMPORARY; will be in glycowork>1.6.4
+
+
 def match_spectra(array1, array2, mass_threshold=MASS_TOLERANCE, rt_threshold=RT_TOLERANCE, array2_alt=None):
     matches = []
     used_predictions = set()
@@ -67,38 +86,40 @@ def add_pred_column(df_in,col_name,matches,pred_df,rt_col):
     return df_in
 
 def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
-    assert len(predictions)>0
-    if len(predictions)==0:
-        print('empty preds')
-        return 0,0,0,0,0,0
-    predictions['converted_masses'] = [m_z * abs(charge) + (abs(charge) - 1) for m_z, charge in zip(predictions.reset_index()['m/z'], predictions['charge'])]
-    pairs = predictions.reset_index()[['m/z','RT']].round(2).values
-    pairs_converted = predictions[['converted_masses','RT']].round(2).values
-    gt_pairs = gt.reset_index()[['Mass',rt_col]].round(2).values
-    matched_pairs = match_spectra(gt_pairs, pairs, mass_threshold=mass_thresh, rt_threshold=RT_thresh, array2_alt=pairs_converted)
-    merge_df = gt[['Mass',rt_col,'glycan']].reset_index(drop=True)
-    new_md = add_pred_column(merge_df,'batch_pred',matched_pairs,predictions.reset_index(),rt_col)
-    # correct_preds = [compare_glycans(x,y) if (isinstance(x,str) and isinstance(y,str)) else False for x,y in zip(new_md['glycan'],new_md['batch_pred'])]
-    correct_preds = []
-    for gt_glycan, pred_glycan in zip(new_md['glycan'],new_md['batch_pred']):
-        if not (isinstance(gt_glycan,str) and isinstance(pred_glycan,str)):
-            correct_preds.append(False)
-            continue
-        if '{' in gt_glycan:
-            possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan)]
-            correct_preds.append(any([compare_glycans(p,pred_glycan) for p in possible_structures]))
-        else:
-            correct_preds.append(compare_glycans(gt_glycan,pred_glycan))
-    new_md['correct_preds'] = correct_preds
-    tp = len(np.where(new_md['correct_preds'] == True)[0])
-    fp = len(np.where((new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
-    fn = len(np.where((new_md['glycan'].notnull())&(new_md['correct_preds'] == False))[0])
-    peaks_not_picked = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].isnull()))[0])
-    incorrect_predictions = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].notnull())&(new_md['correct_preds'] == False))[0])
-    Precision = tp / (tp + fp + 1e-8)
-    Recall = tp / (tp + fn + 1e-8)
-    F1_score = 2 * (Precision * Recall) / (Precision + Recall  + 1e-8)
-    return F1_score,Precision,Recall,peaks_not_picked,incorrect_predictions,tp,fp,fn
+  assert len(predictions)>0
+  if len(predictions)==0:
+    print('empty preds')
+    return 0,0,0,0,0,0
+  predictions['converted_masses'] = [m_z * abs(charge) + (abs(charge) - 1) for m_z, charge in zip(predictions.reset_index()['m/z'], predictions['charge'])]
+  pairs = predictions.reset_index()[['m/z','RT']].round(2).values
+  pairs_converted = predictions[['converted_masses','RT']].round(2).values
+  gt_pairs = gt.reset_index()[['Mass',rt_col]].round(2).values
+  matched_pairs = match_spectra(gt_pairs, pairs, mass_threshold=mass_thresh, rt_threshold=RT_thresh, array2_alt=pairs_converted)
+  merge_df = gt[['Mass',rt_col,'glycan']].reset_index(drop=True)
+  new_md = add_pred_column(merge_df,'batch_pred',matched_pairs,predictions.reset_index(),rt_col)
+  similarity_scores = []
+  for gt_glycan, pred_glycan in zip(new_md['glycan'],new_md['batch_pred']):
+    if not (isinstance(gt_glycan,str) and isinstance(pred_glycan,str)):
+      similarity_scores.append(0.0)
+      continue
+    if '{' in gt_glycan:
+      possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan)]
+      similarity_scores.append(max([1.0 if compare_glycans(p,pred_glycan) else get_glycan_similarity(p,pred_glycan) for p in possible_structures]))
+    else:
+      if compare_glycans(gt_glycan, pred_glycan):
+        similarity_scores.append(1.0)
+      else:
+        similarity_scores.append(get_glycan_similarity(gt_glycan,pred_glycan))
+  new_md['similarity_score'] = similarity_scores
+  tp = new_md['similarity_score'].sum()
+  fp = len(np.where((new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
+  fn = (new_md[new_md['glycan'].notnull()]['similarity_score'].apply(lambda x: 1-x)).sum()
+  peaks_not_picked = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].isnull()))[0])
+  incorrect_predictions = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].notnull())&(new_md['similarity_score'] < 1.0))[0])
+  Precision = tp / (tp + fp + 1e-8)
+  Recall = tp / (tp + fn + 1e-8)
+  F1_score = 2 * (Precision * Recall) / (Precision + Recall + 1e-8)
+  return F1_score,Precision,Recall,peaks_not_picked,incorrect_predictions,tp,fp,fn
 
 def posthoc_process_df(df_in,posthoc_params):
     for arg in posthoc_params:
