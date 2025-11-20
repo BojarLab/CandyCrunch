@@ -8,7 +8,8 @@ import numpy as np
 from collections import defaultdict
 
 from candycrunch.prediction import *
-from glycowork.motif.graph import compare_glycans,get_possible_topologies,graph_to_string
+from glycowork.motif.graph import compare_glycans, get_possible_topologies, graph_to_string
+from glycowork.motif.annotate import get_glycan_similarity
 from itertools import product
 import time
 
@@ -28,24 +29,6 @@ TEST_DICTS = [
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
-
-#TEMPORARY; will be in glycowork>1.6.4
-from scipy.spatial.distance import cosine
-from typing import Union, Optional
-from glycowork.motif.annotate import annotate_dataset
-import networkx as nx
-
-def get_glycan_similarity(
-  glycan1: Union[str, nx.DiGraph],
-  glycan2: Union[str, nx.DiGraph],
-  motifs: Optional[pd.DataFrame] = None,
-  termini_list: List = [],
-  gmotifs: Optional[List[nx.DiGraph]] = None
-  ) -> float:
-  "Calculates cosine similarity between two glycans based on their motif count fingerprints"
-  fp = annotate_dataset([glycan1, glycan2], motifs = motifs, feature_set = ['known', 'exhaustive', 'terminal'])
-  return 1 - cosine(fp.iloc[0].values, fp.iloc[1].values)
-#TEMPORARY; will be in glycowork>1.6.4
 
 
 def match_spectra(array1, array2, mass_threshold=MASS_TOLERANCE, rt_threshold=RT_TOLERANCE, array2_alt=None):
