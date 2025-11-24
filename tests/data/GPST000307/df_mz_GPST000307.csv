@@ -32,6 +32,7 @@
 813.4,30.52,,,,1,1
 829.4,19.28913333,Gal(b1-3/4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,1.512034088,0.927210549,1,1
 829.4,20.40845,Gal(b1-3/4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,1.608229392,1.493519383,0,
+839.85,32.83,,,,1,1
 840.1,29.00066667,Neu5Ac(a2-3)[GalNAc(b1-4)]Gal(b1-4)[Neu5Ac(a2-3)]GlcNAc(b1-6)[Fuc(a1-2)Gal(b1-3)]GalNAc,0,0,4.712523482,
 868.6,19.90174167,Neu5Ac(a2-3)[GalNAc(b1-4)]Gal(b1-3/4)GlcNAc(b1-6)[Neu5Ac(a2-3)[GalNAc(b1-4)]Gal(b1-3)]GalNAc,1.06988292,2.036812572,0,
 868.6,21.22,,,,1,1
@@ -50,6 +51,7 @@
 975.5,18.73913333,Fuc(a1-2)Gal(b1-3/4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,0,0,2.120423391,
 975.5,28.35,Fuc(a1-2)Gal(b1-3)[Gal(b1-4)GlcNAc6S(b1-6)]GalNAc,,1,1,1
 1032.477541,20.03,GlcNAc(a1-4)Gal(b1-4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,,,1,1
+1040.4,20.55,,,,1,1
 1040.4,22.03,{Neu5Ac(a2-3)}{Gal(?1-?)}Gal(b1-3)[GlcNAc(b1-6)]GalNAc,,,1,1
 1040.4,23.26974167,{Neu5Ac(a2-3)}Gal(b1-3/4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc,1.838569469,2.823232622,0,
 1040.4,23.63,Gal(b1-4)[Neu5Ac(a2-6)]GlcNAc(b1-6)[Gal(b1-3)]GalNAc,,,1,1
@@ -77,6 +79,7 @@
 1266.47,30.39,Neu5Ac(a2-3)Gal(b1-3)[Fuc(a1-3)[Gal(b1-4)]GlcNAc6S(b1-6)]GalNAc,,,1,1
 1331.5,21.01985,Neu5Ac(a2-3)Gal(b1-3)[Neu5Ac(a2-3)[Gal(b1-4)]GlcNAc(b1-6)]GalNAc,0,0,2.287308632,
 1332.664435,27.86,,,,1,1
+1372.66,21.92,,,,1,1
 1389.6,23.35,Neu5Ac(a2-3)[GalNAc(b1-4)]Gal(b1-4)GlcNAc(b1-6)[Fuc(a1-2)Gal(b1-3)]GalNAc,,,1,1
 1389.6,25.57,Fuc(a1-2)Gal(b1-4)GlcNAc(b1-3)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-6)]GalNAc,,,1,1
 1389.6,27.83081667,{Neu5Ac(a2-3)}HexNAc(?1-3/4)Gal(b1-4)GlcNAc(b1-6)[Fuc(a1-2)Gal(b1-3)]GalNAc,0,0,6.193023096,
