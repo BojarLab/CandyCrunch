@@ -61,18 +61,23 @@ def match_spectra(array1, array2, mass_threshold=MASS_TOLERANCE, rt_threshold=RT
     return matches
     
 def add_pred_column(df_in,col_name,matches,pred_df,rt_col):
-    df_in[col_name] = None
-    for gt_idx,pred_idx in matches:
-        df_in.at[gt_idx,col_name] = pred_df.iloc[pred_idx,:]['top1_pred']
-    extra_preds = pred_df[~(pred_df.index.isin([x[1] for x in matches]))][['m/z','RT','top1_pred']].rename(columns={'m/z':'Mass','top1_pred':col_name,'RT':rt_col})
-    df_in = pd.concat([df_in,extra_preds]).sort_values(['Mass',rt_col])
-    return df_in
+  df_in = df_in.copy()
+  df_in[col_name] = None
+  df_in['in_ground_truth'] = True
+  for gt_idx,pred_idx in matches:
+    df_in.at[gt_idx,col_name] = pred_df.iloc[pred_idx,:]['top1_pred']
+  extra_preds = pred_df[~(pred_df.index.isin([x[1] for x in matches]))][['m/z','RT','top1_pred']].rename(columns={'m/z':'Mass','top1_pred':col_name,'RT':rt_col})
+  extra_preds['in_ground_truth'] = False
+  extra_preds['glycan'] = None
+  df_in = pd.concat([df_in,extra_preds]).sort_values(['Mass',rt_col])
+  return df_in
+
 
 def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
   assert len(predictions)>0
   if len(predictions)==0:
     print('empty preds')
-    return 0,0,0,0,0,0
+    return 0,0,0,0,0,0,0,0,0
   predictions['converted_masses'] = [m_z * abs(charge) + (abs(charge) - 1) for m_z, charge in zip(predictions.reset_index()['m/z'], predictions['charge'])]
   pairs = predictions.reset_index()[['m/z','RT']].round(2).values
   pairs_converted = predictions[['converted_masses','RT']].round(2).values
@@ -94,15 +99,16 @@ def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
       else:
         similarity_scores.append(get_glycan_similarity(gt_glycan,pred_glycan))
   new_md['similarity_score'] = similarity_scores
-  tp = new_md['similarity_score'].sum()
-  fp = len(np.where((new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
+  unevaluable = len(np.where((new_md['in_ground_truth'])&(new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
+  fp = len(np.where((~new_md['in_ground_truth'])&(new_md['batch_pred'].notnull()))[0])
+  tp = new_md[new_md['glycan'].notnull()]['similarity_score'].sum() + 0.5 * unevaluable
   fn = (new_md[new_md['glycan'].notnull()]['similarity_score'].apply(lambda x: 1-x)).sum()
   peaks_not_picked = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].isnull()))[0])
   incorrect_predictions = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].notnull())&(new_md['similarity_score'] < 1.0))[0])
   Precision = tp / (tp + fp + 1e-8)
   Recall = tp / (tp + fn + 1e-8)
   F1_score = 2 * (Precision * Recall) / (Precision + Recall + 1e-8)
-  return F1_score,Precision,Recall,peaks_not_picked,incorrect_predictions,tp,fp,fn
+  return F1_score,Precision,Recall,peaks_not_picked,incorrect_predictions,tp,fp,fn,unevaluable
 
 def posthoc_process_df(df_in,posthoc_params):
     for arg in posthoc_params:
@@ -151,12 +157,13 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
         loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{test_dict['name']}/df_mz_{test_dict['name']}.csv")
         col_name  =  filename.split(".")[0]
         rt_col_name = 'RT' if 'RT' in loaded_gt.columns else col_name+'_RT'
-        eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name]>0].dropna(subset='glycan'), rt_col_name, MASS_TOLERANCE, RT_TOLERANCE)
-        print('True Positives',eval_scores[-3])
-        print('False Positives',eval_scores[-2])
-        print('False Negatives',eval_scores[-1])
-        print('incorrect_preds',eval_scores[-4])
-        print('peaks_not_picked',eval_scores[-5])
+        eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name]>0], rt_col_name, MASS_TOLERANCE, RT_TOLERANCE)
+        print('True Positives',eval_scores[-4])
+        print('False Positives',eval_scores[-3])
+        print('Unevaluable',eval_scores[-1])
+        print('False Negatives',eval_scores[-2])
+        print('incorrect_preds',eval_scores[-3])
+        print('peaks_not_picked',eval_scores[-6])
         test_outputs.append(eval_scores)
         print(f'file_score:{eval_scores[0]}')
         result_collector.add_result(test_params, eval_scores[0])
