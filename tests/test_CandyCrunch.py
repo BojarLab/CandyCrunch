@@ -102,8 +102,9 @@ def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
   unevaluable = len(np.where((new_md['in_ground_truth'])&(new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
   fp = len(np.where((~new_md['in_ground_truth'])&(new_md['batch_pred'].notnull()))[0])
   tp = new_md[new_md['glycan'].notnull()]['similarity_score'].sum() + 0.5 * unevaluable
-  fn = (new_md[new_md['glycan'].notnull()]['similarity_score'].apply(lambda x: 1-x)).sum()
-  peaks_not_picked = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].isnull()))[0])
+  empty_glycan_not_predicted = len(np.where((new_md['in_ground_truth'])&(new_md['glycan'].isnull())&(new_md['batch_pred'].isnull()))[0])
+  fn = (new_md[new_md['glycan'].notnull()]['similarity_score'].apply(lambda x: 1-x)).sum() + empty_glycan_not_predicted
+  peaks_not_picked = len(np.where((new_md['in_ground_truth'])&(new_md['batch_pred'].isnull()))[0])
   incorrect_predictions = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].notnull())&(new_md['similarity_score'] < 1.0))[0])
   Precision = tp / (tp + fp + 1e-8)
   Recall = tp / (tp + fn + 1e-8)
