@@ -91,7 +91,7 @@ def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
       similarity_scores.append(0.0)
       continue
     if '{' in gt_glycan:
-      possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan)]
+      possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan, exhaustive=True)]
       similarity_scores.append(max([1.0 if compare_glycans(p,pred_glycan) else get_glycan_similarity(p,pred_glycan) for p in possible_structures]))
     else:
       if compare_glycans(gt_glycan, pred_glycan):
