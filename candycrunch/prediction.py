@@ -14,7 +14,7 @@ import pymzml
 import torch
 import torch.nn.functional as F
 from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
-from glycowork.motif.graph import subgraph_isomorphism
+from glycowork.motif.graph import subgraph_isomorphism, glycan_to_graph
 from glycowork.motif.processing import enforce_class
 from glycowork.motif.tokenization import (composition_to_mass,
                                           glycan_to_composition,
@@ -1521,6 +1521,15 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type==glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)]
+        # work-around until we have cleaned sugarbase of syntactic errors...
+        idx = []
+        for i, glycan in enumerate(df_use.glycan):
+            try:
+                _, _ = glycan_to_graph(glycan)
+                idx.append(i)
+            except:
+                pass
+        df_use = df_use.iloc[idx, :].reset_index(drop = True)
     reduced = 1.0078 if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
