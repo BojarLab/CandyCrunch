@@ -319,10 +319,10 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_t
     threshold_dict = {2:double_thresh, 3:triple_thresh, 4:quadruple_thresh}
     greater_charges = [x for x in permitted_charges if x>1]
     try:
-        mz = glycan_to_mass(glycan, sample_prep= modification if modification in ["permethylated", "peracetylated"] else 'underivatized') if isinstance(glycan, str) else glycan
+        mz = glycan_to_mass(glycan, sample_prep = modification if modification in ["permethylated", "peracetylated"] else 'underivatized') if isinstance(glycan, str) else glycan
     except:
         return False
-    mz += modification_mass_dict.get(modification)
+    mz += modification_mass_dict.get(modification, 0)
     if not mass_tag:
         mass_tag = 0
     mz += mass_tag

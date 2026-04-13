@@ -15,13 +15,7 @@
 #### Development version:
 ```bash
 pip install git+https://github.com/BojarLab/CandyCrunch.git
-``` 
-#### Development version bundled with GlycoDraw:
-> [!NOTE]  
-> The Operating System specific installations for GlycoDraw are still required, read more in the [GlycoDraw installation guide](https://bojarlab.github.io/glycowork/examples.html#glycodraw-code-snippets)
-```bash
-pip install 'CandyCrunch[draw] @ git+https://github.com/Bojarlab/CandyCrunch'
-``` 
+```
 #### PyPI:
 ```bash
 pip install CandyCrunch
@@ -257,5 +251,5 @@ GlycoDraw(fragment_iupac)
 - Includes the extracted spectra of an example mzML file from Kouka et al. 2022
 
 ## Citation 
-If you use `CandyCrunch` or any of our datasets in your work, please cite Urban et al., bioRxiv 2023.  
+If you use `CandyCrunch` or any of our datasets in your work, please cite Urban et al., Nat Methods 2024.  
 The data used to train `CandyCrunch` can be found at Zenodo, under [doi:10.5281/zenodo.7940047](https://zenodo.org/record/7940047)
