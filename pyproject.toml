@@ -54,3 +54,6 @@ candycrunch = ["*.csv", "*.pkl", "*.jpg", "*.pt"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["tests*", "*.ipynb"]
+
+[tool.setuptools.package-dir]
+candycrunch = "candycrunch"

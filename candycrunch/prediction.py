@@ -86,6 +86,8 @@ def process_mzML_stack(filepath, num_peaks = 1000,
             for mz, i in spectrum.highest_peaks(num_actual_peaks):
                 mz_i_dict[mz] = i
             if mz_i_dict:
+                if not spectrum.selected_precursors:
+                    continue
                 key = f"{spectrum.ID}_{spectrum.selected_precursors[0]['mz']}"
                 highest_i_dict[key] = mz_i_dict
                 reducing_mass.append(float(key.split('_')[-1]))
@@ -205,7 +207,7 @@ def normalize_dict(peak_d):
 
 
 def process_for_inference(df, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
-                          trap = 'linear'):
+                          trap = 'linear', rt_max_default = 30.0):
     """processes averaged spectra for them being inputs to CandyCrunch\n
    | Arguments:
    | :-
@@ -214,7 +216,8 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
    | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
-   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'\n
+   | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
+   | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0\n
    | Returns:
    | :-
    | (1) a dataloader used for model prediction
@@ -227,7 +230,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
               trap = np.select([trap == 'linear', trap == 'orbitrap', trap == 'amazon'], [0, 1, 2], 3))
     df['glycan'] = [0]*len(df)
     # Retention time normalization
-    max_rt = max(max(df['RT']), 30)
+    max_rt = max(max(df['RT']), rt_max_default)
     df['RT2'] = df['RT'] / max_rt
     # Dataloader generation
     X = list(zip(df.binned_intensities.values.tolist(), df.mz_remainder.values.tolist(), df.compositional_vector.values.tolist(), df.glycan_type.values.tolist(),
@@ -1275,7 +1278,7 @@ def spectra_filepath_to_condensed_df(spectra_filepath,rt_min,rt_max,rt_diff,mass
     return df_out
 
 
-def assign_predictions(df_out,glycan_class,model,glycans,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh):
+def assign_predictions(df_out,glycan_class,model,glycans,mode,modification,lc,trap,mass_tag,pred_thresh,temperature,extra_thresh, rt_max_default=30.0):
     """generates dataframe initial predictions\n
     | Arguments:
     | :-
@@ -1290,13 +1293,14 @@ def assign_predictions(df_out,glycan_class,model,glycans,mode,modification,lc,tr
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | pred_thresh (float): prediction confidence threshold used for filtering
     | temperature (float): the temperature factor used to calibrate logits
-    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples)\n
+    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples)
+    | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0\n
     | Returns:
     | :-
     | Returns a preliminary df_out dataframe with initial predictions 
     """
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
-    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap)
+    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
     # Predict glycans from spectra
     preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
     if device != 'cpu':
@@ -1479,7 +1483,7 @@ def finalise_predictions(df_out,get_missing,pred_thresh,mode,modification,mass_t
 
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, bin_num = 2048,
-                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0,
+                   frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh=300,
                    filter_out = {'Ac','Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
                    taxonomy_level='Class',taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False):
@@ -1500,6 +1504,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0
    | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered; default:0
    | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0
+   | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0
    | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
    | temperature (float): the temperature factor used to calibrate logits; default:1.15
    | spectra (bool): whether to also output the actual spectra used for prediction; default:False
@@ -1549,7 +1554,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = assign_candidate_structures(df_out,df_use,common_structure_map,topo_struct_map,mass_tolerance,mode,mass_tag)
     df_out = assign_annotation_scores_pooled(df_out,multiplier,mass_tag,mass_tolerance)
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop=True)
-    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap)
+    loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
     # Predict glycans from spectra
     preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
     if device != 'cpu':
@@ -1642,7 +1647,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
 
 
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers, model=candycrunch, glycans=glycans, bin_num=2048,
-                   frag_num=100, mode='negative', modification='reduced', mass_tag=None, lc='PGC', trap='linear', rt_min=0, rt_max=0, rt_diff=1.0,
+                   frag_num=100, mode='negative', modification='reduced', mass_tag=None, lc='PGC', trap='linear', rt_min=0, rt_max=0, rt_diff=1.0, rt_max_default=30.0,
                    pred_thresh=0.01, temperature=temperature, spectra=False, get_missing=False, mass_tolerance=0.5, extra_thresh=0.2, crumbs_thresh=2,
                    filter_out={'Ac', 'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement=True, experimental=True, mass_dic=None,
                    taxonomy_level='Class', taxonomy_filter='Mammalia', df_use=None, plot_glycans=False):
@@ -1665,6 +1670,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0
    | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered; default:0
    | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0
+   | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0
    | pred_thresh (float): prediction confidence threshold used for filtering; default:0.01
    | temperature (float): the temperature factor used to calibrate logits; default:1.15
    | spectra (bool): whether to also output the actual spectra used for prediction; default:False
@@ -1703,7 +1709,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance)
         df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop=True)
         # Process for inference
-        loader, df_out = process_for_inference(df_out, coded_class, mode=mode, modification=modification, lc=lc, trap=trap)
+        loader, df_out = process_for_inference(df_out, coded_class, mode=mode, modification=modification, lc=lc, trap=trap, rt_max_default=rt_max_default)
         # Get predicted glycans
         preds, pred_conf = get_topk(loader, model, glycans, temp=True, temperature=temperature)
         df_out['rel_abundance'] = df_out['intensity']
