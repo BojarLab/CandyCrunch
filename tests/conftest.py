@@ -12,7 +12,8 @@ class ResultCollector:
         self.results = defaultdict(list)
         self.param_names = None
         self.current_dict = None
-        self.dict_results = defaultdict(lambda: defaultdict(list))  
+        self.dict_results = defaultdict(lambda: defaultdict(list))
+        self.dict_full_results = defaultdict(lambda: defaultdict(list))
         self.log_file = "test_results_log.json"
         self.previous_results = self.load_previous_results()
 
@@ -34,7 +35,6 @@ class ResultCollector:
                 'scores': averaged_results,
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
-        
         # Save to log file
         with open(self.log_file, 'w') as f:
             json.dump(final_results, f, indent=4)
@@ -53,86 +53,94 @@ class ResultCollector:
                         f"\nCurrent score: {current_score:.3f}"
                         f"\nParameters: {param_key}")
 
-    def add_result(self, params, score):
+    def add_result(self, params, score, full_scores = None):
         test_dict_name = params['test_dict']['name']
         param_key = tuple(
             params[key] if key != 'test_dict' else params['test_dict']['name']
             for key in self.param_names.keys()
         )
-        
         # Append the individual score to the list of scores for this parameter combination
         self.dict_results[test_dict_name][param_key[1:]].append(score)
-        
+        if full_scores is not None:
+            self.dict_full_results[test_dict_name][param_key[1:]].append(full_scores)
         # If we've switched to a new test_dict, print the results for the previous one
         if self.current_dict != test_dict_name and self.current_dict is not None:
             self.print_dict_results(self.current_dict)
-        
         self.current_dict = test_dict_name
     
     def print_dict_results(self, dict_name):
         print(f"\n=== Results for {dict_name} ===")
-        
         # Get results for this test_dict
         dict_specific_results = self.dict_results[dict_name]
-        
+        dict_specific_full = self.dict_full_results[dict_name]
         # Generate headers (exclude test_dict since it's the same for all rows)
-        headers = list(self.param_names.values())[1:] + ['F1 Score']
+        headers = list(self.param_names.values())[1:] + ['F1', 'Prec', 'Rec', 'NotPicked', 'Wrong', 'FP']
         table_data = []
-        
         # Calculate averages and sort by F1 score
         averaged_results = {
-            params: np.mean(scores) 
+            params: np.mean(scores)
             for params, scores in dict_specific_results.items()
         }
-        
         # Sort by average F1 score and create table rows
         for params, avg_f1 in sorted(averaged_results.items(), key=lambda x: x[1], reverse=True):
-            row = list(params) + [f"{avg_f1:.3f}"]
+            full = dict_specific_full.get(params, [])
+            avg_prec = np.mean([s[1] for s in full]) if full else float('nan')
+            avg_rec = np.mean([s[2] for s in full]) if full else float('nan')
+            avg_np = np.mean([s[3] for s in full]) if full else float('nan')
+            avg_wrong = np.mean([s[4] for s in full]) if full else float('nan')
+            avg_fp = np.mean([s[6] for s in full]) if full else float('nan')
+            row = list(params) + [f"{avg_f1:.3f}", f"{avg_prec:.3f}", f"{avg_rec:.3f}", f"{avg_np:.1f}", f"{avg_wrong:.1f}", f"{avg_fp:.1f}"]
             table_data.append(row)
-        
-        print(tabulate(table_data, headers=headers, tablefmt='grid'))
+        print(tabulate(table_data, headers = headers, tablefmt = 'grid'))
         print()
     
     def get_table(self):
         if not self.dict_results:
             return "No results collected!"
-        
         # Print final results for the last test_dict
         if self.current_dict:
             self.print_dict_results(self.current_dict)
-        
         self.save_current_results()
-
         # Print overall results
         print("\n=== Overall Performance Results ===")
         headers = list(self.param_names.values()) + ['F1 Score']
         table_data = []
-        
         # Combine results from all test_dicts
         overall_results = defaultdict(list)
+        overall_full = defaultdict(list)
         for dict_name, param_results in self.dict_results.items():
             for params, scores in param_results.items():
                 overall_key = (dict_name,) + params
                 overall_results[overall_key].extend(scores)
-        
+        for dict_name, param_results in self.dict_full_results.items():
+            for params, scores in param_results.items():
+                overall_key = (dict_name,) + params
+                overall_full[overall_key].extend(scores)
         # Calculate averages and sort
         averaged_overall = {
             params: np.mean(scores)
             for params, scores in overall_results.items()
         }
-        
-        for params, avg_f1 in sorted(averaged_overall.items(), key=lambda x: x[1], reverse=True):
-            row = list(params) + [f"{avg_f1:.3f}"]
+        for params, avg_f1 in sorted(averaged_overall.items(), key = lambda x: x[1], reverse = True):
+            full = overall_full.get(params, [])
+            avg_prec = np.mean([s[1] for s in full]) if full else float('nan')
+            avg_rec = np.mean([s[2] for s in full]) if full else float('nan')
+            avg_np = np.mean([s[3] for s in full]) if full else float('nan')
+            avg_wrong = np.mean([s[4] for s in full]) if full else float('nan')
+            avg_fp = np.mean([s[6] for s in full]) if full else float('nan')
+            row = list(params) + [f"{avg_f1:.3f}", f"{avg_prec:.3f}", f"{avg_rec:.3f}", f"{avg_np:.1f}",
+                                  f"{avg_wrong:.1f}", f"{avg_fp:.1f}"]
             table_data.append(row)
-        
-        return tabulate(table_data, headers=headers, tablefmt='grid')
+        headers = list(self.param_names.values()) + ['F1', 'Prec', 'Rec', 'NotPicked', 'Wrong', 'FP']
+        return tabulate(table_data, headers = headers, tablefmt = 'grid')
 
 # Rest remains the same
 collector = ResultCollector()
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope = "session")
 def result_collector():
     return collector
+
 
 def pytest_configure(config):
     config.collector = collector
@@ -140,16 +148,13 @@ def pytest_configure(config):
 
 def pytest_sessionfinish():
     print("\n=== Final Summary ===")
-    
     # Print tables for each test_dict
     for dict_name in collector.dict_results.keys():
         collector.print_dict_results(dict_name)
-    
     # Print overall results
     print("\n=== Overall Performance Results ===")
     print(collector.get_table())
     print()
-
     if collector.previous_results:
         print("\n=== Comparison with Previous Run ===")
         for dict_name in collector.dict_results.keys():

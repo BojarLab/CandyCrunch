@@ -31,7 +31,7 @@ MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
 
 
-def match_spectra(array1, array2, mass_threshold=MASS_TOLERANCE, rt_threshold=RT_TOLERANCE, array2_alt=None):
+def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array2_alt = None):
     matches = []
     used_predictions = set()
     for i, (mass1, rt1) in enumerate(array1):
@@ -59,8 +59,9 @@ def match_spectra(array1, array2, mass_threshold=MASS_TOLERANCE, rt_threshold=RT
                 matches.append((i, best_match))
                 used_predictions.add(best_match)
     return matches
-    
-def add_pred_column(df_in,col_name,matches,pred_df,rt_col):
+
+
+def add_pred_column(df_in, col_name, matches, pred_df, rt_col):
   df_in = df_in.copy()
   df_in[col_name] = None
   df_in['in_ground_truth'] = True
@@ -73,31 +74,31 @@ def add_pred_column(df_in,col_name,matches,pred_df,rt_col):
   return df_in
 
 
-def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
+def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh):
   assert len(predictions)>0
   if len(predictions)==0:
     print('empty preds')
-    return 0,0,0,0,0,0,0,0,0
+    return 0, 0, 0, 0, 0, 0, 0, 0, 0
   predictions['converted_masses'] = [m_z * abs(charge) + (abs(charge) - 1) for m_z, charge in zip(predictions.reset_index()['m/z'], predictions['charge'])]
-  pairs = predictions.reset_index()[['m/z','RT']].round(2).values
-  pairs_converted = predictions[['converted_masses','RT']].round(2).values
-  gt_pairs = gt.reset_index()[['Mass',rt_col]].round(2).values
-  matched_pairs = match_spectra(gt_pairs, pairs, mass_threshold=mass_thresh, rt_threshold=RT_thresh, array2_alt=pairs_converted)
-  merge_df = gt[['Mass',rt_col,'glycan']].reset_index(drop=True)
-  new_md = add_pred_column(merge_df,'batch_pred',matched_pairs,predictions.reset_index(),rt_col)
+  pairs = predictions.reset_index()[['m/z', 'RT']].round(2).values
+  pairs_converted = predictions[['converted_masses', 'RT']].round(2).values
+  gt_pairs = gt.reset_index()[['Mass', rt_col]].round(2).values
+  matched_pairs = match_spectra(gt_pairs, pairs, mass_threshold = mass_thresh, rt_threshold = RT_thresh, array2_alt = pairs_converted)
+  merge_df = gt[['Mass', rt_col, 'glycan']].reset_index(drop = True)
+  new_md = add_pred_column(merge_df,'batch_pred', matched_pairs, predictions.reset_index(), rt_col)
   similarity_scores = []
   for gt_glycan, pred_glycan in zip(new_md['glycan'],new_md['batch_pred']):
-    if not (isinstance(gt_glycan,str) and isinstance(pred_glycan,str)):
+    if not (isinstance(gt_glycan, str) and isinstance(pred_glycan, str)):
       similarity_scores.append(0.0)
       continue
     if '{' in gt_glycan:
-      possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan, exhaustive=True)]
-      similarity_scores.append(max([1.0 if compare_glycans(p,pred_glycan) else get_glycan_similarity(p,pred_glycan) for p in possible_structures]))
+      possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan, exhaustive = True)]
+      similarity_scores.append(max([1.0 if compare_glycans(p, pred_glycan) else get_glycan_similarity(p, pred_glycan) for p in possible_structures]))
     else:
       if compare_glycans(gt_glycan, pred_glycan):
         similarity_scores.append(1.0)
       else:
-        similarity_scores.append(get_glycan_similarity(gt_glycan,pred_glycan))
+        similarity_scores.append(get_glycan_similarity(gt_glycan, pred_glycan))
   new_md['similarity_score'] = similarity_scores
   unevaluable = len(np.where((new_md['in_ground_truth'])&(new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
   fp = len(np.where((~new_md['in_ground_truth'])&(new_md['batch_pred'].notnull()))[0])
@@ -109,16 +110,16 @@ def evaluate_predictions(predictions,gt,rt_col,mass_thresh,RT_thresh):
   Precision = tp / (tp + fp + 1e-8)
   Recall = tp / (tp + fn + 1e-8)
   F1_score = 2 * (Precision * Recall) / (Precision + Recall + 1e-8)
-  return F1_score,Precision,Recall,peaks_not_picked,incorrect_predictions,tp,fp,fn,unevaluable
+  return F1_score, Precision, Recall, peaks_not_picked, incorrect_predictions, tp, fp, fn, unevaluable
 
-def posthoc_process_df(df_in,posthoc_params):
+def posthoc_process_df(df_in, posthoc_params):
     for arg in posthoc_params:
         df_arg = arg.split('posthoc_')[1]
         if 'lowerthan' in arg:
             df_arg = df_arg.split('lowerthan_')[1]
-            df_in = df_in[(df_in[df_arg]<posthoc_params[arg])] 
+            df_in = df_in[(df_in[df_arg] < posthoc_params[arg])]
         else:
-            df_in = df_in[(df_in[df_arg]>posthoc_params[arg])]
+            df_in = df_in[(df_in[df_arg] > posthoc_params[arg])]
     return df_in 
 
 extra_param_dict = {
@@ -133,9 +134,9 @@ test_params = [
 ]
 
 @pytest.mark.parametrize("test_params", test_params)
-def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
+def test_candycrunch_accuracy(test_params, result_collector, test_files = None):
     if result_collector.param_names is None:
-        result_collector.param_names = {k:k for k in extra_param_dict.keys()}
+        result_collector.param_names = {k: k for k in extra_param_dict.keys()}
     start_time = time.time()  # Start timing
     test_outputs = []
     test_dict = test_params['test_dict']
@@ -144,8 +145,8 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
         test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{test_dict['name']}")]
     test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
     for filename in test_files:
-        inference_params = {k:v for k,v in test_params.items() if 'posthoc' not in k if k!= 'test_dict'}
-        posthoc_params = {k:v for k,v in test_params.items() if 'posthoc' in k}
+        inference_params = {k: v for k,v in test_params.items() if 'posthoc' not in k if k != 'test_dict'}
+        posthoc_params = {k: v for k,v in test_params.items() if 'posthoc' in k}
         print(filename)
         print(inference_params|posthoc_params)
         start_time = time.time()
@@ -158,7 +159,7 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
         loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{test_dict['name']}/df_mz_{test_dict['name']}.csv")
         col_name  =  filename.split(".")[0]
         rt_col_name = 'RT' if 'RT' in loaded_gt.columns else col_name+'_RT'
-        eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name]>0], rt_col_name, MASS_TOLERANCE, RT_TOLERANCE)
+        eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name] > 0], rt_col_name, MASS_TOLERANCE, RT_TOLERANCE)
         print('True Positives',eval_scores[-4])
         print('False Positives',eval_scores[-3])
         print('Unevaluable',eval_scores[-1])
@@ -167,8 +168,7 @@ def test_candycrunch_accuracy(test_params,result_collector,test_files=None):
         print('peaks_not_picked',eval_scores[-6])
         test_outputs.append(eval_scores)
         print(f'file_score:{eval_scores[0]}')
-        result_collector.add_result(test_params, eval_scores[0])
-        
+        result_collector.add_result(test_params, eval_scores[0], eval_scores)
         param_key = tuple(
             test_params[key] if key != 'test_dict' else test_params['test_dict']['name']
             for key in test_params
