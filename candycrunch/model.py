@@ -16,7 +16,7 @@ def remove_low_intensity_peaks(array, removal_threshold, removal_percentage):
 
 
 def peak_intensity_jitter(array, augment_intensity):
-  return array * np.random.uniform(1-augment_intensity, 1+augment_intensity, len(array)).astype(np.float32)
+  return array * np.random.uniform(1 - augment_intensity, 1 + augment_intensity, len(array)).astype(np.float32)
 
 
 def new_peak_addition(array, n_noise_peaks, max_noise_intensity):
@@ -34,15 +34,6 @@ transform_mz = transforms.Compose([
 ])
 
 
-def precursor_jitter(prec):
-  return prec + random.uniform(-0.5, 0.5)
-
-
-transform_prec = transforms.Compose([
-    lambda x: precursor_jitter(x)
-])
-
-
 def rt_jitter(RT):
   return max(0, RT + random.uniform(-0.1, 0.1))
 
@@ -54,8 +45,7 @@ transform_rt = transforms.Compose([
 
 class SimpleDataset(torch.utils.data.Dataset):
 
-  def __init__(self, x, y, transform_mz = None, transform_prec = None, transform_rt = None,
-               transform_prec_neg = None, transform_prec_pos = None):
+  def __init__(self, x, y, transform_mz = None, transform_rt = None):
     self.x = x
     self.y = y
     self.transform_mz = transform_mz

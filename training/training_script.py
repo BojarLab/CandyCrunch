@@ -1,10 +1,10 @@
 import pickle
 import pandas as pd
 
-from candycrunch.model import (SimpleDataset,CandyCrunch_CNN,transform_mz,transform_prec,transform_rt)
-from glycowork.motif.annotate import annotate_dataset,get_k_saccharides
+from candycrunch.model import (SimpleDataset, CandyCrunch_CNN, transform_mz, transform_prec, transform_rt)
+from glycowork.motif.annotate import annotate_dataset, get_k_saccharides
 from glycowork.motif.processing import get_lib
-from glycowork.motif.tokenization import get_stem_lib,glycan_to_composition
+from glycowork.motif.tokenization import get_stem_lib, glycan_to_composition
 from training_utils import *
 from sklearn.metrics import pairwise_distances
 
@@ -61,7 +61,7 @@ y_test = [glycans.index(c) for c in y_test]
 
 
 print("Preparing dataloaders")
-trainset = SimpleDataset(X_train, y_train, transform_mz=transform_mz, transform_prec=None, transform_rt=transform_rt)
+trainset = SimpleDataset(X_train, y_train, transform_mz=transform_mz, transform_rt=transform_rt)
 valset = SimpleDataset(X_test, y_test)
 trainloader = torch.utils.data.DataLoader(trainset, batch_size = 256, shuffle = True, drop_last = True, pin_memory = True,
                                           num_workers = 0)

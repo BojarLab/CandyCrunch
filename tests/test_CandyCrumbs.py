@@ -55,6 +55,7 @@ TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6
 ]
 THRESHOLD = 0.1
 TOP5_THRESHOLD = 0.63
+
 @pytest.mark.parametrize("test_dict", TEST_DICTS)
 def test_candycrumbs_accuracy(test_dict):
     result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], 0.4, charge=test_dict['charge'],mass_tag=test_dict['label_mass'],max_cleavages=test_dict.get('max_cleavages',3))
@@ -72,7 +73,6 @@ def test_candycrumbs_accuracy(test_dict):
                     correct_annotations += 1
             elif not expected_annotations:
                 correct_annotations += 1  # Credit for correctly predicting no annotations
-    
     score = correct_annotations / total_annotations
     # Set a threshold for acceptable performance (e.g., 80% correct)
     print(f"Score: {score:.2f}, Threshold: {THRESHOLD}")
@@ -95,7 +95,6 @@ def test_candycrumbs_accuracy_top5(test_dict):
                     correct_annotations += 1
             elif not expected_annotations:
                 correct_annotations += 1  # Credit for correctly predicting no annotations
-    
     score = correct_annotations / total_annotations
     # Set a threshold for acceptable performance (e.g., 80% correct)
     print(f"Score: {score:.2f}, Threshold: {TOP5_THRESHOLD}")

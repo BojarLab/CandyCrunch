@@ -23,9 +23,7 @@ from glycowork.motif.tokenization import (composition_to_mass,
                                           mz_to_composition,structure_to_basic)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mzxml
-
-from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz,
-                               transform_prec, transform_rt)
+from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
 from candycrunch.analysis import CandyCrumbs
 
 this_dir, this_filename = os.path.split(__file__)
@@ -33,12 +31,10 @@ data_path = os.path.join(this_dir, 'glycans.pkl')
 glycans = pickle.load(open(data_path, 'rb'))
 data_path = os.path.join(this_dir, 'glytoucan_mapping.pkl')
 glytoucan_mapping = pickle.load(open(data_path, 'rb'))
-
 # Choose the correct computing architecture
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda:0"
-
 sdict = os.path.join(this_dir, 'candycrunch.pt')
 sdict = torch.load(sdict, map_location = device, weights_only = True)
 sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
@@ -47,7 +43,8 @@ candycrunch.load_state_dict(sdict)
 candycrunch = candycrunch.eval()
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
-modification_mass_dict = {'reduced': 1.0078, '2AA': 137.14, '2AB': 120.2}
+HYDROGEN_MASS = 1.007825
+modification_mass_dict = {'reduced': HYDROGEN_MASS, '2AA': 137.14, '2AB': 120.2}
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
 
@@ -226,7 +223,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
     if device != 'cpu':
         X = unwrap([[k]*5 for k in X])
         y = y.repeat(5).reset_index(drop = True)
-    dset = SimpleDataset(X, y, transform_mz = transform_mz, transform_prec = transform_prec, transform_rt = transform_rt)
+    dset = SimpleDataset(X, y, transform_mz = transform_mz, transform_rt = transform_rt)
     dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
     df.set_index('reducing_mass', inplace = True)
     drop_cols = ['binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification', 'trap', 'glycan', 'glycan_type', 'lc']
@@ -316,7 +313,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', mass_t
     adduct_list = ['Acetonitrile', 'Acetate', 'Formate', 'HCO3-'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
     og_list = [mz] + [mz + mass_dict.get(adduct, 999) for adduct in adduct_list]
     single_list = og_list if 1 in permitted_charges else []
-    charge_adjustments = [-(1-(1/x)) for x in greater_charges] if mode == 'negative' else [(1-(1/x)) for x in greater_charges]
+    charge_adjustments = [-(1-(1/x)) * HYDROGEN_MASS for x in greater_charges] if mode == 'negative' else [(1-(1/x)) * HYDROGEN_MASS for x in greater_charges]
     thresholds = [threshold_dict[x] for x in greater_charges]
     mz_list = single_list + [
         (m / z + charge_adjust) for z, threshold, charge_adjust in zip(greater_charges, thresholds, charge_adjustments)
@@ -357,7 +354,6 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         'peak_d': [first_row['peak_d']],
         'max_intensity': [first_row['intensity']]
     })
-
     # Loop through the sorted dataframe starting from the second row
     for _, row in df.iloc[1:].iterrows():
         rm = row['reducing_mass']
@@ -378,9 +374,6 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 cluster['intensity'].append(intensity)
                 cluster['peak_d'].append(peak_d)
                 cluster['max_intensity'].append(intensity if intensity > last_max else last_max)
-                if len(cluster['intensity']) == 3:
-                  if cluster['intensity'][0] > cluster['intensity'][1] > cluster['intensity'][2]:
-                    cluster = None
                 found = True
                 break
         if not found:
@@ -439,44 +432,45 @@ def comp_to_str_comp(comp):
     return str_comp
 
 
-def create_struct_map(df_glycan,glycan_class,filter_out=None,phylo_level = 'Kingdom',phylo_filter= 'Animalia'):
+def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 'Kingdom', phylo_filter = 'Animalia'):
     processed_df_use = df_glycan[df_glycan[f"{phylo_level}"].apply(lambda x: phylo_filter in x)&(df_glycan['glycan_type']== glycan_class)]
     if filter_out:
         processed_df_use = processed_df_use.iloc[[i for i,x in enumerate(processed_df_use.Composition) if not filter_out.intersection(x)]]
-    processed_df_use = processed_df_use.assign(comp_str=[comp_to_str_comp(x) for x in processed_df_use.Composition])
-    processed_df_use = processed_df_use.assign(ref_counts=processed_df_use.loc[:,'ref'].map(len)+processed_df_use.loc[:,'tissue_ref'].map(len)+processed_df_use.loc[:,'disease_ref'].map(len))
+    processed_df_use = processed_df_use.assign(comp_str = [comp_to_str_comp(x) for x in processed_df_use.Composition])
+    processed_df_use = processed_df_use.assign(ref_counts = processed_df_use.loc[:, 'ref'].map(len) + processed_df_use.loc[:, 'tissue_ref'].map(len) + processed_df_use.loc[:, 'disease_ref'].map(len))
     processed_df_use = processed_df_use[~(processed_df_use['glycan'].str.contains("}"))]
-    processed_df_use = processed_df_use.sort_values('ref_counts',ascending=False)
-    processed_df_use = processed_df_use.assign(topology= [structure_to_basic(x) for x in processed_df_use['glycan']])
-    processed_df_use = processed_df_use.assign(glycan=[x.replace('-ol', '').replace('1Cer', '') for x in processed_df_use.glycan])
+    processed_df_use = processed_df_use.sort_values('ref_counts', ascending = False)
+    processed_df_use = processed_df_use.assign(topology = [structure_to_basic(x) for x in processed_df_use['glycan']])
+    processed_df_use = processed_df_use.assign(glycan = [x.replace('-ol', '').replace('1Cer', '') for x in processed_df_use.glycan])
     small_comps = [x for x in processed_df_use['comp_str'] if x if sum([int(p[-1]) for p in x.split('$')])<6]
     small_comps = processed_df_use[processed_df_use['comp_str'].isin(small_comps)]
     df_use_unq_topos = small_comps.groupby('topology').first().groupby('comp_str').agg(list)
-    topology_map = dict(zip(df_use_unq_topos.index,df_use_unq_topos.glycan))
+    topology_map = dict(zip(df_use_unq_topos.index, df_use_unq_topos.glycan))
     df_use_unq_comps = processed_df_use.groupby('comp_str').first()
-    common_struct_map = dict(zip(df_use_unq_comps.index,df_use_unq_comps.glycan))
-    return common_struct_map,processed_df_use,topology_map
+    common_struct_map = dict(zip(df_use_unq_comps.index, df_use_unq_comps.glycan))
+    return common_struct_map, processed_df_use, topology_map
 
 
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag, modification = 'reduced', max_charge = 3):
     red_masses = np.array(df_in.reducing_mass)
     sample_prep = modification if modification in ['permethylated', 'peracetylated'] else 'underivatized'
     # Adduct mass accounts for the ionization mode proton gain/loss
-    mass_modifier = {'negative': 1.0078, 'positive': 3.0234}[mode]
+    mass_modifier = {'negative': HYDROGEN_MASS, 'positive': 3.0234}[mode]
+    mass_modifier += modification_mass_dict.get(modification, 0) if modification in ('2AA', '2AB') else 0
     if mass_tag:
         mass_modifier += mass_tag
     all_comps = [x for x in df_glycan_in.groupby('comp_str').first()['Composition']]
     comps_in = copy.deepcopy(all_comps)
-    comp_masses = np.array([composition_to_mass(x, mass_value='monoisotopic', sample_prep=sample_prep) + mass_modifier for x in comps_in])
+    comp_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep) + mass_modifier for x in comps_in])
     comps_out = [(None, 0)] * len(red_masses)
     # Try each charge state separately; higher charges produce lower observed m/z for the same neutral mass
     for charge in range(1, max_charge + 1):
-        charged_comp_masses = (comp_masses - (charge - 1) * 1.0078) / charge
+        charged_comp_masses = (comp_masses - (charge - 1) * HYDROGEN_MASS) / charge
         chunked_calc_comps = []
         for mz_chunk in np.array_split(red_masses, max(1, len(red_masses) // 1000)):
             # Vectorized pairwise comparison between observed m/z values and theoretical composition masses
             row_idx, comp_idx = np.where(np.abs(charged_comp_masses.reshape(1, -1) - mz_chunk.reshape(-1, 1)) < mass_tolerance)
-            values, indices, _ = np.unique(row_idx, return_counts=True, return_index=True)
+            values, indices, _ = np.unique(row_idx, return_counts = True, return_index = True)
             subarrays = np.split(comp_idx, indices)[1:]
             comps_all = [None] * len(mz_chunk)
             for x, y in zip(values, subarrays):
@@ -497,7 +491,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             compositions = [comp for comp, comp_str in zip(matched_comps, matched_comps_str) for _ in topo_struct_map.get(comp_str, [comp_struct_map[comp_str]])]
             candidate_data.append((structures, compositions))
     df_in['candidate_structure'], df_in['composition'] = zip(*candidate_data)
-    df_in = df_in.explode(['composition', 'candidate_structure']).reset_index(names='spec_id')
+    df_in = df_in.explode(['composition', 'candidate_structure']).reset_index(names = 'spec_id')
     # Build a fixed-length composition vector aligned to comp_vector_order for model input
     df_in['compositional_vector'] = [
         np.array([x.get(m, 0) for m in comp_vector_order]) if x else None
@@ -627,8 +621,7 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0):
     dedup_df = pd.DataFrame(max_conf_rows,columns = df.columns)
     dedup_df = dedup_df.astype(dict(df.dtypes))
     # Drop duplicate rows based on index and 'predictions'
-    dedup_df = dedup_df[~dedup_df.index.duplicated(keep='first')]
-    # dedup_df.drop_duplicates(subset=['RT'], keep = 'first', inplace = True)
+    dedup_df = dedup_df[~dedup_df.index.duplicated(keep = 'first')]
     return dedup_df
 
 
@@ -650,22 +643,22 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
    """
     if df_use is None:
         df_use = df_glycan
-    reduced = 1.0078 if modification == 'reduced' else 0
+    reduced = HYDROGEN_MASS if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     # Identify which spectra carry common adducts so downstream checks can account for the mass offset
     adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
     computed_masses = np.array([composition_to_mass(comp) for comp in df_out['composition'].values])
-    observed_masses = df_out.index.values * np.abs(df_out['charge'].values) + (np.abs(df_out['charge'].values) - 1)
+    observed_masses = df_out.index.values * np.abs(df_out['charge'].values) + np.abs(df_out['charge'].values) * HYDROGEN_MASS * multiplier
     df_out['adduct'] = None
     for adduct in adduct_list:
-        adduct_mass = mass_dict.get(adduct, 999) + (1.0078 if modification == 'reduced' else 0)
+        adduct_mass = mass_dict.get(adduct, 999) + (HYDROGEN_MASS if modification == 'reduced' else 0)
         df_out.loc[np.abs(computed_masses + adduct_mass - observed_masses) < 0.5, 'adduct'] = adduct
     new_preds = []
     for k in range(len(df_out)):
         keep = []
-        addy = df_out['charge'].iloc[k]*multiplier-1
+        addy = df_out['charge'].iloc[k] * multiplier - 1
         c = abs(df_out['charge'].iloc[k])
-        assumed_mass = df_out.index[k]*c + addy
+        assumed_mass = df_out.index[k] * c + addy
         if len(df_out['predictions'].iloc[k]) > 0:
             current_preds = df_out['predictions'].iloc[k]
         else:
@@ -677,25 +670,25 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             truth = [True]
             # Check diagnostic ions
             if 'Neu5Ac' in m:
-                truth.append(any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Neu5Ac']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Ac']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j, float)]))
+                truth.append(any([abs(mass_dict['Neu5Ac']+(HYDROGEN_MASS*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Neu5Ac']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Ac']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j, float)]))
             if 'Neu5Gc' in m:
-                truth.append(any([abs(mass_dict['Neu5Gc']+(1.0078*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Neu5Gc']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Gc']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j, float)]))
+                truth.append(any([abs(mass_dict['Neu5Gc']+(HYDROGEN_MASS*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Neu5Gc']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Neu5Gc']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j, float)]))
             if 'Kdn' in m:
-                truth.append(any([abs(mass_dict['Kdn']+(1.0078*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Kdn']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Kdn']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j, float)]))
+                truth.append(any([abs(mass_dict['Kdn']+(HYDROGEN_MASS*multiplier)-j) < 1 or abs(assumed_mass-mass_dict['Kdn']-j) < 1 or abs(df_out.index.tolist()[k]-((mass_dict['Kdn']-addy)/c)-j) < 1 for j in df_out.top_fragments.values.tolist()[k] if isinstance(j, float)]))
             if 'Neu5Gc' not in m:
-                truth.append(not any([abs(mass_dict['Neu5Gc']+(1.0078*multiplier)-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j, float)]))
+                truth.append(not any([abs(mass_dict['Neu5Gc']+(HYDROGEN_MASS*multiplier)-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j, float)]))
             if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
-                truth.append(not any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j, float)]))
+                truth.append(not any([abs(mass_dict['Neu5Ac']+(HYDROGEN_MASS*multiplier)-j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5] if isinstance(j, float)]))
             if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
-                truth.append(not any([abs(mass_dict['Neu5Ac']+(1.0078*multiplier)-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j, float)]))
+                truth.append(not any([abs(mass_dict['Neu5Ac']+(HYDROGEN_MASS*multiplier)-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j, float)]))
             if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
                 truth.append(any(['S' in (mz_to_composition(t, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
                                   df_use = df_use, filter_out = filter_out, reduced = reduced > 0)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
             # Check fragment size distribution
             if c > 1:
-                truth.append(any([j > df_out.index.values[k]*1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
+                truth.append(any([j > df_out.index.values[k] * 1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
             if c == 1:
-                truth.append(all([j < df_out.index.values[k]*1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
+                truth.append(all([j < df_out.index.values[k] * 1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
             if len(df_out.top_fragments.values.tolist()[k]) < 5:
                 truth.append(False)
             # Check M-adduct for adducts
@@ -729,7 +722,7 @@ def backfill_missing(df):
     compositions = df['composition'].apply(stringify_dict).values
     charges = df['charge'].values
     RTs = df['RT'].values
-    masses = df.index.values * np.abs(charges) + (np.abs(charges) - 1)
+    masses = df.index.values * np.abs(charges) - charges * HYDROGEN_MASS
     for k in range(len(df)):
         if not len(predictions[k]) > 0:
             target_mass = masses[k]
@@ -954,7 +947,7 @@ def load_spectra_filepath(spectra_filepath):
             return None
 
         loaded_file['peak_d'] = loaded_file['peak_d'].apply(parse_peak_dict)
-        loaded_file = loaded_file[loaded_file['peak_d'].notnull()].reset_index(drop=True)
+        loaded_file = loaded_file[loaded_file['peak_d'].notnull()].reset_index(drop = True)
         return loaded_file
     if spectra_filepath.endswith('.csv'):
         storage = DictStorage()
@@ -985,11 +978,11 @@ def combine_charge_states(df_out):
         idx = df_filtered.index[len(df_filtered) - 1 - df_filtered.top_pred.values.tolist()[::-1].index(pred)]
         idx_rt = df_filtered.loc[idx, 'RT']
         for k, row in df_filtered[:idx-1][::-1].iterrows():
-            if row['top_pred'] == pred and abs(row['RT'] -idx_rt) < 1:
+            if row['top_pred'] == pred and abs(row['RT'] - idx_rt) < 1:
                 df_filtered.at[idx, 'rel_abundance'] += row['rel_abundance']
                 df_filtered.drop(k, inplace = True)
     df_out = pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index()
-    df_out.drop(['top_pred'], axis = 1 , inplace = True)
+    df_out.drop(['top_pred'], axis = 1, inplace = True)
     return df_out
 
 
@@ -1008,7 +1001,7 @@ def Ac_follows_Gc(df_out):
             lambda x: x[0][0] if x else None
         )
     # Iterate through unique Gc predictions
-    for gc_pred in df_out[df_out["Original_Prediction"].str.contains("Neu5Gc", na=False)][
+    for gc_pred in df_out[df_out["Original_Prediction"].str.contains("Neu5Gc", na = False)][
         "Original_Prediction"
     ].unique():
         ac_pred = gc_pred.replace("Neu5Gc", "Neu5Ac")
@@ -1103,9 +1096,9 @@ def spectra_filepath_to_condensed_df(spectra_filepath, rt_min, rt_max, rt_diff, 
     loaded_file = filter_rts(loaded_file, rt_min, rt_max)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     if intensity:
-        loaded_file.fillna({'intensity': 0},inplace=True)
+        loaded_file.fillna({'intensity': 0}, inplace = True)
     else:
-        loaded_file['intensity'] = [0]*len(loaded_file)
+        loaded_file['intensity'] = [0] * len(loaded_file)
     # Prepare file for processing
     loaded_file = loaded_file.dropna(subset = ['peak_d'])
     loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
@@ -1283,7 +1276,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 except:
                     pass
             df_use = df_use.iloc[idx, :].reset_index(drop = True)
-    reduced = 1.0078 if modification == 'reduced' else 0
+    reduced = HYDROGEN_MASS if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
     loaded_file = filter_rts(loaded_file,rt_min,rt_max)
@@ -1372,7 +1365,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Calculate  ppm error
     valid_indices, ppm_errors = [], []
     for preds, obs_mass in zip(df_out['predictions'], df_out.index):
-        if len(preds)>0:
+        if len(preds) > 0:
             theo_mass = mass_check(obs_mass, preds[0][0], modification = modification, mass_tag = mass_tag, mode = mode)
             if theo_mass:
                 valid_indices.append(True)
@@ -1382,8 +1375,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         else:
             valid_indices.append(True)
     df_out = df_out[valid_indices]
-    df_out.loc[df_out['predictions'].str.len() > 0,'ppm_error'] = ppm_errors
-    df_out = df_out[df_out['ppm_error']<ppm_thresh]
+    df_out.loc[df_out['predictions'].str.len() > 0, 'ppm_error'] = ppm_errors
+    df_out = df_out[df_out['ppm_error'] < ppm_thresh]
     # Clean-up
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
@@ -1451,7 +1444,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)]
-    reduced = 1.0078 if modification == 'reduced' else 0
+    reduced = HYDROGEN_MASS if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     common_structure_map, df_use, topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out,
