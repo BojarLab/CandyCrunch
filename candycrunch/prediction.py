@@ -865,7 +865,7 @@ def canonicalize_biosynthesis(df_out, pred_thresh):
         if len(preds) == 0:
             prediction_column.append(new_preds)
             continue
-        for p in [x for x in preds if len(x)==2 if x[1]]:
+        for p in [x for x in preds if len(x) == 2 if x[1]]:
             p_list = list(p)
             if len(p_list) == 1:
                 p_list.append(0)

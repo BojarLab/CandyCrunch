@@ -103,7 +103,8 @@ mono_attributes = {'Hex': {'mass': {'03X': 72.0211, '02X': 42.0106, '15X': 27.99
                                       'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, '+Acetonitrile': +41.0265, '+Acetate': 59.013851,
                                       '+Na': +22.989218, '+K': 38.963707}}
                    }
-
+WATER_MASS = 18.0105546
+HYDROGEN_MASS = 1.007825
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond'], 3: ['peptide_a','peptide_b','peptide_c'], 4:['peptide_y','peptide_z']}
 cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B',
                  '13A': '13A', '14A': '14A', '15A': '15A', '24A': '24A', '04A': '04A', '35A': '35A', '03A': '03A', '25A': '25A', '02A': '02A',
@@ -117,7 +118,7 @@ AA_masses = {'A': 71.0371, 'R': 156.1011, 'N': 114.0429, 'D': 115.0269,
 'P': 97.0527, 'S': 87.0320, 'T': 101.0476, 'W': 186.0793, 'Y': 163.0633, 'V': 99.0684}
 tester_ma_addition = {k: {'mass': {k: v},'atoms': {k: [1, 2, 3, 4, 5, 6]}} for k, v in AA_masses.items()}
 mono_attributes = mono_attributes|tester_ma_addition
-bond_masses = {'red_bond': 18.010, 'no_bond': -18.010, 'peptide_b': -18.010, 'peptide_c': -1, 'peptide_z': -16, 'peptide_a': -46}
+bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WATER_MASS, 'peptide_c': -1, 'peptide_z': -16, 'peptide_a': -46}
 
 def evaluate_adjacency_monos(glycan_part, adjustment):
   """Modified version of evaluate_adjacency to check glycoletter adjacency for monosaccharide only strings\n
@@ -512,8 +513,8 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
 	| :-
 	| Returns a list every single mass of each modification combination for each cross ring combination
 	"""
-	mode_mass = -1.0078 if charge < 0 else 1.0078
-	bonus_pep_mass = 18.0105546 if [x for x in terminals if isinstance(x, str) if '0-' in x] else 0
+	mode_mass = -HYDROGEN_MASS if charge < 0 else HYDROGEN_MASS
+	bonus_pep_mass = WATER_MASS if [x for x in terminals if isinstance(x, str) if '0-' in x] else 0
 	masses_list = []
 	if bonus_root_mass:
 		root_node_idx = terminals.index(bonus_root_node)
@@ -527,7 +528,7 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
 		if bonus_root_mass:
 			root_mod = root_perms[(perm_number % cycle) // stride]
 			if root_mod not in A_cross_rings:
-				mass += 18.0105546 + mass_tag
+				mass += WATER_MASS + mass_tag
 		masses_list.append(mass)
 		masses_list.extend([mass + mod_mass for mod_mass in global_mods_mass])
 	return masses_list
@@ -604,7 +605,7 @@ def extend_masses(fragment_masses, charge):
     return fragment_masses
   modifier = np.sign(charge)
   for z in range(2, abs(charge) + 1):
-    charged_masses = fragment_masses + [(k * z) - (z - 1.0078) * modifier for k in fragment_masses]
+    charged_masses = fragment_masses + [(k * z) - (z - HYDROGEN_MASS) * modifier for k in fragment_masses]
   return charged_masses
 
 
@@ -669,7 +670,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
 		other_terminals = [x for x in subg.nodes if x in all_other_terminals and x not in terminals]
 		terminals = terminals + other_terminals
 		inner_mass = sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in subg.nodes() if m not in terminals])
-		max_graph_mass = inner_mass + sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in terminals]) + 18.0105546 * len(terminals)
+		max_graph_mass = inner_mass + sum([mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in terminals]) + WATER_MASS * len(terminals)
 		max_graph_mass += max_global_mass
 		min_graph_mass = inner_mass + min_global_mass
 		avg_graph_mass = (min_graph_mass + max_graph_mass) / 2
@@ -1032,7 +1033,7 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_f
 	if sorted_frag_keys is None:
 		sorted_frag_keys = sorted(subg_frags.keys())
 	for z in range(1, abs(charge) + 1):
-		charged_mass = (mass * z) - (z - 1.0078) * modifier
+		charged_mass = (mass * z) - (z - HYDROGEN_MASS) * modifier
 		lo = bisect.bisect_left(sorted_frag_keys, charged_mass - mass_threshold)
 		hi = bisect.bisect_right(sorted_frag_keys, charged_mass + mass_threshold)
 		for frag_mass in sorted_frag_keys[lo:hi]:

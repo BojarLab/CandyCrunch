@@ -20,7 +20,7 @@ def peak_intensity_jitter(array, augment_intensity):
 
 
 def new_peak_addition(array, n_noise_peaks, max_noise_intensity):
-  idx_noise_peaks = np.random.choice(np.argwhere(array == 0)[0], n_noise_peaks)
+  idx_noise_peaks = np.random.choice(np.where(array == 0)[0], n_noise_peaks)
   new_values = max_noise_intensity * np.random.random(len(idx_noise_peaks))
   noisy_array = np.copy(array)
   noisy_array[idx_noise_peaks] = new_values
@@ -113,7 +113,7 @@ class CandyCrunch_CNN(torch.nn.Module):
 
     self.input_dim = input_dim
 
-    self.mz_lin1 = torch.nn.Linear(input_dim, 2*hidden_dim)
+    self.mz_lin1 = torch.nn.Linear(input_dim, 2*hidden_dim) # not used
     self.prec_lin1 = torch.nn.Linear(12, 24)
     self.rt_lin1 = torch.nn.Linear(1, 24)
     self.comb_lin1 = torch.nn.Linear(2*hidden_dim+24+24+24+24+24+24+24, 2*512)
@@ -136,12 +136,12 @@ class CandyCrunch_CNN(torch.nn.Module):
     self.maxpool1 = torch.nn.MaxPool1d(kernel_size = 20)
     self.fc1 = torch.nn.Linear(in_features = 6528, out_features = 1024)
 
-    self.mz_bn1 = torch.nn.LayerNorm(2*hidden_dim)
+    self.mz_bn1 = torch.nn.LayerNorm(2*hidden_dim) # not used
     self.prec_bn1 = torch.nn.LayerNorm(24)
     self.rt_bn1 = torch.nn.LayerNorm(24)
     self.comb_bn1 = torch.nn.LayerNorm(2*512)
     self.comb_bn2 = torch.nn.LayerNorm(2*256)
-    self.mz_act1 = torch.nn.LeakyReLU()
+    self.mz_act1 = torch.nn.LeakyReLU() # not used
     self.prec_act1 = torch.nn.LeakyReLU()
     self.rt_act1 = torch.nn.LeakyReLU()
     self.comb_act1 = torch.nn.LeakyReLU()
@@ -150,11 +150,11 @@ class CandyCrunch_CNN(torch.nn.Module):
     self.comb_dp2 = torch.nn.Dropout(0.2)
 
   def forward(self, mz_list, precursor, glycan_type, rt, mode, lc, modification, trap, rep = False):
-    glycan_type = self.type_emb(glycan_type).squeeze()
-    mode = self.mode_emb(mode).squeeze()
-    lc = self.lc_emb(lc).squeeze()
-    modification = self.modification_emb(modification).squeeze()
-    trap = self.trap_emb(trap).squeeze()
+    glycan_type = self.type_emb(glycan_type).squeeze(1)
+    mode = self.mode_emb(mode).squeeze(1)
+    lc = self.lc_emb(lc).squeeze(1)
+    modification = self.modification_emb(modification).squeeze(1)
+    trap = self.trap_emb(trap).squeeze(1)
     precursor = self.prec_act1(self.prec_bn1(self.prec_lin1(precursor)))
     rt = self.rt_act1(self.rt_bn1(self.rt_lin1(rt)))
     mz = F.leaky_relu(self.conv1(mz_list))

@@ -132,6 +132,24 @@ class ResultCollector:
                                   f"{avg_wrong:.1f}", f"{avg_fp:.1f}"]
             table_data.append(row)
         headers = list(self.param_names.values()) + ['F1', 'Prec', 'Rec', 'NotPicked', 'Wrong', 'FP']
+        param_scores = defaultdict(lambda: {'means': [], 'weights': []})
+        for dict_name, param_results in self.dict_results.items():
+            for params, scores in param_results.items():
+                param_scores[params]['means'].append(np.mean(scores))
+                param_scores[params]['weights'].append(len(scores))
+        print("\n=== Weighted Summary ===")
+        for params, data in sorted(param_scores.items()):
+            means = np.array(data['means'])
+            weights = np.array(data['weights'])
+            weighted_mean = np.average(means, weights = weights)
+            n = len(means)
+            se = np.std(means, ddof = 1) / np.sqrt(n) if n > 1 else float('nan')
+            param_label = ', '.join(
+                f"{list(self.param_names.values())[i + 1]}={p}"
+                for i, p in enumerate(params)
+            )
+            line = f"[{param_label}]  score={weighted_mean:.4f}  ±{1.96 * se:.4f} (95% CI, n={n} datasets)"
+            print(line)
         return tabulate(table_data, headers = headers, tablefmt = 'grid')
 
 # Rest remains the same
