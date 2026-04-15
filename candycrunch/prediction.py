@@ -689,7 +689,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 truth.append(any([j > df_out.index.values[k] * 1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
             if c == 1:
                 truth.append(all([j < df_out.index.values[k] * 1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
-            if len(df_out.top_fragments.values.tolist()[k]) < 5:
+            if len(df_out.top_fragments.values.tolist()[k]) < 2:
                 truth.append(False)
             # Check M-adduct for adducts
             if isinstance(df_out.adduct.values.tolist()[k], str):
@@ -1224,8 +1224,8 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode,modification, ma
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, bin_num = 2048, max_charge = 3,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh=300,
-                   filter_out = {'Ac','Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
-                   taxonomy_level='Class',taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False):
+                   filter_out = {'Ac','Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
+                   taxonomy_level='Class',taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False, struct_mass_tol = 0.6):
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
@@ -1292,7 +1292,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
     df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
     common_structure_map,df_use,topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter= taxonomy_filter)
-    df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, mass_tolerance, mode, mass_tag, modification = modification, max_charge = max_charge)
+    df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, struct_mass_tol, mode, mass_tag, modification = modification, max_charge = max_charge)
     df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance)
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
@@ -1376,7 +1376,14 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             valid_indices.append(True)
     df_out = df_out[valid_indices]
     df_out.loc[df_out['predictions'].str.len() > 0, 'ppm_error'] = ppm_errors
-    df_out = df_out[df_out['ppm_error'] < ppm_thresh]
+    if len(ppm_errors) >= 5:
+        med = np.median(ppm_errors)
+        mad = np.median(np.abs(np.array(ppm_errors) - med))
+        k = 3.0 # 3-sigma
+        adaptive_thresh = min(ppm_thresh, med + k * mad * 1.4826)
+    else:
+        adaptive_thresh = ppm_thresh
+    df_out = df_out[df_out['ppm_error'] < adaptive_thresh]
     # Clean-up
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
@@ -1398,7 +1405,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers, model = candycrunch, glycans = glycans, bin_num = 2048, max_charge = 3,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 2,
-                   filter_out = {'Ac', 'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
+                   filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None,
                    taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False):
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
