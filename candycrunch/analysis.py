@@ -590,6 +590,7 @@ def mod_count(node_mod, global_mod):
   c += sum([1 for k in unwrap([list(n.values()) for n in node_mod[1]]) if isinstance(k, str)])
   return c
 
+
 def extend_masses(fragment_masses, charge):
   """Extends a list of masses with the additional masses to include multiply charged fragments in the filter\n
   | Arguments:
