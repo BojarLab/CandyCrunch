@@ -590,7 +590,7 @@ def mod_count(node_mod, global_mod):
   c += sum([1 for k in unwrap([list(n.values()) for n in node_mod[1]]) if isinstance(k, str)])
   return c
 
-
+# fix overwritten iteration
 def extend_masses(fragment_masses, charge):
   """Extends a list of masses with the additional masses to include multiply charged fragments in the filter\n
   | Arguments:
@@ -604,9 +604,11 @@ def extend_masses(fragment_masses, charge):
   if abs(charge) == 1:
     return fragment_masses
   modifier = np.sign(charge)
+  all_masses = list(fragment_masses)
   for z in range(2, abs(charge) + 1):
-    charged_masses = fragment_masses + [(k * z) - (z - HYDROGEN_MASS) * modifier for k in fragment_masses]
-  return charged_masses
+      z_masses = [(k * z) - (z - HYDROGEN_MASS) * modifier for k in fragment_masses]
+      all_masses.extend(z_masses)
+  return all_masses
 
 
 def annotate_subgraph(subg, node_mod, global_mod, terminals):
