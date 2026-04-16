@@ -604,9 +604,11 @@ def extend_masses(fragment_masses, charge):
   if abs(charge) == 1:
     return fragment_masses
   modifier = np.sign(charge)
+  all_masses = list(fragment_masses)
   for z in range(2, abs(charge) + 1):
-    charged_masses = fragment_masses + [(k * z) - (z - HYDROGEN_MASS) * modifier for k in fragment_masses]
-  return charged_masses
+      z_masses = [(k * z) - (z - HYDROGEN_MASS) * modifier for k in fragment_masses]
+      all_masses.extend(z_masses)
+  return all_masses
 
 
 def annotate_subgraph(subg, node_mod, global_mod, terminals):
