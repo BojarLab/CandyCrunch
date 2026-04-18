@@ -213,7 +213,10 @@ def mono_graph_to_nx(mono_graph, directed = True):
     gr.add_node(0)
   nx.set_node_attributes(gr, node_dict_mono, 'string_labels')
   nx.set_node_attributes(gr, {k: 'terminal' if gr.degree[k] == 1 else 'internal' for k in gr.nodes()}, 'termini')
-  nx.set_node_attributes(gr, {max(gr.nodes): 2},  'reducing_end')
+  # Add safety check
+  if len(gr.nodes) > 0:
+      reducing_node = max(gr.nodes())
+      nx.set_node_attributes(gr, {int(reducing_node): 2}, 'reducing_end')
   bond_dict = create_edge_labels(gr, all_dict)
   nx.set_edge_attributes(gr, bond_dict)
   return gr
