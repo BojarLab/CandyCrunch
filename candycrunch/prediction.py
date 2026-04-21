@@ -548,7 +548,7 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
     return dict(sorted(deisotoped.items(), key=lambda x: x[1], reverse=True))
 
 
-def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance):
+def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance, sample_prep = 'underivatized'):
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
     for struct, comp in zip(unq_structs.candidate_structure, unq_structs.composition):
         try:
@@ -558,7 +558,7 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance)
             rounded_mass_rows = [[np.round(y,1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
             unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
             cc_out = CandyCrumbs(struct, unq_rounded_masses, mass_tolerance, simplify = False, charge = int(multiplier * abs(row_charge)),
-                                 disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2, mass_tag = mass_tag)
+                                 disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2, mass_tag = mass_tag, sample_prep = sample_prep)
             # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
             # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations
             tester_mass_scores = {}
@@ -1307,7 +1307,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
     common_structure_map, df_use, topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter= taxonomy_filter)
     df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, struct_mass_tol, mode, mass_tag, modification = modification, max_charge = max_charge, sample_prep = sample_prep)
-    df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance)
+    df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, sample_prep = sample_prep)
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
     # Predict glycans from spectra
@@ -1479,7 +1479,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map,
                                             mass_tolerance, mode, mass_tag, modification = modification, max_charge = max_charge,  sample_prep = sample_prep)
         # Assign annotation scores
-        df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance)
+        df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, sample_prep = sample_prep)
         df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
         # Process for inference
         loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
