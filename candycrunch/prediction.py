@@ -303,10 +303,9 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     threshold_dict = {2: double_thresh, 3: triple_thresh, 4: quadruple_thresh}
     greater_charges = [x for x in permitted_charges if x > 1]
     try:
-        mz = glycan_to_mass(glycan, sample_prep = sample_prep) if isinstance(glycan, str) else glycan
+        mz = glycan_to_mass(glycan, sample_prep = sample_prep, modification = modification) if isinstance(glycan, str) else glycan + modification_mass_dict.get(modification, 0)
     except:
         return False
-    mz += modification_mass_dict.get(modification, 0)
     if not mass_tag:
         mass_tag = 0
     mz += mass_tag
@@ -454,12 +453,10 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
 
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag, modification = 'reduced', sample_prep = 'underivatized', max_charge = 3):
     red_masses = np.array(df_in.reducing_mass)
-    mass_modifier = modification_mass_dict.get(modification, 0)
-    if mass_tag:
-        mass_modifier += mass_tag
+    tag = mass_tag if mass_tag else 0
     all_comps = [x for x in df_glycan_in.groupby('comp_str').first()['Composition']]
     comps_in = copy.deepcopy(all_comps)
-    comp_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep) + mass_modifier for x in comps_in])
+    comp_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep, modification = modification) + tag for x in comps_in])
     comps_out = [(None, 0)] * len(red_masses)
     # Try each charge state separately; higher charges produce lower observed m/z for the same neutral mass
     for charge in range(1, max_charge + 1):
@@ -646,13 +643,12 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
    """
     if df_use is None:
         df_use = df_glycan
-    reduced = HYDROGEN_MASS if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     # Identify which spectra carry common adducts so downstream checks can account for the mass offset
     adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
-    mod_mass = modification_mass_dict.get(modification, 0) + (mass_tag if mass_tag else 0)
+    tag = mass_tag if mass_tag else 0
     computed_masses = np.array(
-        [composition_to_mass(comp, sample_prep = sample_prep) + mod_mass for comp in df_out['composition'].values])
+        [composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + tag for comp in df_out['composition'].values])
     observed_masses = df_out.index.values * np.abs(df_out['charge'].values) - np.abs(
         df_out['charge'].values) * HYDROGEN_MASS * multiplier
     df_out['adduct'] = None
@@ -689,7 +685,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 truth.append(not any([abs(mass_dict['Neu5Ac']+(HYDROGEN_MASS*multiplier)-j) < 1 or abs(df_out.index.tolist()[k]-mass_dict['Neu5Ac']-j) < 1 for j in df_out.top_fragments.values.tolist()[k][:10] if isinstance(j, float)]))
             if 'S' in m and len(df_out.predictions.values.tolist()[k]) < 1:
                 truth.append(any(['S' in (mz_to_composition(t, mode = mode, mass_tolerance = mass_tolerance, glycan_class = glycan_class,
-                                  df_use = df_use, filter_out = filter_out, reduced = reduced > 0, sample_prep = sample_prep)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
+                                  df_use = df_use, filter_out = filter_out, modification = modification, sample_prep = sample_prep)[0:1] or ({},))[0].keys() for t in df_out.top_fragments.values.tolist()[k][:20]]))
             # Check fragment size distribution
             if c > 1:
                 truth.append(any([j > df_out.index.values[k] * 1.2 for j in df_out.top_fragments.values.tolist()[k][:15]]))
@@ -1216,7 +1212,7 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode,modification, ma
     df_out['ppm_error'] = ppm_errors
     # Clean-up
     df_out['composition'] = [get_comp(k[0][0]) if k else val for k, val in zip(df_out['predictions'], df_out['composition'])]
-    df_out['charge'] = round(df_out['composition'].apply(lambda x: composition_to_mass(x, sample_prep = sample_prep)) / df_out.index) * multiplier
+    df_out['charge'] = round(df_out['composition'].apply(lambda x: composition_to_mass(x, sample_prep = sample_prep, modification = modification)) / df_out.index) * multiplier
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
     # Map GlyTouCan IDs
@@ -1290,7 +1286,6 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 except:
                     pass
             df_use = df_use.iloc[idx, :].reset_index(drop = True)
-    reduced = HYDROGEN_MASS if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
     loaded_file = filter_rts(loaded_file, rt_min, rt_max)
@@ -1465,7 +1460,6 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)]
-    reduced = HYDROGEN_MASS if modification == 'reduced' else 0
     multiplier = -1 if mode == 'negative' else 1
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     common_structure_map, df_use, topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out,
