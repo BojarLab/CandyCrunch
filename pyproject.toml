@@ -18,7 +18,7 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "glycowork[ml]~=1.8.0",
+    "glycowork[ml]>=1.8.1",
     "requests",
     "regex",
     "networkx",
