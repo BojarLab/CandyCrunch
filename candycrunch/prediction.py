@@ -6,8 +6,6 @@ import pickle
 from collections import defaultdict
 import json
 from typing import Dict
-import importlib.metadata
-_gw_version = tuple(int(x) for x in importlib.metadata.version("glycowork").split(".")[:3])
 import numpy as np
 import numpy_indexed as npi
 import pandas as pd
@@ -1276,16 +1274,6 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type==glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
-        if _gw_version < (1, 8, 1):
-            # work-around until we have cleaned sugarbase of syntactic errors...
-            idx = []
-            for i, glycan in enumerate(df_use.glycan):
-                try:
-                    _, _ = glycan_to_graph(glycan)
-                    idx.append(i)
-                except:
-                    pass
-            df_use = df_use.iloc[idx, :].reset_index(drop = True)
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
     loaded_file = filter_rts(loaded_file, rt_min, rt_max)
