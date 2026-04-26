@@ -15,7 +15,7 @@ from sklearn.model_selection import GroupShuffleSplit
 from candycrunch.prediction import bin_intensities
 
 full_dataset_path = Path("full_dataset.xlsx")
-metadata_path = Path("training/file_checklist_template.csv")
+metadata_path = Path("file_checklist_template.csv")
 legacy_train_path = None               # e.g. Path("prepared_datasets/train_legacy.pkl")
 legacy_test_path = None                # e.g. Path("prepared_datasets/test_legacy.pkl")
 output_dir = Path("prepared_datasets")
@@ -164,6 +164,13 @@ if legacy_train_path:
 if legacy_test_path:
     frames.append(pd.read_pickle(legacy_test_path))
 combined = pd.concat(frames, ignore_index=True)
+
+nan_count = combined["filename"].isna().sum()
+total_count = len(combined)
+print(f"Total rows: {total_count}")
+print(f"Rows with NaN in filename: {nan_count}")
+# Remove rows with NaN in filename
+combined = combined.dropna(subset=["filename"])
 
 glycans = sorted(set(combined["glycan"]))
 glycan_to_idx = {g: i for i, g in enumerate(glycans)}
