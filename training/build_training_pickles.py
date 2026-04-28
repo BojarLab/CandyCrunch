@@ -171,10 +171,7 @@ print(f"Total rows: {total_count}")
 print(f"Rows with NaN in filename: {nan_count}")
 # Remove rows with NaN in filename
 combined = combined.dropna(subset=["filename"])
-
 glycans = sorted(set(combined["glycan"]))
-glycan_to_idx = {g: i for i, g in enumerate(glycans)}
-combined["glycan"] = combined["glycan"].map(glycan_to_idx)
 
 print("Splitting train/test by filename")
 splitter = GroupShuffleSplit(test_size=test_size, n_splits=1, random_state=random_state)
