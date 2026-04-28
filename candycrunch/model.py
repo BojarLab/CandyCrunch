@@ -108,13 +108,13 @@ class ResUnit(nn.Module):
 
 class CandyCrunch_CNN(torch.nn.Module):
 
-  def __init__(self, input_dim, num_classes = 1, hidden_dim = 512):
+  def __init__(self, input_dim, num_classes = 1, hidden_dim = 512, input_precursor_dim=None):
     super(CandyCrunch_CNN, self).__init__()
 
     self.input_dim = input_dim
 
     self.mz_lin1 = torch.nn.Linear(input_dim, 2*hidden_dim) # not used
-    self.prec_lin1 = torch.nn.Linear(12, 24)
+    self.prec_lin1 = torch.nn.Linear(input_precursor_dim, 24)
     self.rt_lin1 = torch.nn.Linear(1, 24)
     self.comb_lin1 = torch.nn.Linear(2*hidden_dim+24+24+24+24+24+24+24, 2*512)
     self.comb_lin2 = torch.nn.Linear(2*512, 2*256)
