@@ -7,31 +7,61 @@ from glycowork.motif.processing import get_lib
 from glycowork.motif.tokenization import get_stem_lib, glycan_to_composition
 from training_utils import *
 from sklearn.metrics import pairwise_distances
+import warnings
+# Suppress the specific sklearn runtime warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.utils.extmath")
 
 def filter_data_exceptions(features, labels, valid_labels):
+    """
+    Filter out data points with:
+    1. Labels not in valid_labels
+    2. Glycans that cannot be processed by glycan_to_composition or other glycan functions
+
+    Returns filtered features, labels, and the updated valid_labels list
+    """
     for i in range(len(labels) - 1, -1, -1):
         if labels[i] not in valid_labels:
             del labels[i]
             del features[i]
+    problematic_glycans = set()
+    for i in range(len(labels) - 1, -1, -1):
+        glycan = labels[i]
+        try:
+            glycan_to_composition(glycan)
+            from glycowork.motif.graph import glycan_to_nxGraph
+            glycan_to_nxGraph(glycan)
+        except (KeyError, IndexError, ValueError, AttributeError, Exception) as e:
+            problematic_glycans.add(glycan)
+            del labels[i]
+            del features[i]
+            print(f"  - Removed problematic glycan '{glycan}' due to error: {type(e).__name__}")
+    if problematic_glycans:
+        print(f"Removed {len(problematic_glycans)} unprocessable glycans: {problematic_glycans}")
+
+    # Update valid_labels to exclude problematic glycans
+    valid_labels = [g for g in valid_labels if g not in problematic_glycans]
+
+    return features, labels, valid_labels
 
 print("Reading data")
 #Train and test data can be found on zenodo at https://doi.org/10.5281/zenodo.7940046
 #Please modify the filepaths below to point to your downloaded files
 
-with open("../../../Downloads/X_train_CC2_240110.pkl", "rb") as file:
+with open("./prepared_datasets/X_train.pkl", "rb") as file:
   X_train = pickle.load(file)
-with open("../../../Downloads/X_test_CC2_240110.pkl", "rb") as file:
+with open("./prepared_datasets/X_test.pkl", "rb") as file:
   X_test = pickle.load(file)
-with open("../../../Downloads/y_train_CC2_240110.pkl", "rb") as file:
+with open("./prepared_datasets/y_train.pkl", "rb") as file:
   y_train = pickle.load(file)
-with open("../../../Downloads/y_test_CC2_240110.pkl", "rb") as file:
+with open("./prepared_datasets/y_test.pkl", "rb") as file:
   y_test = pickle.load(file)
-with open("../../../Downloads/glycans_240110.pkl", "rb") as file:
-  glycans = pickle.load(file) 
+with open("./prepared_datasets/glycans.pkl", "rb") as file:
+  glycans = pickle.load(file)
 
 print("Preprocessing data")
-filter_data_exceptions(X_train, y_train, glycans)
-filter_data_exceptions(X_test, y_test, glycans)
+X_train, y_train, glycans = filter_data_exceptions(X_train, y_train, glycans)
+X_test, y_test, glycans = filter_data_exceptions(X_test, y_test, glycans)
+
 
 disallowed_glycans = []
 allowed_glycan_comps = {}
@@ -43,14 +73,13 @@ for glyc in glycans:
         disallowed_glycans.append(glyc)
 comp_vector_order = list(set(x for y in allowed_glycan_comps.values() for x in y))
 comp_vector_order = sorted(comp_vector_order,key=lambda x:x.lower())
-
+print(f"This is comp_vector_order for Zenodo dataset {comp_vector_order}")
 glycan_comp_vect_map = {}
 for glyc,glycomp in allowed_glycan_comps.items():
-    comp_vect = np.zeros(12)
+    comp_vect = np.zeros(len(comp_vector_order))
     for mono,counts in glycomp.items():
         comp_vect[comp_vector_order.index(mono)] = counts
     glycan_comp_vect_map[glyc] = comp_vect
-
 X_train = [t[:2] + (glycan_comp_vect_map[gt],) + t[3:]
            for t, gt in zip(X_train, y_train)]
 X_test = [t[:2] + (glycan_comp_vect_map[gt],) + t[3:]
@@ -75,8 +104,7 @@ embs = annotate_dataset(glycans, feature_set = ['exhaustive'], condense = True)
 embs2 = get_k_saccharides(glycans,size = 3)
 embs2.index = glycans
 embs = pd.concat([embs, embs2], axis=1)
-cols = embs.columns.values.tolist()
-embs[cols] = embs[cols].map(float)
+embs = embs.apply(pd.to_numeric, errors='coerce').fillna(0).astype(np.float32)
 dist = pairwise_distances(embs, metric='cosine')
 dist = dist*1000*20
 dist2 = torch.tensor(dist, requires_grad=True).to(device)
@@ -87,7 +115,7 @@ dist = dist*1000*50
 dist3 = torch.tensor(dist, requires_grad=True).to(device)
 
 print("Preparing the model")
-model = CandyCrunch_CNN(2048, num_classes = len(glycans))
+model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = len(comp_vector_order))
 model = model.apply(lambda module: init_weights(module, mode = 'kaiming'))
 if torch.cuda.device_count() > 1:
   print("Let's use", torch.cuda.device_count(), "GPUs!")
@@ -99,7 +127,7 @@ primary_loss = Poly1CrossEntropyLoss(num_classes = len(glycans), epsilon = 1, re
 criterion = custom_loss(primary_loss,dist2,dist3).to(device)
 
 print("Start training")
-model_ft = train_model(model, 'CandyCrunch_example_script',dataloaders, criterion, optimizer_ft, scheduler, glycans, num_epochs = 200,
+model_ft = train_model(model, 'CandyCrunch_example_script',dataloaders, criterion, optimizer_ft, scheduler, glycans, num_epochs = 20,
                        patience = 12)
                        
 torch.save(model_ft.state_dict(), f'./CandyCrunch_example_script.pt')
