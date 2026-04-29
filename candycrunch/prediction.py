@@ -547,8 +547,6 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
     for struct, comp in zip(unq_structs.candidate_structure, unq_structs.composition):
         try:
-            if '][GlcNAc(b1-4)]' in struct:
-                continue
             row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
             rounded_mass_rows = [[np.round(y,1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
             unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
