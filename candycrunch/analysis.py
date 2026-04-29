@@ -171,11 +171,11 @@ bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WAT
                'peptide_z': -16, 'peptide_a': -46}
 # Atom positions carrying methylatable -OH (or -COOH) groups per base monosaccharide.
 # C1 is excluded: consumed by the glycosidic bond in the residue mass convention.
-# Amide N-H (e.g., C2 of HexNAc) is excluded: standard permethylation does not
+# Amide N-H (e.g., C2 of HexNAc) is included: standard permethylation does
 # methylate acetamido NH under Ciucanu/Kerek conditions.
 methyl_oh_atoms = {
     'Hex': {2, 3, 4, 6},
-    'HexNAc': {3, 4, 6},
+    'HexNAc': {2, 3, 4, 6},
     'dHex': {2, 3, 4},
     'Pen': {2, 3, 4},
     'Neu5Ac': {1, 4, 7, 8, 9},
@@ -186,9 +186,9 @@ methyl_oh_atoms = {
     'Hex6S': {2, 3, 4},
     'Hex3S': {2, 4, 6},
     'HexOS': {2, 4},
-    'HexNAc4S': {3, 6},
-    'HexNAc6S': {3, 4},
-    'HexNAcOS': {3},
+    'HexNAc4S': {2, 3, 6},
+    'HexNAc6S': {2, 3, 4},
+    'HexNAcOS': {2, 3},
     'Neu5Ac8S': {1, 4, 7, 9},
     'Neu5Gc8S': {1, 4, 7, 9},
     'Man6P': {2, 3, 4},
@@ -548,7 +548,7 @@ def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic
 
 
 def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, global_mods,
-                            sample_prep = 'underivatized'):
+                            sample_prep = 'underivatized', charge = -1):
     """Determines the masses of all possible monosaccharide modifications and their respective atom level representations\n
     | Arguments:
     | :-
@@ -556,7 +556,8 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
     | all_terminal_perms (list): all possible bond fragmentation dictionaries
     | terminal_labels (list): string labels of nodes in terminals
     | global_mods (list): possible global modifications
-    | sample_prep (string): underivatized/permethylated\n
+    | sample_prep (string): underivatized/permethylated
+    | charge (int): negative/positive charge state of precursor\n
     | Returns:
     | :-
     | (1) a list of all possible mass combinations for each cross ring combination
@@ -583,7 +584,11 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
             present_atom_mods = [active_bond_masses[x] for x in mod.values() if x in active_bond_masses]
             node_dict_masses.append(sum(present_atom_mods))
         all_atom_dict_masses.append(node_dict_masses)
-    global_mods_mass = [mono_attributes['Global']['mass'][x] for x in global_mods[1:]]
+    adduct_mods = {'+Na', '+K', '+Acetate', '+Acetonitrile'}
+    mode_mass = -HYDROGEN_MASS if charge < 0 else HYDROGEN_MASS
+    global_mods_mass = [mono_attributes['Global']['mass'][x] - mode_mass if x in adduct_mods
+                        else mono_attributes['Global']['mass'][x]
+                        for x in global_mods[1:]]
     return product(*all_mono_mod_masses), product(*all_atom_dict_masses), global_mods_mass
 
 
@@ -639,11 +644,17 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
                 mass += WATER_MASS + mass_tag
                 if sample_prep == 'permethylated':
                     mass += CH2_MASS
-            elif sample_prep == 'permethylated' and root_label is not None:
+                    if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
+                        mass += CH2_MASS  # alditol ring opening exposes C5-OH
+            elif root_label is not None:
                 root_basic = map_to_basic(root_label, obfuscate_ptm = False)
                 if 1 in mono_attributes.get(root_basic, {}).get('atoms', {}).get(
                         map_to_basic(root_mod, obfuscate_ptm = False), []):
-                    mass += CH2_MASS
+                    mass += mass_tag
+                    if sample_prep == 'permethylated':
+                        mass += CH2_MASS
+                        if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
+                            mass += CH2_MASS
         masses_list.append(mass)
         masses_list.extend([mass + mod_mass for mod_mass in global_mods_mass])
     return masses_list
@@ -721,7 +732,7 @@ def extend_masses(fragment_masses, charge):
     modifier = np.sign(charge)
     all_masses = list(fragment_masses)
     for z in range(2, abs(charge) + 1):
-        z_masses = [(k * z) - (z - HYDROGEN_MASS) * modifier for k in fragment_masses]
+        z_masses = [(k * z) - (z - 1) * HYDROGEN_MASS * modifier for k in fragment_masses]
         all_masses.extend(z_masses)
     return all_masses
 
@@ -798,6 +809,9 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             [mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in terminals]) + WATER_MASS * len(
             terminals)
         max_graph_mass += max_global_mass
+        if sample_prep == 'permethylated':
+            max_graph_mass += sum(
+                len(methyl_oh_atoms.get(node_dict_basic[m], set())) * CH2_MASS for m in terminals)
         min_graph_mass = inner_mass + min_global_mass
         avg_graph_mass = (min_graph_mass + max_graph_mass) / 2
         graph_mass_thresh = (max_graph_mass - min_graph_mass) / 2
@@ -818,7 +832,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
                                                                     atomic_mod_dict_subg)
         mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms,
                                                                           terminal_labels, subg_global_mods,
-                                                                          sample_prep = sample_prep)
+                                                                          sample_prep = sample_prep, charge = charge)
         root_label = node_dict.get(bonus_root_node) if bonus_root_mass else None
         initial_masses = np.array(
             preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, bonus_root_mass,
@@ -828,10 +842,11 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
         if valid_idx.size == 0:
             continue
         permutation_list = nested_lazy_product_vect(mono_mod_perms, atom_dict_perms, subg_global_mods, valid_idx)
+        m_thresh = 1 if charge < 0 else 2
         for perms, idx in zip(permutation_list, valid_idx):
             mass = initial_masses[idx]
             if (m := mod_count(perms[:2], perms[2])) <= max_cleavages:
-                if m > 1 and perms[2] in ['+Acetate', '+Acetonitrile', '+Na', '+K']:
+                if m > m_thresh and perms[2] in ['+Acetate', '+Acetonitrile', '+Na', '+K']:
                     continue
                 annotated_subg = annotate_subgraph(subg, perms[:2], perms[2], terminals)
                 subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments, [annotated_subg], [round(mass, 5)])
@@ -1172,7 +1187,7 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_f
     if sorted_frag_keys is None:
         sorted_frag_keys = sorted(subg_frags.keys())
     for z in range(1, abs(charge) + 1):
-        charged_mass = (mass * z) - (z - HYDROGEN_MASS) * modifier
+        charged_mass = (mass * z) - (z - 1) * HYDROGEN_MASS * modifier
         lo = bisect.bisect_left(sorted_frag_keys, charged_mass - mass_threshold)
         hi = bisect.bisect_right(sorted_frag_keys, charged_mass + mass_threshold)
         for frag_mass in sorted_frag_keys[lo:hi]:

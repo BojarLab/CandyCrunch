@@ -42,6 +42,7 @@ candycrunch = candycrunch.eval()
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
 HYDROGEN_MASS = 1.007825
+METHYL_MASS = 14.01565
 modification_mass_dict = {'reduced': 2 * HYDROGEN_MASS, '2AA': 121.0528, '2AB': 120.0688}
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
@@ -301,7 +302,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     threshold_dict = {2: double_thresh, 3: triple_thresh, 4: quadruple_thresh}
     greater_charges = [x for x in permitted_charges if x > 1]
     try:
-        mz = glycan_to_mass(glycan, sample_prep = sample_prep, modification = modification) if isinstance(glycan, str) else glycan + modification_mass_dict.get(modification, 0)
+        mz = glycan_to_mass(glycan, sample_prep = sample_prep, modification = modification) if isinstance(glycan, str) else glycan + modification_mass_dict.get(modification, 0) + (METHYL_MASS if modification == 'reduced' and sample_prep == 'permethylated' else 0)
     except:
         return False
     if not mass_tag:
@@ -1152,7 +1153,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
         except ValueError:
             pass
         ionization = -HYDROGEN_MASS if mode == 'negative' else HYDROGEN_MASS
-        mass_offset = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + ionization
+        mass_offset = modification_mass_dict.get(modification, 0) + (METHYL_MASS if modification == 'reduced' and sample_prep == 'permethylated' else 0) + (mass_tag or 0) + ionization
         mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use,
                                                            taxonomy_class = taxonomy_class, sample_prep = sample_prep)
         df_out = possibles(df_out, mass_dic, mass_offset)
