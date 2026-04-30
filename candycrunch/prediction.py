@@ -308,9 +308,10 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     if not mass_tag:
         mass_tag = 0
     mz += mass_tag
+    mz_neutral = mz
     mz += HYDROGEN_MASS if mode == 'positive' else -HYDROGEN_MASS
     adduct_list = ['Acetonitrile', 'Acetate', 'Formate', 'HCO3-'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
-    og_list = [mz] + [mz + mass_dict.get(adduct, 999) for adduct in adduct_list]
+    og_list = [mz] + [mz_neutral + mass_dict.get(adduct, 999) for adduct in adduct_list]
     single_list = og_list if 1 in permitted_charges else []
     charge_adjustments = [-(1-(1/x)) * HYDROGEN_MASS for x in greater_charges] if mode == 'negative' else [(1-(1/x)) * HYDROGEN_MASS for x in greater_charges]
     thresholds = [threshold_dict[x] for x in greater_charges]
@@ -476,6 +477,24 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             chunked_calc_comps.extend([[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
         # Only overwrite if this charge state found a match and the previous charge state did not
         comps_out = [(y, charge) if (not x[0] and y) else x for x, y in zip(comps_out, chunked_calc_comps)]
+    adduct_list = ['Acetate', 'Formate', 'Acetonitrile', 'HCO3-'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
+    for adduct in adduct_list:
+        adduct_mass = mass_dict.get(adduct, 999)
+        if adduct_mass == 999:
+            continue
+        adduct_comp_masses = comp_masses + adduct_mass
+        chunked_calc_comps = []
+        for mz_chunk in np.array_split(red_masses, max(1, len(red_masses) // 1000)):
+            row_idx, comp_idx = np.where(
+                np.abs(adduct_comp_masses.reshape(1, -1) - mz_chunk.reshape(-1, 1)) < mass_tolerance)
+            values, indices, _ = np.unique(row_idx, return_counts = True, return_index = True)
+            subarrays = np.split(comp_idx, indices)[1:]
+            comps_all = [None] * len(mz_chunk)
+            for x, y in zip(values, subarrays):
+                comps_all[x] = y
+            comps_with_none = comps_in + [None]
+            chunked_calc_comps.extend([[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
+        comps_out = [(y, 1) if (not x[0] and y) else x for x, y in zip(comps_out, chunked_calc_comps)]
     df_in['composition'] = [x[0] for x in comps_out]
     df_in['charge'] = [x[1] if x[0] else None for x in comps_out]
     candidate_data = []
@@ -643,12 +662,11 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
     tag = mass_tag if mass_tag else 0
     computed_masses = np.array(
         [composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + tag for comp in df_out['composition'].values])
-    observed_masses = df_out.index.values * np.abs(df_out['charge'].values) - np.abs(
-        df_out['charge'].values) * HYDROGEN_MASS * multiplier
+    raw_masses = df_out.index.values * np.abs(df_out['charge'].values)
     df_out['adduct'] = None
     for adduct in adduct_list:
         adduct_mass = mass_dict.get(adduct, 999)
-        df_out.loc[np.abs(computed_masses + adduct_mass - observed_masses) < 0.5, 'adduct'] = adduct
+        df_out.loc[np.abs(computed_masses + adduct_mass - raw_masses) < 0.5, 'adduct'] = adduct
     new_preds = []
     for k in range(len(df_out)):
         keep = []
@@ -687,9 +705,9 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 truth.append(all([j < df_out.index.values[k] * 1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
             if len(df_out.top_fragments.values.tolist()[k]) < 2:
                 truth.append(False)
-            # Check M-adduct for adducts
+            # Check M-adduct for adducts (but note that they will have to gain/lose a proton to still stay ionized)
             if isinstance(df_out.adduct.values.tolist()[k], str):
-                truth.append(any([abs(df_out.index.tolist()[k] - mass_dict.get(df_out.adduct.values.tolist()[k], 999) - j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5]]))
+                truth.append(any([abs(df_out.index.tolist()[k] - mass_dict.get(df_out.adduct.values.tolist()[k], 999) + (HYDROGEN_MASS * multiplier) - j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5]]))
             if all(truth):
                 if to_append:
                     keep.append(current_preds[i])
