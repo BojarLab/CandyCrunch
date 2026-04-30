@@ -280,7 +280,7 @@ def get_comp(glycan):
 
 
 def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample_prep = 'underivatized', mass_tag = None, double_thresh = 900,
-               triple_thresh = 1500, quadruple_thresh = 3500, mass_thresh = 0.5, permitted_charges = [1, 2, 3, 4]):
+               triple_thresh = 1500, quadruple_thresh = 3500, mass_tolerance = 0.5, permitted_charges = [1, 2, 3, 4]):
     """determine whether glycan could explain m/z\n
    | Arguments:
    | :-
@@ -293,7 +293,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
    | triple_thresh (float): mass threshold over which to consider triply-charged ions; default:1500
    | quadruple_thresh (float): mass threshold over which to consider quadruply-charged ions; default:3500
-   | mass_thresh (float): maximum allowed mass difference to return True; default:0.5
+   | mass_tolerance (float): maximum allowed mass difference to return True; default:0.5
    | permitted_charges (list): charges of ions used to check mass against; default:[1,2,3,4]\n
    | Returns:
    | :-
@@ -318,7 +318,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
         (m / z + charge_adjust) for z, threshold, charge_adjust in zip(greater_charges, thresholds, charge_adjustments)
         for m in og_list if m > threshold
     ]
-    return [m for m in mz_list if abs(mass - m) < mass_thresh]
+    return [m for m in mz_list if abs(mass - m) < mass_tolerance]
 
 
 def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048):
@@ -1358,7 +1358,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     valid_indices, ppm_errors = [], []
     for preds, obs_mass in zip(df_out['predictions'], df_out.index):
         if len(preds) > 0:
-            theo_mass = mass_check(obs_mass, preds[0][0], modification = modification, mass_tag = mass_tag, mode = mode, sample_prep = sample_prep)
+            theo_mass = mass_check(obs_mass, preds[0][0], modification = modification, mass_tag = mass_tag, mode = mode, sample_prep = sample_prep, mass_tolerance = mass_tolerance)
             if theo_mass:
                 valid_indices.append(True)
                 ppm_errors.append(abs(((theo_mass[0] - obs_mass) / theo_mass[0]) * 1e6))
