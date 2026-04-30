@@ -547,32 +547,29 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
 def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance, sample_prep = 'underivatized'):
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
     for struct, comp in zip(unq_structs.candidate_structure, unq_structs.composition):
-        try:
-            row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
-            rounded_mass_rows = [[np.round(y,1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
-            unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
-            cc_out = CandyCrumbs(struct, unq_rounded_masses, mass_tolerance, simplify = False, charge = int(multiplier * abs(row_charge)),
-                                 disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2, mass_tag = mass_tag, sample_prep = sample_prep)
-            # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
-            # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations
-            tester_mass_scores = {}
-            for _k, _v in cc_out.items():
-                if _v:
-                    _filtered = []
-                    for ant in _v['Domon-Costello nomenclatures']:
-                        prefs = [a.split('_')[0][-1] for a in ant]
-                        if ('A' in prefs or 'X' in prefs) and len(prefs) > 1:
-                            continue
-                        if 'M' in prefs and len(prefs) > 2:
-                            continue
-                        _filtered.append(ant)
-                    tester_mass_scores[_k] = len(_filtered)
-                else:
-                    tester_mass_scores[_k] = 0
-            row_scores = [sum([tester_mass_scores[x] for x in y]) for y in rounded_mass_rows]
-            df_in.loc[df_in['candidate_structure'] == struct,'annotation_score'] = row_scores
-        except (IndexError, KeyError, AttributeError) as e:
-            pass
+        row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
+        rounded_mass_rows = [[np.round(y,1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
+        unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
+        cc_out = CandyCrumbs(struct, unq_rounded_masses, mass_tolerance, simplify = False, charge = int(multiplier * abs(row_charge)),
+                             disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2, mass_tag = mass_tag, sample_prep = sample_prep)
+        # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
+        # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations
+        tester_mass_scores = {}
+        for _k, _v in cc_out.items():
+            if _v:
+                _filtered = []
+                for ant in _v['Domon-Costello nomenclatures']:
+                    prefs = [a.split('_')[0][-1] for a in ant]
+                    if ('A' in prefs or 'X' in prefs) and len(prefs) > 1:
+                        continue
+                    if 'M' in prefs and len(prefs) > 2:
+                        continue
+                    _filtered.append(ant)
+                tester_mass_scores[_k] = len(_filtered)
+            else:
+                tester_mass_scores[_k] = 0
+        row_scores = [sum([tester_mass_scores[x] for x in y]) for y in rounded_mass_rows]
+        df_in.loc[df_in['candidate_structure'] == struct,'annotation_score'] = row_scores
     return df_in
 
 

@@ -160,7 +160,7 @@ cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B
                  '24X': '24X', '35X': '35X'}
 A_cross_rings = {c for c in cut_type_dict if c[-1] == 'A'}
 X_cross_rings = {c for c in cut_type_dict if c[-1] == 'X'}
-ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta']
+ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda']
 AA_masses = {'A': 71.0371, 'R': 156.1011, 'N': 114.0429, 'D': 115.0269,
              'C': 103.0091, 'E': 129.0425, 'Q': 128.0585, 'G': 57.0214, 'H': 137.0589,
              'I': 113.0840, 'L': 113.0840, 'K': 128.0949, 'k': 357.25783, 'M': 131.0404, 'F': 147.0684,
@@ -400,7 +400,7 @@ def get_broken_bonds(subg, nx_mono, nx_edge_dict):
                                                                           subg.nodes()]  # Unfortunately this is necessary due to networkx considering neighbours in directed graphs as only the successors (they even mention neighbors() and successors() are the same)
     subg_linkages = [x for v in subg_linkages for x in v]
     internal_linkages = [subg.out_edges(node) for node in subg.nodes()] + [subg.in_edges(node) for node in subg.nodes()]
-    internal_linkages = [x for v in internal_linkages for x in v]
+    internal_linkages = set(x for v in internal_linkages for x in v)
     present_breakages = [x for x in subg_linkages if x not in internal_linkages]
     present_breakages = {bond: label['bond_label'] for bond, label in nx_edge_dict.items() if bond in present_breakages}
     return present_breakages
@@ -594,7 +594,6 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
 
 def temporary_root_calc_func(glyco_pep):
     """Determines whether and where to add label and extra oxygen masses to the reducing end of a glycan\n"""
-    bonus_root_presence = None
     reducing_ends = [x for x in nx.get_node_attributes(glyco_pep, 'reducing_end')]
     if not reducing_ends:
         return False, None
@@ -603,8 +602,7 @@ def temporary_root_calc_func(glyco_pep):
         for x in glyco_pep.in_edges(red_end):
             if bond_labels[x] == 'glycosite':
                 return False, None
-    if bonus_root_presence == None:
-        return True, red_end
+    return True, red_end
 
 
 def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass, terminals,
@@ -1199,17 +1197,6 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_f
         return [[], [], [], [], []]
 
 
-def flatten_list(nested_list):
-    """Recursively flattens a nested list."""
-    flat_list = []
-    for item in nested_list:
-        if isinstance(item, list):
-            flat_list.extend(flatten_list(item))
-        else:
-            flat_list.append(item)
-    return flat_list
-
-
 def observed_fragments_checker(possible_fragments, observed_fragments):
     """Calculates for each possible fragment the largest overlap of cleavages with previous fragments\n
     | Arguments:
@@ -1220,9 +1207,7 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
     | :-
     | Returns a list containing integers corresponding to the largest overlap each possible fragment had with all previously observed fragments
     """
-    # if observed_fragments and observed_fragments[0] and observed_fragments[0][0] and isinstance(observed_fragments[0][0], list):
-    #  observed_fragments = unwrap(observed_fragments)
-    observed_fragments = flatten_list(observed_fragments)
+    observed_fragments = [f for sublist in observed_fragments for f in sublist if f]
     sums = [sum(len(set(pf) & set(of)) for of in observed_fragments if of) for pf in possible_fragments]
     return [sums[i] - 1 if 'M' in ''.join(f) else sums[i] for i, f in enumerate(possible_fragments)]
 
@@ -1456,6 +1441,9 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
     input_dict = glycopeptide_string_to_input(input_string)
     fragment_masses = sorted(fragment_masses)
     nx_mono, pep_gr = input_to_graph(input_dict)
+    node_labels = nx.get_node_attributes(nx_mono, 'string_labels')
+    if any(map_to_basic(v, obfuscate_ptm = False) not in mono_attributes for v in node_labels.values() if len(v) > 1):
+        return {m: None for m in fragment_masses}
     global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = disable_global_mods)
     allowed_X_cleavages = [] if disable_X_cross_rings else X_cross_rings
     subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,
