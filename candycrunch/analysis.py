@@ -626,7 +626,9 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
     """
     mode_mass = -HYDROGEN_MASS if charge < 0 else HYDROGEN_MASS
     bonus_pep_mass = WATER_MASS if [x for x in terminals if isinstance(x, str) if '0-' in x] else 0
-    masses_list = []
+    mono_arr = np.array(list(mono_mods_mass))
+    atom_arr = np.array(list(atom_mods_mass))
+    base_masses = inner_mass + mode_mass + bonus_pep_mass + mono_arr.sum(axis = 1) + atom_arr.sum(axis = 1)
     if bonus_root_mass:
         root_node_idx = terminals.index(bonus_root_node)
         stride = 1
@@ -634,28 +636,32 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
             stride *= len(p)
         cycle = stride * len(mono_mod_perms[root_node_idx])
         root_perms = mono_mod_perms[root_node_idx]
-    for perm_number, (mod_combo, atom_combo) in enumerate(zip(mono_mods_mass, atom_mods_mass)):
-        mass = inner_mass + mode_mass + sum(mod_combo) + sum(atom_combo) + bonus_pep_mass
-        if bonus_root_mass:
-            root_mod = root_perms[(perm_number % cycle) // stride]
-            if root_mod not in A_cross_rings:
-                mass += WATER_MASS + mass_tag
-                if sample_prep == 'permethylated':
-                    mass += CH2_MASS
-                    if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
-                        mass += CH2_MASS  # alditol ring opening exposes C5-OH
-            elif root_label is not None:
-                root_basic = map_to_basic(root_label, obfuscate_ptm = False)
+        perm_indices = np.arange(len(base_masses))
+        root_mod_indices = (perm_indices % cycle) // stride
+        root_mods = np.array(root_perms, dtype = object)[root_mod_indices]
+        is_not_A = np.array([rm not in A_cross_rings for rm in root_mods])
+        bonus = np.where(is_not_A, WATER_MASS + mass_tag, 0.0)
+        if sample_prep == 'permethylated':
+            bonus = np.where(is_not_A, bonus + CH2_MASS, bonus)
+            if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
+                bonus = np.where(is_not_A, bonus + CH2_MASS, bonus)
+        if root_label is not None:
+            root_basic = map_to_basic(root_label, obfuscate_ptm = False)
+            for idx in np.where(~is_not_A)[0]:
+                rm = root_mods[idx]
                 if 1 in mono_attributes.get(root_basic, {}).get('atoms', {}).get(
-                        map_to_basic(root_mod, obfuscate_ptm = False), []):
-                    mass += mass_tag
+                        map_to_basic(rm, obfuscate_ptm = False), []):
+                    bonus[idx] += mass_tag
                     if sample_prep == 'permethylated':
-                        mass += CH2_MASS
+                        bonus[idx] += CH2_MASS
                         if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
-                            mass += CH2_MASS
-        masses_list.append(mass)
-        masses_list.extend([mass + mod_mass for mod_mass in global_mods_mass])
-    return masses_list
+                            bonus[idx] += CH2_MASS
+        base_masses += bonus
+    if not global_mods_mass:
+        return base_masses.tolist()
+    global_arr = np.array(global_mods_mass)
+    expanded = base_masses[:, np.newaxis] + np.concatenate([[0.0], global_arr])
+    return expanded.ravel().tolist()
 
 
 def add_to_subgraph_fragments(subgraph_fragments, nx_mono_list, mass_list):
@@ -810,7 +816,10 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
         if sample_prep == 'permethylated':
             max_graph_mass += sum(
                 len(methyl_oh_atoms.get(node_dict_basic[m], set())) * CH2_MASS for m in terminals)
-        min_graph_mass = inner_mass + min_global_mass
+        min_bond_mass = min(bond_masses.values())
+        min_terminal_mass = sum(
+            min(mono_attributes[node_dict_basic[m]]['mass'].values()) + min_bond_mass for m in terminals)
+        min_graph_mass = inner_mass + min_terminal_mass + min_global_mass
         avg_graph_mass = (min_graph_mass + max_graph_mass) / 2
         graph_mass_thresh = (max_graph_mass - min_graph_mass) / 2
         lo = bisect.bisect_left(sorted_charge_masses, avg_graph_mass - graph_mass_thresh)
@@ -1212,7 +1221,7 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
     return [sums[i] - 1 if 'M' in ''.join(f) else sums[i] for i, f in enumerate(possible_fragments)]
 
 
-def simplify_fragments(dc_names, peptide = False):
+def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = None):
     """Sorts a list of possible fragments for each observed mass into a list of one fragment per observed mass\n
     | Arguments:
     | :-
@@ -1232,7 +1241,7 @@ def simplify_fragments(dc_names, peptide = False):
             else:
                 observed_frags.append([possible_frags[0]])
         return observed_frags
-    for possible_frags in dc_names:
+    for i, possible_frags in enumerate(dc_names):
         possible_frags = sorted(possible_frags, key = len)
         if not possible_frags or len(possible_frags[0]) == 0:
             observed_frags.append([])
@@ -1240,8 +1249,14 @@ def simplify_fragments(dc_names, peptide = False):
             observed_frags.append([possible_frags[0]])
         else:
             frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
-            max_overlaps_seen = (observed_fragments_checker(frag_options, observed_frags))
-            max_overlap_idx = np.argsort(max_overlaps_seen, kind = 'stable')[-1]
+            max_overlaps_seen = observed_fragments_checker(frag_options, observed_frags)
+            if diffs and diffs[i]:
+                min_cleavages = len(possible_frags[0])
+                option_diffs = [d for f, d in zip(possible_frags, diffs[i]) if len(f) == min_cleavages]
+                scores = [overlap - 0.5 * diff for overlap, diff in zip(max_overlaps_seen, option_diffs)]
+            else:
+                scores = max_overlaps_seen
+            max_overlap_idx = np.argsort(scores, kind = 'stable')[-1]
             observed_frags.append([frag_options[max_overlap_idx]])
     return observed_frags
 
@@ -1474,7 +1489,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
             downstream_values.append((*fragment_properties, dc_names))
     filtered_dc_names = [priority_filter(x[5], x[2], peptide = peptide) if x[0] else [] for x in downstream_values]
     if simplify:
-        filtered_dc_names = simplify_fragments(filtered_dc_names, peptide = peptide)
+        filtered_diffs = [list(x[2]) if x[0] else [] for x in downstream_values]
+        filtered_dc_names = simplify_fragments(filtered_dc_names, peptide = peptide, diffs = filtered_diffs)
     for i, frag_dc_names in enumerate(filtered_dc_names):
         if frag_dc_names:
             filtered_properties = list(zip(*downstream_values[i]))
