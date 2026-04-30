@@ -43,9 +43,15 @@ candycrunch = candycrunch.eval()
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
 HYDROGEN_MASS = 1.007825
 METHYL_MASS = 14.01565
+NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'Acetonitrile', 'HCO3-']
+POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 modification_mass_dict = {'reduced': 2 * HYDROGEN_MASS, '2AA': 121.0528, '2AB': 120.0688, 'procainamide': 219.1736}
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
+
+
+def get_adduct_list(mode):
+    return NEGATIVE_ADDUCTS if mode == 'negative' else POSITIVE_ADDUCTS
 
 
 def process_mzML_stack(filepath, num_peaks = 1000,
@@ -310,7 +316,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     mz += mass_tag
     mz_neutral = mz
     mz += HYDROGEN_MASS if mode == 'positive' else -HYDROGEN_MASS
-    adduct_list = ['Acetonitrile', 'Acetate', 'Formate', 'HCO3-'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
+    adduct_list = get_adduct_list(mode)
     og_list = [mz] + [mz_neutral + mass_dict.get(adduct, 999) for adduct in adduct_list]
     single_list = og_list if 1 in permitted_charges else []
     charge_adjustments = [-(1-(1/x)) * HYDROGEN_MASS for x in greater_charges] if mode == 'negative' else [(1-(1/x)) * HYDROGEN_MASS for x in greater_charges]
@@ -477,7 +483,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             chunked_calc_comps.extend([[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
         # Only overwrite if this charge state found a match and the previous charge state did not
         comps_out = [(y, charge) if (not x[0] and y) else x for x, y in zip(comps_out, chunked_calc_comps)]
-    adduct_list = ['Acetate', 'Formate', 'Acetonitrile', 'HCO3-'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
+    adduct_list = get_adduct_list(mode)
     for adduct in adduct_list:
         adduct_mass = mass_dict.get(adduct, 999)
         if adduct_mass == 999:
@@ -563,14 +569,22 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
     return dict(sorted(deisotoped.items(), key=lambda x: x[1], reverse=True))
 
 
-def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance, sample_prep = 'underivatized'):
+def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance, modification = 'reduced', sample_prep = 'underivatized'):
+    mode = 'negative' if multiplier == -1 else 'positive'
+    adduct_list = get_adduct_list(mode)
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
     for struct, comp in zip(unq_structs.candidate_structure, unq_structs.composition):
         row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
+        comp_mass = composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + (
+            mass_tag if mass_tag else 0)
+        spec_masses = df_in[df_in['candidate_structure'] == struct].reducing_mass.values * np.abs(df_in[df_in['candidate_structure'] == struct].charge.values)
+        is_adduct = any(
+            np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance)
+            for adduct in adduct_list)
         rounded_mass_rows = [[np.round(y,1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
         unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
         cc_out = CandyCrumbs(struct, unq_rounded_masses, mass_tolerance, simplify = False, charge = int(multiplier * abs(row_charge)),
-                             disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2, mass_tag = mass_tag, sample_prep = sample_prep)
+                             disable_global_mods = not is_adduct, disable_X_cross_rings = True, max_cleavages = 2, mass_tag = mass_tag, sample_prep = sample_prep)
         # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
         # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations
         tester_mass_scores = {}
@@ -658,7 +672,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
         df_use = df_glycan
     multiplier = -1 if mode == 'negative' else 1
     # Identify which spectra carry common adducts so downstream checks can account for the mass offset
-    adduct_list = ['Acetonitrile', 'Acetate', 'Formate'] if mode == 'negative' else ['Na+', 'K+', 'NH4+']
+    adduct_list = get_adduct_list(mode)
     tag = mass_tag if mass_tag else 0
     computed_masses = np.array(
         [composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + tag for comp in df_out['composition'].values])
@@ -705,9 +719,13 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 truth.append(all([j < df_out.index.values[k] * 1.1 for j in df_out.top_fragments.values.tolist()[k][:5]]))
             if len(df_out.top_fragments.values.tolist()[k]) < 2:
                 truth.append(False)
-            # Check M-adduct for adducts (but note that they will have to gain/lose a proton to still stay ionized)
+            # Check neutral loss of adduct for adducts
             if isinstance(df_out.adduct.values.tolist()[k], str):
-                truth.append(any([abs(df_out.index.tolist()[k] - mass_dict.get(df_out.adduct.values.tolist()[k], 999) + (HYDROGEN_MASS * multiplier) - j) < 0.5 for j in df_out.top_fragments.values.tolist()[k][:5]]))
+                adduct_name = df_out.adduct.values.tolist()[k]
+                precursor_mz = df_out.index.tolist()[k]
+                neutral_loss = mass_dict.get(adduct_name, 999) - (HYDROGEN_MASS * multiplier)
+                expected_frag = precursor_mz - neutral_loss / c
+                truth.append(any([abs(expected_frag - j) < mass_tolerance for j in df_out.top_fragments.values.tolist()[k][:10]]))
             if all(truth):
                 if to_append:
                     keep.append(current_preds[i])
@@ -1304,7 +1322,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
     common_structure_map, df_use, topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter= taxonomy_filter)
     df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, struct_mass_tol, mode, mass_tag, modification = modification, max_charge = max_charge, sample_prep = sample_prep)
-    df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, sample_prep = sample_prep)
+    df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, modification = modification, sample_prep = sample_prep)
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
     # Predict glycans from spectra
@@ -1479,7 +1497,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map,
                                             mass_tolerance, mode, mass_tag, modification = modification, max_charge = max_charge,  sample_prep = sample_prep)
         # Assign annotation scores
-        df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, sample_prep = sample_prep)
+        df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, modification = modification, sample_prep = sample_prep)
         df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
         # Process for inference
         loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
