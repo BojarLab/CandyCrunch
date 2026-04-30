@@ -1344,6 +1344,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = df_out.sort_values(['spec_id','annotation_score'], ascending = False).groupby('spec_id').first()
     df_out = df_out[df_out['annotation_score'] > crumbs_thresh].drop(columns = ['candidate_structure']).set_index('reducing_mass')
     df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d','annotation_score','rel_abundance','top_fragments']]
+    if df_out.empty:
+        df_out['ppm_error'] = []
+        df_out.index.name = "m/z"
+        return (df_out, []) if spectra else df_out
     # Deduplicate identical predictions for different spectra
     df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
     df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
@@ -1369,10 +1373,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_out['predictions'] = [[(k[0].replace('-ol', '').replace('1Cer', ''), k[1]) if len(k) > 1 else (k[0].replace('-ol', '').replace('1Cer', ''),) for k in j] if j else j for j in df_out['predictions']]
     # Keep or remove spectra that still lack a prediction after all this
     if not get_missing:
-        df_out = df_out[df_out['predictions'].str.len() > 0]
+        df_out = df_out[df_out['predictions'].apply(len) > 0]
     # Reprioritize predictions based on how well they are explained by biosynthetic precursors in the same file (e.g., core 1 O-glycan making extended core 1 O-glycans more likely)
     df_out = canonicalize_biosynthesis(df_out, pred_thresh)
-    # Calculate  ppm error
+    # Calculate ppm error
     valid_indices, ppm_errors = [], []
     for preds, obs_mass in zip(df_out['predictions'], df_out.index):
         if len(preds) > 0:
@@ -1384,8 +1388,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 valid_indices.append(False)
         else:
             valid_indices.append(True)
-    df_out = df_out[valid_indices]
-    df_out.loc[df_out['predictions'].str.len() > 0, 'ppm_error'] = ppm_errors
+    df_out = df_out[valid_indices] if valid_indices else df_out.iloc[0:0]
+    df_out.loc[df_out['predictions'].apply(len) > 0, 'ppm_error'] = ppm_errors
     if len(ppm_errors) >= 5:
         med = np.median(ppm_errors)
         mad = np.median(np.abs(np.array(ppm_errors) - med))
