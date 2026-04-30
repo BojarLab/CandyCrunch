@@ -43,7 +43,7 @@ candycrunch = candycrunch.eval()
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
 HYDROGEN_MASS = 1.007825
 METHYL_MASS = 14.01565
-modification_mass_dict = {'reduced': 2 * HYDROGEN_MASS, '2AA': 121.0528, '2AB': 120.0688}
+modification_mass_dict = {'reduced': 2 * HYDROGEN_MASS, '2AA': 121.0528, '2AB': 120.0688, 'procainamide': 219.1736}
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
 
@@ -287,7 +287,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
    | mass (float): observed m/z
    | glycan (string): glycan in IUPAC-condensed nomenclature
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB, or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
    | sample_prep (string): underivatized/permethylated/peracetylated
    | mass_tag (float): label mass to add when calculating possible m/z if modification == 'custom'; default:0
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
@@ -1120,7 +1120,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
     | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB' or 'custom'; default:'reduced'
+    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
     | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'
@@ -1173,7 +1173,7 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode,modification, ma
     | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition
     | pred_thresh (float): prediction confidence threshold used for filtering
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB' or 'custom'
+    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | multiplier (int): sign of ion mode
     | plot_glycans (bool): whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions
@@ -1240,7 +1240,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | max_charge (int): maximum absolute charge to consider for composition matching etc.; default 3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB' or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
@@ -1412,7 +1412,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | max_charge (int): maximum absolute charge to consider for composition matching etc.; default 3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB' or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
