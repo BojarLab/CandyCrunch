@@ -203,6 +203,31 @@ permethylated_bond_masses = {
     'peptide_z': -16,
     'peptide_a': -46,
 }
+# to be updated with a more empirical estimation once we have clear-cut annotation data
+fragmentation_priors = {
+	'cleavage_type': {
+		-1: {  # negative ion mode
+			'Y': 1.0, 'Z': 0.7, 'C': 0.4, 'B': 0.3,
+			'02A': 0.6, '24A': 0.5, '03A': 0.45, '04A': 0.4,
+			'35A': 0.35, '25A': 0.35, '13A': 0.3, '14A': 0.3, '15A': 0.25,
+			'02X': 0.3, '04X': 0.25, '24X': 0.25, '03X': 0.2,
+			'35X': 0.2, '25X': 0.2, '13X': 0.15, '14X': 0.15, '15X': 0.15, '12X': 0.15,
+		},
+		1: {  # positive ion mode
+			'B': 1.0, 'Y': 0.9, 'C': 0.5, 'Z': 0.3,
+			'02A': 0.5, '24A': 0.45, '04A': 0.4, '03A': 0.35,
+			'35A': 0.3, '25A': 0.3, '13A': 0.25, '14A': 0.25, '15A': 0.2,
+			'02X': 0.25, '04X': 0.2, '24X': 0.2, '03X': 0.15,
+			'35X': 0.15, '25X': 0.15, '13X': 0.1, '14X': 0.1, '15X': 0.1, '12X': 0.1,
+		},
+	},
+	'global_mod': {
+		'H2O': 0.9, 'CH2O': 0.5, 'C2H2O': 0.4, 'CO2': 0.7,
+		'C2H4O2': 0.3, 'SO4': 0.6, 'PO4': 0.6, 'C3H8O4': 0.2,
+		'+Acetonitrile': 0.3, '+Acetate': 0.4, '+Na': 0.5, '+K': 0.3,
+	},
+	'multi_cleavage_penalty': 0.5,
+}
 
 
 def evaluate_adjacency_monos(glycan_part, adjustment):
@@ -1155,21 +1180,52 @@ def subgraphs_to_domon_costello(nx_mono, subgs, chain_rank = None):
     return ion_names
 
 
-def priority_filter(dc_names, diffs, peptide = False):
-    """Filters Domon-Costello fragment names by number of cleavages and difference from observed mass\n
+def score_fragment_prior(dc_name, charge):
+	"""Calculates an empirical prior score for a Domon-Costello fragment based on known fragmentation tendencies\n
+	| Arguments:
+	| :-
+	| dc_name (list): list of Domon-Costello cleavage names making up a fragment
+	| charge (int): charge state of the precursor ion\n
+	| Returns:
+	| :-
+	| Returns a float score where higher values indicate more commonly observed fragmentation patterns
+	"""
+	if not dc_name:
+		return 0.0
+	mode = np.sign(charge)
+	cleavage_weights = fragmentation_priors['cleavage_type'].get(mode, fragmentation_priors['cleavage_type'][-1])
+	score = 0.0
+	n_cleavages = 0
+	for cut in dc_name:
+		parts = cut.split('_')
+		if parts[0] == 'M':
+			score += fragmentation_priors['global_mod'].get('_'.join(parts[1:]), 0.2)
+			continue
+		score += cleavage_weights.get(parts[0], 0.1)
+		n_cleavages += 1
+	if n_cleavages > 1:
+		score *= fragmentation_priors['multi_cleavage_penalty'] ** (n_cleavages - 1)
+	return score
+
+
+def priority_filter(dc_names, diffs, peptide = False, charge = -1):
+    """Filters Domon-Costello fragment names by number of cleavages, fragmentation prior, and difference from observed mass\n
     | Arguments:
     | :-
     | dc_names (list): a nested list of Domon-Costello fragment grouped by mass
-    | diffs (list): a nested list of mass differences between the masses of Domon-Costello fragments and the observed masses\n
+	| diffs (list): a nested list of mass differences between the masses of Domon-Costello fragments and the observed masses
+	| peptide (bool): whether the input is a glycopeptide; default:False
+	| charge (int): charge state of the precursor ion; default:-1\n
     | Returns:
     | :-
-    | Returns a list of Domon-Costello fragment names sorted by number of cleavages and the observed mass difference
+    | Returns a list of Domon-Costello fragment names sorted by number of cleavages, prior score, and the observed mass difference
     """
     if peptide:
         sorted_frags = sorted(list(zip(dc_names, diffs)),
                               key = lambda x: (len([y for v in x[0] for y in v if y not in ['Peptide', 'M']]), x[1]))
     else:
-        sorted_frags = sorted(list(zip(dc_names, diffs)), key = lambda x: (len(x[0]), x[1]))
+        sorted_frags = sorted(list(zip(dc_names, diffs)),
+                              key = lambda x: (len(x[0]), -score_fragment_prior(x[0], charge), x[1]))
     return [f[0] for f in sorted_frags]
 
 
@@ -1221,15 +1277,19 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
     return [sums[i] - 1 if 'M' in ''.join(f) else sums[i] for i, f in enumerate(possible_fragments)]
 
 
-def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = None):
+def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = None, charge = -1, prior_weight = 1.0):
     """Sorts a list of possible fragments for each observed mass into a list of one fragment per observed mass\n
-    | Arguments:
-    | :-
-    | dc_names (list): a list of Domon-Costello fragment names grouped by mass
-    | observed_fragments (list): a nested list of Domon-Costello fragment names already selected for output\n
-    | Returns:
-    | :-
-    | Returns a nested list with each list containing a single fragment or being empty
+	| Arguments:
+	| :-
+	| dc_names (list): a list of Domon-Costello fragment names grouped by mass
+	| peptide (bool): whether the input is a glycopeptide; default:False
+	| diffs (list): a nested list of mass differences; default:None
+	| intensities (list): not yet used; default:None
+	| charge (int): charge state of the precursor ion; default:-1
+	| prior_weight (float): scaling factor for fragmentation prior contribution to scoring; default:1.0\n
+	| Returns:
+	| :-
+	| Returns a nested list with each list containing a single fragment or being empty
     """
     observed_frags = []
     if peptide:
@@ -1250,12 +1310,15 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
         else:
             frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
             max_overlaps_seen = observed_fragments_checker(frag_options, observed_frags)
+            prior_scores = [score_fragment_prior(f, charge) for f in frag_options]
             if diffs and diffs[i]:
                 min_cleavages = len(possible_frags[0])
                 option_diffs = [d for f, d in zip(possible_frags, diffs[i]) if len(f) == min_cleavages]
-                scores = [overlap - 0.5 * diff for overlap, diff in zip(max_overlaps_seen, option_diffs)]
+                scores = [overlap - 0.5 * diff + prior_weight * prior
+                          for overlap, diff, prior in zip(max_overlaps_seen, option_diffs, prior_scores)]
             else:
-                scores = max_overlaps_seen
+                scores = [overlap + prior_weight * prior
+                          for overlap, prior in zip(max_overlaps_seen, prior_scores)]
             max_overlap_idx = np.argsort(scores, kind = 'stable')[-1]
             observed_frags.append([frag_options[max_overlap_idx]])
     return observed_frags
@@ -1435,7 +1498,7 @@ def get_methyl_count(mono_type, fragment_type):
 def CandyCrumbs(input_string, fragment_masses, mass_threshold,
                 max_cleavages = 3, simplify = True, charge = -1, mass_tag = None,
                 iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = False,
-                sample_prep = 'underivatized'):
+                sample_prep = 'underivatized', prior_weight = 1.0):
     """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
     | Arguments:
     | :-
@@ -1447,7 +1510,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
     | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:-1
     | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
     | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False
-    | sample_prep (string): underivatized/permethylated\n
+    | sample_prep (string): underivatized/permethylated
+    | prior_weight (float): weighting of prior-informed scoring in simplify=True\n
     | Returns:
     | :-
     | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
@@ -1487,10 +1551,12 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
                                                             sorted_frag_keys)
             dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1], chain_rank)
             downstream_values.append((*fragment_properties, dc_names))
-    filtered_dc_names = [priority_filter(x[5], x[2], peptide = peptide) if x[0] else [] for x in downstream_values]
+    filtered_dc_names = [priority_filter(x[5], x[2], peptide = peptide, charge = charge) if x[0] else [] for x in
+                         downstream_values]
     if simplify:
         filtered_diffs = [list(x[2]) if x[0] else [] for x in downstream_values]
-        filtered_dc_names = simplify_fragments(filtered_dc_names, peptide = peptide, diffs = filtered_diffs)
+        filtered_dc_names = simplify_fragments(filtered_dc_names, peptide = peptide, diffs = filtered_diffs,
+                                               charge = charge, prior_weight = prior_weight)
     for i, frag_dc_names in enumerate(filtered_dc_names):
         if frag_dc_names:
             filtered_properties = list(zip(*downstream_values[i]))
