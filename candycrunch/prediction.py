@@ -73,7 +73,13 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     highest_i_dict = {}
     rts, intensities, reducing_mass, charges = [], [], [], []
     detected_mode, detected_trap = None, None
+    ms1_rts, ms1_scans = [], []
     for spectrum in run:
+        if extract_ms1 and spectrum.ms_level == 1:
+            peaks_raw = spectrum.peaks("raw")
+            if len(peaks_raw) > 0:
+                ms1_rts.append(spectrum.scan_time_in_minutes())
+                ms1_scans.append((peaks_raw[:, 0].copy(), peaks_raw[:, 1].copy()))
         if spectrum.ms_level == ms_level:
             try:
                 temp = spectrum.highest_peaks(2)
@@ -122,6 +128,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
         df_out['intensity'] = intensities
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
+    if extract_ms1:
+        df_out.attrs['ms1_rts'] = np.array(ms1_rts)
+        df_out.attrs['ms1_scans'] = ms1_scans
     return df_out
 
 
@@ -217,6 +226,44 @@ def bin_intensities(peak_d, frames):
     binned_intensities[unique_bins - 1] = summed_intensities
     mz_diff[unique_bins - 1] = max_mz_remainder
     return binned_intensities , mz_diff
+
+
+def extract_xic_areas(ms1_rts, ms1_scans, target_mzs, rt_centers, rt_window = 2.0, mz_tolerance = 0.5):
+    """extracts integrated XIC peak areas from MS1 data for a set of precursor m/z values\n
+    | Arguments:
+    | :-
+    | ms1_rts (np.array): retention times of MS1 scans (must be sorted ascending)
+    | ms1_scans (list): list of (mz_array, intensity_array) tuples per MS1 scan
+    | target_mzs (array-like): precursor m/z values to extract XICs for
+    | rt_centers (array-like): retention time centers for each precursor
+    | rt_window (float): half-width of RT window (in minutes) around rt_center to integrate; default:2.0
+    | mz_tolerance (float): m/z tolerance for XIC extraction; default:0.01\n
+    | Returns:
+    | :-
+    | Returns a list of integrated XIC areas, one per target m/z
+    """
+    target_mzs = np.asarray(target_mzs, dtype = np.float64)
+    rt_centers = np.asarray(rt_centers, dtype = np.float64)
+    mz_lo = target_mzs - mz_tolerance
+    mz_hi = target_mzs + mz_tolerance
+    # Binary search for RT window boundaries instead of boolean masking all scans per target
+    scan_starts = np.searchsorted(ms1_rts, rt_centers - rt_window)
+    scan_ends = np.searchsorted(ms1_rts, rt_centers + rt_window, side = 'right')
+    areas = np.zeros(len(target_mzs))
+    for t in range(len(target_mzs)):
+        s0, s1 = scan_starts[t], scan_ends[t]
+        if s1 - s0 < 2:
+            continue
+        rts = ms1_rts[s0:s1]
+        ints_arr = np.empty(s1 - s0)
+        lo_mz, hi_mz = mz_lo[t], mz_hi[t]
+        for j, si in enumerate(range(s0, s1)):
+            mzs, scan_ints = ms1_scans[si]
+            lo = np.searchsorted(mzs, lo_mz)
+            hi = np.searchsorted(mzs, hi_mz, side = 'right')
+            ints_arr[j] = np.sum(scan_ints[lo:hi]) if hi > lo else 0.0
+        areas[t] = _trapezoid(ints_arr, rts)
+    return areas.tolist()
 
 
 def process_for_inference(df, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
@@ -1004,9 +1051,9 @@ class DictStorage:
         df[dict_col] = df[dict_col].apply(self.deserialize_dict)
         return df
 
-def load_spectra_filepath(spectra_filepath):
+def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     if spectra_filepath.endswith(".mzML"):
-        return process_mzML_stack(spectra_filepath, intensity = True)
+        return process_mzML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if spectra_filepath.endswith(".mzXML"):
         return process_mzXML_stack(spectra_filepath, intensity = True)
     if spectra_filepath.endswith(".pkl"):
@@ -1487,7 +1534,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type==glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
     multiplier = -1 if mode == 'negative' else 1
-    loaded_file = load_spectra_filepath(spectra_filepath)
+    loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.endswith('.mzML'))
+    ms1_rts = loaded_file.attrs.pop('ms1_rts', None)
+    ms1_scans = loaded_file.attrs.pop('ms1_scans', None)
     detected_mode = getattr(loaded_file, 'attrs', {}).get('detected_mode')
     detected_trap = getattr(loaded_file, 'attrs', {}).get('detected_trap')
     if detected_mode and detected_mode != mode:
@@ -1615,6 +1664,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Map GlyTouCan IDs
     df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in df_out["predictions"]]
     # Normalize relative abundances if relevant
+    if ms1_rts is not None and len(ms1_rts) > 0:
+        xic_areas = extract_xic_areas(ms1_rts, ms1_scans, df_out.index.values, df_out['RT'].values, mz_tolerance = mass_tolerance)
+        if any(a > 0 for a in xic_areas):
+            df_out['rel_abundance'] = xic_areas
     if intensity:
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
     else:
