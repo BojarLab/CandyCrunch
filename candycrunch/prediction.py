@@ -501,6 +501,33 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             comps_with_none = comps_in + [None]
             chunked_calc_comps.extend([[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
         comps_out = [(y, 1) if (not x[0] and y) else x for x, y in zip(comps_out, chunked_calc_comps)]
+        # Multiply-charged adduct ions: only fill gaps not explained by protonated or singly-charged adduct matches
+        threshold_dict = {2: 900, 3: 1500, 4: 3500}
+        for adduct in adduct_list:
+            adduct_mass = mass_dict.get(adduct, 999)
+            if adduct_mass == 999:
+                continue
+            for charge in range(2, max_charge + 1):
+                threshold = threshold_dict.get(charge, 9999)
+                if mode == 'negative':
+                    charged_adduct_masses = (comp_masses + adduct_mass - (charge - 1) * HYDROGEN_MASS) / charge
+                else:
+                    charged_adduct_masses = (comp_masses + adduct_mass + (charge - 1) * HYDROGEN_MASS) / charge
+                # Mask out compositions too small to realistically form multiply-charged adducts
+                charged_adduct_masses = np.where(comp_masses + adduct_mass > threshold, charged_adduct_masses, 9999)
+                chunked_calc_comps = []
+                for mz_chunk in np.array_split(red_masses, max(1, len(red_masses) // 1000)):
+                    row_idx, comp_idx = np.where(
+                        np.abs(charged_adduct_masses.reshape(1, -1) - mz_chunk.reshape(-1, 1)) < mass_tolerance)
+                    values, indices, _ = np.unique(row_idx, return_counts = True, return_index = True)
+                    subarrays = np.split(comp_idx, indices)[1:]
+                    comps_all = [None] * len(mz_chunk)
+                    for x, y in zip(values, subarrays):
+                        comps_all[x] = y
+                    comps_with_none = comps_in + [None]
+                    chunked_calc_comps.extend(
+                        [[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
+                comps_out = [(y, charge) if (not x[0] and y) else x for x, y in zip(comps_out, chunked_calc_comps)]
     df_in['composition'] = [x[0] for x in comps_out]
     df_in['charge'] = [x[1] if x[0] else None for x in comps_out]
     candidate_data = []
