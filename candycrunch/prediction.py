@@ -71,12 +71,27 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     run = pymzml.run.Reader(filepath)
     highest_i_dict = {}
     rts, intensities, reducing_mass, charges = [], [], [], []
+    detected_mode, detected_trap = None, None
     for spectrum in run:
         if spectrum.ms_level == ms_level:
             try:
                 temp = spectrum.highest_peaks(2)
             except:
                 continue
+            if detected_mode is None:
+                ns_uri = '{http://psi.hupo.org/ms/mzml}'
+                for cv in spectrum.element.iter(f'{ns_uri}cvParam'):
+                    acc = cv.get('accession', '')
+                    if acc == 'MS:1000129':
+                        detected_mode = 'negative'
+                    elif acc == 'MS:1000130':
+                        detected_mode = 'positive'
+                    elif acc == 'MS:1000512':
+                        filt = cv.get('value', '')
+                        if filt.startswith('ITMS'):
+                            detected_trap = 'linear'
+                        elif filt.startswith('FTMS'):
+                            detected_trap = 'orbitrap'
             mz_i_dict = {}
             num_actual_peaks = min(num_peaks, len(spectrum.peaks("raw")))
             for mz, i in spectrum.highest_peaks(num_actual_peaks):
@@ -104,6 +119,8 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     })
     if intensity:
         df_out['intensity'] = intensities
+    df_out.attrs['detected_mode'] = detected_mode
+    df_out.attrs['detected_trap'] = detected_trap
     return df_out
 
 
@@ -1301,7 +1318,7 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode,modification, ma
     return (df_out, spectra_out) if spectra else df_out
 
 
-def flag_coeluting_substructures(df_out, glycan_class, rt_tolerance = 0.5):
+def flag_coeluting_substructures(df_out, glycan_class, rt_tolerance = 0.25):
     """Flag potential in-source fragments and O-glycan peeling products"""
     df_out['notes'] = ''
     top1_data = [(idx, row['predictions'][0][0], row['RT'])
@@ -1416,6 +1433,17 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath)
+    detected_mode = getattr(loaded_file, 'attrs', {}).get('detected_mode')
+    detected_trap = getattr(loaded_file, 'attrs', {}).get('detected_trap')
+    if detected_mode and detected_mode != mode:
+        print(
+            f"WARNING: File contains {detected_mode}-mode spectra but mode='{mode}' was specified. Overriding to '{detected_mode}'.")
+        mode = detected_mode
+        multiplier = -1 if mode == 'negative' else 1
+    if detected_trap and detected_trap != trap:
+        print(
+            f"WARNING: File was acquired on {detected_trap} but trap='{trap}' was specified. Overriding to '{detected_trap}'.")
+        trap = detected_trap
     loaded_file = filter_rts(loaded_file, rt_min, rt_max)
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     if intensity:
