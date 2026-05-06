@@ -396,6 +396,15 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
         (m / z + charge_adjust) for z, threshold, charge_adjust in zip(greater_charges, thresholds, charge_adjustments)
         for m in og_list if m > threshold
     ]
+    # Pure multi-adduct ions: [M + z×adduct]^z± where all charge carriers are the adduct
+    for adduct in adduct_list:
+        a_mass = mass_dict.get(adduct, 999)
+        if a_mass == 999:
+            continue
+        for z in greater_charges:
+            multi_m = mz_neutral + z * a_mass
+            if multi_m > threshold_dict.get(z, 9999):
+                mz_list.append(multi_m / z)
     return [m for m in mz_list if abs(mass - m) < mass_tolerance]
 
 
@@ -611,6 +620,31 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
                 chunked_calc_comps.extend(
                     [[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
             comps_out = [(y, charge) if (not x[0] and y and (kc is None or kc == charge)) else x for x, y, kc in zip(comps_out, chunked_calc_comps, known_charges)]
+    # Pure multi-adduct ions: e.g., [M + 2Na]²⁺, [M + 3Na]³⁺ — only fill remaining gaps
+    for adduct in adduct_list:
+        adduct_mass = mass_dict.get(adduct, 999)
+        if adduct_mass == 999:
+            continue
+        for charge in range(2, max_charge + 1):
+            threshold = threshold_dict.get(charge, 9999)
+            # All charge carriers are the adduct (no protons): m/z = (M + z×adduct) / z
+            multi_adduct_masses = (comp_masses + charge * adduct_mass) / charge
+            multi_adduct_masses = np.where(comp_masses + charge * adduct_mass > threshold, multi_adduct_masses,
+                                           9999)
+            chunked_calc_comps = []
+            for mz_chunk in np.array_split(red_masses, max(1, len(red_masses) // 1000)):
+                row_idx, comp_idx = np.where(
+                    np.abs(multi_adduct_masses.reshape(1, -1) - mz_chunk.reshape(-1, 1)) < mass_tolerance)
+                values, indices, _ = np.unique(row_idx, return_counts = True, return_index = True)
+                subarrays = np.split(comp_idx, indices)[1:]
+                comps_all = [None] * len(mz_chunk)
+                for x, y in zip(values, subarrays):
+                    comps_all[x] = y
+                comps_with_none = comps_in + [None]
+                chunked_calc_comps.extend(
+                    [[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
+            comps_out = [(y, charge) if (not x[0] and y and (kc is None or kc == charge)) else x for x, y, kc in
+                         zip(comps_out, chunked_calc_comps, known_charges)]
     df_in['composition'] = [x[0] for x in comps_out]
     df_in['charge'] = [x[1] if x[0] else None for x in comps_out]
     candidate_data = []
@@ -687,9 +721,11 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
         comp_mass = composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + (
             mass_tag if mass_tag else 0)
-        spec_masses = df_in[df_in['candidate_structure'] == struct].reducing_mass.values * np.abs(df_in[df_in['candidate_structure'] == struct].charge.values)
+        charges_arr = np.abs(df_in[df_in['candidate_structure'] == struct].charge.values)
+        spec_masses = df_in[df_in['candidate_structure'] == struct].reducing_mass.values * charges_arr
         is_adduct = any(
-            np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance)
+            np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance) or
+            np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) * charges_arr - spec_masses) < mass_tolerance)
             for adduct in adduct_list)
         rounded_mass_rows = [[np.round(y,1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15] for x in df_in[df_in['candidate_structure'] == struct].peak_d]
         unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
