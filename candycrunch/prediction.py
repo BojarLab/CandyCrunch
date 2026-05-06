@@ -39,6 +39,7 @@ sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
 candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim=12).to(device)
 candycrunch.load_state_dict(sdict)
 candycrunch = candycrunch.eval()
+_trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 
 mass_dict = dict(zip(mapping_file.composition, mapping_file["underivatized_monoisotopic"]))
 HYDROGEN_MASS = 1.007825
@@ -55,15 +56,15 @@ def get_adduct_list(mode):
 
 
 def process_mzML_stack(filepath, num_peaks = 1000,
-                       ms_level = 2,
-                       intensity = False):
+                       ms_level = 2, intensity = False, extract_ms1 = False):
     """function extracting all MS/MS spectra from .mzML file\n
    | Arguments:
    | :-
    | filepath (string): absolute filepath to the .mzML file
    | num_peaks (int): max number of peaks to extract from spectrum; default:1000
    | ms_level (int): which MS^n level to extract; default:2
-   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False\n
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, and intensity if True
@@ -447,7 +448,12 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 ms, ints = zip(*cur_grp)
                 pk[np.average(ms, weights = ints)] = sum(ints)
         peaks = dict(sorted(pk.items(), key = lambda x: x[1], reverse = True))
-        sum_intensity = np.nansum(cluster['intensity'])
+        rt_int_pairs = sorted(zip(cluster['RT'], cluster['intensity']))
+        rts_sorted, ints_sorted = zip(*rt_int_pairs)
+        if len(rts_sorted) >= 3:
+            sum_intensity = _trapezoid(ints_sorted, rts_sorted)
+        else:
+            sum_intensity = np.nansum(ints_sorted)
         binned_intensities, mz_remainder = zip(*[bin_intensities(c, frames) for c in cluster['peak_d']])
         binned_intensities = np.mean(np.array(binned_intensities), axis = 0)
         mz_remainder = np.mean(np.array(mz_remainder), axis = 0)
@@ -1078,6 +1084,54 @@ def combine_charge_states(df_out):
     return df_out
 
 
+def combine_adduct_species(df_out, rt_diff = 1.0):
+    """combines abundances when the same glycan appears as different adduct forms (e.g., [M-H]⁻ and [M+Acetate]⁻)\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): prediction dataframe generated within wrap_inference
+    | rt_diff (float): retention time tolerance (in minutes) for considering two rows the same species; default:1.0\n
+    | Returns:
+    | :-
+    | Returns prediction dataframe with adduct abundances consolidated into the primary ion form
+    """
+    df_out['top_pred'] = [k[0][0] if len(k) > 0 else np.nan for k in df_out.predictions]
+    repeated = df_out['top_pred'].value_counts()
+    repeated = repeated[repeated > 1].index.tolist()
+    # Only act when multiple rows share a prediction but differ in m/z (i.e., different ionization forms)
+    rows_to_drop = []
+    for pred in repeated:
+        pred_df = df_out[df_out['top_pred'] == pred].sort_values('RT')
+        mz_vals = pred_df.index.values
+        if mz_vals.max() - mz_vals.min() < 1.0:
+            continue
+        used = set()
+        for i, (idx_i, row_i) in enumerate(pred_df.iterrows()):
+            if idx_i in used:
+                continue
+            for idx_j, row_j in pred_df.iloc[i+1:].iterrows():
+                if idx_j in used:
+                    continue
+                if abs(row_i['RT'] - row_j['RT']) > rt_diff:
+                    continue
+                if abs(idx_i - idx_j) < 1.0:
+                    continue
+                # Fold the weaker signal into the stronger one
+                if row_i.get('rel_abundance', 0) >= row_j.get('rel_abundance', 0):
+                    df_out.at[idx_i, 'rel_abundance'] = df_out.at[idx_i, 'rel_abundance'] + row_j.get('rel_abundance', 0)
+                    df_out.at[idx_i, 'num_spectra'] = df_out.at[idx_i, 'num_spectra'] + row_j['num_spectra']
+                    rows_to_drop.append(idx_j)
+                    used.add(idx_j)
+                else:
+                    df_out.at[idx_j, 'rel_abundance'] = df_out.at[idx_j, 'rel_abundance'] + row_i.get('rel_abundance', 0)
+                    df_out.at[idx_j, 'num_spectra'] = df_out.at[idx_j, 'num_spectra'] + row_i['num_spectra']
+                    rows_to_drop.append(idx_i)
+                    used.add(idx_i)
+                    break
+    df_out = df_out.drop(rows_to_drop)
+    df_out.drop(['top_pred'], axis = 1, inplace = True)
+    return df_out
+
+
 def Ac_follows_Gc(df_out):
     """function to inform Neu5Ac isomer deduplication based on Neu5Gc isomers\n
     | Arguments:
@@ -1303,6 +1357,7 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode,modification, ma
     df_out['charge'] = round(df_out['composition'].apply(lambda x: composition_to_mass(x, sample_prep = sample_prep, modification = modification)) / df_out.index) * multiplier
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
+    df_out = combine_adduct_species(df_out, rt_diff = 1.0)
     # Map GlyTouCan IDs
     df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in df_out["predictions"]]
     # Normalize relative abundances if relevant
@@ -1556,6 +1611,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Clean-up
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
+    df_out = combine_adduct_species(df_out, rt_diff = rt_diff)
     # Map GlyTouCan IDs
     df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in df_out["predictions"]]
     # Normalize relative abundances if relevant
