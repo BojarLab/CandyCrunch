@@ -620,7 +620,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
                 chunked_calc_comps.extend(
                     [[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
             comps_out = [(y, charge) if (not x[0] and y and (kc is None or kc == charge)) else x for x, y, kc in zip(comps_out, chunked_calc_comps, known_charges)]
-    # Pure multi-adduct ions: e.g., [M + 2Na]²⁺, [M + 3Na]³⁺ — only fill remaining gaps
+    # Pure multi-adduct ions: e.g., [M + 2Na]_2+, [M + 3Na]_3+ ; only fill remaining gaps
     for adduct in adduct_list:
         adduct_mass = mass_dict.get(adduct, 999)
         if adduct_mass == 999:
@@ -1307,38 +1307,6 @@ def filter_rts(loaded_file, rt_min, rt_max):
     return loaded_file
 
 
-def spectra_filepath_to_condensed_df(spectra_filepath, rt_min, rt_max, rt_diff, mass_tolerance, bin_num = 2048):
-    """Loads and clusters spectra into distinct mass and RT groups\n
-    | Arguments:
-    | :-
-    | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", or ".xlsx" pointing to a file containing spectra or preprocessed spectra 
-    | rt_min (float): whether only spectra from a minimum retention time (in minutes) onward should be considered
-    | rt_max (float): whether only spectra up to a maximum retention time (in minutes) should be considered
-    | rt_diff (float): maximum retention time difference (in minutes) to peak apex that can be grouped with that peak
-    | mass_tolerance (float): the general mass tolerance that is used for composition matching
-    | bin_num (int): number of bins for binning; don't change; default: 2048\n
-    | Returns:
-    | :-
-    | Returns a preliminary df_out dataframe of clustered spectra with no predictions 
-    """
-    loaded_file = load_spectra_filepath(spectra_filepath)
-    loaded_file = filter_rts(loaded_file, rt_min, rt_max)
-    intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
-    if intensity:
-        loaded_file.fillna({'intensity': 0}, inplace = True)
-    else:
-        loaded_file['intensity'] = [0] * len(loaded_file)
-    # Prepare file for processing
-    loaded_file = loaded_file.dropna(subset = ['peak_d'])
-    loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
-    spec_dic = {mass: peak for mass, peak in zip(loaded_file['reducing_mass'].values, loaded_file['peak_d'].values)}
-    # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
-    df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
-    # df_out.set_index('reducing_mass', inplace = True,drop=False)
-    df_out['peak_d'] = [spec_dic[m] for m in df_out['reducing_mass']]
-    return df_out
-
-
 def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use, mode, modification,
                         mass_tag, filter_out, taxonomy_class, mass_tolerance, mass_dic, sample_prep = 'underivatized'):
     """adds and reorders predictions based on possible structures\n
@@ -1395,7 +1363,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     return df_out
     
     
-def finalise_predictions(df_out, get_missing, pred_thresh, mode,modification, mass_tag, multiplier, plot_glycans, spectra_filepath, spectra, sample_prep = 'underivatized'):
+def finalise_predictions(df_out, get_missing, pred_thresh, mode, modification, mass_tag, multiplier, plot_glycans, spectra_filepath, spectra, sample_prep = 'underivatized', glycan_class = 'O'):
     """Cleans up incorrect structure predictions and formats dataframe\n
     | Arguments:
     | :-
@@ -1527,7 +1495,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh=300,
                    filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None, sample_prep = 'underivatized',
-                   taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False, struct_mass_tol = 0.6):
+                   taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False, struct_mass_tol = 0.6, _return_intermediate = False):
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
@@ -1565,9 +1533,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | :-
    | Returns dataframe of predictions for spectra in file
    """
-    print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
+    if not _return_intermediate:
+        print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     if df_use is None:
-        df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type==glycan_class])
+        df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.endswith('.mzML'))
@@ -1645,6 +1614,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Deduplicate identical predictions for different spectra
     df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
     df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
+    if _return_intermediate:
+        df_out.attrs['ms1_rts'] = ms1_rts
+        df_out.attrs['ms1_scans'] = ms1_scans
+        return df_out
     # Construct biosynthetic network from top1 predictions and check whether intermediates could be a fit for some of the spectra
     if supplement:
         try:
@@ -1718,9 +1691,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
 
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers, model = candycrunch, glycans = glycans, bin_num = 2048, max_charge = 3,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
-                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3,
+                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh = 300,
                    filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None, sample_prep = 'underivatized',
-                   taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False):
+                   taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False, struct_mass_tol = 0.6):
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
@@ -1748,8 +1721,9 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
    | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions; default:0.2
-   | crumbs_thresh (float): threshold for annotation score to keep predictions; default:0.5
-   | filter_out (set): set of monosaccharide or modification types to filter out; default:{'Ac', 'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
+   | crumbs_thresh (float): threshold for annotation score to keep predictions; default:3
+   | ppm_thresh (float): ppm error threshold for filtering; default:300
+   | filter_out (set): set of monosaccharide or modification types to filter out; default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
    | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
@@ -1757,91 +1731,121 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | taxonomy_level (string): taxonomy level to filter by; default:'Class'
    | taxonomy_filter (string): which taxonomy to pull glycans for; default:'Mammalia'
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
-   | plot_glycans (bool): whether to save an output.xlsx file with SNFG images of all top1 predictions; default:False\n
+   | plot_glycans (bool): whether to save an output.xlsx file with SNFG images of all top1 predictions; default:False
+   | struct_mass_tol (float): mass tolerance for candidate structure assignment; default:0.6\n
    | Returns:
    | :-
-   | Returns a dictionary of dataframes, one for each input file, keyed by their filenames
+   | Returns a tuple of (pivot_table, dict of per-file dataframes)
    """
     print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)]
     multiplier = -1 if mode == 'negative' else 1
-    coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
-    common_structure_map, df_use, topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out,
-                                                                      phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)
+    # Core inference per file via wrap_inference intermediate return
     inference_dfs = {}
+    ms1_data = {}
     for spectra_filepath in spectra_filepath_list:
         file_label = spectra_filepath.split('/')[-1].split('.')[0]
-        # Create condensed dataframe from spectra
-        df_out = spectra_filepath_to_condensed_df(spectra_filepath, rt_min, rt_max, rt_diff, mass_tolerance, bin_num = bin_num)
-        # Assign candidate structures based on compositional input
-        df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map,
-                                            mass_tolerance, mode, mass_tag, modification = modification, max_charge = max_charge,  sample_prep = sample_prep)
-        # Assign annotation scores
-        df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, modification = modification, sample_prep = sample_prep)
-        df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
-        # Process for inference
-        loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc, trap = trap, rt_max_default = rt_max_default)
-        # Get predicted glycans
-        preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
-        df_out['rel_abundance'] = df_out['intensity']
-        df_out['predictions'] = [[(pred, conf) for pred, conf in zip(pred_row, conf_row)] 
-                                for pred_row, conf_row in zip(preds, pred_conf)]
-        # Filter predictions based on glycan class, confidence, and mass
-        df_out['predictions'] = [
-            [(g[0], round(g[1], 4)) for g in preds if
-             enforce_class(g[0], glycan_class, g[1], extra_thresh = extra_thresh) and
-             g[1] > pred_thresh and
-             get_comp(g[0]) == comp][:5]
-            for preds, comp in zip(df_out.predictions, df_out.composition)
-        ]
-        df_out['charge'] = [c * multiplier for c in df_out['charge']]
-        df_out['RT'] = df_out['RT'].round(2)
-        # Extract top fragments
-        df_out['top_fragments'] = [
-            [round(frag[0], 4) for frag in sorted(peak_d.items(), key = lambda x: x[1], reverse = True)[:frag_num]]
-            for peak_d in df_out['peak_d']
-        ]
-        # Filter using domain knowledge
-        df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep, mass_tag = mass_tag,
-                              modification = modification, mass_tolerance = mass_tolerance, df_use = df_use).reset_index()
-        # Keep only the best prediction for each spectrum ID
-        df_out = df_out.sort_values(['spec_id', 'annotation_score'], ascending = False).groupby('spec_id').first()
-        # Filter by annotation score threshold
-        df_out = df_out[df_out['annotation_score'] > crumbs_thresh].drop(columns = ['candidate_structure']).set_index('reducing_mass')
-        # Reorganize columns
-        df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d', 
-                         'annotation_score', 'rel_abundance', 'top_fragments']]
-        # Deduplicate identical predictions
-        df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
-        df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
-        # Add mass label and condition label for later categorization
+        df_out = wrap_inference(spectra_filepath, glycan_class, model = model, glycans = glycans, bin_num = bin_num, max_charge = max_charge,
+                                frag_num = frag_num, mode = mode, modification = modification, mass_tag = mass_tag, lc = lc, trap = trap,
+                                rt_min = rt_min, rt_max = rt_max, rt_diff = rt_diff, rt_max_default = rt_max_default,
+                                pred_thresh = pred_thresh, temperature = temperature, get_missing = get_missing,
+                                mass_tolerance = mass_tolerance, extra_thresh = extra_thresh, crumbs_thresh = crumbs_thresh, ppm_thresh = ppm_thresh,
+                                filter_out = filter_out, supplement = False, experimental = experimental, mass_dic = mass_dic,
+                                sample_prep = sample_prep, taxonomy_level = taxonomy_level, taxonomy_filter = taxonomy_filter,
+                                df_use = df_use, struct_mass_tol = struct_mass_tol, _return_intermediate = True)
+        ms1_data[file_label] = (df_out.attrs.pop('ms1_rts', None), df_out.attrs.pop('ms1_scans', None))
+        if df_out.empty:
+            inference_dfs[file_label] = df_out
+            continue
         df_out['mass_label'] = np.round(df_out.index * 2) / 2
         df_out = df_out.assign(condition_label = file_label)
         inference_dfs[file_label] = df_out
-    # Categorize across samples
-    assigned_cats = assign_categories(pd.concat([x for x in inference_dfs.values()]), 
-                                     intra_cat_thresh = intra_cat_thresh, maximise_cat_size = True)
-    # Assign modal predictions to categories
+    non_empty = {k: v for k, v in inference_dfs.items() if not v.empty}
+    if not non_empty:
+        return pd.DataFrame(), inference_dfs
+    # Cross-file harmonization: align RT drift, resolve variant predictions, link DDA gaps
+    assigned_cats = assign_categories(pd.concat(non_empty.values()), intra_cat_thresh = intra_cat_thresh, maximise_cat_size = True)
     smoothed_category_predictions = assign_modal_category_prediction(assigned_cats)
-    # Filter to keep only top N isomers
     prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n = top_n_isomers)
-    # Process each file with the harmonized predictions
-    for file_label in prevailing_category_predictions.condition_label.unique():
-        df_out = prevailing_category_predictions[prevailing_category_predictions['condition_label'] == file_label]
-        df_out = df_out.sort_index().drop_duplicates(subset=['RT', 'rel_abundance'])
-        # Augment predictions with biosynthetic networks and database searches
-        if supplement or experimental:
-            df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use,
-                                         mode, modification, mass_tag, filter_out, taxonomy_filter,
-                                         mass_tolerance, mass_dic, sample_prep = sample_prep)
-        # Finalize predictions
-        if len(df_out) > 0:
-            df_out = finalise_predictions(df_out, get_missing, pred_thresh, mode, modification,
-                                        mass_tag, multiplier, plot_glycans, file_label, spectra, sample_prep = sample_prep)
-        inference_dfs[file_label] = df_out
-    all_outputs = pd.concat(inference_dfs.values())
+    # Cross-file MS1 gap filling: propagate predictions to files missing MS2 when MS1 confirms the precursor
+    all_file_labels = [fp.split('/')[-1].split('.')[0] for fp in spectra_filepath_list]
+    temp = prevailing_category_predictions.reset_index()
+    master = temp.groupby(['mass_label', 'category_label']).agg(
+        repr_mz = ('reducing_mass', 'median'),
+        repr_rt = ('RT', 'median'),
+        repr_charge = ('charge', 'first'),
+        repr_composition = ('composition', 'first'),
+        repr_predictions = ('predictions', 'first'),
+        repr_top1 = ('top1_pred', 'first'),
+        present_in = ('condition_label', set)
+    ).reset_index()
+    gap_rows_by_file = defaultdict(list)
+    for file_label in all_file_labels:
+        ms1_rts_file, ms1_scans_file = ms1_data.get(file_label, (None, None))
+        if ms1_rts_file is None or len(ms1_rts_file) == 0:
+            continue
+        missing = master[~master['present_in'].apply(lambda s: file_label in s)]
+        if missing.empty:
+            continue
+        xic_areas = extract_xic_areas(ms1_rts_file, ms1_scans_file,
+                                       missing['repr_mz'].values, missing['repr_rt'].values,
+                                       mz_tolerance = mass_tolerance)
+        for (_, row), area in zip(missing.iterrows(), xic_areas):
+            if area > 0:
+                gap_rows_by_file[file_label].append({
+                    'm/z': row['repr_mz'],
+                    'predictions': row['repr_predictions'],
+                    'composition': row['repr_composition'],
+                    'num_spectra': 0,
+                    'charge': row['repr_charge'],
+                    'RT': row['repr_rt'],
+                    'rel_abundance': area,
+                    'evidence': 'ms1_only',
+                    'top1_pred': row['repr_top1'],
+                    'condition_label': file_label,
+                    'GlyTouCan_ID': glytoucan_mapping.get(row['repr_top1'], ''),
+                    'ppm_error': np.nan,
+                    'notes': 'MS1 signal only; propagated from other files',
+                })
+    # Per-file augment, finalize, and append gap-filled rows
+    harmonized_labels = set(prevailing_category_predictions.condition_label.unique())
+    for file_label in all_file_labels:
+        if file_label in harmonized_labels:
+            df_out = prevailing_category_predictions[prevailing_category_predictions['condition_label'] == file_label]
+            df_out = df_out.sort_index().drop_duplicates(subset = ['RT', 'rel_abundance'])
+            if supplement or experimental:
+                df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use,
+                                             mode, modification, mass_tag, filter_out, taxonomy_filter,
+                                             mass_tolerance, mass_dic, sample_prep = sample_prep)
+            if len(df_out) > 0:
+                df_out = finalise_predictions(df_out, get_missing, pred_thresh, mode, modification,
+                                            mass_tag, multiplier, plot_glycans, file_label, spectra, sample_prep = sample_prep, glycan_class = glycan_class)
+        else:
+            df_out = pd.DataFrame()
+        # Unpack if spectra=True returned a tuple
+        spectra_out = None
+        if isinstance(df_out, tuple):
+            df_out, spectra_out = df_out
+        # Append MS1-only gap-filled rows (these bypass domain_filter since they have no MS2 fragments)
+        gaps = gap_rows_by_file.get(file_label, [])
+        if gaps:
+            gap_df = pd.DataFrame(gaps).set_index('m/z')
+            gap_df.index.name = 'm/z'
+            if not df_out.empty:
+                for col in df_out.columns:
+                    if col not in gap_df.columns:
+                        gap_df[col] = np.nan
+                df_out = pd.concat([df_out, gap_df[df_out.columns]])
+            else:
+                df_out = gap_df
+            # Re-normalize abundances to include gap-filled entries
+            if 'rel_abundance' in df_out.columns and df_out['rel_abundance'].sum() > 0:
+                df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
+        inference_dfs[file_label] = (df_out, spectra_out) if spectra_out is not None else df_out
+    to_concat = [v[0] if isinstance(v, tuple) else v for v in inference_dfs.values()]
+    all_outputs = pd.concat([df for df in to_concat if not df.empty])
     combined_batch = all_outputs.pivot_table(index = 'top1_pred', columns = 'condition_label', values = 'rel_abundance', aggfunc = 'sum')
     return combined_batch, inference_dfs
 
