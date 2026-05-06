@@ -18,7 +18,7 @@ pip install git+https://github.com/BojarLab/CandyCrunch.git
 ```
 #### PyPI:
 ```bash
-pip install CandyCrunch
+pip install candycrunch
 ```
 ## `CandyCrunch.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/BojarLab/CandyCrunch/blob/main/CandyCrunch.ipynb)
 If you are looking for a **convenient** and **easy-to-run** version of the code that does not require any local installations, we have also created a Google Colaboratory notebook.  
@@ -187,8 +187,8 @@ Wrapper function to annotate MS2 fragments using `CandyCrumbs`
 </pre>
 ```python
 condensed_iupac_glycan = 'Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3)]Gal(b1-4)Glc'
-ms2_fragment_masses = [425.07,443.07,546.19,1216.32]
-annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan,fragment_masses=ms2_fragment_masses,mass_threshold=1)
+ms2_fragment_masses = [425.07, 443.07, 546.19, 1216.32]
+annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan, fragment_masses = ms2_fragment_masses, mass_threshold = 1)
 ```
 
 <details>
@@ -228,7 +228,7 @@ iupac, type=bool: whether to also return the fragment sequence in IUPAC-condense
 It isn't always easy to quickly visualise the Domon-Costello nomenclature. Here is an example of how we can use GlycoDraw to visualise one of the outputs:
 ```python
 #This will calculate where on the glycan the fragments occured and return a valid GlycoDraw input
-fragment_iupac = domon_costello_to_fragIUPAC('Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3)]Gal(b1-4)Glc',['Y_3_Beta', 'Y_2_Alpha'])
+fragment_iupac = domon_costello_to_fragIUPAC('Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3)]Gal(b1-4)Glc', ['Y_3_Beta', 'Y_2_Alpha'])
 
 #Then we can simply draw the result with GlycoDraw
 GlycoDraw(fragment_iupac)
