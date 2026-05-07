@@ -71,7 +71,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
    """
     run = pymzml.run.Reader(filepath)
     highest_i_dict = {}
-    rts, intensities, reducing_mass, charges = [], [], [], []
+    rts, intensities, mzs, charges = [], [], [], []
     detected_mode, detected_trap = None, None
     ms1_rts, ms1_scans = [], []
     for spectrum in run:
@@ -108,7 +108,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                     continue
                 key = f"{spectrum.ID}_{spectrum.selected_precursors[0]['mz']}"
                 highest_i_dict[key] = mz_i_dict
-                reducing_mass.append(float(key.split('_')[-1]))
+                mzs.append(float(key.split('_')[-1]))
                 rts.append(spectrum.scan_time_in_minutes())
                 raw_charge = spectrum.selected_precursors[0].get('charge', None)
                 # Vendor software can default to charge=1 when undetermined;
@@ -123,7 +123,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     for key in highest_i_dict.keys():
         highest_i_dict[key] = dict(sorted(highest_i_dict[key].items(), key = lambda x: x[1], reverse = True))
     df_out = pd.DataFrame({
-        'reducing_mass': reducing_mass,
+        'm/z': mzs,
         'peak_d': list(highest_i_dict.values()),
         'RT': rts,
         'precursor_charge': charges,
@@ -151,7 +151,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, and intensity if True
     """
     highest_i_dict = {}
-    rts, intensities, reducing_mass, charges = [], [], [], []
+    rts, intensities, mzs, charges = [], [], [], []
     with mzxml.read(filepath) as reader:
         for spectrum in reader:
             if spectrum['msLevel'] == ms_level:
@@ -163,7 +163,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                     precursor_mz = spectrum['precursorMz'][0]['precursorMz']
                     key = f"{spectrum['id']}_{precursor_mz}"
                     highest_i_dict[key] = mz_i_dict
-                    reducing_mass.append(float(precursor_mz))
+                    mzs.append(float(precursor_mz))
                     rts.append(spectrum['retentionTime'])
                     raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
                     if raw_charge is not None and abs(int(raw_charge)) == 1:
@@ -176,7 +176,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     for key in highest_i_dict.keys():
         highest_i_dict[key] = dict(sorted(highest_i_dict[key].items(), key = lambda x: x[1], reverse = True))
     df_out = pd.DataFrame({
-        'reducing_mass': reducing_mass,
+        'm/z': mzs,
         'peak_d': list(highest_i_dict.values()),
         'RT': rts,
         'precursor_charge': charges,
@@ -306,7 +306,8 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
     y = y.repeat(5).reset_index(drop = True)
     dset = SimpleDataset(X, y, transform_mz = transform_mz, transform_rt = transform_rt)
     dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
-    df.set_index('reducing_mass', inplace = True)
+    idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
+    df.set_index(idx_col, inplace = True)
     drop_cols = ['binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification', 'trap', 'glycan', 'glycan_type', 'lc']
     df.drop(drop_cols, axis = 1, inplace = True)
     return dloader, df
@@ -434,15 +435,16 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     if 'precursor_charge' not in df.columns:
         df['precursor_charge'] = None
     clusters= []
-    # Sort the dataframe by 'reducing_mass' and 'RT'
-    df['rounded_reducing_mass'] = np.round(df['reducing_mass'] * 2) / 2
+    # Sort the dataframe by 'reducing_mass'/'m/z' and 'RT'
+    idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
+    df['rounded_mz'] = np.round(df[idx_col] * 2) / 2
     df['rounded_RT'] = np.round(df['RT'], 1)
-    df.sort_values(by = ['rounded_reducing_mass', 'rounded_RT'], inplace = True)
-    df.drop(['rounded_reducing_mass', 'rounded_RT'], axis = 1, inplace = True)
+    df.sort_values(by = ['rounded_mz', 'rounded_RT'], inplace = True)
+    df.drop(['rounded_mz', 'rounded_RT'], axis = 1, inplace = True)
     # Initialize the first cluster
     first_row = df.iloc[0]
     clusters.append({
-        'reducing_mass': [first_row['reducing_mass']],
+        'm/z': [first_row[idx_col]],
         'RT': [first_row['RT']],
         'intensity': [first_row['intensity']],
         'peak_d': [first_row['peak_d']],
@@ -451,7 +453,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     })
     # Loop through the sorted dataframe starting from the second row
     for _, row in df.iloc[1:].iterrows():
-        rm = row['reducing_mass']
+        mz = row[idx_col]
         rt = row['RT']
         intensity = row['intensity']
         peak_d = row['peak_d']
@@ -460,11 +462,11 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             last_max = cluster['max_intensity'][-1]
             if last_max > 0:
                 idx = np.argmax(cluster['max_intensity'])
-                last_rm, last_rt = cluster['reducing_mass'][idx], cluster['RT'][idx]
+                last_mz, last_rt = cluster['m/z'][idx], cluster['RT'][idx]
             else:
-                last_rm, last_rt = cluster['reducing_mass'][-1], cluster['RT'][-1]
-            if abs(last_rm - rm) <= mz_diff and abs(last_rt - rt) <= rt_diff:
-                cluster['reducing_mass'].append(rm)
+                last_mz, last_rt = cluster['m/z'][-1], cluster['RT'][-1]
+            if abs(last_mz - mz) <= mz_diff and abs(last_rt - rt) <= rt_diff:
+                cluster['m/z'].append(mz)
                 cluster['RT'].append(rt)
                 cluster['intensity'].append(intensity)
                 cluster['peak_d'].append(peak_d)
@@ -474,7 +476,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 break
         if not found:
             clusters.append({
-                'reducing_mass': [rm],
+                'm/z': [mz],
                 'RT': [rt],
                 'intensity': [intensity],
                 'peak_d': [peak_d],
@@ -487,10 +489,10 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         highest_intensity_index = np.argmax(cluster['intensity'])
         highest_intensity = cluster['intensity'][highest_intensity_index]
         if highest_intensity > 0:
-            min_rm = cluster['reducing_mass'][highest_intensity_index]
+            min_mz = cluster['m/z'][highest_intensity_index]
             mean_rt = cluster['RT'][highest_intensity_index]
         else:
-            min_rm = min(cluster['reducing_mass'])
+            min_mz = min(cluster['m/z'])
             mean_rt = np.mean(cluster['RT'])
         # Cluster fragment peaks across spectra by mass proximity, then weight-average mass and sum intensity
         mi_pairs = sorted([(m, i) for spec in cluster['peak_d'] for m, i in spec.items()], key = lambda x: x[0])
@@ -524,8 +526,8 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         num_spectra = len(cluster['RT'])
         rep_charge = cluster['precursor_charge'][highest_intensity_index]
         condensed_data.append(
-            [min_rm, mean_rt, sum_intensity, peaks, binned_intensities, mz_remainder, num_spectra, rep_charge])
-    return pd.DataFrame(condensed_data, columns = ['reducing_mass', 'RT', 'intensity', 'peak_d', 'binned_intensities', 'mz_remainder', 'num_spectra', 'precursor_charge'])
+            [min_mz, mean_rt, sum_intensity, peaks, binned_intensities, mz_remainder, num_spectra, rep_charge])
+    return pd.DataFrame(condensed_data, columns = ['m/z', 'RT', 'intensity', 'peak_d', 'binned_intensities', 'mz_remainder', 'num_spectra', 'precursor_charge'])
 
 
 def comp_to_str_comp(comp):
@@ -555,7 +557,8 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
 
 
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag, modification = 'reduced', sample_prep = 'underivatized', max_charge = 3):
-    red_masses = np.array(df_in.reducing_mass)
+    idx_col = 'm/z' if 'm/z' in df_in.columns else 'reducing_mass'
+    red_masses = np.array(df_in[idx_col])
     known_charges = df_in['precursor_charge'].values if 'precursor_charge' in df_in.columns else [None] * len(red_masses)
     tag = mass_tag if mass_tag else 0
     all_comps = [x for x in df_glycan_in.groupby('comp_str').first()['Composition']]
@@ -722,13 +725,14 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
 def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance, modification = 'reduced', sample_prep = 'underivatized'):
     mode = 'negative' if multiplier == -1 else 'positive'
     adduct_list = get_adduct_list(mode)
+    idx_col = 'm/z' if 'm/z' in df_in.columns else 'reducing_mass'
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
     for struct, comp in zip(unq_structs.candidate_structure, unq_structs.composition):
         row_charge = max(df_in[df_in['candidate_structure'] == struct].charge)
         comp_mass = composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + (
             mass_tag if mass_tag else 0)
         charges_arr = np.abs(df_in[df_in['candidate_structure'] == struct].charge.values)
-        spec_masses = df_in[df_in['candidate_structure'] == struct].reducing_mass.values * charges_arr
+        spec_masses = df_in[df_in['candidate_structure'] == struct][idx_col].values * charges_arr
         is_adduct = any(
             np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance) or
             np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) * charges_arr - spec_masses) < mass_tolerance)
@@ -830,9 +834,17 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
         [composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + tag for comp in df_out['composition'].values])
     raw_masses = df_out.index.values * np.abs(df_out['charge'].values)
     df_out['adduct'] = None
+    charges_abs = np.abs(df_out['charge'].values)
     for adduct in adduct_list:
         adduct_mass = mass_dict.get(adduct, 999)
+        if adduct_mass == 999:
+            continue
+        # Singly-charged adduct: mz × |z| = M + adduct
         df_out.loc[np.abs(computed_masses + adduct_mass - raw_masses) < 0.5, 'adduct'] = adduct
+        # Multiply-charged adduct: mz × |z| = M + adduct − (|z|−1)×H
+        proton_offset = (charges_abs - 1) * HYDROGEN_MASS
+        df_out.loc[(charges_abs > 1) & (
+                    np.abs(computed_masses + adduct_mass - proton_offset - raw_masses) < 0.5), 'adduct'] = adduct
     new_preds = []
     for k in range(len(df_out)):
         keep = []
@@ -1567,7 +1579,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         loaded_file['intensity'] = [0]*len(loaded_file)
     # Prepare file for processing
     loaded_file.dropna(subset = ['peak_d'], inplace = True)
-    loaded_file['reducing_mass'] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
+    idx_col = 'm/z' if 'm/z' in loaded_file.columns else 'reducing_mass'
+    loaded_file[idx_col] += np.random.uniform(0.00001, 10**(-20), size = len(loaded_file))
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
     df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
@@ -1611,11 +1624,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     else:
         df_out = df_out.reset_index()
     df_out = df_out.sort_values(['spec_id','annotation_score'], ascending = False).groupby('spec_id').first()
-    df_out = df_out[df_out['annotation_score'] > crumbs_thresh].drop(columns = ['candidate_structure']).set_index('reducing_mass')
-    df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d','annotation_score','rel_abundance','top_fragments']]
+    df_out = df_out[df_out['annotation_score'] > crumbs_thresh].drop(columns = ['candidate_structure']).set_index('m/z')
+    df_out = df_out[['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d', 'annotation_score', 'rel_abundance', 'top_fragments']]
     if df_out.empty:
         df_out['ppm_error'] = []
-        df_out.index.name = "m/z"
         return (df_out, []) if spectra else df_out
     # Deduplicate identical predictions for different spectra
     df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
@@ -1778,8 +1790,9 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Cross-file MS1 gap filling: propagate predictions to files missing MS2 when MS1 confirms the precursor
     all_file_labels = [fp.split('/')[-1].split('.')[0] for fp in spectra_filepath_list]
     temp = prevailing_category_predictions.reset_index()
+    idx_col = 'm/z' if 'm/z' in temp.columns else 'reducing_mass'
     master = temp.groupby(['mass_label', 'category_label']).agg(
-        repr_mz = ('reducing_mass', 'median'),
+        repr_mz = (idx_col, 'median'),
         repr_rt = ('RT', 'median'),
         repr_charge = ('charge', 'first'),
         repr_composition = ('composition', 'first'),

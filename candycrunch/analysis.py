@@ -1784,3 +1784,134 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
         plt.plot(conf_idx, data_list, label = key)
     plt.legend()
     return bins
+
+
+def domon_costello_to_mpl(dc_name):
+    """Converts a Domon-Costello fragment name to matplotlib mathtext format\n
+    | Arguments:
+    | :-
+    | dc_name (list): a list of Domon-Costello cleavage names\n
+    | Returns:
+    | :-
+    | Returns a matplotlib-renderable string with correct superscript/subscript formatting
+    """
+    greek = {'Alpha': r'\alpha', 'Beta': r'\beta', 'Gamma': r'\gamma',
+             'Delta': r'\delta', 'Epsilon': r'\epsilon', 'Zeta': r'\zeta',
+             'Eta': r'\eta', 'Theta': r'\theta', 'Iota': r'\iota',
+             'Kappa': r'\kappa', 'Lambda': r'\lambda', 'Mu': r'\mu'}
+    mpl_parts = []
+    for nom in dc_name:
+        parts = nom.split('_')
+        if len(parts) == 3:
+            frag_type, number, chain = parts
+            chain_greek = greek.get(chain, chain)
+            if len(frag_type) > 1:
+                mpl_parts.append(f"$^{{{frag_type[0]},{frag_type[1]}}}{frag_type[2]}_{{{number}{chain_greek}}}$")
+            else:
+                mpl_parts.append(f"${frag_type}_{{{number}{chain_greek}}}$")
+        elif len(parts) >= 2 and parts[0] == 'M':
+            loss = '_'.join(parts[1:])
+            formatted = []
+            for ch in loss:
+                if ch.isnumeric():
+                    formatted.append(f"_{ch}")
+                else:
+                    formatted.append(ch)
+            mpl_parts.append(f"$M - {''.join(formatted)}$")
+        elif parts[0] == 'M':
+            mpl_parts.append('$M$')
+        else:
+            mpl_parts.append(nom)
+    return "/".join(mpl_parts)
+
+
+def plot_annotated_spectrum(input_string, df_out, spectra_out, mass_threshold,
+                            max_cleavages = 3, mass_tag = None,
+                            sample_prep = 'underivatized', disable_global_mods = False,
+                            prior_weight = 1.0, ax = None, annotate_top_n = None,
+                            annotation_threshold = 0.05, figsize = (12, 5)):
+    """Plots an MS2 spectrum annotated with CandyCrumbs fragment assignments\n
+    | Arguments:
+    | :-
+    | input_string (string): glycan in IUPAC-condensed format, must match a top1 prediction in df_out
+    | df_out (dataframe): prediction dataframe from wrap_inference with spectra=True
+    | spectra_out (list): list of peak_d dicts from wrap_inference with spectra=True
+    | mass_threshold (float): maximum tolerated mass difference for fragment matching
+    | max_cleavages (int): maximum concurrent fragmentations per mass; default:3
+    | mass_tag (float): mass of the glycan label or reducing end modification; default:None
+    | sample_prep (string): underivatized/permethylated; default:'underivatized'
+    | disable_global_mods (bool): whether to disable global modifications; default:False
+    | prior_weight (float): weighting of prior-informed scoring; default:1.0
+    | ax (matplotlib axis): axis to plot on, creates new figure if None; default:None
+    | annotate_top_n (int): only label the N most intense annotated peaks; default:None (label all)
+    | annotation_threshold (float): minimum relative intensity (0-1) to annotate a peak; default:0.05
+    | figsize (tuple): figure size if creating a new figure; default:(12, 5)\n
+    | Returns:
+    | :-
+    | (1) the CandyCrumbs hit_dict for downstream use
+    | (2) the matplotlib axis object
+    """
+    top1_preds = [p[0][0] if p else '' for p in df_out['predictions']]
+    matches = [i for i, pred in enumerate(top1_preds) if pred == input_string]
+    if not matches:
+        raise ValueError(f"'{input_string}' not found as a top1 prediction in df_out")
+    row_idx = matches[0]
+    charge = df_out.iloc[row_idx]['charge']
+    peak_d = spectra_out[row_idx]
+    mz_values = np.array(sorted(peak_d.keys()), dtype = float)
+    intensities = np.array([peak_d[mz] for mz in mz_values], dtype = float)
+    max_int = intensities.max()
+    rel_intensities = intensities / max_int * 100 if max_int > 0 else intensities.copy()
+    hit_dict = CandyCrumbs(input_string, mz_values.tolist(), mass_threshold,
+                           max_cleavages = max_cleavages, simplify = True, charge = charge,
+                           mass_tag = mass_tag, sample_prep = sample_prep,
+                           disable_global_mods = disable_global_mods, prior_weight = prior_weight)
+    annotated_peaks, unannotated_mz, unannotated_int = [], [], []
+    for mz, rel_int in zip(mz_values, rel_intensities):
+        hit = hit_dict.get(mz)
+        if hit is not None:
+            dc_names = hit['Domon-Costello nomenclatures']
+            label = domon_costello_to_mpl(dc_names[0])
+            z = hit['Fragment charges'][0]
+            if abs(z) > 1:
+                label += f" [{'+' if z > 0 else ''}{z}]"
+            annotated_peaks.append((mz, rel_int, label))
+        else:
+            unannotated_mz.append(mz)
+            unannotated_int.append(rel_int)
+    if annotate_top_n is not None:
+        annotated_peaks.sort(key = lambda x: x[1], reverse = True)
+        label_peaks = annotated_peaks[:annotate_top_n]
+        demoted = annotated_peaks[annotate_top_n:]
+        unannotated_mz.extend([p[0] for p in demoted])
+        unannotated_int.extend([p[1] for p in demoted])
+        annotated_peaks = label_peaks
+    ann_mz = [p[0] for p in annotated_peaks]
+    ann_int = [p[1] for p in annotated_peaks]
+    ann_labels = [p[2] for p in annotated_peaks]
+    if ax is None:
+        fig, ax = plt.subplots(figsize = figsize)
+    ax.vlines(unannotated_mz, 0, unannotated_int, colors = 'grey', linewidth = 0.8, alpha = 0.4)
+    ax.vlines(ann_mz, 0, ann_int, colors = 'tab:red', linewidth = 1.2)
+    sorted_ann = sorted(zip(ann_mz, ann_int, ann_labels), key = lambda x: x[0])
+    min_mz_gap = (mz_values.max() - mz_values.min()) * 0.025
+    offsets = [0] * len(sorted_ann)
+    for i in range(1, len(sorted_ann)):
+        if sorted_ann[i][0] - sorted_ann[i - 1][0] < min_mz_gap:
+            offsets[i] = (offsets[i - 1] + 1) % 5
+        else:
+            offsets[i] = 0
+    y_offset_map = {0: 4, 1: 14, 2: 24, 3: 34, 4: 44}
+    for (mz, rel_int, label), offset in zip(sorted_ann, offsets):
+        if rel_int >= annotation_threshold * 100:
+            ax.annotate(label, (mz, rel_int), textcoords = 'offset points',
+                        xytext = (0, y_offset_map[offset]), ha = 'center', fontsize = 6,
+                        rotation = 90, rotation_mode = 'anchor')
+    ax.set_xlabel('m/z')
+    ax.set_ylabel('Relative Intensity (%)')
+    ax.set_title(f'Annotated MS² spectrum: {input_string}')
+    ax.set_xlim(mz_values.min() - 20, mz_values.max() + 20)
+    ax.set_ylim(0, max(rel_intensities) * 1.3)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    return hit_dict, ax
