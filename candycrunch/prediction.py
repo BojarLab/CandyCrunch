@@ -559,7 +559,7 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag, modification = 'reduced', sample_prep = 'underivatized', max_charge = 3):
     idx_col = 'm/z' if 'm/z' in df_in.columns else 'reducing_mass'
     red_masses = np.array(df_in[idx_col])
-    known_charges = df_in['precursor_charge'].values if 'precursor_charge' in df_in.columns else [None] * len(red_masses)
+    known_charges = [None if pd.isna(c) else int(c) for c in df_in['precursor_charge'].values] if 'precursor_charge' in df_in.columns else [None] * len(red_masses)
     tag = mass_tag if mass_tag else 0
     all_comps = [x for x in df_glycan_in.groupby('comp_str').first()['Composition']]
     comps_in = copy.deepcopy(all_comps)
