@@ -111,6 +111,10 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 reducing_mass.append(float(key.split('_')[-1]))
                 rts.append(spectrum.scan_time_in_minutes())
                 raw_charge = spectrum.selected_precursors[0].get('charge', None)
+                # Vendor software can default to charge=1 when undetermined;
+                # only trust explicit multiply-charged assignments
+                if raw_charge is not None and abs(int(raw_charge)) == 1:
+                    raw_charge = None
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                 if intensity:
                     inty = spectrum.selected_precursors[0].get('i', np.nan)
@@ -162,6 +166,8 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                     reducing_mass.append(float(precursor_mz))
                     rts.append(spectrum['retentionTime'])
                     raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
+                    if raw_charge is not None and abs(int(raw_charge)) == 1:
+                        raw_charge = None
                     charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                     if intensity:
                         inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
