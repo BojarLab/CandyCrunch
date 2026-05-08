@@ -1511,7 +1511,7 @@ def flag_coeluting_substructures(df_out, glycan_class, rt_tolerance = 0.25):
 
 def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, bin_num = 2048, max_charge = 3,
                    frag_num = 100, mode = 'negative', modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
-                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh=300,
+                   pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False, mass_tolerance = 0.5, extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh = 300,
                    filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True, experimental = True, mass_dic = None, sample_prep = 'underivatized',
                    taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False, struct_mass_tol = 0.6, _return_intermediate = False):
     """wrapper function to get & curate CandyCrunch predictions\n
@@ -1602,6 +1602,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         pred_conf.append(list(combs.values()))
     df_out['rel_abundance'] = df_out['intensity']
     df_out['predictions'] = [[(pred, conf) for pred, conf in zip(pred_row, conf_row)] for pred_row, conf_row in zip(preds, pred_conf)]
+    _raw_predictions = df_out['predictions'].tolist()
     # Check correctness of glycan class & mass
     df_out['predictions'] = [
         [(g[0], round(g[1], 4)) for g in preds if
@@ -1610,6 +1611,75 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
          get_comp(g[0]) == comp][:5]
         for preds, comp in zip(df_out.predictions, df_out.composition)
         ]
+    # Cross-validate: for spectra where exact composition equality eliminated all model
+    # predictions, run CandyCrumbs on the model's top mass-compatible prediction.
+    # Accepted only when fragment annotation independently passes crumbs_thresh.
+    _no_pred_indices = [i for i in range(len(df_out)) if not df_out['predictions'].iloc[i]]
+    if _no_pred_indices:
+        _tag = mass_tag if mass_tag else 0
+        _adduct_list = get_adduct_list(mode)
+        _model_tops = {}
+        for i in _no_pred_indices:
+            for g_name, g_conf in _raw_predictions[i]:
+                if g_conf <= pred_thresh:
+                    break
+                if (enforce_class(g_name, glycan_class, g_conf, extra_thresh = extra_thresh)
+                        and mass_check(df_out.index[i], g_name, mode = mode, modification = modification,
+                                       mass_tag = mass_tag, sample_prep = sample_prep,
+                                       permitted_charges = [abs(int(df_out['charge'].iloc[i]))],
+                                       mass_tolerance = mass_tolerance)):
+                    _model_tops[i] = (g_name, g_conf)
+                    break
+        _struct_to_indices = defaultdict(list)
+        for i, (g_name, _) in _model_tops.items():
+            _struct_to_indices[g_name].append(i)
+        for _struct, _indices in _struct_to_indices.items():
+            _pred_comp = get_comp(_struct)
+            if not _pred_comp:
+                continue
+            _pred_comp_mass = composition_to_mass(_pred_comp, sample_prep = sample_prep,
+                                                  modification = modification) + _tag
+            _charges_arr = np.array([abs(int(df_out['charge'].iloc[i])) for i in _indices])
+            _spec_masses = np.array([df_out.index[i] * _charges_arr[j] for j, i in enumerate(_indices)])
+            _is_adduct = any(
+                np.any(np.abs(_pred_comp_mass + mass_dict.get(adduct, 999) - _spec_masses) < mass_tolerance) or
+                np.any(
+                    np.abs(_pred_comp_mass + mass_dict.get(adduct, 999) * _charges_arr - _spec_masses) < mass_tolerance)
+                for adduct in _adduct_list)
+            _row_charge = int(max(_charges_arr))
+            _peak_dicts = [df_out['peak_d'].iloc[i] for i in _indices]
+            _rounded_mass_rows = [[np.round(y, 1) for y in deisotope_ms2(pd, _row_charge, 0.05)][:15] for pd in
+                                  _peak_dicts]
+            _unq_rounded = set(m for row in _rounded_mass_rows for m in row)
+            try:
+                _cc_out = CandyCrumbs(_struct, _unq_rounded, mass_tolerance, simplify = False,
+                                      charge = int(multiplier * _row_charge),
+                                      disable_global_mods = (not _is_adduct or mode == "negative"),
+                                      disable_X_cross_rings = True, max_cleavages = 2,
+                                      mass_tag = mass_tag, sample_prep = sample_prep)
+            except Exception:
+                continue
+            _tms = {}
+            for _k, _v in _cc_out.items():
+                if _v:
+                    _filtered = []
+                    for ant in _v['Domon-Costello nomenclatures']:
+                        prefs = [a.split('_')[0][-1] for a in ant]
+                        if ('A' in prefs or 'X' in prefs) and len(prefs) > 1:
+                            continue
+                        if 'M' in prefs and len(prefs) > 2:
+                            continue
+                        _filtered.append(ant)
+                    _tms[_k] = len(_filtered)
+                else:
+                    _tms[_k] = 0
+            for _idx, _rmasses in zip(_indices, _rounded_mass_rows):
+                _score = sum(_tms.get(m, 0) for m in _rmasses)
+                if _score > crumbs_thresh:
+                    _gn, _gc = _model_tops[_idx]
+                    df_out.iat[_idx, df_out.columns.get_loc('predictions')] = [(_gn, round(_gc, 4))]
+                    df_out.iat[_idx, df_out.columns.get_loc('composition')] = get_comp(_gn)
+                    df_out.iat[_idx, df_out.columns.get_loc('annotation_score')] = float(_score)
     df_out['charge'] = [c * multiplier for c in df_out['charge']]
     df_out['RT'] = df_out['RT'].round(2)
     # Extract & sort the top 100 fragments by intensity
