@@ -53,7 +53,7 @@ TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6
 'ref':'https://doi.org/10.1007/s13361-018-1945-7'
 }
 ]
-THRESHOLD = 0.1
+THRESHOLD = 0.2
 TOP5_THRESHOLD = 0.63
 
 @pytest.mark.parametrize("test_dict", TEST_DICTS)

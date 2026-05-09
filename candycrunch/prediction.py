@@ -5,6 +5,7 @@ import re
 import pickle
 from collections import defaultdict
 import json
+import random
 from typing import Dict
 import numpy as np
 import numpy_indexed as npi
@@ -1553,6 +1554,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    """
     if not _return_intermediate:
         print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
+    np.random.seed(42)
+    random.seed(42)
+    torch.manual_seed(42)
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
@@ -1826,6 +1830,9 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | Returns a tuple of (pivot_table, dict of per-file dataframes)
    """
     print(f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
+    np.random.seed(42)
+    random.seed(42)
+    torch.manual_seed(42)
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)]

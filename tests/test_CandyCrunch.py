@@ -134,9 +134,9 @@ test_params = [
 ]
 
 @pytest.mark.parametrize("test_params", test_params)
-def test_candycrunch_accuracy(test_params, result_collector, test_files = None):
+def test_candycrunch_accuracy(test_params, result_collector, input_format, test_files = None):
     if result_collector.param_names is None:
-        result_collector.param_names = {k: k for k in extra_param_dict.keys()}
+        result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
     start_time = time.time()  # Start timing
     test_outputs = []
     test_dict = test_params['test_dict']
@@ -144,8 +144,13 @@ def test_candycrunch_accuracy(test_params, result_collector, test_files = None):
     if test_files is None:
         test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{test_dict['name']}")]
     test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
+    if input_format == "xlsx":
+        test_files = [x for x in test_files if not x.endswith(".mzML")]
+    elif input_format == "mzml":
+        mzml = [x for x in test_files if x.endswith(".mzML")]
+        test_files = mzml if mzml else test_files  # fall back to xlsx if no mzML present
     for filename in test_files:
-        inference_params = {k: v for k,v in test_params.items() if 'posthoc' not in k if k != 'test_dict'}
+        inference_params = {k: v for k,v in test_params.items() if 'posthoc' not in k if k not in ('test_dict', 'format')}
         posthoc_params = {k: v for k,v in test_params.items() if 'posthoc' in k}
         print(filename)
         print(inference_params|posthoc_params)
@@ -167,7 +172,9 @@ def test_candycrunch_accuracy(test_params, result_collector, test_files = None):
         print('incorrect_preds',eval_scores[-3])
         print('peaks_not_picked',eval_scores[-6])
         test_outputs.append(eval_scores)
-        print(f'file_score:{eval_scores[0]}')
+        file_format = 'mzML' if filename.endswith('.mzML') else 'xlsx'
+        print(f'file_score:{eval_scores[0]} ({file_format})')
+        test_params['format'] = file_format
         result_collector.add_result(test_params, eval_scores[0], eval_scores)
         param_key = tuple(
             test_params[key] if key != 'test_dict' else test_params['test_dict']['name']

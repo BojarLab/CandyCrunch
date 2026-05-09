@@ -39,3 +39,6 @@ htmlcov/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+# Test files
+tests/data/*/*.mzML
