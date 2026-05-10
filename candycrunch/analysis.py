@@ -167,8 +167,8 @@ AA_masses = {'A': 71.0371, 'R': 156.1011, 'N': 114.0429, 'D': 115.0269,
              'P': 97.0527, 'S': 87.0320, 'T': 101.0476, 'W': 186.0793, 'Y': 163.0633, 'V': 99.0684}
 tester_ma_addition = {k: {'mass': {k: v}, 'atoms': {k: [1, 2, 3, 4, 5, 6]}} for k, v in AA_masses.items()}
 mono_attributes = mono_attributes | tester_ma_addition
-bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WATER_MASS, 'peptide_c': -1,
-               'peptide_z': -16, 'peptide_a': -46}
+bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WATER_MASS, 'peptide_c': -(WATER_MASS - 17.026549),
+               'peptide_z': -(17.026549 - 1.007825), 'peptide_a': -(WATER_MASS + 27.994915)} # z here is from EThcD even-electron convention
 # Atom positions carrying methylatable -OH (or -COOH) groups per base monosaccharide.
 # C1 is excluded: consumed by the glycosidic bond in the residue mass convention.
 # Amide N-H (e.g., C2 of HexNAc) is included: standard permethylation does
@@ -199,9 +199,9 @@ permethylated_bond_masses = {
     'no_bond': -(WATER_MASS + CH2_MASS),
     'red_bond': WATER_MASS,
     'peptide_b': -WATER_MASS,
-    'peptide_c': -1,
-    'peptide_z': -16,
-    'peptide_a': -46,
+    'peptide_c': -(WATER_MASS - 17.026549),
+    'peptide_z': -(17.026549 - 1.007825), # z here is from EThcD even-electron convention
+    'peptide_a': -(WATER_MASS + 27.994915),
 }
 # to be updated with a more empirical estimation once we have clear-cut annotation data
 fragmentation_priors = {
@@ -228,6 +228,13 @@ fragmentation_priors = {
 	},
 	'multi_cleavage_penalty': 0.5,
 }
+linkage_lability = {
+    ('Neu5Ac', '2-3'): 1.0, ('Neu5Ac', '2-6'): 0.3, ('Neu5Ac', '2-8'): 0.5,
+    ('Neu5Gc', '2-3'): 1.0, ('Neu5Gc', '2-6'): 0.3, ('Neu5Gc', '2-8'): 0.5,
+    ('Kdn', '2-3'): 1.0, ('Kdn', '2-6'): 0.3,
+    ('dHex', '1-2'): 0.7, ('dHex', '1-3'): 0.9, ('dHex', '1-4'): 0.6, ('dHex', '1-6'): 0.4,
+}
+DEFAULT_LABILITY = 0.5
 
 
 def evaluate_adjacency_monos(glycan_part, adjustment):
@@ -1208,6 +1215,25 @@ def score_fragment_prior(dc_name, charge):
 	return score
 
 
+def compute_fragment_lability(nx_mono, subg):
+    """Scores how labile the broken glycosidic bonds are; higher means more expected cleavage"""
+    node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
+    subg_nodes = set(subg.nodes())
+    total = 0.0
+    n = 0
+    for u, v, d in nx_mono.edges(data = True):
+        if (u in subg_nodes) == (v in subg_nodes):
+            continue
+        bond = d.get('bond_label', '')
+        if bond in ('glycosite', 'peptide'):
+            continue
+        child_label = map_to_basic(node_dict[u], obfuscate_ptm = False)
+        link_pos = bond[1:] if bond and bond[0].isalpha() else bond
+        total += linkage_lability.get((child_label, link_pos), DEFAULT_LABILITY)
+        n += 1
+    return total / max(n, 1)
+
+
 def priority_filter(dc_names, diffs, peptide = False, charge = -1):
     """Filters Domon-Costello fragment names by number of cleavages, fragmentation prior, and difference from observed mass\n
     | Arguments:
@@ -1222,11 +1248,13 @@ def priority_filter(dc_names, diffs, peptide = False, charge = -1):
     """
     if peptide:
         sorted_frags = sorted(list(zip(dc_names, diffs)),
-                              key = lambda x: (len([y for v in x[0] for y in v if y not in ['Peptide', 'M']]), x[1]))
+                              key = lambda x: (len([y for v in x[0] for y in v if
+                                                    y not in ['Peptide', 'No Peptide', 'M'] and not y.startswith(
+                                                        'loss of glycan')]), x[1]))
     else:
         sorted_frags = sorted(list(zip(dc_names, diffs)),
                               key = lambda x: (len(x[0]), -score_fragment_prior(x[0], charge), x[1]))
-    return [f[0] for f in sorted_frags]
+    return [f[0] for f in sorted_frags], [f[1] for f in sorted_frags]
 
 
 def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_frag_keys = None):
@@ -1277,7 +1305,8 @@ def observed_fragments_checker(possible_fragments, observed_fragments):
     return [sums[i] - 1 if 'M' in ''.join(f) else sums[i] for i, f in enumerate(possible_fragments)]
 
 
-def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = None, charge = -1, prior_weight = 1.0):
+def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = None, charge = -1, prior_weight = 1.0,
+                       lability_scores = None, mass_threshold = 0.5):
     """Sorts a list of possible fragments for each observed mass into a list of one fragment per observed mass\n
 	| Arguments:
 	| :-
@@ -1293,12 +1322,22 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
     """
     observed_frags = []
     if peptide:
-        for possible_frags in dc_names:
-            possible_frags = sorted(possible_frags,
-                                    key = lambda x: len([y for v in x for y in v if y not in ['Peptide', 'M']]))
-            if not possible_frags or len(possible_frags[0]) == 0:
+        diff_weight = 4.0 / mass_threshold if mass_threshold > 0 else 10.0
+        for i, possible_frags in enumerate(dc_names):
+            if not possible_frags or (len(possible_frags) > 0 and len(possible_frags[0]) == 0):
                 observed_frags.append([])
+                continue
+            if diffs and diffs[i]:
+                paired = sorted(zip(possible_frags, diffs[i]),
+                                key = lambda x: (len([y for v in x[0] for y in v if
+                                                      y not in ['Peptide', 'No Peptide', 'M'] and not y.startswith(
+                                                          'loss of glycan')]) * (1 + diff_weight * x[1]), x[1]))
+                observed_frags.append([paired[0][0]])
             else:
+                possible_frags = sorted(possible_frags,
+                                        key = lambda x: len([y for v in x for y in v if
+                                                             y not in ['Peptide', 'No Peptide',
+                                                                       'M'] and not y.startswith('loss of glycan')]))
                 observed_frags.append([possible_frags[0]])
         return observed_frags
     for i, possible_frags in enumerate(dc_names):
@@ -1311,14 +1350,19 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
             frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
             max_overlaps_seen = observed_fragments_checker(frag_options, observed_frags)
             prior_scores = [score_fragment_prior(f, charge) for f in frag_options]
-            if diffs and diffs[i]:
-                min_cleavages = len(possible_frags[0])
-                option_diffs = [d for f, d in zip(possible_frags, diffs[i]) if len(f) == min_cleavages]
-                scores = [overlap - 0.5 * diff + prior_weight * prior
-                          for overlap, diff, prior in zip(max_overlaps_seen, option_diffs, prior_scores)]
+            min_cleavages = len(possible_frags[0])
+            if lability_scores and lability_scores[i]:
+                option_lability = [l for f, l in zip(possible_frags, lability_scores[i]) if len(f) == min_cleavages]
             else:
-                scores = [overlap + prior_weight * prior
-                          for overlap, prior in zip(max_overlaps_seen, prior_scores)]
+                option_lability = [DEFAULT_LABILITY] * len(frag_options)
+            if diffs and diffs[i]:
+                option_diffs = [d for f, d in zip(possible_frags, diffs[i]) if len(f) == min_cleavages]
+                scores = [overlap - 0.5 * diff + prior_weight * (prior + lability)
+                          for overlap, diff, prior, lability in
+                          zip(max_overlaps_seen, option_diffs, prior_scores, option_lability)]
+            else:
+                scores = [overlap + prior_weight * (prior + lability)
+                          for overlap, prior, lability in zip(max_overlaps_seen, prior_scores, option_lability)]
             max_overlap_idx = np.argsort(scores, kind = 'stable')[-1]
             observed_frags.append([frag_options[max_overlap_idx]])
     return observed_frags
@@ -1543,20 +1587,27 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
                 dc_names = get_glycan_cleavages(nx_mono, frag_subg, input_dict['glycosites'])
                 gp_names = [rf_names] + dc_names
                 all_gp_names.append(gp_names)
-            downstream_values.append((*fragment_properties, all_gp_names))
+            lability = [compute_fragment_lability(nx_mono, sg) for sg in fragment_properties[-1]] if \
+            fragment_properties[-1] else []
+            downstream_values.append((*fragment_properties, all_gp_names, lability))
     else:
         peptide = False
         for observed_mass in fragment_masses:
             fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge,
                                                             sorted_frag_keys)
             dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1], chain_rank)
-            downstream_values.append((*fragment_properties, dc_names))
-    filtered_dc_names = [priority_filter(x[5], x[2], peptide = peptide, charge = charge) if x[0] else [] for x in
-                         downstream_values]
+            lability = [compute_fragment_lability(nx_mono, sg) for sg in fragment_properties[-1]] if \
+            fragment_properties[-1] else []
+            downstream_values.append((*fragment_properties, dc_names, lability))
+    filtered_results = [priority_filter(x[5], x[2], peptide = peptide, charge = charge) if x[0] else ([], []) for x in
+                        downstream_values]
+    filtered_dc_names = [r[0] for r in filtered_results]
     if simplify:
-        filtered_diffs = [list(x[2]) if x[0] else [] for x in downstream_values]
+        filtered_diffs = [r[1] for r in filtered_results]
+        filtered_lability = [list(x[6]) if x[0] else [] for x in downstream_values]
         filtered_dc_names = simplify_fragments(filtered_dc_names, peptide = peptide, diffs = filtered_diffs,
-                                               charge = charge, prior_weight = prior_weight)
+                                               charge = charge, prior_weight = prior_weight,
+                                               lability_scores = filtered_lability, mass_threshold = mass_threshold)
     for i, frag_dc_names in enumerate(filtered_dc_names):
         if frag_dc_names:
             filtered_properties = list(zip(*downstream_values[i]))
