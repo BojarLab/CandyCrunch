@@ -1703,6 +1703,54 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     if df_out.empty:
         df_out['ppm_error'] = []
         return (df_out, []) if spectra else df_out
+    # Re-rank predictions by CandyCrumbs fragment validation; seems like a slight improvement --> keep it in for now
+    _rr_tag = mass_tag if mass_tag else 0
+    _rr_adducts = get_adduct_list(mode)
+    for idx in df_out.index:
+        preds_row = df_out.at[idx, 'predictions']
+        if len(preds_row) < 2:
+            continue
+        c = abs(int(df_out.at[idx, 'charge']))
+        comp = df_out.at[idx, 'composition']
+        comp_mass = composition_to_mass(comp, sample_prep = sample_prep, modification = modification) + _rr_tag
+        spec_mass = idx * c
+        is_adduct = any(
+            abs(comp_mass + mass_dict.get(adduct, 999) - spec_mass) < mass_tolerance or
+            abs(comp_mass + mass_dict.get(adduct, 999) * c - spec_mass) < mass_tolerance
+            for adduct in _rr_adducts)
+        rounded_masses = [np.round(y, 1) for y in deisotope_ms2(df_out.at[idx, 'peak_d'], c, 0.05)][:15]
+        unq_rounded = set(rounded_masses)
+        scored_preds = []
+        for struct, conf in preds_row:
+            try:
+                cc_out = CandyCrumbs(struct, unq_rounded, mass_tolerance, simplify = False,
+                                     charge = int(multiplier * c),
+                                     disable_global_mods = (not is_adduct or mode == "negative"),
+                                     disable_X_cross_rings = True,
+                                     max_cleavages = 2, mass_tag = mass_tag, sample_prep = sample_prep)
+            except Exception:
+                scored_preds.append((struct, conf, 0))
+                continue
+            tms = {}
+            for _k, _v in cc_out.items():
+                if _v:
+                    _filtered = []
+                    for ant in _v['Domon-Costello nomenclatures']:
+                        prefs = [a.split('_')[0][-1] for a in ant]
+                        if ('A' in prefs or 'X' in prefs) and len(prefs) > 1:
+                            continue
+                        if 'M' in prefs and len(prefs) > 2:
+                            continue
+                        _filtered.append(ant)
+                    tms[_k] = len(_filtered)
+                else:
+                    tms[_k] = 0
+            scored_preds.append((struct, conf, sum(tms.get(m, 0) for m in rounded_masses)))
+        top1_crumbs = scored_preds[0][2]
+        best_alt = max(scored_preds[1:], key = lambda x: x[2])
+        if best_alt[2] > top1_crumbs * 2 and best_alt[2] >= crumbs_thresh:
+            scored_preds.sort(key = lambda x: (x[2], x[1]), reverse = True)
+            df_out.at[idx, 'predictions'] = [(s, c) for s, c, _ in scored_preds]
     # Deduplicate identical predictions for different spectra
     df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
     df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
