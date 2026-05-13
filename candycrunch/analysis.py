@@ -1642,7 +1642,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
 
 
 @rescue_glycans
-def CandyCrumbs(input_string, fragment_masses, mass_threshold,
+def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
                 max_cleavages = 3, simplify = True, charge = -1, mass_tag = None,
                 iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = False,
                 sample_prep = 'underivatized', prior_weight = 1.0):
@@ -1651,7 +1651,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold,
     | :-
     | input_string (string): glycan in IUPAC-condensed format (or composition as dict/string)
     | fragment_masses (list): all masses which are to be annotated with a fragment name
-    | mass_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments
+    | mass_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments; default:0.5
     | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
     | simplify (bool): whether to try condensing fragment options to the most likely option; default:True
     | charge (int): the charge state of the precursor ion (singly-charged, doubly-charged); default:-1
