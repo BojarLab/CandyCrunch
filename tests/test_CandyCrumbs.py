@@ -53,8 +53,22 @@ TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6
 'ref':'https://doi.org/10.1007/s13361-018-1945-7'
 }
 ]
-THRESHOLD = 0.3
-TOP5_THRESHOLD = 0.63
+THRESHOLD = 0.4
+TOP5_THRESHOLD = 0.7
+CHAIN_RANKS = {'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu'}
+
+def strip_chain_rank(name):
+	parts = name.split('_')
+	if len(parts) == 3 and parts[2] in CHAIN_RANKS:
+		return '_'.join(parts[:2])
+	return name
+
+def normalize_annotations(annotations):
+	if not annotations:
+		return []
+	if isinstance(annotations[0], str):
+		return sorted(strip_chain_rank(x) for x in annotations)
+	return sorted(tuple(sorted(strip_chain_rank(y) for y in x)) for x in annotations)
 
 @pytest.mark.parametrize("test_dict", TEST_DICTS)
 def test_candycrumbs_accuracy(test_dict):
@@ -69,9 +83,7 @@ def test_candycrumbs_accuracy(test_dict):
         if mass in result:
             if result[mass]:
                 predicted_annotations = result[mass]['Domon-Costello nomenclatures'][0]
-                pred_sorted = sorted([sorted(x) for x in predicted_annotations])
-                exp_sorted = sorted([sorted(x) for x in expected_annotations])
-                if pred_sorted == exp_sorted:
+                if normalize_annotations(predicted_annotations) == normalize_annotations(expected_annotations):
                     correct_annotations += 1
             elif not expected_annotations:
                 correct_annotations += 1  # Credit for correctly predicting no annotations
@@ -93,7 +105,8 @@ def test_candycrumbs_accuracy_top5(test_dict):
         if mass in result:
             if result[mass]:
                 predicted_annotations = result[mass]['Domon-Costello nomenclatures']
-                if expected_annotations in predicted_annotations:
+                exp_norm = normalize_annotations(expected_annotations)
+                if any(normalize_annotations(pred) == exp_norm for pred in predicted_annotations):
                     correct_annotations += 1
             elif not expected_annotations:
                 correct_annotations += 1  # Credit for correctly predicting no annotations
