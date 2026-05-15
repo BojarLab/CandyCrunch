@@ -30,7 +30,6 @@ data_path = os.path.join(this_dir, 'glycans.pkl')
 glycans = pickle.load(open(data_path, 'rb'))
 data_path = os.path.join(this_dir, 'glytoucan_mapping.pkl')
 glytoucan_mapping = pickle.load(open(data_path, 'rb'))
-# Choose the correct computing architecture
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda:0"
