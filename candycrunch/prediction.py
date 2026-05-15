@@ -1962,7 +1962,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     assigned_cats = assign_categories(pd.concat(non_empty.values()), intra_cat_thresh = intra_cat_thresh,
                                       maximise_cat_size=True)
     smoothed_category_predictions = assign_modal_category_prediction(assigned_cats)
-    prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n = top_n_isomers)
+    prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n=top_n_isomers)
     # Cross-file MS1 gap filling: propagate predictions to files missing MS2 when MS1 confirms the precursor
     all_file_labels = [fp.split('/')[-1].split('.')[0] for fp in spectra_filepath_list]
     temp = prevailing_category_predictions.reset_index()
@@ -2013,11 +2013,11 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             if supplement or experimental:
                 df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use,
                                              mode, modification, mass_tag, filter_out, taxonomy_filter,
-                                             mass_tolerance, mass_dic, sample_prep = sample_prep)
+                                             mass_tolerance, mass_dic, sample_prep=sample_prep)
             if len(df_out) > 0:
                 df_out = finalise_predictions(df_out, get_missing, pred_thresh, mode, modification,
                                               mass_tag, multiplier, plot_glycans, file_label, spectra,
-                                              sample_prep = sample_prep, glycan_class = glycan_class)
+                                              sample_prep=sample_prep, glycan_class=glycan_class)
         else:
             df_out = pd.DataFrame()
         # Unpack if spectra=True returned a tuple
@@ -2042,12 +2042,12 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         inference_dfs[file_label] = (df_out, spectra_out) if spectra_out is not None else df_out
     to_concat = [v[0] if isinstance(v, tuple) else v for v in inference_dfs.values()]
     all_outputs = pd.concat([df for df in to_concat if not df.empty])
-    combined_batch = all_outputs.pivot_table(index = 'top1_pred', columns = 'condition_label', values = 'rel_abundance',
-                                             aggfunc = 'sum')
+    combined_batch = all_outputs.pivot_table(index='top1_pred', columns='condition_label', values='rel_abundance',
+                                             aggfunc='sum')
     return combined_batch, inference_dfs
 
 
-def filter_top_n_isomers(df_in, top_n= 3):
+def filter_top_n_isomers(df_in, top_n=3):
     df_out = df_in.copy(deep=True)
     df_out['paired_categories'] = [(x, y) for x, y in zip(df_out.mass_label, df_out.category_label)]
     grouped_bc = df_out[['mass_label', 'category_label', 'condition_label']].groupby(
@@ -2078,24 +2078,24 @@ def assign_modal_category_prediction(assigned_cats):
     return assigned_cats
 
 
-def assign_categories(all_ms2_spectra, intra_cat_thresh= 3, maximise_cat_size= True):
+def assign_categories(all_ms2_spectra, intra_cat_thresh=3, maximise_cat_size=True):
     all_mass_dfs = []
     for search_mass in all_ms2_spectra.mass_label.unique():
         mass_group_dfs = []
         for condition_label in all_ms2_spectra.condition_label.unique():
             mass_group = all_ms2_spectra[(all_ms2_spectra['mass_label'] == search_mass) & (
-                        all_ms2_spectra['condition_label'] == condition_label)].copy(deep = True)
-            mass_group = mass_group.assign(RT_group = [i for i in range(len(mass_group))])
+                        all_ms2_spectra['condition_label'] == condition_label)].copy(deep=True)
+            mass_group = mass_group.assign(RT_group=[i for i in range(len(mass_group))])
             mass_group_dfs.append(mass_group)
-        cats_mass_dfs = mass_dfs_to_categories(mass_group_dfs, intra_cat_thresh, maximise_cat_size = maximise_cat_size)
+        cats_mass_dfs = mass_dfs_to_categories(mass_group_dfs, intra_cat_thresh, maximise_cat_size=maximise_cat_size)
         all_mass_dfs.append(cats_mass_dfs)
     return pd.concat([p for q in all_mass_dfs for p in q])
 
 
-def mass_dfs_to_categories(mass_range_dfs, inter_sample_thresh, maximise_cat_size= True):
+def mass_dfs_to_categories(mass_range_dfs, inter_sample_thresh, maximise_cat_size=True):
     RT_groups = create_RT_groups(mass_range_dfs)
     categories = initialise_categories(RT_groups)
-    categories = expand_RT_categories(RT_groups, categories, inter_sample_thresh, maximise_cat_size = maximise_cat_size)
+    categories = expand_RT_categories(RT_groups, categories, inter_sample_thresh, maximise_cat_size=maximise_cat_size)
     sample_cats = RT_cats_to_sample_cats(categories, RT_groups)
     cat_dfs = sample_categories_to_df(sample_cats, mass_range_dfs)
     return cat_dfs
@@ -2125,7 +2125,7 @@ def add_new_category(categories, cluster):
     return categories
 
 
-def expand_RT_categories(all_sample_RT_groups, categories, inter_sample_thresh, maximise_cat_size= False):
+def expand_RT_categories(all_sample_RT_groups, categories, inter_sample_thresh, maximise_cat_size=False):
     for i, sample in enumerate(all_sample_RT_groups[1:]):
         all_candidate_categories = calculate_candidate_clusters(sample, categories, inter_sample_thresh)
         orphan_idxs = []
@@ -2188,7 +2188,7 @@ def find_closest_categories_largest(sample, sample_candidates, categories):
         cat_mean_diffs.append({k: abs(v - cluster_mean) for k, v in cat_mean.items()})
     cats_out = [set() for m in cluster_means]
     selected_RTs = []
-    sorted_categories = dict(sorted(categories.items(), key = lambda x: len(x[1]), reverse = True))
+    sorted_categories = dict(sorted(categories.items(), key=lambda x: len(x[1]), reverse=True))
     for cat in sorted_categories:
         closest_RTs = sorted(
             [(diffs[cat], sample_RT) for diffs, sample_RT in zip(cat_mean_diffs, cluster_means) if cat in diffs if
@@ -2251,7 +2251,7 @@ def sample_categories_to_df(sample_group_categories, mass_range_df):
     return category_dfs
 
 
-def supplement_prediction(df_in, glycan_class, mode= 'negative', modification= 'reduced', sample_prep= 'underivatized',
+def supplement_prediction(df_in, glycan_class, mode='negative', modification='reduced', sample_prep='underivatized',
                           mass_tag=None):
     """searches for biosynthetic precursors of CandyCrunch predictions that could explain peaks\n
    | Arguments:
@@ -2285,10 +2285,10 @@ def supplement_prediction(df_in, glycan_class, mode= 'negative', modification= '
     preds_set = set(preds)
     new_nodes = [k for k in net.nodes() if k not in preds_set]
     explained_idx = [[unexplained_idx[k] for k, check in enumerate([mass_check(j, node,
-                                                                               modification = modification, mode = mode,
-                                                                               mass_tag = mass_tag,
-                                                                               sample_prep = sample_prep,
-                                                                               permitted_charges = [abs(c)]) for j, c in
+                                                                               modification=modification, mode=mode,
+                                                                               mass_tag=mass_tag,
+                                                                               sample_prep=sample_prep,
+                                                                               permitted_charges=[abs(c)]) for j, c in
                                                                     zip(unexplained, charges)]) if check] for node in
                      new_nodes]
     new_nodes = [(node, idx) for node, idx in zip(new_nodes, explained_idx) if idx]
