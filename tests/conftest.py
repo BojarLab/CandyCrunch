@@ -7,6 +7,22 @@ import json
 import os
 from datetime import datetime
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--input-format",
+        action="store",
+        default="xlsx",
+        choices=["xlsx", "mzml", "both"],
+        help="Which spectra format to test: xlsx (default), mzml, or both",
+    )
+
+
+@pytest.fixture(scope="session")
+def input_format(request):
+    return request.config.getoption("--input-format")
+
+
 class ResultCollector:
     def __init__(self):
         self.results = defaultdict(list)
@@ -162,6 +178,10 @@ def result_collector():
 
 def pytest_configure(config):
     config.collector = collector
+    config.addinivalue_line(
+        "filterwarnings",
+        "ignore:Testing an element's truth value:DeprecationWarning:pymzml",
+    )
 
 
 def pytest_sessionfinish():
