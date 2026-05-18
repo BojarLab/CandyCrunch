@@ -72,7 +72,7 @@ def normalize_annotations(annotations):
 
 @pytest.mark.parametrize("test_dict", TEST_DICTS)
 def test_candycrumbs_accuracy(test_dict):
-    result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], 0.4, charge=test_dict['charge'],mass_tag=test_dict['label_mass'],max_cleavages=test_dict.get('max_cleavages',3))
+    result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], mass_threshold = 0.4, charge=test_dict['charge'],mass_tag=test_dict['label_mass'],max_cleavages=test_dict.get('max_cleavages',3))
     total_annotations = len(test_dict['annotations'])
     correct_annotations = 0
     assert len(result) == total_annotations

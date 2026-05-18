@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from glycowork.glycan_data.loader import unwrap
 from glycowork.motif.processing import (bracket_removal, canonicalize_composition, is_composition,
-                                        min_process_glycans, rescue_glycans)
+                                        min_process_glycans, rescue_glycans, get_class)
 from glycowork.motif.tokenization import map_to_basic
 from glycowork.glycan_data.stats import cohen_d
 from scipy.stats import ttest_ind
@@ -1381,6 +1381,25 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False):
     return [None] + sorted(global_mods), present_special_residues
 
 
+def infer_glycosites(peptide_seq, glycan_class = None):
+	"""Infers potential N- and O-glycosylation sites from a peptide sequence\n
+	| Arguments:
+	| :-
+	| peptide_seq (string): amino acid sequence
+	| glycan_class (string): 'N', 'O', or None (both); default:None\n
+	| Returns:
+	| :-
+	| Returns a list of 0-indexed positions
+	"""
+	sites = []
+	for i, aa in enumerate(peptide_seq):
+		if glycan_class != 'O' and aa == 'N' and i + 2 < len(peptide_seq) and peptide_seq[i + 1] != 'P' and peptide_seq[i + 2] in 'ST':
+			sites.append(i)
+		elif glycan_class != 'N' and aa in 'ST':
+			sites.append(i)
+	return sites
+
+
 def create_peptide_graph(pep_seq):
     """Creates a network object of a peptide"""
     pep_arr = np.roll(np.eye(len(pep_seq)), (2, 1), axis = (1, 0))
@@ -1538,114 +1557,232 @@ def get_methyl_count(mono_type, fragment_type):
     return len(sites & set(atoms_entry))
 
 
+def _build_composition_fragments(composition, re_bonus, sample_prep = 'underivatized',
+                                 disable_X_cross_rings = False):
+	"""Builds glycan fragment options from a monosaccharide composition\n
+	| Arguments:
+	| :-
+	| composition (dict): monosaccharide composition, e.g., {'Hex': 5, 'HexNAc': 4}
+	| re_bonus (float): mass bonus for fragments retaining the reducing end (Y/Z/M)
+	| sample_prep (string): underivatized/permethylated
+	| disable_X_cross_rings (bool): whether to disable X-type cross-ring cleavages\n
+	| Returns:
+	| :-
+	| Returns a list of (mass_without_mode, label_string, n_cleavages) tuples
+	"""
+	permethylated = sample_prep == 'permethylated'
+	mono_types = sorted(m for m in composition if m in mono_attributes and composition[m] > 0)
+	if not mono_types:
+		return []
+	frags = []
+	if permethylated:
+		ion_adj = {'Y': (-CH2_MASS, re_bonus), 'Z': (-(WATER_MASS + CH2_MASS), re_bonus),
+		           'B': (0, 0), 'C': (WATER_MASS, 0)}
+	else:
+		ion_adj = {'Y': (0, re_bonus), 'Z': (-WATER_MASS, re_bonus),
+		           'B': (0, 0), 'C': (WATER_MASS, 0)}
+	for combo in product(*(range(composition[m] + 1) for m in mono_types)):
+		sub_comp = {m: c for m, c in zip(mono_types, combo) if c > 0}
+		if not sub_comp:
+			continue
+		residue_sum = sum(mono_attributes[m]['mass'][m] * c for m, c in sub_comp.items())
+		if permethylated:
+			n_sub = sum(sub_comp.values())
+			residue_sum += (sum(len(methyl_oh_atoms.get(m, set())) * c for m, c in sub_comp.items()) - max(n_sub - 1, 0)) * CH2_MASS
+		is_full = all(sub_comp.get(m, 0) == composition[m] for m in mono_types)
+		comp_str = '/'.join(f"{m}({c})" for m, c in sorted(sub_comp.items()))
+		if is_full:
+			frags.append((residue_sum + re_bonus, f'M {comp_str}', 0))
+		else:
+			for ion_type, (bond_adj, red_bon) in ion_adj.items():
+				frags.append((residue_sum + bond_adj + red_bon, f'{ion_type} {comp_str}', 1))
+	allowed_X = X_cross_rings if not disable_X_cross_rings else set()
+	for mono in mono_types:
+		for frag_type, frag_mass in mono_attributes[mono]['mass'].items():
+			if frag_type == mono:
+				continue
+			if frag_type in A_cross_rings or frag_type in allowed_X:
+				frags.append((frag_mass, f'{frag_type} {mono}', 1))
+	return frags
+
+
 def composition_to_fragments(composition, fragment_masses, mass_threshold, max_cleavages = 3,
                              charge = -1, mass_tag = None, simplify = True, disable_global_mods = False,
-                             disable_X_cross_rings = False, sample_prep = 'underivatized'):
-    """Calculates all possible fragment masses directly from a monosaccharide composition\n
-    | Arguments:
-    | :-
-    | composition (dict): monosaccharide composition, e.g., {'Hex': 5, 'HexNAc': 4, 'Neu5Ac': 2}
-    | fragment_masses (list): observed masses to annotate
-    | mass_threshold (float): maximum tolerated mass difference for fragment matching
-    | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
-    | charge (int): charge state of the precursor ion; default:-1
-    | mass_tag (float): mass of the glycan label or reducing end modification; default:2*H
-    | simplify (bool): whether to condense fragment options to the most likely; default:True
-    | disable_global_mods (bool): whether to disable global modifications; default:False
-    | disable_X_cross_rings (bool): whether to disable X-type cross-ring cleavages; default:False
-    | sample_prep (string): underivatized/permethylated\n
-    | Returns:
-    | :-
-    | Returns a dict keyed by observed mass, each pointing to an annotation dict or None
-    """
-    if not mass_tag:
-        mass_tag = 2 * HYDROGEN_MASS
-    mode_mass = -HYDROGEN_MASS if charge < 0 else HYDROGEN_MASS
-    permethylated = sample_prep == 'permethylated'
-    valid_monos = {m: c for m, c in composition.items() if m in mono_attributes and c > 0}
-    if not valid_monos:
-        return {m: None for m in fragment_masses}
-    mono_types = sorted(valid_monos.keys())
-    re_bonus = WATER_MASS + mass_tag
-    if permethylated:
-        re_bonus += CH2_MASS
-        if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
-            re_bonus += CH2_MASS
-    ion_adj = {'Y': (0, re_bonus), 'Z': (-WATER_MASS, re_bonus),
-               'B': (0, 0), 'C': (WATER_MASS, 0)}
-    if permethylated:
-        ion_adj = {'Y': (-CH2_MASS, re_bonus), 'Z': (-(WATER_MASS + CH2_MASS), re_bonus),
-                   'B': (0, 0), 'C': (WATER_MASS, 0)}
-    frag_dict = {}
-    for combo in product(*(range(valid_monos[m] + 1) for m in mono_types)):
-        sub_comp = {m: c for m, c in zip(mono_types, combo) if c > 0}
-        if not sub_comp:
-            continue
-        residue_sum = sum(mono_attributes[m]['mass'][m] * c for m, c in sub_comp.items())
-        if permethylated:
-            n_residues = sum(sub_comp.values())
-            residue_sum += (sum(len(methyl_oh_atoms.get(m, set())) * c for m, c in sub_comp.items()) - max(n_residues - 1, 0)) * CH2_MASS
-        is_full = all(sub_comp.get(m, 0) == valid_monos[m] for m in mono_types)
-        comp_str = '/'.join(f"{m}({c})" for m, c in sorted(sub_comp.items()))
-        if is_full:
-            frag_dict.setdefault(round(residue_sum + re_bonus + mode_mass, 5), []).append(([f'M {comp_str}'], 0))
-        else:
-            for ion_type, (bond_adj, red_bonus) in ion_adj.items():
-                mass_val = residue_sum + bond_adj + red_bonus + mode_mass
-                frag_dict.setdefault(round(mass_val, 5), []).append(([f'{ion_type} {comp_str}'], 1))
-    allowed_X = X_cross_rings if not disable_X_cross_rings else set()
-    for mono in mono_types:
-        for frag_type, frag_mass in mono_attributes[mono]['mass'].items():
-            if frag_type == mono:
-                continue
-            if frag_type in A_cross_rings or frag_type in allowed_X:
-                frag_dict.setdefault(round(frag_mass + mode_mass, 5), []).append(([f'{frag_type} {mono}'], 1))
-    if not disable_global_mods:
-        adduct_mods = {'+Na', '+K', '+Acetate', '+Acetonitrile'}
-        charge_exclude = {-1: ['+Na', '+K'], 1: ['+Acetate', '+Acetonitrile']}
-        global_mods_dict = {k: v for k, v in mono_attributes['Global']['mass'].items()
-            if k not in ['CO2', 'SO4', 'PO4'] and k not in charge_exclude.get(np.sign(charge), [])}
-        base_entries = list(frag_dict.items())
-        for gmod, gmod_mass in global_mods_dict.items():
-            adjusted_mass = gmod_mass - mode_mass if gmod in adduct_mods else gmod_mass
-            for base_mass, labels in base_entries:
-                for label, n_cleav in labels:
-                    if n_cleav + 1 <= max_cleavages:
-                        frag_dict.setdefault(round(base_mass + adjusted_mass, 5), []).append((label + [f'M_{gmod}'], n_cleav + 1))
-    sorted_frag_keys = sorted(frag_dict.keys())
-    modifier = np.sign(charge)
-    hit_dict = {}
-    for observed_mass in fragment_masses:
-        matches = []
-        for z in range(1, abs(charge) + 1):
-            charged_mass = (observed_mass * z) - (z - 1) * HYDROGEN_MASS * modifier
-            lo = bisect.bisect_left(sorted_frag_keys, charged_mass - mass_threshold)
-            hi = bisect.bisect_right(sorted_frag_keys, charged_mass + mass_threshold)
-            for frag_mass in sorted_frag_keys[lo:hi]:
-                for label, n_cleav in frag_dict[frag_mass]:
-                    if n_cleav <= max_cleavages:
-                        matches.append((frag_mass, label, modifier * z, abs(charged_mass - frag_mass), n_cleav))
-        if matches:
-            matches.sort(key = lambda x: (x[4], x[3]))
-            if simplify:
-                matches = matches[:1]
-            else:
-                matches = matches[:5]
-            hit_dict[observed_mass] = {
-                'Theoretical fragment masses': [m[0] for m in matches],
-                'Domon-Costello nomenclatures': [m[1] for m in matches],
-                'Fragment charges': [m[2] for m in matches],
-            }
-        else:
-            hit_dict[observed_mass] = None
-    return hit_dict
+                             disable_X_cross_rings = False, sample_prep = 'underivatized',
+                             peptide_seq = None, glycosites = None, glycan_class = None):
+	"""Calculates all possible fragment masses from a monosaccharide composition, optionally on a peptide\n
+	| Arguments:
+	| :-
+	| composition (dict or list): monosaccharide composition(s); a single dict or list of dicts for multi-glycan glycopeptides
+	| fragment_masses (list): observed masses to annotate
+	| mass_threshold (float): maximum tolerated mass difference for fragment matching
+	| max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
+	| charge (int): charge state of the precursor ion; default:-1
+	| mass_tag (float): mass of the glycan label or reducing end modification; default:2*H (free glycan) or 0 (glycopeptide)
+	| simplify (bool): whether to condense fragment options to the most likely; default:True
+	| disable_global_mods (bool): whether to disable global modifications; default:False
+	| disable_X_cross_rings (bool): whether to disable X-type cross-ring cleavages; default:False
+	| sample_prep (string): underivatized/permethylated
+	| peptide_seq (string): amino acid sequence; when provided, generates glycopeptide fragments; default:None
+	| glycosites (list): 0-indexed peptide positions for each glycan; inferred from sequence if None; default:None\n
+	| Returns:
+	| :-
+	| Returns a dict keyed by observed mass, each pointing to an annotation dict or None
+	"""
+	is_glycopeptide = peptide_seq is not None
+	if mass_tag is None:
+		mass_tag = 0 if is_glycopeptide else 2 * HYDROGEN_MASS
+	mode_mass = -HYDROGEN_MASS if charge < 0 else HYDROGEN_MASS
+	modifier = np.sign(charge)
+	permethylated = sample_prep == 'permethylated'
+	frag_dict = {}
+	if is_glycopeptide:
+		compositions = [composition] if isinstance(composition, dict) else list(composition)
+		if glycosites is None:
+			glycosites = infer_glycosites(peptide_seq, glycan_class)[:len(compositions)]
+		glycosites = list(glycosites)
+		n_glycans = len(compositions)
+		# Glycan fragment options per glycan (re_bonus=0: reducing end bonded to peptide)
+		all_glycan_frags = [_build_composition_fragments(comp, 0, sample_prep, disable_X_cross_rings) for comp in compositions]
+		glycan_totals = [next((m for m, lb, nc in gf if nc == 0), 0) for gf in all_glycan_frags]
+		total_glycan = sum(glycan_totals)
+		# Peptide masses
+		pep_res = [AA_masses.get(aa, 0) for aa in peptide_seq]
+		n_aa = len(pep_res)
+		full_pep = sum(pep_res) + WATER_MASS
+		cum_n = list(np.cumsum(pep_res))
+		cum_c = list(np.cumsum(pep_res[::-1]))
+		pep_ions = [('b', lambda i: cum_n[i - 1], 'n'),
+		            ('a', lambda i: cum_n[i - 1] - 27.994915, 'n'),
+		            ('c', lambda i: cum_n[i - 1] + 17.026549, 'n'),
+		            ('y', lambda i: cum_c[i - 1] + WATER_MASS, 'c'),
+		            ('z', lambda i: cum_c[i - 1] + WATER_MASS - 17.026549 + HYDROGEN_MASS, 'c')]
+		def add(mass, label, nc):
+			frag_dict.setdefault(round(mass, 5), []).append((label, nc))
+		# Full molecule
+		add(full_pep + total_glycan + mode_mass, [['Peptide']] + [['M'] for _ in range(n_glycans)], 0)
+		# Intact peptide + glycan sub-fragments
+		for g_idx in range(n_glycans):
+			other = total_glycan - glycan_totals[g_idx]
+			for gm, gl, gc in all_glycan_frags[g_idx]:
+				if gc == 0:
+					continue
+				glyc = [['M']] * n_glycans
+				glyc[g_idx] = [gl]
+				add(full_pep + gm + other + mode_mass, [['Peptide']] + glyc, gc)
+		# Peptide backbone fragments
+		for ion_name, mass_fn, terminus in pep_ions:
+			for i in range(1, n_aa):
+				pmass = mass_fn(i)
+				plabel = f'{ion_name}_{i}'
+				included = [j for j, gs in enumerate(glycosites)
+				            if (gs < i if terminus == 'n' else gs >= n_aa - i)]
+				# All glycans lost
+				lost = [[f'loss of glycan {j + 1}'] for j in range(n_glycans)]
+				add(pmass + mode_mass, [[plabel]] + lost, 1 + len(included))
+				if not included:
+					continue
+				# Included glycans fully attached
+				att = [[f'loss of glycan {j + 1}'] for j in range(n_glycans)]
+				att_mass = 0
+				for j in included:
+					att[j] = ['M']
+					att_mass += glycan_totals[j]
+				add(pmass + att_mass + mode_mass, [[plabel]] + att, 1)
+				# Included glycans sub-fragmented
+				if max_cleavages >= 2:
+					for j in included:
+						for gm, gl, gc in all_glycan_frags[j]:
+							if gl == 'M' or gl.startswith('loss') or 1 + gc > max_cleavages:
+								continue
+							fl = [[f'loss of glycan {k + 1}'] for k in range(n_glycans)]
+							o_mass = 0
+							for k in included:
+								if k == j:
+									fl[k] = [gl]
+								else:
+									fl[k] = ['M']
+									o_mass += glycan_totals[k]
+							add(pmass + gm + o_mass + mode_mass, [[plabel]] + fl, 1 + gc)
+		# Glycan-only (no peptide)
+		for g_idx in range(n_glycans):
+			for gm, gl, gc in all_glycan_frags[g_idx]:
+				if gc == 0 or gl.startswith('loss'):
+					continue
+				glyc = [[f'loss of glycan {j + 1}'] for j in range(n_glycans)]
+				glyc[g_idx] = [gl]
+				add(gm + mode_mass, [['No Peptide']] + glyc, 1 + gc)
+	else:
+		# Pure composition (existing behavior)
+		valid_monos = {m: c for m, c in composition.items() if m in mono_attributes and c > 0}
+		if not valid_monos:
+			return {m: None for m in fragment_masses}
+		re_bonus = WATER_MASS + mass_tag
+		if permethylated:
+			re_bonus += CH2_MASS
+			if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
+				re_bonus += CH2_MASS
+		glycan_frags = _build_composition_fragments(composition, re_bonus, sample_prep, disable_X_cross_rings)
+		for gm, gl, gc in glycan_frags:
+			frag_dict.setdefault(round(gm + mode_mass, 5), []).append(([gl], gc))
+	# Global modifications (shared)
+	if not disable_global_mods:
+		adduct_mods = {'+Na', '+K', '+Acetate', '+Acetonitrile'}
+		charge_exclude = {-1: ['+Na', '+K'], 1: ['+Acetate', '+Acetonitrile']}
+		excluded = set(charge_exclude.get(np.sign(charge), []))
+		global_mods_dict = {k: v for k, v in mono_attributes['Global']['mass'].items()
+		                    if k not in ('CO2', 'SO4', 'PO4') and k not in excluded}
+		all_comps = compositions if is_glycopeptide else [composition]
+		all_mono_labels = ''.join(m * c for comp in all_comps for m, c in comp.items())
+		if any(x in all_mono_labels for x in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
+			global_mods_dict['CO2'] = mono_attributes['Global']['mass']['CO2']
+		if 'S' in all_mono_labels:
+			global_mods_dict['SO4'] = mono_attributes['Global']['mass']['SO4']
+		if 'P' in all_mono_labels:
+			global_mods_dict['PO4'] = mono_attributes['Global']['mass']['PO4']
+		base_entries = list(frag_dict.items())
+		for gmod, gmod_mass in global_mods_dict.items():
+			adj_mass = gmod_mass - mode_mass if gmod in adduct_mods else gmod_mass
+			for base_mass, entries in base_entries:
+				for label, nc in entries:
+					if nc + 1 <= max_cleavages:
+						if is_glycopeptide:
+							new_label = [sub[:] for sub in label]
+							new_label[0] = new_label[0] + [f'M_{gmod}']
+						else:
+							new_label = label + [f'M_{gmod}']
+						frag_dict.setdefault(round(base_mass + adj_mass, 5), []).append((new_label, nc + 1))
+	# Matching (shared)
+	sorted_frag_keys = sorted(frag_dict.keys())
+	hit_dict = {}
+	for observed_mass in fragment_masses:
+		matches = []
+		for z in range(1, abs(charge) + 1):
+			charged_mass = (observed_mass * z) - (z - 1) * HYDROGEN_MASS * modifier
+			lo = bisect.bisect_left(sorted_frag_keys, charged_mass - mass_threshold)
+			hi = bisect.bisect_right(sorted_frag_keys, charged_mass + mass_threshold)
+			for frag_mass in sorted_frag_keys[lo:hi]:
+				for label, nc in frag_dict[frag_mass]:
+					if nc <= max_cleavages:
+						matches.append((frag_mass, label, modifier * z, abs(charged_mass - frag_mass), nc))
+		if matches:
+			matches.sort(key = lambda x: (x[4], x[3]))
+			matches = matches[:1] if simplify else matches[:5]
+			hit_dict[observed_mass] = {
+				'Theoretical fragment masses': [m[0] for m in matches],
+				'Domon-Costello nomenclatures': [m[1] for m in matches],
+				'Fragment charges': [m[2] for m in matches],
+			}
+		else:
+			hit_dict[observed_mass] = None
+	return hit_dict
 
 
 @rescue_glycans
 def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
                 max_cleavages = 3, simplify = True, charge = -1, mass_tag = None,
                 iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = False,
-                sample_prep = 'underivatized', prior_weight = 1.0):
+                sample_prep = 'underivatized', prior_weight = 1.0, glycan_class = None):
     """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
     | Arguments:
     | :-
@@ -1658,14 +1795,46 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
     | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
     | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False
     | sample_prep (string): underivatized/permethylated
-    | prior_weight (float): weighting of prior-informed scoring in simplify=True\n
+    | prior_weight (float): weighting of prior-informed scoring in simplify=True
+    | glycan_class (string): "N" or "O" if relevant (only used to assign candidate sites in glycopeptides, nowhere else)\n
     | Returns:
     | :-
     | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
     """
     composition = None
     if isinstance(input_string, dict):
-        composition = input_string
+        if 'peptide' in input_string:
+            glycan_comps = []
+            all_comp = True
+            for g in input_string.get('glycans', []):
+                c = g if isinstance(g, dict) else (
+                    canonicalize_composition(g) if isinstance(g, str) and is_composition(g) else None)
+                if c:
+                    glycan_comps.append(c)
+                else:
+                    all_comp = False
+                    break
+            if all_comp and glycan_comps:
+                return composition_to_fragments(
+                    glycan_comps if len(glycan_comps) > 1 else glycan_comps[0],
+                    sorted(fragment_masses), mass_threshold, max_cleavages = max_cleavages,
+                    charge = charge, mass_tag = mass_tag, simplify = simplify,
+                    disable_global_mods = disable_global_mods,
+                    disable_X_cross_rings = disable_X_cross_rings,
+                    sample_prep = sample_prep, peptide_seq = input_string['peptide'],
+                    glycosites = list(input_string['glycosites']) if 'glycosites' in input_string else None)
+            else:
+                glycans = input_string.get('glycans', [])
+                if not glycans:
+                    return {m: None for m in fragment_masses}
+                peptide = input_string['peptide']
+                gc = glycan_class if glycan_class else get_class(glycans[0])
+                sites = list(input_string['glycosites']) if 'glycosites' in input_string else infer_glycosites(peptide, gc)[:len(glycans)]
+                for site, glycan in sorted(zip(sites, glycans), reverse = True):
+                    peptide = peptide[:site + 1] + '*' + glycan + '*' + peptide[site + 1:]
+                input_string = peptide
+        else:
+            composition = input_string
     elif isinstance(input_string, str) and is_composition(input_string):
         composition = canonicalize_composition(input_string)
         if not composition:
@@ -1676,9 +1845,31 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
                                         simplify = simplify,
                                         disable_global_mods = disable_global_mods,
                                         disable_X_cross_rings = disable_X_cross_rings,
-                                        sample_prep = sample_prep)
+                                        sample_prep = sample_prep, glycan_class = glycan_class)
     hit_dict = {}
     input_dict = glycopeptide_string_to_input(input_string)
+    if input_dict['peptide'] and input_dict['glycans']:
+        glycan_comps, all_comp = [], True
+        for g in input_dict['glycans']:
+            if is_composition(g):
+                c = canonicalize_composition(g)
+                if c:
+                    glycan_comps.append(c)
+                else:
+                    all_comp = False
+                    break
+            else:
+                all_comp = False
+                break
+        if all_comp and glycan_comps:
+            return composition_to_fragments(
+                glycan_comps if len(glycan_comps) > 1 else glycan_comps[0],
+                sorted(fragment_masses), mass_threshold, max_cleavages = max_cleavages,
+                charge = charge, mass_tag = mass_tag, simplify = simplify,
+                disable_global_mods = disable_global_mods,
+                disable_X_cross_rings = disable_X_cross_rings,
+                sample_prep = sample_prep, peptide_seq = input_dict['peptide'],
+                glycosites = list(input_dict['glycosites']), glycan_class = glycan_class)
     fragment_masses = sorted(fragment_masses)
     nx_mono, pep_gr = input_to_graph(input_dict)
     node_labels = nx.get_node_attributes(nx_mono, 'string_labels')
