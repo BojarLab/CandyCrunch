@@ -165,6 +165,12 @@ AA_masses = {'A': 71.0371, 'R': 156.1011, 'N': 114.0429, 'D': 115.0269,
              'C': 103.0091, 'E': 129.0425, 'Q': 128.0585, 'G': 57.0214, 'H': 137.0589,
              'I': 113.0840, 'L': 113.0840, 'K': 128.0949, 'k': 357.25783, 'M': 131.0404, 'F': 147.0684,
              'P': 97.0527, 'S': 87.0320, 'T': 101.0476, 'W': 186.0793, 'Y': 163.0633, 'V': 99.0684}
+AA_masses['c'] = 103.0091 + 57.02146   # Carbamidomethyl Cys
+AA_masses['j'] = 128.0949 + 42.02180   # Guanidinyl Lys
+MODIFICATION_TOKENS = {
+    'Carbamidomethyl': {'C': 'c'},
+    'Guanidinyl': {'K': 'j'},
+}
 tester_ma_addition = {k: {'mass': {k: v}, 'atoms': {k: [1, 2, 3, 4, 5, 6]}} for k, v in AA_masses.items()}
 mono_attributes = mono_attributes | tester_ma_addition
 bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WATER_MASS, 'peptide_c': -(WATER_MASS - 17.026549),
@@ -1400,6 +1406,35 @@ def infer_glycosites(peptide_seq, glycan_class = None):
 	return sites
 
 
+def build_glycopeptide_input(peptide, modification_str):
+    """Parses a Peptide Modification string and returns a CandyCrumbs-ready input dict\n
+    | Arguments:
+    | :-
+    | peptide (string): amino acid sequence
+    | modification_str (string): modification string from glycoproteomics search (e.g., 'T1(Hex(1)HexNAc(1));K14(Guanidinyl)')\n
+    | Returns:
+    | :-
+    | Returns a dict with 'peptide' (modified sequence), 'glycans' (list of composition dicts), and 'glycosites' (list of 0-indexed positions)
+    """
+    peptide = list(peptide)
+    glycans = []
+    glycosites = []
+    for mod in modification_str.split(';'):
+        mod = mod.strip()
+        aa = mod[0]
+        rest = mod[1:]
+        pos_str = re.match(r'\d+', rest).group()
+        pos = int(pos_str) - 1
+        content = rest[len(pos_str):][1:-1]
+        if content in MODIFICATION_TOKENS and aa in MODIFICATION_TOKENS[content]:
+            peptide[pos] = MODIFICATION_TOKENS[content][aa]
+        else:
+            comp = canonicalize_composition(content)
+            glycans.append(comp if comp else content)
+            glycosites.append(pos)
+    return {'peptide': ''.join(peptide), 'glycans': glycans, 'glycosites': glycosites}
+
+
 def create_peptide_graph(pep_seq):
     """Creates a network object of a peptide"""
     pep_arr = np.roll(np.eye(len(pep_seq)), (2, 1), axis = (1, 0))
@@ -1704,14 +1739,21 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
 									fl[k] = ['M']
 									o_mass += glycan_totals[k]
 							add(pmass + gm + o_mass + mode_mass, [[plabel]] + fl, 1 + gc)
-		# Glycan-only (no peptide)
+		# Glycan-only (no peptide): oxonium / B-type ions
 		for g_idx in range(n_glycans):
+			# Full glycan B-ion (single cleavage: glycan detaches from peptide)
+			comp = compositions[g_idx]
+			comp_str = '/'.join(f"{m}({c})" for m, c in sorted(comp.items()))
+			glyc = [[f'loss of glycan {j + 1}'] for j in range(n_glycans)]
+			glyc[g_idx] = [f'B {comp_str}']
+			add(glycan_totals[g_idx] + mode_mass, [['No Peptide']] + glyc, 1)
+			# Sub-composition glycan-only fragments
 			for gm, gl, gc in all_glycan_frags[g_idx]:
 				if gc == 0 or gl.startswith('loss'):
 					continue
 				glyc = [[f'loss of glycan {j + 1}'] for j in range(n_glycans)]
 				glyc[g_idx] = [gl]
-				add(gm + mode_mass, [['No Peptide']] + glyc, 1 + gc)
+				add(gm + mode_mass, [['No Peptide']] + glyc, gc)
 	else:
 		# Pure composition (existing behavior)
 		valid_monos = {m: c for m, c in composition.items() if m in mono_attributes and c > 0}
