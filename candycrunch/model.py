@@ -80,16 +80,23 @@ class ResUnit(nn.Module):
         self.dilation = dilation
         self.causal = causal
         self.in_ln = in_ln
+        # 1. InstanceNorm1d
         if self.in_ln:
             self.ln1 = nn.InstanceNorm1d(in_channels, affine = True)
             self.ln1.weight.data.fill_(1.0)
+        # 2. Bottleneck 1×1 convolution, Reduces channels: C -> C/2
         self.conv_in = nn.Conv1d(in_channels, in_channels//2, 1)
+        # 3. InstanceNorm1d
         self.ln2 = nn.InstanceNorm1d(in_channels//2, affine = True)
         self.ln2.weight.data.fill_(1.0)
+        # 4. Dilated Conv1D
+        # 5. Optional causal convolution, the padding part
         self.conv_dilated = nn.Conv1d(in_channels//2, in_channels//2, size, dilation = self.dilation,
                                       padding = ((dilation*(size-1)) if causal else (dilation*(size-1)//2)))
+        # 6. InstanceNorm1d
         self.ln3 = nn.InstanceNorm1d(in_channels//2, affine = True)
         self.ln3.weight.data.fill_(1.0)
+        # 7. Bottleneck 1×1 convolution, Restores channels: C/2 -> C
         self.conv_out = nn.Conv1d(in_channels//2, in_channels, 1)
 
     def forward(self, inp):
@@ -103,31 +110,32 @@ class ResUnit(nn.Module):
             x = x[:, :, :-self.dilation*(self.size-1)]
         x = nn.functional.leaky_relu(self.ln3(x))
         x = self.conv_out(x)
-        return x+inp
+        # 8. Residual connection
+        out = x + inp
+        return out
 
-
-class CandyCrunch_CNN(torch.nn.Module):
+class CandyCrunch_CNN(nn.Module):
 
     def __init__(self, input_dim, num_classes = 1, hidden_dim = 512, input_precursor_dim = None):
         super(CandyCrunch_CNN, self).__init__()
         self.input_dim = input_dim
 
-        self.mz_lin1 = torch.nn.Linear(input_dim, 2 * hidden_dim)  # not used
-        self.mz_bn1 = torch.nn.LayerNorm(2 * hidden_dim)  # not used
-        self.mz_act1 = torch.nn.LeakyReLU()  # not used
-        self.type_emb = torch.nn.Embedding(5, 24)
-        self.mode_emb = torch.nn.Embedding(3, 24)
-        self.lc_emb = torch.nn.Embedding(4, 24)
-        self.modification_emb = torch.nn.Embedding(4, 24)
-        self.trap_emb = torch.nn.Embedding(5, 24)
-        self.prec_block = torch.nn.Sequential(torch.nn.Linear(input_precursor_dim, 24),
-                                              torch.nn.LayerNorm(24),
-                                              torch.nn.LeakyReLU())
-        self.rt_block = torch.nn.Sequential(torch.nn.Linear(1, 24),
-                                            torch.nn.LayerNorm(24),
-                                            torch.nn.LeakyReLU())
-        self.res_block = nn.Sequential(torch.nn.Conv1d(in_channels = 2, out_channels = 64, kernel_size = 1),
-                                       torch.nn.LeakyReLU(),
+        self.mz_lin1 = nn.Linear(input_dim, 2 * hidden_dim)  # not used
+        self.mz_bn1 = nn.LayerNorm(2 * hidden_dim)  # not used
+        self.mz_act1 = nn.LeakyReLU()  # not used
+        self.type_emb = nn.Embedding(5, 24)
+        self.mode_emb = nn.Embedding(3, 24)
+        self.lc_emb = nn.Embedding(4, 24)
+        self.modification_emb = nn.Embedding(4, 24)
+        self.trap_emb = nn.Embedding(5, 24)
+        self.prec_block = nn.Sequential(nn.Linear(input_precursor_dim, 24),
+                                              nn.LayerNorm(24),
+                                              nn.LeakyReLU())
+        self.rt_block = nn.Sequential(nn.Linear(1, 24),
+                                            nn.LayerNorm(24),
+                                            nn.LeakyReLU())
+        self.res_block = nn.Sequential(nn.Conv1d(in_channels = 2, out_channels = 64, kernel_size = 1),
+                                       nn.LeakyReLU(),
                                        ResUnit(64, size = 2, dilation = 1, causal = True),
                                        ResUnit(64, size = 2, dilation = 2, causal = True),
                                        ResUnit(64, size = 2, dilation = 4, causal = True),
@@ -135,16 +143,16 @@ class CandyCrunch_CNN(torch.nn.Module):
                                        ResUnit(64, size = 2, dilation = 16, causal = True),
                                        ResUnit(64, size = 2, dilation = 32, causal = True),
                                        torch.nn.MaxPool1d(kernel_size = 20))
-        self.fc1 = torch.nn.Linear(in_features = 6528, out_features = 1024)
-        self.comb_block1 = torch.nn.Sequential(torch.nn.Linear(2 * hidden_dim + 24 + 24 + 24 + 24 + 24 + 24 + 24, 2 * 512),
-                                               torch.nn.LayerNorm(2 * 512),
-                                               torch.nn.LeakyReLU(),
-                                               torch.nn.Dropout(0.2))
-        self.comb_lin1 = torch.nn.Linear(2 * 512, 2 * 256)
-        self.comb_block2 = nn.Sequential(torch.nn.LayerNorm(2 * 256),
-                                         torch.nn.LeakyReLU(),
-                                         torch.nn.Dropout(0.2))
-        self.comb_lin2 = torch.nn.Linear(2 * 256, num_classes)
+        self.fc1 = nn.Linear(in_features = 6528, out_features = 1024)
+        self.comb_block1 = nn.Sequential(torch.nn.Linear(2 * hidden_dim + 24 + 24 + 24 + 24 + 24 + 24 + 24, 2 * 512),
+                                               nn.LayerNorm(2 * 512),
+                                               nn.LeakyReLU(),
+                                               nn.Dropout(0.2))
+        self.comb_lin1 = nn.Linear(2 * 512, 2 * 256)
+        self.comb_block2 = nn.Sequential(nn.LayerNorm(2 * 256),
+                                         nn.LeakyReLU(),
+                                         nn.Dropout(0.2))
+        self.comb_lin2 = nn.Linear(2 * 256, num_classes)
 
     def forward(self, mz_list, precursor, glycan_type, rt, mode, lc, modification, trap, rep = False):
         glycan_type = self.type_emb(glycan_type).squeeze(1)
