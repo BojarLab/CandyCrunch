@@ -108,72 +108,60 @@ class ResUnit(nn.Module):
 
 class CandyCrunch_CNN(torch.nn.Module):
 
-  def __init__(self, input_dim, num_classes = 1, hidden_dim = 512, input_precursor_dim=None):
-    super(CandyCrunch_CNN, self).__init__()
+    def __init__(self, input_dim, num_classes = 1, hidden_dim = 512, input_precursor_dim = None):
+        super(CandyCrunch_CNN, self).__init__()
+        self.input_dim = input_dim
 
-    self.input_dim = input_dim
+        self.mz_lin1 = torch.nn.Linear(input_dim, 2 * hidden_dim)  # not used
+        self.mz_bn1 = torch.nn.LayerNorm(2 * hidden_dim)  # not used
+        self.mz_act1 = torch.nn.LeakyReLU()  # not used
+        self.type_emb = torch.nn.Embedding(5, 24)
+        self.mode_emb = torch.nn.Embedding(3, 24)
+        self.lc_emb = torch.nn.Embedding(4, 24)
+        self.modification_emb = torch.nn.Embedding(4, 24)
+        self.trap_emb = torch.nn.Embedding(5, 24)
+        self.prec_block = torch.nn.Sequential(torch.nn.Linear(input_precursor_dim, 24),
+                                              torch.nn.LayerNorm(24),
+                                              torch.nn.LeakyReLU())
+        self.rt_block = torch.nn.Sequential(torch.nn.Linear(1, 24),
+                                            torch.nn.LayerNorm(24),
+                                            torch.nn.LeakyReLU())
+        self.res_block = nn.Sequential(torch.nn.Conv1d(in_channels = 2, out_channels = 64, kernel_size = 1),
+                                       torch.nn.LeakyReLU(),
+                                       ResUnit(64, size = 2, dilation = 1, causal = True),
+                                       ResUnit(64, size = 2, dilation = 2, causal = True),
+                                       ResUnit(64, size = 2, dilation = 4, causal = True),
+                                       ResUnit(64, size = 2, dilation = 8, causal = True),
+                                       ResUnit(64, size = 2, dilation = 16, causal = True),
+                                       ResUnit(64, size = 2, dilation = 32, causal = True),
+                                       torch.nn.MaxPool1d(kernel_size = 20))
+        self.fc1 = torch.nn.Linear(in_features = 6528, out_features = 1024)
+        self.comb_block1 = torch.nn.Sequential(torch.nn.Linear(2 * hidden_dim + 24 + 24 + 24 + 24 + 24 + 24 + 24, 2 * 512),
+                                               torch.nn.LayerNorm(2 * 512),
+                                               torch.nn.LeakyReLU(),
+                                               torch.nn.Dropout(0.2))
+        self.comb_lin1 = torch.nn.Linear(2 * 512, 2 * 256)
+        self.comb_block2 = nn.Sequential(torch.nn.LayerNorm(2 * 256),
+                                         torch.nn.LeakyReLU(),
+                                         torch.nn.Dropout(0.2))
+        self.comb_lin2 = torch.nn.Linear(2 * 256, num_classes)
 
-    self.mz_lin1 = torch.nn.Linear(input_dim, 2*hidden_dim) # not used
-    self.prec_lin1 = torch.nn.Linear(input_precursor_dim, 24)
-    self.rt_lin1 = torch.nn.Linear(1, 24)
-    self.comb_lin1 = torch.nn.Linear(2*hidden_dim+24+24+24+24+24+24+24, 2*512)
-    self.comb_lin2 = torch.nn.Linear(2*512, 2*256)
-    self.comb_lin3 = torch.nn.Linear(2*256, num_classes)
-
-    self.type_emb = torch.nn.Embedding(5, 24)
-    self.mode_emb = torch.nn.Embedding(3, 24)
-    self.lc_emb = torch.nn.Embedding(4, 24)
-    self.modification_emb = torch.nn.Embedding(4, 24)
-    self.trap_emb = torch.nn.Embedding(5, 24)
-
-    self.conv1 = torch.nn.Conv1d(in_channels = 2, out_channels = 64, kernel_size = 1)
-    self.res1 = ResUnit(64, size = 2, dilation = 1, causal = True)
-    self.res2 = ResUnit(64, size = 2, dilation = 2, causal = True)
-    self.res3 = ResUnit(64, size = 2, dilation = 4, causal = True)
-    self.res4 = ResUnit(64, size = 2, dilation = 8, causal = True)
-    self.res5 = ResUnit(64, size = 2, dilation = 16, causal = True)
-    self.res6 = ResUnit(64, size = 2, dilation = 32, causal = True)
-    self.maxpool1 = torch.nn.MaxPool1d(kernel_size = 20)
-    self.fc1 = torch.nn.Linear(in_features = 6528, out_features = 1024)
-
-    self.mz_bn1 = torch.nn.LayerNorm(2*hidden_dim) # not used
-    self.prec_bn1 = torch.nn.LayerNorm(24)
-    self.rt_bn1 = torch.nn.LayerNorm(24)
-    self.comb_bn1 = torch.nn.LayerNorm(2*512)
-    self.comb_bn2 = torch.nn.LayerNorm(2*256)
-    self.mz_act1 = torch.nn.LeakyReLU() # not used
-    self.prec_act1 = torch.nn.LeakyReLU()
-    self.rt_act1 = torch.nn.LeakyReLU()
-    self.comb_act1 = torch.nn.LeakyReLU()
-    self.comb_act2 = torch.nn.LeakyReLU()
-    self.comb_dp1 = torch.nn.Dropout(0.2)
-    self.comb_dp2 = torch.nn.Dropout(0.2)
-
-  def forward(self, mz_list, precursor, glycan_type, rt, mode, lc, modification, trap, rep = False):
-    glycan_type = self.type_emb(glycan_type).squeeze(1)
-    mode = self.mode_emb(mode).squeeze(1)
-    lc = self.lc_emb(lc).squeeze(1)
-    modification = self.modification_emb(modification).squeeze(1)
-    trap = self.trap_emb(trap).squeeze(1)
-    precursor = self.prec_act1(self.prec_bn1(self.prec_lin1(precursor)))
-    rt = self.rt_act1(self.rt_bn1(self.rt_lin1(rt)))
-    mz = F.leaky_relu(self.conv1(mz_list))
-    mz = self.res1(mz)
-    mz = self.res2(mz)
-    mz = self.res3(mz)
-    mz = self.res4(mz)
-    mz = self.res5(mz)
-    mz = self.res6(mz)
-
-    mz = self.maxpool1(mz)
-    mz = F.leaky_relu(self.fc1(flatten(mz, start_dim = 1)))
-
-    comb = torch.cat([mz, precursor, glycan_type, rt, mode, lc, modification, trap], dim = 1)
-    comb = self.comb_dp1(self.comb_act1(self.comb_bn1(self.comb_lin1(comb))))
-    comb_rep = self.comb_lin2(comb)
-    comb = self.comb_dp2(self.comb_act2(self.comb_bn2(comb_rep)))
-    comb = self.comb_lin3(comb)
-    if rep:
-      return comb, comb_rep
-    else:
-      return comb
+    def forward(self, mz_list, precursor, glycan_type, rt, mode, lc, modification, trap, rep = False):
+        glycan_type = self.type_emb(glycan_type).squeeze(1)
+        mode = self.mode_emb(mode).squeeze(1)
+        lc = self.lc_emb(lc).squeeze(1)
+        modification = self.modification_emb(modification).squeeze(1)
+        trap = self.trap_emb(trap).squeeze(1)
+        precursor = self.prec_block(precursor)
+        rt = self.rt_block(rt)
+        mz = self.res_block(mz_list)
+        mz = F.leaky_relu(self.fc1(flatten(mz, start_dim = 1)))
+        comb = torch.cat([mz, precursor, glycan_type, rt, mode, lc, modification, trap], dim = 1)
+        comb = self.comb_block1(comb)
+        comb_rep = self.comb_lin1(comb)
+        comb = self.comb_block2(comb_rep)
+        comb = self.comb_lin2(comb)
+        if rep:
+            return comb, comb_rep
+        else:
+            return comb
