@@ -150,7 +150,7 @@ class CandyCrunch_CNN(nn.Module):
                                          nn.Dropout(0.2))
         self.comb_lin2 = nn.Linear(2 * 256, num_classes)
 
-    def forward(self, mz_list, precursor, glycan_type, rt, mode, lc, modification, trap, rep = False):
+    def forward(self, mz_features, precursor, glycan_type, rt, mode, lc, modification, trap, rep = False):
         glycan_type = self.type_emb(glycan_type).squeeze(1)
         mode = self.mode_emb(mode).squeeze(1)
         lc = self.lc_emb(lc).squeeze(1)
@@ -158,7 +158,7 @@ class CandyCrunch_CNN(nn.Module):
         trap = self.trap_emb(trap).squeeze(1)
         precursor = self.prec_block(precursor)
         rt = self.rt_block(rt)
-        mz = self.res_block(mz_list)
+        mz = self.res_block(mz_features)
         mz = F.leaky_relu(self.fc1(flatten(mz, start_dim = 1)))
         comb = torch.cat([mz, precursor, glycan_type, rt, mode, lc, modification, trap], dim = 1)
         comb = self.comb_block1(comb)
