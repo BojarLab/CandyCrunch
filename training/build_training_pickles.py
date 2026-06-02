@@ -41,7 +41,7 @@ FEATURE_COLUMNS = [
 
 
 
-def safe_peak_parse(value):
+def _safe_peak_parse(value):
     if isinstance(value, dict):
         return {float(k): float(v) for k, v in value.items()}
     if isinstance(value, str):
@@ -56,16 +56,16 @@ def safe_peak_parse(value):
             return {float(k): float(v) for k, v in parsed.items()}
     return None
 
-def normalise_spectrum(spec):
+def _normalise_spectrum(spec):
     total = float(sum(spec.values()))
     if total <= 0:
         return None
     return {mz: intensity / total for mz, intensity in spec.items()}
 
-def process_peaks(df, min_mz=39.714, max_mz=3000.0, bin_num=2048):
+def _process_peaks(df, min_mz=39.714, max_mz=3000.0, bin_num=2048):
     frames = np.linspace(min_mz, max_mz, bin_num)
-    parsed = df["peak_d"].map(safe_peak_parse)
-    parsed = parsed.map(lambda spec: None if spec is None else normalise_spectrum(spec))
+    parsed = df["peak_d"].map(_safe_peak_parse)
+    parsed = parsed.map(lambda spec: None if spec is None else _normalise_spectrum(spec))
     keep_mask = parsed.notnull()
     df = df.loc[keep_mask].copy()
     parsed = parsed.loc[keep_mask]
@@ -74,14 +74,14 @@ def process_peaks(df, min_mz=39.714, max_mz=3000.0, bin_num=2048):
     df["mz_remainder"] = [np.asarray(vec, dtype=np.float32) for vec in remainders]
     return df
 
-def process_retention_times(df):
+def _process_retention_times(df):
     df = df.copy()
     df["RT"] = df["RT"].fillna(15)
     df = df[df["RT"] > 2]
     df["RT"] = df.groupby("filename")["RT"].transform(lambda rt: rt / max(rt.max(), 30.0))
     return df
 
-def infer_glycan_types(df):
+def _infer_glycan_types(df):
     def classify(g):
         if g.endswith(("GalNAc", "GalNAc6S", "GalNAcOS", "Fuc", "Man", "Gal")):
             return 0
@@ -94,7 +94,7 @@ def infer_glycan_types(df):
     df["glycan_type"] = df["glycan"].map(classify)
     return df
 
-def attach_metadata(df, checklist):
+def _attach_metadata(df, checklist):
     meta = checklist.copy()
     meta.columns = [col.strip() for col in meta.columns]
     meta = meta.set_index("GlycoPOST_ID")
@@ -133,10 +133,10 @@ def attach_metadata(df, checklist):
     return df
 
 def process_full_dataset(full_df, checklist):
-    df = process_retention_times(full_df)
-    df = infer_glycan_types(df)
-    df = process_peaks(df)
-    df = attach_metadata(df, checklist)
+    df = _process_retention_times(full_df)
+    df = _infer_glycan_types(df)
+    df = _process_peaks(df)
+    df = _attach_metadata(df, checklist)
     return df
 
 def downcast_numeric(df):
