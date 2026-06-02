@@ -119,10 +119,6 @@ class CandyCrunch_CNN(nn.Module):
     def __init__(self, input_dim, num_classes = 1, hidden_dim = 512, input_precursor_dim = None):
         super(CandyCrunch_CNN, self).__init__()
         self.input_dim = input_dim
-
-        self.mz_lin1 = nn.Linear(input_dim, 2 * hidden_dim)  # not used
-        self.mz_bn1 = nn.LayerNorm(2 * hidden_dim)  # not used
-        self.mz_act1 = nn.LeakyReLU()  # not used
         self.type_emb = nn.Embedding(5, 24)
         self.mode_emb = nn.Embedding(3, 24)
         self.lc_emb = nn.Embedding(4, 24)
