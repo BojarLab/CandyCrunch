@@ -235,6 +235,12 @@ fragmentation_priors = {
         '+Acetonitrile': 0.3, '+Acetate': 0.4, '+Na': 0.5, '+K': 0.3,
     },
     'multi_cleavage_penalty': 0.5,
+    # Alkali-cation-adducted fragments only (Na+/CID; from doi:10.1021/acs.jpca.6c00953): cross-ring dissociation needs reducing-end
+    # ring-opening via the free anomeric O1, so it concentrates on the reducing-terminal residue.
+    # X_1 cross-rings retain the reducing end and are the diagnostic class; cross-rings on
+    # non-reducing-terminal residues are strongly disfavored. Detected per-fragment via the M_+Na
+    # token, so protonated and negative-mode fragments (where internal 02A/24A are diagnostic) are untouched.
+    'reducing_end_cross_ring': {'boost': 1.6, 'non_reducing_penalty': 0.2, 'adducts': {'+Na', '+K'}},
 }
 linkage_lability = {
     ('Neu5Ac', '2-3'): 1.0, ('Neu5Ac', '2-6'): 0.3, ('Neu5Ac', '2-8'): 0.5,
@@ -1216,6 +1222,8 @@ def score_fragment_prior(dc_name, charge):
         return 0.0
     mode = np.sign(charge)
     cleavage_weights = fragmentation_priors['cleavage_type'].get(mode, fragmentation_priors['cleavage_type'][-1])
+    re_weights = fragmentation_priors['reducing_end_cross_ring']
+    cation_adduct = any(c.startswith('M_') and c[2:] in re_weights['adducts'] for c in dc_name)
     score = 0.0
     n_cleavages = 0
     for cut in dc_name:
@@ -1223,7 +1231,11 @@ def score_fragment_prior(dc_name, charge):
         if parts[0] == 'M':
             score += fragmentation_priors['global_mod'].get('_'.join(parts[1:]), 0.2)
             continue
-        score += cleavage_weights.get(parts[0], 0.1)
+        cut_score = cleavage_weights.get(parts[0], 0.1)
+        if cation_adduct and (parts[0] in A_cross_rings or parts[0] in X_cross_rings):
+            cut_score *= re_weights['boost'] if parts[0] in X_cross_rings and parts[1] == '1' else re_weights[
+                'non_reducing_penalty']
+        score += cut_score
         n_cleavages += 1
     if n_cleavages > 1:
         score *= fragmentation_priors['multi_cleavage_penalty'] ** (n_cleavages - 1)
@@ -1865,10 +1877,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
     if disable_A_cross_rings is None:
         disable_A_cross_rings = charge > 0
     if disable_X_cross_rings is None:
-        disable_X_cross_rings = charge > 0
-    if charge > 0 and disable_A_cross_rings and disable_X_cross_rings:
+        disable_X_cross_rings = False
+    if charge > 0 and disable_A_cross_rings:
         print(
-            "Cross-ring fragmentation auto-disabled for positive mode. Override with disable_A_cross_rings=False / disable_X_cross_rings=False")
+            "A-type cross-ring fragmentation auto-disabled for positive mode; reducing-end X-type cross-rings kept (Na+/CID diagnostic). Override A with disable_A_cross_rings=False")
     composition = None
     if isinstance(input_string, dict):
         if 'peptide' in input_string:
