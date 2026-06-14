@@ -34,10 +34,10 @@ glytoucan_mapping = pickle.load(open(data_path, 'rb'))
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda:0"
-sdict = os.path.join(this_dir, 'candycrunch.pt')
+sdict = os.path.join(this_dir, 'CandyCrunch_CNN_GShS.pt')
 sdict = torch.load(sdict, map_location=device, weights_only=True)
 sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
-candycrunch = CandyCrunch_CNN(2048, num_classes=len(glycans), input_precursor_dim=12).to(device)
+candycrunch = CandyCrunch_CNN(2048, num_classes=len(glycans)-4, input_precursor_dim=15).to(device)
 candycrunch.load_state_dict(sdict)
 candycrunch = candycrunch.eval()
 _trapezoid = getattr(np, 'trapezoid', None) or np.trapz
@@ -49,7 +49,8 @@ NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'Acetonitrile', 'HCO3-']
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 modification_mass_dict = {'reduced': 2 * HYDROGEN_MASS, '2AA': 121.0528, '2AB': 120.0688, 'procainamide': 219.1736}
 temperature = torch.Tensor([1.15]).to(device)
-comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
+# comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
+comp_vector_order = ['-H2O', 'Ac', 'dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'PCho', 'Pen', 'S']
 
 
 def get_adduct_list(mode):
