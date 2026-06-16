@@ -34,7 +34,7 @@ glytoucan_mapping = pickle.load(open(data_path, 'rb'))
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda:0"
-sdict = os.path.join(this_dir, 'CandyCrunch_CNN_GShS.pt')
+sdict = os.path.join(this_dir, 'CandyCrunch.pt')
 sdict = torch.load(sdict, map_location=device, weights_only=True)
 sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
 candycrunch = CandyCrunch_CNN(2048, num_classes=len(glycans), input_precursor_dim=12).to(device)
