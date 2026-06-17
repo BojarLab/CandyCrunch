@@ -23,6 +23,11 @@ def input_format(request):
     return request.config.getoption("--input-format")
 
 
+@pytest.fixture(scope="session")
+def verbose(request):
+    return request.config.getoption("verbose") > 0
+
+
 class ResultCollector:
     def __init__(self):
         self.results = defaultdict(list)

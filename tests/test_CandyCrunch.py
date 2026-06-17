@@ -74,7 +74,7 @@ def add_pred_column(df_in, col_name, matches, pred_df, rt_col):
   return df_in
 
 
-def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh):
+def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbose = False):
   assert len(predictions)>0
   if len(predictions)==0:
     print('empty preds')
@@ -106,7 +106,26 @@ def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh):
   empty_glycan_not_predicted = len(np.where((new_md['in_ground_truth'])&(new_md['glycan'].isnull())&(new_md['batch_pred'].isnull()))[0])
   fn = (new_md[new_md['glycan'].notnull()]['similarity_score'].apply(lambda x: 1-x)).sum() + empty_glycan_not_predicted
   peaks_not_picked = len(np.where((new_md['in_ground_truth'])&(new_md['batch_pred'].isnull()))[0])
-  incorrect_predictions = len(np.where((new_md['glycan'].notnull())&(new_md['batch_pred'].notnull())&(new_md['similarity_score'] < 1.0))[0])
+  incorrect_predictions = len(
+      np.where((new_md['glycan'].notnull()) & (new_md['batch_pred'].notnull()) & (new_md['similarity_score'] < 1.0))[0])
+  if verbose:
+      np_rows = new_md[(new_md['in_ground_truth']) & (new_md['batch_pred'].isnull())]
+      if len(np_rows) > 0:
+          print('\n--- NotPicked (ground-truth m/z with no prediction) ---')
+          print(tabulate(np_rows[['Mass', rt_col, 'glycan']].values, headers = ['Mass', 'RT', 'correct_glycan'],
+                         tablefmt = 'grid'))
+      wrong_rows = new_md[
+          (new_md['glycan'].notnull()) & (new_md['batch_pred'].notnull()) & (new_md['similarity_score'] < 1.0)]
+      if len(wrong_rows) > 0:
+          print('\n--- Wrong (predicted, similarity < 1.0) ---')
+          print(tabulate(wrong_rows[['Mass', rt_col, 'batch_pred', 'glycan', 'similarity_score']].round(
+              {'similarity_score': 3}).values, headers = ['Mass', 'RT', 'predicted', 'correct_glycan', 'sim'],
+                         tablefmt = 'grid'))
+      fp_rows = new_md[(~new_md['in_ground_truth']) & (new_md['batch_pred'].notnull())]
+      if len(fp_rows) > 0:
+          print('\n--- FP (prediction not in ground truth) ---')
+          print(tabulate(fp_rows[['Mass', rt_col, 'batch_pred']].values, headers = ['Mass', 'RT', 'predicted'],
+                         tablefmt = 'grid'))
   Precision = tp / (tp + fp + 1e-8)
   Recall = tp / (tp + fn + 1e-8)
   F1_score = 2 * (Precision * Recall) / (Precision + Recall + 1e-8)
@@ -134,7 +153,7 @@ test_params = [
 ]
 
 @pytest.mark.parametrize("test_params", test_params)
-def test_candycrunch_accuracy(test_params, result_collector, input_format, test_files = None):
+def test_candycrunch_accuracy(test_params, result_collector, input_format, verbose, test_files = None):
     if result_collector.param_names is None:
         result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
     start_time = time.time()  # Start timing
@@ -164,7 +183,7 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, test_
         loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{test_dict['name']}/df_mz_{test_dict['name']}.csv")
         col_name  =  filename.split(".")[0]
         rt_col_name = 'RT' if 'RT' in loaded_gt.columns else col_name+'_RT'
-        eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name] > 0], rt_col_name, MASS_TOLERANCE, RT_TOLERANCE)
+        eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name] > 0], rt_col_name, MASS_TOLERANCE, RT_TOLERANCE, verbose = verbose)
         print('True Positives',eval_scores[-4])
         print('False Positives',eval_scores[-3])
         print('Unevaluable',eval_scores[-1])
