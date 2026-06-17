@@ -234,7 +234,7 @@ fragmentation_priors = {
         'C2H4O2': 0.3, 'SO4': 0.6, 'PO4': 0.6, 'C3H8O4': 0.2,
         '+Acetonitrile': 0.3, '+Acetate': 0.4, '+Na': 0.5, '+K': 0.3,
     },
-    'multi_cleavage_penalty': 0.5,
+    'multi_cleavage_penalty': {'glycosidic': 0.6, 'cross_ring': 0.35},
     # Alkali-cation-adducted fragments only (Na+/CID; from doi:10.1021/acs.jpca.6c00953): cross-ring dissociation needs reducing-end
     # ring-opening via the free anomeric O1, so it concentrates on the reducing-terminal residue.
     # X_1 cross-rings retain the reducing end and are the diagnostic class; cross-rings on
@@ -1238,7 +1238,11 @@ def score_fragment_prior(dc_name, charge):
         score += cut_score
         n_cleavages += 1
     if n_cleavages > 1:
-        score *= fragmentation_priors['multi_cleavage_penalty'] ** (n_cleavages - 1)
+        n_cross = sum(1 for c in dc_name if c.split('_')[0] in A_cross_rings or c.split('_')[0] in X_cross_rings)
+        n_glyco = n_cleavages - n_cross
+        penalties = fragmentation_priors['multi_cleavage_penalty']
+        score *= penalties['glycosidic'] ** (max(n_glyco - 1, 0) if n_glyco else 0)
+        score *= penalties['cross_ring'] ** (n_cross if n_glyco else max(n_cross - 1, 0))
     return score
 
 
@@ -1284,7 +1288,7 @@ def priority_filter(dc_names, diffs, peptide = False, charge = -1):
     return [f[0] for f in sorted_frags], [f[1] for f in sorted_frags]
 
 
-def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_frag_keys = None):
+def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_frag_keys = None, peptide = False):
     """Searches subg_frags for any fragments which could correspond to the observed mass and its charge\n
     | Arguments:
     | :-
@@ -1310,6 +1314,8 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_f
         hi = bisect.bisect_right(sorted_frag_keys, charged_mass + mass_threshold)
         for frag_mass in sorted_frag_keys[lo:hi]:
             for graph in subg_frags[frag_mass]:
+                if not peptide and z > graph.number_of_nodes():
+                    continue
                 fragment_properties.append((mass, frag_mass, abs(charged_mass - frag_mass), modifier * z, graph))
     if fragment_properties:
         return list(zip(*fragment_properties))
@@ -1367,12 +1373,14 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
                                                                        'M'] and not y.startswith('loss of glycan')]))
                 observed_frags.append([possible_frags[0]])
         return observed_frags
-    for i, possible_frags in enumerate(dc_names):
-        possible_frags = sorted(possible_frags, key = len)
+    observed_frags = [[] for _ in dc_names]
+    order = sorted(range(len(dc_names)), key = lambda j: -intensities[j]) if intensities else list(range(len(dc_names)))
+    for i in order:
+        possible_frags = sorted(dc_names[i], key = len)
         if not possible_frags or len(possible_frags[0]) == 0:
-            observed_frags.append([])
+            continue
         elif len(possible_frags[0]) == 1:
-            observed_frags.append([possible_frags[0]])
+            observed_frags[i] = [possible_frags[0]]
         else:
             frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
             max_overlaps_seen = observed_fragments_checker(frag_options, observed_frags)
@@ -1391,7 +1399,7 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
                 scores = [overlap + prior_weight * (prior + lability)
                           for overlap, prior, lability in zip(max_overlaps_seen, prior_scores, option_lability)]
             max_overlap_idx = np.argsort(scores, kind = 'stable')[-1]
-            observed_frags.append([frag_options[max_overlap_idx]])
+            observed_frags[i] = [frag_options[max_overlap_idx]]
     return observed_frags
 
 
@@ -1952,7 +1960,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
                 disable_X_cross_rings = disable_X_cross_rings,
                 sample_prep = sample_prep, peptide_seq = input_dict['peptide'],
                 glycosites = list(input_dict['glycosites']), glycan_class = glycan_class)
-    fragment_masses = sorted(fragment_masses)
+    if intensities is not None:
+        fragment_masses, intensities = map(list, zip(*sorted(zip(fragment_masses, intensities))))
+    else:
+        fragment_masses = sorted(fragment_masses)
     nx_mono, pep_gr = input_to_graph(input_dict)
     node_labels = nx.get_node_attributes(nx_mono, 'string_labels')
     if any(map_to_basic(v, obfuscate_ptm = False) not in mono_attributes for v in node_labels.values() if len(v) > 1):
@@ -1971,7 +1982,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
         for observed_mass in fragment_masses:
             all_gp_names = []
             fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge,
-                                                            sorted_frag_keys)
+                                                            sorted_frag_keys, peptide = True)
             for frag_subg in fragment_properties[-1]:
                 rf_names = peptide_to_RF_nomenclature(pep_gr, frag_subg)
                 dc_names = get_glycan_cleavages(nx_mono, frag_subg, input_dict['glycosites'])
@@ -1996,7 +2007,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = 0.5,
         filtered_diffs = [r[1] for r in filtered_results]
         filtered_lability = [list(x[6]) if x[0] else [] for x in downstream_values]
         filtered_dc_names = simplify_fragments(filtered_dc_names, peptide = peptide, diffs = filtered_diffs,
-                                               charge = charge, prior_weight = prior_weight,
+                                               intensities = intensities, charge = charge, prior_weight = prior_weight,
                                                lability_scores = filtered_lability, mass_threshold = mass_threshold)
     for i, frag_dc_names in enumerate(filtered_dc_names):
         if frag_dc_names:

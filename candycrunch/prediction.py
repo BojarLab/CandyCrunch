@@ -1448,6 +1448,14 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode, modification, m
             valid_indices.append(False)
     df_out = df_out[valid_indices]
     df_out['ppm_error'] = ppm_errors
+    has_pred = df_out['predictions'].apply(len) > 0
+    rts_pred = df_out.loc[has_pred, 'RT'].values
+    if len(rts_pred) >= 5:
+        rt_med = np.median(rts_pred)
+        rt_mad = np.median(np.abs(rts_pred - rt_med))
+        if rt_mad > 0:
+            rt_cut = 3.0 * rt_mad * 1.4826
+            df_out = df_out[(~has_pred) | (np.abs(df_out['RT'] - rt_med) <= rt_cut)]
     # Clean-up
     df_out['composition'] = [get_comp(k[0][0]) if k else val for k, val in
                              zip(df_out['predictions'], df_out['composition'])]
@@ -1811,6 +1819,16 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     else:
         adaptive_thresh = ppm_thresh
     df_out = df_out[df_out['ppm_error'] < adaptive_thresh]
+    # Retention-time outlier removal: drop predictions whose RT lies far outside the file's overall
+    # elution distribution, scaled to the observed spread (tight cluster => strict, wide spread => permissive)
+    has_pred = df_out['predictions'].apply(len) > 0
+    rts_pred = df_out.loc[has_pred, 'RT'].values
+    if len(rts_pred) >= 5:
+        rt_med = np.median(rts_pred)
+        rt_mad = np.median(np.abs(rts_pred - rt_med))
+        if rt_mad > 0:
+            rt_cut = 3.0 * rt_mad * 1.4826  # ~3-sigma on robust spread
+            df_out = df_out[(~has_pred) | (np.abs(df_out['RT'] - rt_med) <= rt_cut)]
     # Clean-up
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
     df_out = combine_charge_states(df_out)
