@@ -876,7 +876,7 @@ def annotate_subgraph(subg, node_mod, global_mod, terminals):
 
 
 def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = 3,
-                          fragment_masses = [],
+                          fragment_masses = [], subgraphs = None,
                           threshold = 0.5, mass_tag = None, charge = -1, sample_prep = 'underivatized',
                           disable_A_cross_rings = False):
     """Calculates the graph and mass of all possible fragments of the input\n
@@ -901,6 +901,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
         mass_tag = 2 * HYDROGEN_MASS
     charge_masses = np.array(extend_masses(fragment_masses, charge))
     sorted_charge_masses = sorted(charge_masses)
+    unfiltered = not len(charge_masses)
     threshold = abs(threshold)
     true_root_node = [v for v, d in nx_mono.out_degree() if d == 0][0]
     all_other_terminals = {node for node in nx_mono.nodes() if nx_mono.degree()[node] < 2 or node == true_root_node}
@@ -908,7 +909,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
     node_dict_basic = {k: map_to_basic(v, obfuscate_ptm = False) for k, v in node_dict.items()}
     subgraph_fragments = {}
-    subgraphs = enumerate_subgraphs(nx_mono) + [nx_mono]
+    subgraphs = (enumerate_subgraphs(nx_mono) + [nx_mono]) if subgraphs is None else subgraphs
     present_global_masses = [global_mod_mass(x, -PROTON_MASS if charge < 0 else PROTON_MASS)
                              for x in global_mods] + [0.0]
     max_global_mass = max(present_global_masses)
@@ -941,9 +942,10 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
         min_graph_mass = inner_mass + min_terminal_mass + min_global_mass
         avg_graph_mass = (min_graph_mass + max_graph_mass) / 2
         graph_mass_thresh = (max_graph_mass - min_graph_mass) / 2
-        lo = bisect.bisect_left(sorted_charge_masses, avg_graph_mass - graph_mass_thresh)
-        if lo >= len(sorted_charge_masses) or sorted_charge_masses[lo] > avg_graph_mass + graph_mass_thresh:
-            continue
+        if not unfiltered:
+            lo = bisect.bisect_left(sorted_charge_masses, avg_graph_mass - graph_mass_thresh)
+            if lo >= len(sorted_charge_masses) or sorted_charge_masses[lo] > avg_graph_mass + graph_mass_thresh:
+                continue
         bonus_root_mass, bonus_root_node = temporary_root_calc_func(subg, nx_mono)
         terminal_labels = [node_dict_basic[x] for x in terminals]
         subg_global_mods = update_global_mods(subg, global_mods, special_residues)
@@ -962,7 +964,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             preliminary_calculate_mass(mono_masses, atom_masses, global_masses, terminals, inner_mass, bonus_root_mass,
                                        bonus_root_node, mass_tag, charge, mono_mod_perms, sample_prep = sample_prep,
                                        root_label = root_label))
-        valid_idx = np.where(check_masses(charge_masses, initial_masses, threshold))[0]
+        valid_idx = np.arange(len(initial_masses)) if unfiltered else np.where(check_masses(charge_masses, initial_masses, threshold))[0]
         if valid_idx.size == 0:
             continue
         permutation_list = nested_lazy_product_vect(mono_mod_perms, atom_dict_perms, subg_global_mods, valid_idx)
@@ -2233,6 +2235,75 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         else:
             hit_dict[fragment_masses[i]] = None
     return hit_dict
+
+
+def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_prep = 'underivatized', max_cleavages = 3):
+    """Calculates the theoretical m/z of a named fragment; the inverse of CandyCrumbs\n
+    | Arguments:
+    | :-
+    | glycan (string): glycan in IUPAC-condensed format
+    | fragment (string/list): fragment in Domon-Costello nomenclature, either compact ("0,2A5a", "B1a/M-H2O") or as the list CandyCrumbs returns (['02A_5_Alpha'])
+    | charge (int): charge state of the fragment ion, sign sets the ion mode; default:-1
+    | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
+    | sample_prep (string): underivatized/permethylated
+    | max_cleavages (int): maximum number of allowed concurrent fragmentations; default:3\n
+    | Returns:
+    | :-
+    | Returns the m/z of the fragment, or None if it cannot exist on this glycan
+    """
+    if isinstance(fragment, str):
+        cuts = []
+        for part in re.split(r'[/;+]', fragment.replace(' ', '')):
+            if part[0] in 'Mm':
+                if mod := part[1:].lstrip('-_'):
+                    cuts.append(f"M_{mod}")
+                continue
+            m = re.fullmatch(r'(\d),?(\d)?([ABCXYZabcxyz])_?(\d+)_?([A-Za-z]+)', part) if part[0].isdigit() else re.fullmatch(r'()()([ABCXYZabcxyz])_?(\d+)_?([A-Za-z]+)', part)
+            if not m:
+                raise ValueError(f"Could not parse fragment name '{part}'")
+            ring_1, ring_2, cut_type, cut_num, chain = m.groups()
+            chain = chain.capitalize()
+            chain_idx = ord(chain.lower()) - 97 if len(chain) == 1 else -1
+            if chain not in ranks and not 0 <= chain_idx < len(ranks):
+                raise ValueError(f"Could not parse fragment name '{part}'")
+            cuts.append(f"{ring_1}{ring_2 or ''}{cut_type.upper()}_{cut_num}_{chain if chain in ranks else ranks[chain_idx]}")
+        fragment = cuts or ['M']
+    fragment = sorted(fragment)
+    nx_mono = mono_graph_to_nx(glycan_to_graph_monos(glycan), directed = True)
+    chain_rank = list(rank_chains(nx_mono))
+    try:
+        skelly_dict, post_mono, global_mod = domon_costello_to_node_labels(fragment, dict(chain_rank))
+    except (IndexError, KeyError):
+        return None
+    node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
+    bond_labels = nx.get_edge_attributes(nx_mono, 'bond_label')
+    keep = set(nx_mono.nodes())
+    for node, cut_type in skelly_dict.items():
+        if cut_type[-1] == 'A':
+            keep &= nx.ancestors(nx_mono, node) | {node}
+            # an A-type cross-ring silently takes any branch attached to a ring atom it does not retain
+            retained_atoms = mono_attributes[map_to_basic(node_dict[node], obfuscate_ptm = False)]['atoms'][cut_type]
+            for child, _ in nx_mono.in_edges(node):
+                if (pos := bond_labels[(child, node)][-1]).isdigit() and int(pos) not in retained_atoms:
+                    keep -= nx.ancestors(nx_mono, child) | {child}
+        elif cut_type[-1] in {'B', 'C'}:
+            keep &= nx.ancestors(nx_mono, post_mono) | {post_mono}
+        elif cut_type[-1] == 'X':
+            keep -= nx.ancestors(nx_mono, node)
+        else:
+            keep -= nx.ancestors(nx_mono, node) | {node}
+    if not keep:
+        return None
+    global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = global_mod is None,
+                                                            max_global_mods = 2)
+    subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, X_cross_rings,
+                                       max_cleavages = max(max_cleavages, len(fragment)), fragment_masses = [],
+                                       subgraphs = [nx_mono.subgraph(keep)], mass_tag = mass_tag, charge = charge,
+                                       sample_prep = sample_prep)
+    for mass in sorted(subg_frags):
+        if any(sorted(x) == fragment for x in subgraphs_to_domon_costello(nx_mono, subg_frags[mass], chain_rank)):
+            return (mass + (abs(charge) - 1) * PROTON_MASS * np.sign(charge)) / abs(charge)
+    return None
 
 
 def get_unique_subgraphs(nx_mono1, nx_mono2):
