@@ -1,4 +1,4 @@
-glycowork==1.4.0
+glycowork==1.10.1
 lxml==5.3.0
 matplotlib==3.9.2
 networkx==3.4.2
@@ -16,5 +16,4 @@ setuptools==75.1.0
 statsmodels==0.14.4
 torch==2.5.1
 torchmetrics==1.4.1
-torchvision==0.20.1
 tqdm==4.66.6

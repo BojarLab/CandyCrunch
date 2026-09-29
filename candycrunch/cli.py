@@ -1,38 +1,84 @@
 #!/usr/bin/env python3
 
 import argparse
-from candycrunch.prediction import wrap_inference
+import os
+import shutil
+import tempfile
+from candycrunch.prediction import wrap_inference, wrap_inference_batch
+
+def str_to_bool(value):
+    if value.lower() in ('true', '1', 'yes'):
+        return True
+    if value.lower() in ('false', '0', 'no'):
+        return False
+    raise argparse.ArgumentTypeError(f"expected True or False, got '{value}'")
 
 def main():
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
     #parser.add_argument('-c', '--config', help='Path to the config file', required=True)
-    parser.add_argument('--spectra_filepath', help='Path to the spectra file', type=str, required=True)
-    parser.add_argument('--glycan_class', help='Glycan class', type=str, required=True)
-    parser.add_argument('--mode', help='negative/positive mode', type=str, required=False)
+    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files and/or folders of .mzML/.mzXML/.mgf files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
+    parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
+    parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
+    parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
     parser.add_argument('--modification', help='glycan derivatization', type=str, required=False)
     parser.add_argument('--mass_tag', help='custom tag mass', type=float, required=False)
-    parser.add_argument('--lc', help='LC type', type=str, required=False)
-    parser.add_argument('--trap', help='Detector type', type=str, required=False)
+    parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'peracetylated'], required=False)
+    parser.add_argument('--lc', help='LC type', type=str, choices=['PGC', 'C18', 'other'], required=False)
+    parser.add_argument('--trap', help='Detector type', type=str, choices=['linear', 'orbitrap', 'amazon', 'other'], required=False)
     parser.add_argument('--rt_min', help='Minimum relevant retention time', type=float, required=False)
     parser.add_argument('--rt_max', help='Maximum relevant retention time', type=float, required=False)
     parser.add_argument('--rt_diff', help='Maximum retention time difference within one peak', type=float, required=False)
-    parser.add_argument('--spectra', help='Whether to output representative spectra', type=bool, required=False)
-    parser.add_argument('--get_missing', help='Whether to output peaks without prediction', type=bool, required=False)
-    parser.add_argument('--mass_tolerance', help='Maximum mass difference within one peak', type=float, required=False)
-    parser.add_argument('--filter_out', help='Composition elements to filter out/ignore', type=dict, required=False)
-    parser.add_argument('--supplement', help='Whether to use biosynthetic modeling for zero-shot prediction', type=bool, required=False)
-    parser.add_argument('--experimental', help='Whether to use database searches for zero-shot prediction', type=bool, required=False)
-    parser.add_argument('--taxonomy_class', help='Taxonomic class to restrict database searches to', type=str, required=False)
-    parser.add_argument('--plot_glycans', help='Whether to save an output.xlsx file with SNFG glycan images for all top1 predictions', type=bool, required=False)
-    parser.add_argument('--output', help='Output CSV file path', type=str, required=True)
-
+    parser.add_argument('--spectra', help='Whether to output representative spectra', type=str_to_bool, required=False)
+    parser.add_argument('--get_missing', help='Whether to output peaks without prediction', type=str_to_bool, required=False)
+    parser.add_argument('--ppm_thresh', help='Mass tolerance in ppm for peak grouping, composition matching and ppm error filtering', type=float, required=False)
+    parser.add_argument('--pred_thresh', help='Prediction confidence threshold', type=float, required=False)
+    parser.add_argument('--crumbs_thresh', help='Minimum CandyCrumbs annotation score to keep a prediction', type=float, required=False)
+    parser.add_argument('--extra_thresh', help='Confidence threshold to allow cross-class predictions', type=float, required=False)
+    parser.add_argument('--frag_num', help='Number of top fragments to report per spectrum', type=int, required=False)
+    parser.add_argument('--filter_out', help='Composition elements to filter out/ignore, space-separated', type=str, nargs='*', required=False)
+    parser.add_argument('--supplement', help='Whether to use biosynthetic modeling for zero-shot prediction', type=str_to_bool, required=False)
+    parser.add_argument('--experimental', help='Whether to use database searches for zero-shot prediction', type=str_to_bool, required=False)
+    parser.add_argument('--taxonomy_level', help='Taxonomic level to restrict database searches to', type=str, required=False)
+    parser.add_argument('--taxonomy_filter', help='Taxon at taxonomy_level to restrict database searches to', type=str, required=False)
+    parser.add_argument('--intra_cat_thresh', help='Several files only: minutes the RT of a structure can differ from the mean of its group', type=float, required=False)
+    parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition', type=int, required=False)
+    parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions', type=str_to_bool, required=False)
+    parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)
     args = parser.parse_args()
-    args_dict = {k:v for k, v in vars(args).items() if v is not None and k != "output"}
-    df_out = wrap_inference(**args_dict)
-    if args.output.endswith('.csv'):
-        df_out.to_csv(args.output)
-    if args.output.endswith('.xlsx') and not args.plot_glycans:
-        df_out.to_excel(args.output)
+    if not args.output.endswith(('.csv', '.xlsx')):
+        parser.error('--output has to end with .csv or .xlsx')
+    filepaths = [f for p in args.spectra_filepath for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.endswith(('.mzML', '.mzXML', '.mgf'))] if os.path.isdir(p) else [p])]
+    if not filepaths:
+        parser.error('no .mzML/.mzXML/.mgf files found in --spectra_filepath')
+    if len(filepaths) > 1 and (args.intra_cat_thresh is None or args.top_n_isomers is None):
+        parser.error('--intra_cat_thresh and --top_n_isomers are required when processing several files')
+    args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers')}
+    # wrap_inference takes the ion mode from the sign of max_charge
+    if args.mode or args.max_charge:
+        args_dict['max_charge'] = abs(args.max_charge or 3) * (1 if args.mode == 'positive' else -1)
+    if args.filter_out is not None:
+        args_dict['filter_out'] = set(args.filter_out)
+    if len(filepaths) == 1:
+        tables = [(args.output, wrap_inference(filepaths[0], **args_dict))]
+    else:
+        combined_batch, inference_dfs = wrap_inference_batch(filepaths, intra_cat_thresh=args.intra_cat_thresh, top_n_isomers=args.top_n_isomers, **args_dict)
+        stem, ext = os.path.splitext(args.output)
+        tables = [(args.output, combined_batch)] + [(f'{stem}_{label}{ext}', df_out) for label, df_out in inference_dfs.items()]
+    for path, df_out in tables:
+        if isinstance(df_out, tuple):
+            df_out, spectra_out = df_out
+            # MS1-only rows that wrap_inference_batch gap-fills have no spectrum
+            df_out['peak_d'] = spectra_out + [None] * (len(df_out) - len(spectra_out))
+        df_flat = df_out.reset_index()
+        if path.endswith('.csv'):
+            df_out.to_csv(path)
+        if args.plot_glycans and 'top1_pred' in df_flat.columns:
+            from glycowork.motif.draw import plot_glycans_excel
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                plot_glycans_excel(df_flat, tmp_dir, glycan_col_num=df_flat.columns.get_loc('top1_pred'))
+                shutil.move(os.path.join(tmp_dir, 'output.xlsx'), os.path.splitext(path)[0] + '.xlsx')
+        elif path.endswith('.xlsx'):
+            df_out.to_excel(path)
 
 if __name__ == '__main__':
     main()
