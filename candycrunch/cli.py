@@ -65,8 +65,7 @@ def main():
     for path, df_out in tables:
         if isinstance(df_out, tuple):
             df_out, spectra_out = df_out
-            # MS1-only rows that wrap_inference_batch gap-fills have no spectrum
-            df_out['peak_d'] = spectra_out + [None] * (len(df_out) - len(spectra_out))
+            df_out['peak_d'] = spectra_out
         df_flat = df_out.reset_index()
         if path.endswith('.csv'):
             df_out.to_csv(path)
