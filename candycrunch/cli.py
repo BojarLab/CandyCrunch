@@ -2,8 +2,6 @@
 
 import argparse
 import os
-import shutil
-import tempfile
 from candycrunch.prediction import wrap_inference, wrap_inference_batch
 
 def str_to_bool(value):
@@ -47,7 +45,7 @@ def main():
     args = parser.parse_args()
     if not args.output.endswith(('.csv', '.xlsx')):
         parser.error('--output has to end with .csv or .xlsx')
-    filepaths = [f for p in args.spectra_filepath for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.endswith(('.mzML', '.mzXML', '.mgf'))] if os.path.isdir(p) else [p])]
+    filepaths = [f for p in args.spectra_filepath for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.mzml', '.mzxml', '.mgf'))] if os.path.isdir(p) else [p])]
     if not filepaths:
         parser.error('no .mzML/.mzXML/.mgf files found in --spectra_filepath')
     if len(filepaths) > 1 and (args.intra_cat_thresh is None or args.top_n_isomers is None):
@@ -74,9 +72,7 @@ def main():
             df_out.to_csv(path)
         if args.plot_glycans and 'top1_pred' in df_flat.columns:
             from glycowork.motif.draw import plot_glycans_excel
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                plot_glycans_excel(df_flat, tmp_dir, glycan_col_num=df_flat.columns.get_loc('top1_pred'))
-                shutil.move(os.path.join(tmp_dir, 'output.xlsx'), os.path.splitext(path)[0] + '.xlsx')
+            plot_glycans_excel(df_flat, os.path.splitext(path)[0] + '.xlsx', glycan_col_num='top1_pred')
         elif path.endswith('.xlsx'):
             df_out.to_excel(path)
 

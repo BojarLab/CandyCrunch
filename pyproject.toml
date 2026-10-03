@@ -18,7 +18,7 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "glycowork[ml]>=1.10.1",
+    "glycowork[ml]>=1.10.2",
     "requests",
     "regex",
     "networkx",
@@ -28,7 +28,6 @@ dependencies = [
     "numpy_indexed",
     "seaborn",
     "pandas",
-    "statsmodels",
     "pymzml", 
     "pyteomics",
     "lxml",

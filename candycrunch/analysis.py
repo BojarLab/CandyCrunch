@@ -1,8 +1,6 @@
 import copy
 import math
 from collections import Counter
-from functools import lru_cache
-import random
 import re
 from itertools import combinations_with_replacement, product
 from operator import neg
@@ -14,13 +12,11 @@ import networkx as nx
 import networkx.algorithms.isomorphism as iso
 import numpy as np
 import pandas as pd
-from glycowork.motif.processing import (bracket_removal, canonicalize_composition, is_composition,
-                                        min_process_glycans, rescue_glycans, get_class)
-from glycowork.motif.tokenization import map_to_basic
-map_to_basic = lru_cache(maxsize = None)(map_to_basic)  # pure string mapping, called hundreds of thousands of times per spectrum; remove once glycowork v1.10.2 releases
-from glycowork.glycan_data.stats import cohen_d
+from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
+from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, METHYL_MASS as CH2_MASS
+from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
+from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
 from scipy.stats import ttest_ind
-from statsmodels.stats.multitest import multipletests
 
 mono_attributes = {
     'Hex': {'mass': {'03X': 72.0211, '02X': 42.0106, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211, '15A': 134.057859,
@@ -151,9 +147,6 @@ mono_attributes = {
                         '+Na': +22.989218, '+K': 38.963707}}
 }
 WATER_MASS = 18.0105546
-HYDROGEN_MASS = 1.007825
-PROTON_MASS = 1.00727646  # charge carrier; the H atom mass is 0.55 mDa heavier and biases every m/z
-CH2_MASS = 14.01565
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond'], 3: ['peptide_a', 'peptide_b', 'peptide_c'],
                     4: ['peptide_y', 'peptide_z', 'peptide_w']}
 # Neutral radical lost from a z. ion by Cbeta-Cgamma homolysis, giving the w ion; residues without a
@@ -294,30 +287,8 @@ def global_mod_mass(global_mod, mode_mass = 0.0):
                for x in parse_global_mod(global_mod))
 
 
-def evaluate_adjacency_monos(glycan_part, adjustment):
-    """Modified version of evaluate_adjacency to check glycoletter adjacency for monosaccharide only strings\n
-    | Arguments:
-    | :-
-    | glycan_part (string): residual part of a glycan from within glycan_to_graph
-    | adjustment (int): number of characters to allow for extra length (consequence of tokenizing glycoletters)\n
-    | Returns:
-    | :-
-    | Returns True if adjacent and False if not
-    """
-    # Check whether glycoletters are adjacent in the main chain
-    if len(glycan_part) < 1 + adjustment:
-        return True
-    # Check whether glycoletters are connected but separated by a branch delimiter
-    elif glycan_part[-1] == ']':
-        if len(glycan_part[:-1]) < 1 + adjustment:
-            return True
-        else:
-            return False
-    return False
-
-
 def glycan_to_graph_monos(glycan):
-    """Modified version of glycan_to_graph taking every other node, i.e., the monosaccharides\n
+    """Monosaccharide-only view of glycowork's glycan graph; a floating part ({...}) is placed at its first possible position\n
     | Arguments:
     | :-
     | glycan (string): IUPAC-condensed glycan sequence\n
@@ -327,29 +298,14 @@ def glycan_to_graph_monos(glycan):
     | (2) an adjacency matrix of size monosaccharide X monosaccharide
     | (3) a dictionary of node : monosaccharide/linkage
     """
-    bond_proc = min_process_glycans([glycan])[0]
-    mono_proc = bond_proc[::2]
-    all_mask_dic = {k: v for k, v in enumerate(bond_proc)}
-    mono_mask_dic = {k: v for k, v in enumerate(mono_proc)}
-    for k, j in mono_mask_dic.items():
-        glycan = glycan.replace(j, str(k), 1)
-    glycan = ''.join(re.split(r'[()]', glycan)[::2])
-    adj_matrix = np.zeros((len(mono_proc), len(mono_proc)), dtype = int)
-    for k in mono_mask_dic:
-        adjustment = 2 if k >= 100 else 1 if k >= 10 else 0
-        for j in range(k + 1, len(mono_mask_dic)):
-            min_idx_k = k + (10 * max((k // 10) - 1, 0))
-            min_idx_j = j + (10 * max((j // 10) - 1, 0))
-            k_idx, j_idx = glycan.find(str(k), min_idx_k), glycan.find(str(j), min_idx_j)
-            glycan_part = glycan[k_idx + 1:j_idx]
-            if evaluate_adjacency_monos(glycan_part, adjustment):
-                adj_matrix[k, j] = 1
-                continue
-            if len(bracket_removal(glycan_part)) <= 1 + adjustment:
-                glycan_part = bracket_removal(glycan_part)
-                if evaluate_adjacency_monos(glycan_part, adjustment):
-                    adj_matrix[k, j] = 1
-                    continue
+    ggraph = glycan_to_nxGraph(graph_to_string(get_possible_topologies(glycan)[0]) if '{' in glycan else glycan)
+    all_mask_dic = nx.get_node_attributes(ggraph, 'string_labels')
+    mono_mask_dic = {k // 2: v for k, v in all_mask_dic.items() if not k % 2}
+    adj_matrix = np.zeros((len(mono_mask_dic), len(mono_mask_dic)), dtype = int)
+    # glycowork alternates monosaccharide (even) and linkage (odd) nodes, with edges pointing parent -> linkage -> child
+    for parent, link in ggraph.edges():
+        if link % 2:
+            adj_matrix[link // 2, parent // 2] = 1
     return mono_mask_dic, adj_matrix, all_mask_dic
 
 
@@ -2485,8 +2441,9 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
     remainder = [np.median([x for x in col if x] or [0]) for col in zip(*df_r.mz_remainder.values.tolist())]
     df_a = np.array(df_a.binned_intensities.values.tolist())
     df_b = np.array(df_b.binned_intensities.values.tolist())
-    pvals = [ttest_ind(df_a[:, k], df_b[:, k], equal_var = False)[1] for k in range(max_bin)]
-    pvals = multipletests(pvals)[1]
+    pvals = np.array([ttest_ind(df_a[:, k], df_b[:, k], equal_var = False)[1] for k in range(max_bin)])
+    tested = ~np.isnan(pvals)
+    pvals[tested] = correct_multiple_testing(pvals[tested], 0.05)[0]
     cohensd = [cohen_d(df_a[:, k], df_b[:, k]) for k in range(max_bin)]
     sig_bins = [k for k in range(max_bin) if pvals[k] < 0.05]
     sig_bins = [(min_mz + ((max_mz - min_mz) / (bin_num - 1)) * k + remainder[k], pvals[k], cohensd[k][0]) for k in
@@ -2528,8 +2485,9 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
         df_a2 = np.array(df_a2.binned_intensities.values.tolist())
         df_b2 = np.array(df_b2.binned_intensities.values.tolist())
         cohensd = [cohen_d(df_a2[:, k], df_b2[:, k]) for k in range(max_bin)]
-        pvals = [ttest_ind(df_a2[:, k], df_b2[:, k], equal_var = False)[1] for k in range(max_bin)]
-        pvals = multipletests(pvals)[1]
+        pvals = np.array([ttest_ind(df_a2[:, k], df_b2[:, k], equal_var = False)[1] for k in range(max_bin)])
+        tested = ~np.isnan(pvals)
+        pvals[tested] = correct_multiple_testing(pvals[tested], 0.05)[0]
         for c, cd in enumerate(cohensd):
             bins[bin_keys[c]].append(cd[0] if pvals[c] < 0.05 else 0)
     bins = {k: v for k, v in bins.items() if
