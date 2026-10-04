@@ -39,7 +39,8 @@ def main():
     parser.add_argument('--taxonomy_level', help='Taxonomic level to restrict database searches to', type=str, required=False)
     parser.add_argument('--taxonomy_filter', help='Taxon at taxonomy_level to restrict database searches to', type=str, required=False)
     parser.add_argument('--intra_cat_thresh', help='Several files only: minutes the RT of a structure can differ from the mean of its group', type=float, required=False)
-    parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition', type=int, required=False)
+    parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition; default: 5', type=int, default=5)
+    parser.add_argument('--n_jobs', help='Several files only: number of files to process in parallel; default: 1', type=int, default=1)
     parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions', type=str_to_bool, required=False)
     parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)
     args = parser.parse_args()
@@ -48,9 +49,9 @@ def main():
     filepaths = [f for p in args.spectra_filepath for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.mzml', '.mzxml', '.mgf'))] if os.path.isdir(p) else [p])]
     if not filepaths:
         parser.error('no .mzML/.mzXML/.mgf files found in --spectra_filepath')
-    if len(filepaths) > 1 and (args.intra_cat_thresh is None or args.top_n_isomers is None):
-        parser.error('--intra_cat_thresh and --top_n_isomers are required when processing several files')
-    args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers')}
+    if len(filepaths) > 1 and args.intra_cat_thresh is None:
+        parser.error('--intra_cat_thresh is required when processing several files')
+    args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}
     # wrap_inference takes the ion mode from the sign of max_charge
     if args.mode or args.max_charge:
         args_dict['max_charge'] = abs(args.max_charge or 3) * (1 if args.mode == 'positive' else -1)
@@ -59,21 +60,22 @@ def main():
     if len(filepaths) == 1:
         tables = [(args.output, wrap_inference(filepaths[0], **args_dict))]
     else:
-        combined_batch, inference_dfs = wrap_inference_batch(filepaths, intra_cat_thresh=args.intra_cat_thresh, top_n_isomers=args.top_n_isomers, **args_dict)
+        combined_batch, inference_dfs = wrap_inference_batch(filepaths, intra_cat_thresh=args.intra_cat_thresh, top_n_isomers=args.top_n_isomers, n_jobs=args.n_jobs, **args_dict)
         stem, ext = os.path.splitext(args.output)
         tables = [(args.output, combined_batch)] + [(f'{stem}_{label}{ext}', df_out) for label, df_out in inference_dfs.items()]
     for path, df_out in tables:
         if isinstance(df_out, tuple):
             df_out, spectra_out = df_out
             df_out['peak_d'] = spectra_out
-        df_flat = df_out.reset_index()
+        # Per-file tables are indexed by m/z; the combined feature table has a plain row index that is not worth writing
+        df_flat = df_out.reset_index() if df_out.index.name else df_out
         if path.endswith('.csv'):
-            df_out.to_csv(path)
+            df_flat.to_csv(path, index=False)
         if args.plot_glycans and 'top1_pred' in df_flat.columns:
             from glycowork.motif.draw import plot_glycans_excel
             plot_glycans_excel(df_flat, os.path.splitext(path)[0] + '.xlsx', glycan_col_num='top1_pred')
         elif path.endswith('.xlsx'):
-            df_out.to_excel(path)
+            df_flat.to_excel(path, index=False)
 
 if __name__ == '__main__':
     main()

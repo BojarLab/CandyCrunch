@@ -29,6 +29,8 @@ TEST_DICTS = [
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
+# Batch F1 on rows with MS2 evidence was 0.709-0.721 (GPST000029) and 0.634 (GPST000017) over seeds 0-2
+BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.58}
 
 
 def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array2_alt = None):
@@ -203,4 +205,36 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
     print("Adding results to collector")  # Debug print
     if test_outputs:
         print(f'avg_score:{np.mean([x[0] for x in test_outputs])}')
-        assert np.mean([x[0] for x in test_outputs])>AVG_THRESHOLD
+        assert np.mean([x[0] for x in test_outputs]) > AVG_THRESHOLD
+
+
+def test_candycrunch_batch(result_collector, verbose):
+    if result_collector.param_names is None:
+        result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
+    files = {'GPST000029': 'CA_PGMLAD_OG_051017', 'GPST000017': 'JC_141128PGMa'}
+    combined, outputs = wrap_inference_batch([f"{TEST_DATA_DIR}/{name}/{label}.mzML" for name, label in files.items()],
+                                             'O', intra_cat_thresh = 1.0, spectra = True)
+    assert list(outputs) == list(files.values())
+    for name, label in files.items():
+        df_out, spectra_out = outputs[label]
+        gaps = (df_out['evidence'] == 'ms1_only').values
+        # Spectra stay aligned with the rows, MS1-only gap rows included
+        assert len(spectra_out) == len(df_out)
+        assert all(s is None for s, g in zip(spectra_out, gaps) if g)
+        # Gap rows share the MS2 rows' abundance scale, so they cannot dominate a file
+        assert abs(df_out['rel_abundance'].sum() - 100) < 1e-6
+        assert df_out.loc[gaps, 'rel_abundance'].sum() < 50
+        gt = pd.read_csv(f"{TEST_DATA_DIR}/{name}/df_mz_{name}.csv")
+        eval_scores = evaluate_predictions(df_out[~gaps].copy(), gt[gt[label] > 0],
+                                           'RT' if 'RT' in gt.columns else label + '_RT', MASS_TOLERANCE, RT_TOLERANCE,
+                                           verbose = verbose)
+        print(f'{name} batch F1 (rows with MS2 evidence): {eval_scores[0]:.3f}, MS1-only gap rows: {gaps.sum()}')
+        # Report like the per-file tests, so batch scores reach the summary tables, the results log and the regression check
+        result_collector.add_result({'test_dict': {'name': f'{name}_batch'}, 'supplement': True, 'experimental': True,
+                                     'format': 'mzML'}, eval_scores[0], eval_scores)
+        result_collector.check_performance(f'{name}_batch', (f'{name}_batch', True, True, 'mzML'), eval_scores[0])
+        assert eval_scores[0] > BATCH_F1_THRESHOLDS[name]
+    # Feature table: one row per isomer group with per-file abundances and evidence
+    assert {'top1_pred', 'm/z', 'RT', 'n_files_ms2'}.issubset(combined.columns)
+    assert all(label in combined.columns and f'evidence_{label}' in combined.columns for label in files.values())
+    assert (combined['n_files_ms2'] > 0).all()

@@ -67,7 +67,8 @@ If you would like to run our main inference function from the command line, you 
 |--taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class' <br />
 |--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
 --intra_cat_thresh, type=float: required for several files, minutes the RT of a structure can differ from the mean of its group across files <br />
---top_n_isomers, type=int: required for several files, number of different isomer groups at each composition to retain <br />
+--top_n_isomers, type=int: several files only, number of different isomer groups at each composition to retain; default:5 <br />
+--n_jobs, type=int: several files only, number of files to process in parallel; default:1 <br />
 --plot_glycans, type=bool: whether to write the output as an .xlsx file that contains SNFG images of all top1 predictions (a `.csv` output additionally gets an `.xlsx` of the same name); default:False
 </pre>
 </details>
@@ -79,7 +80,7 @@ If you would like to run our main inference function from the command line, you 
 /Users/xurbja $ candycrunch_predict --spectra_filepath path_to_my_files/file.mzML --glycan_class 'O' --output path_to_my_outputs/output_file.csv 
 ```
 
-Several files, or a folder of mzML/mzXML/mgf files, are harmonized across runs with `wrap_inference_batch`. The output file then holds the relative abundances of all top1 predictions per file, and each file's predictions are written next to it as `output_file_<file name>.csv`:
+Several files, or a folder of mzML/mzXML/mgf files, are harmonized across runs with `wrap_inference_batch`. The output file then holds a feature table with one row per isomer group (top1 prediction, consensus m/z and RT, number of files with MS2 evidence) and its relative abundance and evidence (MS2 or MS1-only) in every file, and each file's predictions are written next to it as `output_file_<file name>.csv`:
 ```console
 /Users/xurbja $ candycrunch_predict --spectra_filepath path_to_my_files/ --glycan_class 'O' --intra_cat_thresh 1.75 --top_n_isomers 2 --output path_to_my_outputs/output_file.csv
 ```
@@ -159,22 +160,24 @@ annotated_spectra_df = wrap_inference("C:/myfiles/my_spectra.mzML", glycan_class
 
 ### `wrap_inference_batch` (in `CandyCrunch.prediction`) <br>
 Wrapper function to predict glycan structures from multiple LC-MS/MS files using CandyCrunch. <br />
-This function similarly to `wrap_inference` except a list of filenames is provided and a tuple is returned: a pivot table of relative abundances (top1 prediction x file) and a dictionary of output DataFrames, one for each input file, keyed by their filenames. <br />
-Glycan predictions are assigned to groups based on the most common prediction in the group across files. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
+This function works similarly to `wrap_inference` except a list of filenames is provided and a tuple is returned: a feature table and a dictionary of output DataFrames, one for each input file, keyed by their filenames. <br />
+The feature table has one row per isomer group with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID and the number of files with MS2 evidence, followed by its relative abundance in each file and an `evidence_<file>` column per file ('strong'/'weak' from MS2, 'ms1_only' if it was gap-filled from MS1). The first column holds the glycans, so the table can go straight into glycowork's `get_differential_expression` with the file columns as groups. <br />
+Precursors are clustered by m/z across files within the mass tolerance, and glycan predictions are assigned to groups based on the most common prediction in the group across files. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
 
 The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_threshold.  
-The largest group of spectra across files at each composition is selected.  If groups are assigned different structres then the largest groups of the first n isomers will be selected <br />
+At each composition, the top_n_isomers isomer groups are kept, preferring groups seen in more files and then more abundant ones. For mzML files, an isomer group without MS2 in a file is filled in from MS1 if the file shows a genuine chromatographic peak for it within intra_cat_threshold that is at least as intense as the weakest precursor that got MS2 in that file <br />
 
 #### Requires at a minimum:  
 <pre>
 - spectra_filepath_list, type = list: list of filepaths to mzML/mzXML/mgf files and/or .xlsx files <br />
 - glycan_class, type = string: the glycan class measured ("N", "O", "lipid"/"free") <br />
 - intra_cat_threshold, type = float: minutes the RT of a structure can differ from the mean of a group. <br />
-- top_n_isomers, type = int: number of different isomer groups at each composition to retain. 
 </pre>
 
 #### Optional arguments:
-See `wrap_inference`  <br />  
+- top_n_isomers, type = int: number of different isomer groups at each composition to retain; default:5 <br />
+- n_jobs, type = int: number of files to process in parallel (in separate processes); default:1 <br />
+See `wrap_inference`  <br />
 <br />  
 ```python
 spectra_filepath_list = ["C:/myfiles/my_spectra_exp1.mzML","C:/myfiles/my_spectra_exp2.mzML",
