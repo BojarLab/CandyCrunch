@@ -238,3 +238,15 @@ def test_candycrunch_batch(result_collector, verbose):
     assert {'top1_pred', 'm/z', 'RT', 'n_files_ms2'}.issubset(combined.columns)
     assert all(label in combined.columns and f'evidence_{label}' in combined.columns for label in files.values())
     assert (combined['n_files_ms2'] > 0).all()
+
+
+def test_xic_quantification():
+    # Two isomers 0.6 min apart (4:1) and a doubly charged ion, with isotope envelopes, on a 5 s MS1 cycle: each gets its own peak area
+    rts, sigma, envelope = np.arange(0, 20, 0.08), 0.08, np.array([0.6, 0.3, 0.08, 0.02])
+    peaks = [(600.2, 1, 8.0, 4e5), (600.2, 1, 8.6, 1e5), (850.3, 2, 12.0, 2e5)]
+    scans = [sorted((mz + i * 1.003355 / z, h * p * np.exp(-0.5 * ((rt - apex) / sigma) ** 2)) for mz, z, apex, h in peaks for i, p in enumerate(envelope)) for rt in rts]
+    ms1 = (rts, np.array([m for scan in scans for m, _ in scan], dtype = np.float32), np.array([i for scan in scans for _, i in scan], dtype = np.float32),
+           np.arange(len(rts) + 1, dtype = np.int64) * len(scans[0]))
+    areas = extract_xic_areas(ms1, [p[0] for p in peaks], [8.05, 8.55, 12.1], charges = [p[1] for p in peaks], weights = [4, 1, 2])
+    truth = np.array([p[3] for p in peaks]) * sigma * np.sqrt(2 * np.pi)
+    assert np.allclose(areas, truth, rtol = 0.05)

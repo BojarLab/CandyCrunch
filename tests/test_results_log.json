@@ -1,50 +1,56 @@
 {
     "milk": {
         "scores": {
-            "(True, True, 'xlsx')": 0.8636363583275941
+            "(True, True, 'xlsx')": 0.8416988364067322
         },
-        "timestamp": "2026-07-27 15:45:09"
+        "timestamp": "2026-10-04 07:36:18"
     },
     "GPST000350": {
         "scores": {
-            "(True, True, 'mzML')": 0.6539944535829314,
-            "(True, True, 'xlsx')": 0.6539944535829314
+            "(True, True, 'xlsx')": 0.6676224214432317
         },
-        "timestamp": "2026-07-27 15:45:09"
+        "timestamp": "2026-10-04 07:36:18"
     },
     "GPST000017": {
         "scores": {
-            "(True, True, 'mzML')": 0.6512521812741686,
-            "(True, True, 'xlsx')": 0.6392567599769529
+            "(True, True, 'xlsx')": 0.6390259111439615
         },
-        "timestamp": "2026-07-27 15:45:09"
+        "timestamp": "2026-10-04 07:36:18"
     },
     "GPST000029": {
         "scores": {
-            "(True, True, 'mzML')": 0.7043458779452084,
-            "(True, True, 'xlsx')": 0.7045358029266595
+            "(True, True, 'xlsx')": 0.7044496966089643
         },
-        "timestamp": "2026-07-27 15:45:09"
+        "timestamp": "2026-10-04 07:36:18"
     },
     "PMC8950484_CHO": {
         "scores": {
-            "(True, True, 'mzML')": 0.8239464086989747,
-            "(True, True, 'xlsx')": 0.865666197519405
+            "(True, True, 'xlsx')": 0.8770553592359738
         },
-        "timestamp": "2026-07-27 15:45:09"
+        "timestamp": "2026-10-04 07:36:18"
     },
     "GPST000307": {
         "scores": {
-            "(True, True, 'mzML')": 0.8561010793275879,
-            "(True, True, 'xlsx')": 0.8607740299899077
+            "(True, True, 'xlsx')": 0.8566134021653039
         },
-        "timestamp": "2026-07-27 15:45:09"
+        "timestamp": "2026-10-04 07:36:18"
     },
     "GPST000487": {
         "scores": {
-            "(True, True, 'mzML')": 0.5887091033430432,
-            "(True, True, 'xlsx')": 0.5960535607181848
+            "(True, True, 'xlsx')": 0.595610408916565
         },
-        "timestamp": "2026-07-27 15:45:09"
+        "timestamp": "2026-10-04 07:36:18"
+    },
+    "GPST000029_batch": {
+        "scores": {
+            "(True, True, 'mzML')": 0.7098244155353007
+        },
+        "timestamp": "2026-10-04 07:36:18"
+    },
+    "GPST000017_batch": {
+        "scores": {
+            "(True, True, 'mzML')": 0.6435239389091739
+        },
+        "timestamp": "2026-10-04 07:36:18"
     }
 }

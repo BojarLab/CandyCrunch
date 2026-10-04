@@ -18,9 +18,10 @@ from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
 from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, \
     graph_to_string
 from glycowork.motif.processing import enforce_class
+from glycowork.motif.annotate import get_molecular_properties
 from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           glycan_to_composition, PROTON_MASS, METHYL_MASS,
-                                          glycan_to_mass, modification_mass_dict,
+                                          glycan_to_mass, modification_mass_dict, calculate_adduct_mass,
                                           mz_to_composition, structure_to_basic, mass_dict)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mgf, mzxml
@@ -49,6 +50,10 @@ POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
 MZ_REF = 1600  # reference m/z used internally to turn the user's single ppm tolerance into the flat-Da window for binning/fragments; corresponds to ~0.5 Da at 300ppm
+ISOTOPE_SPACING = 1.003355  # 13C - 12C
+# Natural abundances of each element's isotopes at +0, +1, +2, ... Da, for the share of a glycan's molecules within the integrated isotope peaks
+ISOTOPE_ABUNDANCES = {'C': [0.9893, 0.0107], 'H': [0.999885, 0.000115], 'N': [0.99636, 0.00364], 'O': [0.99757, 0.00038, 0.00205],
+                      'S': [0.9499, 0.0075, 0.0425, 0, 0.0001], 'P': [1.0]}
 
 
 def get_adduct_list(mode):
@@ -145,22 +150,29 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     return df_out
 
 
-def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = False):
+def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = False, extract_ms1 = False):
     """function extracting all MS/MS spectra from .mzXML file\n
    | Arguments:
    | :-
    | filepath (string): absolute filepath to the .mzXML file
    | num_peaks (int): max number of peaks to extract from spectrum; default:1000
    | ms_level (int): which MS^n level to extract; default:2
-   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False\n
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, and intensity if True
     """
     highest_i_dict = {}
     rts, intensities, mzs, charges = [], [], [], []
+    ms1_rts, ms1_mzs, ms1_ints = [], [], []
     with mzxml.read(filepath) as reader:
         for spectrum in reader:
+            if extract_ms1 and spectrum['msLevel'] == 1 and len(spectrum['m/z array']):
+                order = np.argsort(spectrum['m/z array'], kind = 'stable')
+                ms1_rts.append(float(spectrum['retentionTime']))
+                ms1_mzs.append(spectrum['m/z array'][order].astype(np.float32))
+                ms1_ints.append(spectrum['intensity array'][order].astype(np.float32))
             if spectrum['msLevel'] == ms_level:
                 mz_array = spectrum['m/z array']
                 intensity_array = spectrum['intensity array']
@@ -191,6 +203,11 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     })
     if intensity:
         df_out['intensity'] = intensities
+    if extract_ms1:
+        # Same flat MS1 store as process_mzML_stack
+        df_out.attrs['ms1'] = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
+                               np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
+                               np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
     return df_out
 
 
@@ -242,59 +259,140 @@ def bin_intensities(peak_d, frames):
     return binned_intensities, mz_diff
 
 
-def extract_xic_areas(ms1, target_mzs, rt_centers, rt_window = 2.0, mz_tolerance = 0.5, search_window = 0):
-    """extracts integrated XIC peak areas from MS1 data for a set of precursor m/z values\n
+def ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = 0.5):
+    """estimates the MS1 m/z offset and spread from the most intense centroid near each singly charged precursor\n
     | Arguments:
     | :-
     | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
-    | target_mzs (array-like): precursor m/z values to extract XICs for
-    | rt_centers (array-like): retention time centers for each precursor
-    | rt_window (float): half-width of RT window (in minutes) around rt_center (or the apex) to integrate; default:2.0
-    | mz_tolerance (float): m/z tolerance for XIC extraction; default:0.5
-    | search_window (float): if > 0, the XIC apex is searched within this many minutes of rt_center and the area integrated around it; default:0\n
+    | target_mzs (array-like): (theoretical) precursor m/z values
+    | rt_centers (array-like): retention time of each precursor
+    | charges (array-like): charge of each precursor; only singly charged ones are used, as low-resolution MS1 merges the isotopes of the others
+    | mz_tolerance (float): m/z tolerance within which to look for the centroid; default:0.5\n
     | Returns:
     | :-
-    | Returns a list of integrated XIC areas, one per target m/z; with search_window, a tuple of (areas, apex RTs, apex intensities, whether the apex is a genuine peak)
+    | Returns a tuple of (median m/z offset, half-width covering the m/z spread), or (0, mz_tolerance) with fewer than 5 usable precursors
+    """
+    ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
+    target_mzs, charges = np.asarray(target_mzs, dtype = np.float64), np.abs(np.asarray(charges, dtype = np.float64))
+    nearest = np.clip(np.searchsorted(ms1_rts, np.asarray(rt_centers, dtype = np.float64)), 0, len(ms1_rts) - 1)
+    offsets = []
+    for t in np.where(charges <= 1)[0]:
+        s0, s1 = ms1_offsets[nearest[t]], ms1_offsets[nearest[t] + 1]
+        lo, hi = np.searchsorted(ms1_mzs[s0:s1], target_mzs[t] - mz_tolerance), np.searchsorted(ms1_mzs[s0:s1], target_mzs[t] + mz_tolerance)
+        if hi > lo:
+            offsets.append(ms1_mzs[s0 + lo + np.argmax(ms1_ints[s0 + lo:s0 + hi])] - target_mzs[t])
+    if len(offsets) < 5:
+        return 0.0, mz_tolerance
+    shift = float(np.median(offsets))
+    return shift, min(mz_tolerance, 4 * 1.4826 * float(np.median(np.abs(np.array(offsets) - shift))))
+
+
+def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1.0, mz_tolerance = 0.5, search_window = 0,
+                      isotopes = 3, weights = None, mz_calibration = None, glycans = None, sample_prep = 'underivatized'):
+    """integrates the MS1 isotope envelope of each precursor over its own chromatographic peak\n
+    | Arguments:
+    | :-
+    | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
+    | target_mzs (array-like): monoisotopic precursor m/z values to extract XICs for
+    | rt_centers (array-like): retention time of each precursor (MS2 or consensus RT)
+    | charges (array-like): charge of each precursor, which sets the isotope spacing; default:None (all singly charged)
+    | rt_window (float): maximal distance (in minutes) of a peak boundary from the apex; default:1.0
+    | mz_tolerance (float): largest m/z half-width of an isotope window; default:0.5
+    | search_window (float): if > 0, the apex is the highest point within this many minutes of rt_center and its genuineness is checked (MS1 gap filling), else the apex is reached by climbing uphill from rt_center; default:0
+    | isotopes (int): number of isotope peaks summed on top of the monoisotopic one; default:3
+    | weights (array-like): if given, precursors that land on the same peak (same apex and m/z) split its area in proportion to these instead of each claiming all of it; default:None
+    | mz_calibration (tuple): (m/z offset, half-width) from ms1_mz_calibration; default:None (estimated from the targets)
+    | glycans (list): if given, each area is divided by the share of the glycan's molecules within the summed isotope peaks (computed from its elemental formula; None entries are interpolated by mass); default:None
+    | sample_prep (string): underivatized/permethylated/peracetylated, for the elemental formula; default:'underivatized'\n
+    | Returns:
+    | :-
+    | Returns an array of integrated XIC areas, one per target m/z; with search_window, a tuple of (areas, apex RTs, apex intensities, whether the apex is a genuine peak)
     """
     ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
     target_mzs = np.asarray(target_mzs, dtype = np.float64)
     rt_centers = np.asarray(rt_centers, dtype = np.float64)
-    mz_lo = target_mzs - mz_tolerance
-    mz_hi = target_mzs + mz_tolerance
+    charges = np.ones(len(target_mzs)) if charges is None else np.maximum(np.abs(np.asarray(charges, dtype = np.float64)), 1)
+    shift, half_width = mz_calibration if mz_calibration is not None else ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = mz_tolerance)
+    spacing = ISOTOPE_SPACING / charges
+    # Where the MS1 m/z spread is a sizeable part of the isotope spacing (e.g., ion traps, which also merge the isotopes of multiply charged ions), the isotope windows touch; otherwise each isotope gets its own narrow window
+    widths = np.where(half_width >= 0.2 * spacing, 0.5 * spacing, np.maximum(half_width, 5e-6 * target_mzs))
     # Binary search for RT window boundaries instead of boolean masking all scans per target
     scan_starts = np.searchsorted(ms1_rts, rt_centers - search_window - rt_window)
     scan_ends = np.searchsorted(ms1_rts, rt_centers + search_window + rt_window, side = 'right')
     areas, apex_rts, apex_ints = np.zeros(len(target_mzs)), np.full(len(target_mzs), np.nan), np.zeros(len(target_mzs))
-    is_peak = np.zeros(len(target_mzs), dtype = bool)
+    is_peak, apex_scans = np.zeros(len(target_mzs), dtype = bool), np.full(len(target_mzs), -1)
     for t in range(len(target_mzs)):
         s0, s1 = scan_starts[t], scan_ends[t]
-        if s1 - s0 < 2:
+        if s1 - s0 < 3:
             continue
         rts = ms1_rts[s0:s1]
+        centers = target_mzs[t] + shift + spacing[t] * np.arange(isotopes + 1)
         ints_arr = np.empty(s1 - s0)
         for j, si in enumerate(range(s0, s1)):
             mzs = ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]]
-            lo = np.searchsorted(mzs, mz_lo[t])
-            hi = np.searchsorted(mzs, mz_hi[t], side = 'right')
-            ints_arr[j] = np.sum(ms1_ints[ms1_offsets[si] + lo:ms1_offsets[si] + hi], dtype = np.float64) if hi > lo else 0.0
-        if not search_window:
-            areas[t] = _trapezoid(ints_arr, rts)
-            continue
-        candidates = np.where(np.abs(rts - rt_centers[t]) <= search_window)[0]
-        if not len(candidates):
-            continue
-        apex = candidates[np.argmax(ints_arr[candidates])]
-        in_window = np.abs(rts - rts[apex]) <= rt_window
-        areas[t], apex_rts[t], apex_ints[t] = _trapezoid(ints_arr[in_window], rts[in_window]), rts[apex], ints_arr[apex]
-        # A genuine peak has its apex inside the search window (not the flank of a neighbor), signal in at least 3 consecutive scans, and 3x the median of the integration window
-        first, last = apex, apex
-        while first > 0 and ints_arr[first - 1] > 0:
-            first -= 1
-        while last < len(ints_arr) - 1 and ints_arr[last + 1] > 0:
-            last += 1
-        is_peak[t] = (candidates[0] < apex < candidates[-1] and last - first >= 2 and
-                      ints_arr[apex] >= 3 * np.median(ints_arr[in_window]))
-    return (areas, apex_rts, apex_ints, is_peak) if search_window else areas.tolist()
+            cum = np.concatenate([[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)])
+            ints_arr[j] = np.sum(cum[np.searchsorted(mzs, centers + widths[t])] - cum[np.searchsorted(mzs, centers - widths[t])])
+        # Smoothing (sigma of 0.05 min, at least 0.7 scans) only steers apex and boundary finding; the area comes from the raw trace
+        sigma = max(0.7, 0.05 / np.median(np.diff(rts)))
+        kernel = np.exp(-0.5 * (np.arange(-int(3 * sigma), int(3 * sigma) + 1) / sigma) ** 2)
+        smooth = np.convolve(np.pad(ints_arr, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
+        if search_window:
+            candidates = np.where(np.abs(rts - rt_centers[t]) <= search_window)[0]
+            if not len(candidates):
+                continue
+            apex = candidates[np.argmax(ints_arr[candidates])]
+            # A genuine peak has its apex inside the search window (not the flank of a neighbor), signal in at least 3 consecutive scans, and 3x the median within rt_window of it
+            first, last = apex, apex
+            while first > 0 and ints_arr[first - 1] > 0:
+                first -= 1
+            while last < len(ints_arr) - 1 and ints_arr[last + 1] > 0:
+                last += 1
+            is_peak[t] = (candidates[0] < apex < candidates[-1] and last - first >= 2 and
+                          ints_arr[apex] >= 3 * np.median(ints_arr[np.abs(rts - rts[apex]) <= rt_window]))
+            apex_rts[t], apex_ints[t] = rts[apex], ints_arr[apex]
+        else:
+            apex = np.argmin(np.abs(rts - rt_centers[t]))
+        # Climb to the top of the peak the precursor sits on, then walk down both flanks to a valley (splitting co-eluting isomers), 1% of the peak height, or rt_window
+        while 0 < apex < len(smooth) - 1 and max(smooth[apex - 1], smooth[apex + 1]) > smooth[apex]:
+            apex += 1 if smooth[apex + 1] > smooth[apex - 1] else -1
+        baseline = np.percentile(ints_arr, 10)
+        cut = baseline + 0.01 * (smooth[apex] - baseline)
+        left, right = apex, apex
+        while left > 0 and rts[apex] - rts[left - 1] <= rt_window and smooth[left - 1] <= smooth[left] and smooth[left] > cut:
+            left -= 1
+        while right < len(smooth) - 1 and rts[right + 1] - rts[apex] <= rt_window and smooth[right + 1] <= smooth[right] and smooth[right] > cut:
+            right += 1
+        areas[t], apex_scans[t] = _trapezoid(np.clip(ints_arr[left:right + 1] - baseline, 0, None), rts[left:right + 1]), s0 + apex
+    if weights is not None:
+        weights = np.nan_to_num(np.asarray(weights, dtype = np.float64))
+        shared = [np.where((apex_scans == apex_scans[t]) & (charges == charges[t]) & (np.abs(target_mzs - target_mzs[t]) <= widths[t]))[0] if apex_scans[t] >= 0 else [t] for t in range(len(target_mzs))]
+        areas = np.array([areas[t] * (weights[t] / weights[same].sum() if weights[same].sum() > 0 else 1 / len(same)) for t, same in enumerate(shared)])
+    if glycans is not None:
+        # Divide by the share of each glycan's molecules within the summed isotope peaks, from its elemental formula plus any derivatization groups; glycans without a formula are interpolated by mass
+        props = get_molecular_properties([g for g in set(glycans) if isinstance(g, str)]) if any(isinstance(g, str) for g in glycans) else pd.DataFrame()
+        formulas = props['molecular_formula'].to_dict() if 'molecular_formula' in props.columns else {}
+        unit = {'permethylated': 'CH2', 'peracetylated': 'C2H2O'}.get(sample_prep)
+        share = np.full(len(target_mzs), np.nan)
+        for t, g in enumerate(glycans):
+            if g not in formulas:
+                continue
+            counts = defaultdict(int, {el: int(k or 1) for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', formulas[g])})
+            if unit:
+                comp = get_comp(g)
+                n_units = round((composition_to_mass(comp, sample_prep = sample_prep) - composition_to_mass(comp)) / calculate_adduct_mass(unit))
+                for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', unit):
+                    counts[el] += int(k or 1) * n_units
+            dist = np.array([1.0])
+            for el, k in counts.items():
+                for _ in range(k):
+                    dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:isotopes + 1]
+            share[t] = dist.sum()
+        known = ~np.isnan(share)
+        if known.any():
+            order = np.argsort(target_mzs[known] * charges[known])
+            share[~known] = np.interp(target_mzs[~known] * charges[~known], (target_mzs[known] * charges[known])[order], share[known][order])
+            areas = areas / share
+    return (areas, apex_rts, apex_ints, is_peak) if search_window else areas
 
 
 def process_for_inference(df, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
@@ -527,12 +625,6 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 ms, ints = zip(*cur_grp)
                 pk[np.average(ms, weights = ints)] = sum(ints)
         peaks = dict(sorted(pk.items(), key = lambda x: x[1], reverse = True))
-        rt_int_pairs = sorted(zip(cluster['RT'], cluster['intensity']))
-        rts_sorted, ints_sorted = zip(*rt_int_pairs)
-        if len(rts_sorted) >= 3:
-            sum_intensity = _trapezoid(ints_sorted, rts_sorted)
-        else:
-            sum_intensity = np.nansum(ints_sorted)
         binned_intensities, mz_remainder = zip(*[bin_intensities(c, frames) for c in cluster['peak_d']])
         binned_intensities = np.mean(np.array(binned_intensities), axis = 0)
         mz_remainder = np.mean(np.array(mz_remainder), axis = 0)
@@ -540,8 +632,10 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         binned_intensities = binned_intensities / binned_intensities.sum()
         num_spectra = len(cluster['RT'])
         rep_charge = cluster['precursor_charge'][highest_intensity_index]
+        # Without MS1, the apex precursor intensity is the abundance: it tracks MS1 peak areas far better than summing or integrating
+        # the precursor intensities of however many MS2 spectra dynamic exclusion happened to allow
         condensed_data.append(
-            [rep_mz, mean_rt, sum_intensity, peaks, binned_intensities, mz_remainder, num_spectra, rep_charge])
+            [rep_mz, mean_rt, highest_intensity, peaks, binned_intensities, mz_remainder, num_spectra, rep_charge])
     return pd.DataFrame(condensed_data,
                         columns = ['m/z', 'RT', 'intensity', 'peak_d', 'binned_intensities', 'mz_remainder',
                                    'num_spectra', 'precursor_charge'])
@@ -1140,7 +1234,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     if ext == ".mzml":
         return process_mzML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mzxml":
-        return process_mzXML_stack(spectra_filepath, intensity = True)
+        return process_mzXML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mgf":
         rows = []
         with mgf.read(spectra_filepath, use_index = False) as reader:
@@ -1463,17 +1557,20 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode, modification, m
         df_out = df_out[df_out['predictions'].str.len() > 0]
     df_out = flag_coeluting_substructures(df_out, glycan_class)
     # Calculate ppm error
-    valid_indices, ppm_errors = [], []
+    valid_indices, ppm_errors, theo_mzs = [], [], []
     for preds, obs_mass in zip(df_out['predictions'], df_out.index):
         theo_mass = mass_check(obs_mass, preds[0][0], modification = modification, mass_tag = mass_tag, mode = mode,
                                sample_prep = sample_prep, mass_tolerance = mass_tolerance) if preds else None
         valid_indices.append(bool(theo_mass) or not preds)
         if theo_mass:
             ppm_errors.append(abs(((theo_mass[0] - obs_mass) / theo_mass[0]) * 1e6))
+            theo_mzs.append(theo_mass[0])
         elif not preds:
             ppm_errors.append(np.nan)
+            theo_mzs.append(obs_mass)
     df_out = df_out[np.array(valid_indices, dtype = bool)]
     df_out['ppm_error'] = ppm_errors
+    df_out['theo_mz'] = theo_mzs
     # Drop ppm outliers: robust 3-sigma above the file's median ppm error, never looser than ppm_thresh
     known_ppm = df_out['ppm_error'].dropna().values
     if len(known_ppm) >= 5:
@@ -1496,16 +1593,23 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode, modification, m
     df_out['charge'] = round(df_out['composition'].apply(lambda x: composition_to_mass(x, sample_prep = sample_prep,
                                                                                        modification = modification)) / df_out.index) * (-1 if mode == 'negative' else 1)
     df_out = df_out.astype({'num_spectra': 'int', 'charge': 'int'})
+    # Quantify via MS1 where available, else keep precursor intensities: each row's isotope envelope at its theoretical m/z, over its own chromatographic peak, before charge states and adducts of a glycan are summed
+    if ms1 is not None and len(ms1[0]) > 0 and len(df_out) > 0:
+        calibration = ms1_mz_calibration(ms1, df_out['theo_mz'].values, df_out['RT'].values, df_out['charge'].values,
+                                         mz_tolerance = mass_tolerance)
+        xic_areas = extract_xic_areas(ms1, df_out['theo_mz'].values, df_out['RT'].values, charges = df_out['charge'].values,
+                                      mz_tolerance = mass_tolerance, weights = df_out['rel_abundance'].values,
+                                      mz_calibration = calibration, sample_prep = sample_prep,
+                                      glycans = [k[0][0] if k else None for k in df_out['predictions']])
+        if (xic_areas > 0).any():
+            df_out['rel_abundance'] = xic_areas
+            df_out.attrs['ms1_calibration'] = calibration
+    df_out = df_out.drop(columns = ['theo_mz'])
     df_out = combine_charge_states(df_out)
     df_out = combine_adduct_species(df_out, rt_diff = rt_diff)
     # Map GlyTouCan IDs
     df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in
                               df_out["predictions"]]
-    # Quantify via MS1 XIC areas where available, else keep precursor intensities
-    if ms1 is not None and len(ms1[0]) > 0 and len(df_out) > 0:
-        xic_areas = extract_xic_areas(ms1, df_out.index.values, df_out['RT'].values, mz_tolerance = mass_tolerance)
-        if any(a > 0 for a in xic_areas):
-            df_out['rel_abundance'] = xic_areas
     if (df_out['rel_abundance'] == 0).all():
         df_out = df_out.drop(columns = ['rel_abundance'])
     spectra_out = df_out.pop('peak_d').values.tolist()
@@ -1637,7 +1741,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
     multiplier = -1 if mode == 'negative' else 1
-    loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith('.mzml'))
+    loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml')))
     ms1 = loaded_file.attrs.pop('ms1', None)
     detected_mode = getattr(loaded_file, 'attrs', {}).get('detected_mode')
     detected_trap = getattr(loaded_file, 'attrs', {}).get('detected_trap')
@@ -1968,16 +2072,24 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         if ms1_paths[file_label] and not missing.empty:
             with np.load(ms1_paths[file_label]) as ms1_file:
                 ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])
-            # Look for the apex within intra_cat_thresh of the group's consensus RT and integrate around it
-            areas, apex_rts, apex_ints, is_peak = extract_xic_areas(ms1, missing['repr_mz'].values,
-                                                                    missing['repr_rt'].values,
-                                                                    mz_tolerance = mass_tolerance,
-                                                                    search_window = intra_cat_thresh)
+            # Look for the apex within intra_cat_thresh of the group's consensus RT, on the monoisotopic trace around the consensus m/z
+            _, apex_rts, apex_ints, is_peak = extract_xic_areas(ms1, missing['repr_mz'].values, missing['repr_rt'].values,
+                                                                mz_tolerance = mass_tolerance, search_window = intra_cat_thresh,
+                                                                isotopes = 0, mz_calibration = (0, mass_tolerance))
+            # Then quantify that peak exactly like the MS2 rows of this file, so both share one abundance scale
+            theo_mzs = [(mass_check(mz, top1, mode = file_mode, modification = modification, mass_tag = mass_tag,
+                                    sample_prep = sample_prep, mass_tolerance = mass_tolerance) or [mz])[0] if isinstance(top1, str) else mz
+                        for mz, top1 in zip(missing['repr_mz'], missing['repr_top1'])]
+            areas = extract_xic_areas(ms1, theo_mzs, np.where(np.isnan(apex_rts), missing['repr_rt'].values, apex_rts),
+                                      charges = missing['repr_charge'].values, mz_tolerance = mass_tolerance,
+                                      mz_calibration = df_out.attrs.get('ms1_calibration'), sample_prep = sample_prep,
+                                      glycans = missing['repr_top1'].tolist())
             # Only fill with a genuine peak at least as intense as the weakest precursor that got MS2 in this file,
             # and never with the peak of a feature that already has MS2 in this file
             own = all_ms2[all_ms2['condition_label'] == file_label]
             own_apex = extract_xic_areas(ms1, own.index.values, own['RT'].values, mz_tolerance = mass_tolerance,
-                                         search_window = rt_diff)[2] if len(own) else np.zeros(0)
+                                         search_window = rt_diff, isotopes = 0,
+                                         mz_calibration = (0, mass_tolerance))[2] if len(own) else np.zeros(0)
             floor = own_apex[own_apex > 0].min() if (own_apex > 0).any() else 0
             own_rts = own.groupby('mass_label')['RT'].apply(np.array).to_dict()
             gaps = [{
