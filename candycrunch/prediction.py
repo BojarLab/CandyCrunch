@@ -680,6 +680,8 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
          x in comps_in])
     comps_out = [(None, 0)] * len(red_masses)
     comps_with_none = comps_in + [None]
+    # A top 5 fragment heavier than 1.1x the precursor m/z rules out z = 1 (as in domain_filter)
+    heavy_frags = [any(m > 1.1 * mz for m in list(peaks)[:5]) for mz, peaks in zip(red_masses, df_in['peak_d'])]
 
     def _match_chunked(candidate_masses):
         out = []
@@ -694,18 +696,20 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             out.extend([[comps_with_none[mc] for mc in x] if x is not None else x for x in comps_all])
         return out
 
-    def _update(chunked, charge):
-        # Only overwrite where this scenario found a match, the slot is still empty, and any known charge agrees
-        return [(y, charge) if (not x[0] and y and (kc is None or kc == charge)) else x for x, y, kc in
-                zip(comps_out, chunked, known_charges)]
+    def _update(chunked, charge, replace = False):
+        # Only overwrite where this scenario found a match, the slot is still empty (or, with replace, holds z = 1 matches that the
+        # spectrum rules out and domain_filter would empty), and any known charge agrees
+        return [(y, charge) if ((not x[0] or (replace and heavy and x[1] == 1)) and y and (kc is None or kc == charge)) else x
+                for x, y, kc, heavy in zip(comps_out, chunked, known_charges, heavy_frags)]
 
-    # Try each charge state separately; higher charges produce lower observed m/z for the same neutral mass
+    # Try each charge state separately; higher charges produce lower observed m/z for the same neutral mass, so a ruled-out singly charged
+    # match must not hide a multiply charged one at the same m/z (e.g., HexNAc1Neu5Ac2 [M-H]- vs. Hex3HexNAc4dHex2 [M-2H]2- at 804.3)
     for charge in range(1, abs(max_charge) + 1):
         if mode == 'negative':
             charged_comp_masses = (comp_masses - charge * PROTON_MASS) / charge
         else:
             charged_comp_masses = (comp_masses + charge * PROTON_MASS) / charge
-        comps_out = _update(_match_chunked(charged_comp_masses), charge)
+        comps_out = _update(_match_chunked(charged_comp_masses), charge, replace = True)
     valid_adducts = [(a, mass_dict[a]) for a in get_adduct_list(mode) if mass_dict.get(a, 999) != 999]
     for adduct, adduct_mass in valid_adducts:
         comps_out = _update(_match_chunked(comp_masses + adduct_mass), 1)
@@ -1716,7 +1720,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | temperature (float): the temperature factor used to calibrate logits; default:1.15
    | spectra (bool): whether to also output the actual spectra used for prediction; default:False
    | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
-   | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); default:0.2
+   | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); below it, they are only allowed if more likely than every in-class structure of that composition; default:0.2
    | crumbs_thresh (float): threshold for annotation score to keep predictions; default:3
    | ppm_thresh (float): ppm error threshold for filtering; default:300
    | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
@@ -1796,12 +1800,15 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                              zip(preds, pred_conf)]
     _raw_predictions = df_out['predictions'].tolist()
     # Check correctness of glycan class & mass
+    df_out['predictions'] = [[g for g in preds if g[1] > pred_thresh and get_comp(g[0]) == comp] for preds, comp in
+                             zip(df_out.predictions, df_out.composition)]
+    # A cross-class structure needs extra_thresh, unless it is more likely than every in-class isomer of that composition:
+    # the class prior may veto a composition's cross-class structures, but should not make the row pick a less likely isomer
+    best_in_class = [max([g[1] for g in preds if enforce_class(g[0], glycan_class)], default = 0) for preds in df_out.predictions]
     df_out['predictions'] = [
         [(g[0], round(g[1], 4)) for g in preds if
-         enforce_class(g[0], glycan_class, g[1], extra_thresh = extra_thresh) and
-         g[1] > pred_thresh and
-         get_comp(g[0]) == comp][:5]
-        for preds, comp in zip(df_out.predictions, df_out.composition)
+         enforce_class(g[0], glycan_class, g[1], extra_thresh = extra_thresh) or 0 < best_in <= g[1]][:5]
+        for preds, best_in in zip(df_out.predictions, best_in_class)
     ]
     # Cross-validate: for spectra where exact composition equality eliminated all model
     # predictions, run CandyCrumbs on the model's top mass-compatible prediction.
@@ -1953,7 +1960,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | temperature (float): the temperature factor used to calibrate logits; default:1.15
    | spectra (bool): whether to also output the actual spectra used for prediction; default:False
    | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
-   | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions; default:0.2
+   | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); below it, they are only allowed if more likely than every in-class structure of that composition; default:0.2
    | crumbs_thresh (float): threshold for annotation score to keep predictions; default:3
    | ppm_thresh (float): ppm error threshold for filtering; default:300
    | filter_out (set): set of monosaccharide or modification types to filter out; default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}

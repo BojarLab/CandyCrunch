@@ -77,11 +77,10 @@ def add_pred_column(df_in, col_name, matches, pred_df, rt_col):
 
 
 def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbose = False):
-  assert len(predictions)>0
   if len(predictions)==0:
     print('empty preds')
     return 0, 0, 0, 0, 0, 0, 0, 0, 0
-  predictions['converted_masses'] = [m_z * abs(charge) + (abs(charge) - 1) for m_z, charge in zip(predictions.reset_index()['m/z'], predictions['charge'])]
+  predictions['converted_masses'] = [m_z * abs(charge) - (charge - np.sign(charge)) * PROTON_MASS for m_z, charge in zip(predictions.reset_index()['m/z'], predictions['charge'])]
   pairs = predictions.reset_index()[['m/z', 'RT']].round(2).values
   pairs_converted = predictions[['converted_masses', 'RT']].round(2).values
   gt_pairs = gt.reset_index()[['Mass', rt_col]].round(2).values
@@ -190,7 +189,7 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
         print('False Positives',eval_scores[-3])
         print('Unevaluable',eval_scores[-1])
         print('False Negatives',eval_scores[-2])
-        print('incorrect_preds',eval_scores[-3])
+        print('incorrect_preds',eval_scores[4])
         print('peaks_not_picked',eval_scores[-6])
         test_outputs.append(eval_scores)
         file_format = 'mzML' if filename.endswith('.mzML') else 'xlsx'
