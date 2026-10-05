@@ -2,6 +2,7 @@ import pickle
 import pandas as pd
 
 from candycrunch.model import (SimpleDataset, CandyCrunch_CNN, transform_mz, transform_rt)
+from candycrunch.prediction import comp_vector_order
 from glycowork.motif.annotate import annotate_dataset, get_k_saccharides
 from glycowork.motif.processing import get_lib
 from glycowork.motif.tokenization import get_stem_lib, glycan_to_composition
@@ -71,14 +72,13 @@ for glyc in glycans:
         allowed_glycan_comps[glyc] = glycomp
     except KeyError:
         disallowed_glycans.append(glyc)
-comp_vector_order = list(set(x for y in allowed_glycan_comps.values() for x in y))
-comp_vector_order = sorted(comp_vector_order,key=lambda x:x.lower())
-print(f"This is comp_vector_order for Zenodo dataset {comp_vector_order}")
+# The fixed order prediction.py feeds the model at inference; entries outside it (e.g., -H2O of lactones) are not features
 glycan_comp_vect_map = {}
 for glyc,glycomp in allowed_glycan_comps.items():
     comp_vect = np.zeros(len(comp_vector_order))
     for mono,counts in glycomp.items():
-        comp_vect[comp_vector_order.index(mono)] = counts
+        if mono in comp_vector_order:
+            comp_vect[comp_vector_order.index(mono)] = counts
     glycan_comp_vect_map[glyc] = comp_vect
 X_train = [t[:2] + (glycan_comp_vect_map[gt],) + t[3:]
            for t, gt in zip(X_train, y_train)]

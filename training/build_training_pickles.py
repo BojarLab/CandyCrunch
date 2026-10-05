@@ -23,7 +23,7 @@ test_size = 0.15
 random_state = 42
 
 MODE_MAP = {"negative": 0, "positive": 1}
-LC_MAP = {"PGC": 0, "C18": 1}
+LC_MAP = {"pgc": 0, "c18": 1}
 MOD_MAP = {"reduced": 0, "permethylated": 1}
 TRAP_MAP = {"linear": 0, "orbitrap": 1, "amazon": 2}
 
@@ -87,7 +87,7 @@ def _infer_glycan_types(df):
             return 0
         if "GlcNAc(b1-4)GlcNAc" in g:
             return 1
-        if g.endswith(("Glc", "GlcOS", "GlcNAc", "Ins")):
+        if g.endswith(("Glc", "GlcOS", "GlcNAc", "Ins", "Cer")):
             return 2
         return 3
     df = df.copy()

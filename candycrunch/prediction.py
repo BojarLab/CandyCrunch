@@ -248,6 +248,11 @@ def bin_intensities(peak_d, frames):
     mz_diff = np.zeros(num_frames)
     mzs = np.array(list(peak_d.keys()), dtype = 'float32')
     intensities = np.array(list(peak_d.values()))
+    # Peaks outside the binned range would wrap into the last bin (index -1) with a remainder of about -2960
+    in_range = (mzs > frames[0]) & (mzs <= frames[-1])
+    mzs, intensities = mzs[in_range], intensities[in_range]
+    if not len(mzs):
+        return binned_intensities, mz_diff
     bin_indices = np.digitize(mzs, frames, right = True)
     mz_remainder = mzs - frames[bin_indices - 1]
     unique_bins, max_intensities = npi.group_by(bin_indices).max(intensities)
@@ -837,7 +842,8 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         cc_out = CandyCrumbs(struct, unq_rounded_masses, mass_tolerance, simplify = False,
                              charge = int(multiplier * abs(row_charge)),
                              disable_global_mods = (not is_adduct or mode == "negative"), disable_X_cross_rings = True,
-                             max_cleavages = 2, mass_tag = mass_tag, sample_prep = sample_prep)
+                             max_cleavages = 2, mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0),
+                             sample_prep = sample_prep)
         # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
         # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations
         tester_mass_scores = {}
@@ -941,10 +947,10 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             continue
         # Singly-charged adduct: mz × |z| = M + adduct
         df_out.loc[np.abs(computed_masses + adduct_mass - raw_masses) < mass_tolerance, 'adduct'] = adduct
-        # Multiply-charged adduct: mz × |z| = M + adduct − (|z|−1)×H
+        # Multiply-charged adduct: mz × |z| = M + adduct − (|z|−1)×H in negative mode, + (|z|−1)×H in positive mode
         proton_offset = (charges_abs - 1) * PROTON_MASS
         df_out.loc[(charges_abs > 1) & (
-                np.abs(computed_masses + adduct_mass - proton_offset - raw_masses) < mass_tolerance), 'adduct'] = adduct
+                np.abs(computed_masses + adduct_mass + multiplier * proton_offset - raw_masses) < mass_tolerance), 'adduct'] = adduct
     new_preds = []
     top_fragments_col = df_out['top_fragments'].tolist()
     predictions_col = df_out['predictions'].tolist()
@@ -956,7 +962,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
     for k in range(len(df_out)):
         keep = []
         c = abs(charge_col[k])
-        addy = (c - 1) * -multiplier
+        addy = (c - 1) * -multiplier * PROTON_MASS
         precursor_mz = index_vals[k]
         assumed_mass = precursor_mz * c + addy
         current_preds = predictions_col[k]
@@ -1319,12 +1325,13 @@ def combine_charge_states(df_out):
             filtered_top_pred.append(pred)
     df_filtered = df_out[df_out['top_pred'].isin(filtered_top_pred)].copy()
     for pred in filtered_top_pred:
-        idx = df_filtered.index[len(df_filtered) - 1 - df_filtered.top_pred.values.tolist()[::-1].index(pred)]
-        idx_rt = df_filtered.loc[idx, 'RT']
-        for k, row in df_filtered[:idx - 1][::-1].iterrows():
-            if row['top_pred'] == pred and abs(row['RT'] - idx_rt) < 1:
-                df_filtered.at[idx, 'rel_abundance'] += row['rel_abundance']
-                df_filtered.drop(k, inplace = True)
+        pred_rows = df_filtered[df_filtered['top_pred'] == pred]
+        lowest = pred_rows['charge'].abs().min()
+        # Every lowest-charge row absorbs the higher charge states of this glycan that co-elute with it
+        for idx, row in pred_rows[pred_rows['charge'].abs() == lowest].iterrows():
+            partners = pred_rows[(pred_rows['charge'].abs() > lowest) & ((pred_rows['RT'] - row['RT']).abs() < 1) & pred_rows.index.isin(df_filtered.index)]
+            df_filtered.at[idx, 'rel_abundance'] += partners['rel_abundance'].sum()
+            df_filtered = df_filtered.drop(partners.index)
     df_out = pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index()
     df_out.drop(['top_pred'], axis = 1, inplace = True)
     return df_out
@@ -1737,6 +1744,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    """
     # ppm_thresh is the only tolerance the user sets; derive the flat-Da window everything downstream needs from it here
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
+    # 'custom' labels are described by mass_tag alone; glycowork's mass functions only know the named modifications
+    modification = None if modification == 'custom' else modification
     mode = "negative" if max_charge < 0 else "positive"
     if not _return_intermediate:
         print(
@@ -1768,7 +1777,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Prepare file for processing
     loaded_file.dropna(subset = ['peak_d'], inplace = True)
     idx_col = 'm/z' if 'm/z' in loaded_file.columns else 'reducing_mass'
-    loaded_file[idx_col] += np.random.uniform(0.00001, 10 ** (-20), size = len(loaded_file))
+    loaded_file[idx_col] += np.random.uniform(10 ** (-20), 0.00001, size = len(loaded_file))
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch
     df_out = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num)
@@ -1855,7 +1864,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                       charge = int(multiplier * _row_charge),
                                       disable_global_mods = (not _is_adduct or mode == "negative"),
                                       disable_X_cross_rings = True, max_cleavages = 2,
-                                      mass_tag = mass_tag, sample_prep = sample_prep)
+                                      mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0),
+                                      sample_prep = sample_prep)
             except Exception:
                 continue
             _tms = {}
@@ -1979,6 +1989,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    """
     mode = "negative" if max_charge < 0 else "positive"
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
+    modification = None if modification == 'custom' else modification
     print(
         f"Your chosen settings are: {glycan_class} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     if df_use is None:
