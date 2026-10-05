@@ -20,8 +20,8 @@ from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compa
 from glycowork.motif.processing import enforce_class
 from glycowork.motif.annotate import get_molecular_properties
 from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
-                                          glycan_to_composition, PROTON_MASS, METHYL_MASS,
-                                          glycan_to_mass, modification_mass_dict, calculate_adduct_mass,
+                                          glycan_to_composition, PROTON_MASS,
+                                          glycan_to_mass, modification_formula_dict, calculate_adduct_mass,
                                           mz_to_composition, structure_to_basic, mass_dict)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mgf, mzxml
@@ -51,6 +51,8 @@ temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
 MZ_REF = 1600  # reference m/z used internally to turn the user's single ppm tolerance into the flat-Da window for binning/fragments; corresponds to ~0.5 Da at 300ppm
 ISOTOPE_SPACING = 1.003355  # 13C - 12C
+# Label mass a reducing-end modification adds (H2 for reduction, label minus O for reductive amination)
+modification_mass_dict = {k: calculate_adduct_mass(v) for k, v in modification_formula_dict.items()}
 # Natural abundances of each element's isotopes at +0, +1, +2, ... Da, for the share of a glycan's molecules within the integrated isotope peaks
 ISOTOPE_ABUNDANCES = {'C': [0.9893, 0.0107], 'H': [0.999885, 0.000115], 'N': [0.99636, 0.00364], 'O': [0.99757, 0.00038, 0.00205],
                       'S': [0.9499, 0.0075, 0.0425, 0, 0.0001], 'P': [1.0]}
@@ -58,6 +60,81 @@ ISOTOPE_ABUNDANCES = {'C': [0.9893, 0.0107], 'H': [0.999885, 0.000115], 'N': [0.
 
 def get_adduct_list(mode):
     return NEGATIVE_ADDUCTS if mode == 'negative' else POSITIVE_ADDUCTS
+
+
+def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotope_tolerance = 0.25, min_explained = 0.7):
+    """moves precursor m/z values the instrument never refined onto the monoisotopic centroid of their survey scan\n
+   | Arguments:
+   | :-
+   | ms1 (tuple): flat MS1 store (rts, mzs, intensities, offsets), as built by process_mzML_stack
+   | mzs (list): precursor m/z values from the MS2 headers
+   | rts (list): retention time of each MS2 spectrum
+   | scans (list): index of the survey (MS1) scan preceding each MS2 spectrum, -1 if there was none
+   | refine (list): whether to refine each precursor m/z; True where the header has no charge state, as the instrument then never determined the monoisotopic peak
+   | mz_tolerance (float): maximum distance between the trigger m/z and a survey-scan centroid; default:0.3
+   | isotope_tolerance (float): tolerance for locating lighter isotope peaks; default:0.25
+   | min_explained (float): share of a peak's intensity that the isotope envelope of a lighter peak has to explain for the peak to count as its isotope; default:0.7\n
+   | Returns:
+   | :-
+   | (1) a list of refined precursor m/z values
+   | (2) a boolean array marking spectra triggered on an isotope peak whose monoisotopic precursor was fragmented itself within a minute
+   """
+    ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
+    out, walked = list(mzs), [False] * len(mzs)
+    # Isotope envelope relative to the monoisotopic peak, for an average glycan of a given neutral mass (elemental composition per Da of a
+    # complex glycan); cached per 10 Da
+    props = get_molecular_properties(['Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc'])
+    per_da = {el: int(n or 1) / props['exact_mass'].iloc[0] for el, n in re.findall(r'([A-Z][a-z]?)(\d*)', props['molecular_formula'].iloc[0])}
+    envelopes = {}
+    def envelope(mass):
+        if int(mass // 10) not in envelopes:
+            dist = np.array([1.0])
+            for el, per in per_da.items():
+                for _ in range(round(per * (mass // 10) * 10)):
+                    dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:4]
+            envelopes[int(mass // 10)] = dist / dist[0]
+        return envelopes[int(mass // 10)]
+    for i, (mz, s, r) in enumerate(zip(mzs, scans, refine)):
+        if not r or s < 0:
+            continue
+        scan_mzs, scan_ints = ms1_mzs[ms1_offsets[s]:ms1_offsets[s + 1]], ms1_ints[ms1_offsets[s]:ms1_offsets[s + 1]]
+        if not len(scan_mzs) or np.abs(scan_mzs - mz).min() > mz_tolerance:
+            continue
+        k = np.argmin(np.abs(scan_mzs - mz))
+        mono = k
+        # DDA often triggers on a heavier isotope once the monoisotopic peak is excluded, so step down to the lightest peak (z = 1, then
+        # z = 2 spacing) whose isotope envelope explains this peak, unless that peak itself is explained as an isotope of an even lighter one
+        for z in (1, 2):
+            chain = [k]
+            for j in range(1, 4):
+                near = np.where(np.abs(scan_mzs - (scan_mzs[k] - j * ISOTOPE_SPACING / z)) <= isotope_tolerance)[0]
+                if not len(near):
+                    break
+                chain.append(near[np.argmax(scan_ints[near])])
+            for j in range(len(chain) - 1, 0, -1):
+                below = np.where(np.abs(scan_mzs - (scan_mzs[chain[j]] - ISOTOPE_SPACING / z)) <= isotope_tolerance)[0]
+                below = below[np.argmax(scan_ints[below])] if len(below) else None
+                if (scan_ints[chain[j]] * envelope(scan_mzs[chain[j]] * z)[j] >= min_explained * scan_ints[k] and
+                        (below is None or scan_ints[below] * envelope(scan_mzs[below] * z)[1] < min_explained * scan_ints[chain[j]])):
+                    mono = chain[j]
+                    break
+            if mono != k:
+                break
+        walked[i] = mono != k
+        # Ion-trap centroids jitter between scans, so average the monoisotopic centroid over the neighbouring survey scans
+        pos, wts = [], []
+        for t in range(max(s - 1, 0), min(s + 2, len(ms1_rts))):
+            t_mzs, t_ints = ms1_mzs[ms1_offsets[t]:ms1_offsets[t + 1]], ms1_ints[ms1_offsets[t]:ms1_offsets[t + 1]]
+            if len(t_mzs) and np.abs(t_mzs - scan_mzs[mono]).min() <= 0.2:
+                pos.append(t_mzs[np.argmin(np.abs(t_mzs - scan_mzs[mono]))])
+                wts.append(t_ints[np.argmin(np.abs(t_mzs - scan_mzs[mono]))])
+        out[i] = float(np.average(pos, weights = wts))
+    # An isotope-triggered MS2 repeats its monoisotopic precursor's fragmentation with partly 13C-shifted fragments; if that precursor was
+    # fragmented itself within a minute, the isotope spectrum only blurs the cluster (and can become its apex), so it is dropped
+    out_arr, walked, rts = np.array(out), np.array(walked), np.asarray(rts, dtype = float)
+    drop = np.array([w and bool(np.any(~walked & (np.abs(out_arr - m) < mz_tolerance) & (np.abs(rts - rt) <= 1.0))) for m, rt, w in
+                     zip(out_arr, rts, walked)], dtype = bool)
+    return out, drop
 
 
 def process_mzML_stack(filepath, num_peaks = 1000,
@@ -78,9 +155,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     highest_i_dict = {}
     rts, intensities, mzs, charges = [], [], [], []
     detected_mode, detected_trap = None, None
-    ms1_rts, ms1_mzs, ms1_ints = [], [], []
+    ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     for spectrum in run:
-        if extract_ms1 and spectrum.ms_level == 1:
+        if spectrum.ms_level == 1:
             peaks_raw = spectrum.peaks("raw")
             if len(peaks_raw) > 0:
                 ms1_rts.append(spectrum.scan_time_in_minutes())
@@ -121,6 +198,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 mzs.append(float(key.split('_')[-1]))
                 rts.append(spectrum.scan_time_in_minutes())
                 raw_charge = spectrum.selected_precursors[0].get('charge', None)
+                # Without a charge state the instrument never determined the monoisotopic peak, so its trigger m/z gets refined from MS1
+                ms1_scans.append(len(ms1_rts) - 1)
+                refine.append(raw_charge is None)
                 # Vendor software can default to charge=1 when undetermined;
                 # only trust explicit multiply-charged assignments
                 if raw_charge is not None and abs(int(raw_charge)) == 1:
@@ -140,13 +220,16 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     })
     if intensity:
         df_out['intensity'] = intensities
+    # Flat MS1 store (rts, mzs, intensities, offsets): the peaks of scan i are mzs[offsets[i]:offsets[i + 1]]
+    ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
+           np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
+           np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine)
+    df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
     if extract_ms1:
-        # Flat MS1 store (rts, mzs, intensities, offsets): the peaks of scan i are mzs[offsets[i]:offsets[i + 1]]
-        df_out.attrs['ms1'] = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
-                               np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
-                               np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+        df_out.attrs['ms1'] = ms1
     return df_out
 
 
@@ -165,10 +248,10 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     """
     highest_i_dict = {}
     rts, intensities, mzs, charges = [], [], [], []
-    ms1_rts, ms1_mzs, ms1_ints = [], [], []
+    ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     with mzxml.read(filepath) as reader:
         for spectrum in reader:
-            if extract_ms1 and spectrum['msLevel'] == 1 and len(spectrum['m/z array']):
+            if spectrum['msLevel'] == 1 and len(spectrum['m/z array']):
                 order = np.argsort(spectrum['m/z array'], kind = 'stable')
                 ms1_rts.append(float(spectrum['retentionTime']))
                 ms1_mzs.append(spectrum['m/z array'][order].astype(np.float32))
@@ -186,6 +269,8 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                     mzs.append(float(precursor_mz))
                     rts.append(spectrum['retentionTime'])
                     raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
+                    ms1_scans.append(len(ms1_rts) - 1)
+                    refine.append(raw_charge is None)
                     if raw_charge is not None and abs(int(raw_charge)) == 1:
                         raw_charge = None
                     charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
@@ -203,11 +288,14 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     })
     if intensity:
         df_out['intensity'] = intensities
+    # Same flat MS1 store and precursor refinement as process_mzML_stack
+    ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
+           np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
+           np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine)
+    df_out = df_out[~drop].reset_index(drop = True)
     if extract_ms1:
-        # Same flat MS1 store as process_mzML_stack
-        df_out.attrs['ms1'] = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
-                               np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
-                               np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+        df_out.attrs['ms1'] = ms1
     return df_out
 
 
@@ -518,8 +606,8 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
    """
     try:
         mz = glycan_to_mass(glycan, sample_prep = sample_prep, modification = modification) if isinstance(glycan,
-                                                                                                          str) else glycan + modification_mass_dict.get(
-            modification, 0) + (METHYL_MASS if modification == 'reduced' and sample_prep == 'permethylated' else 0)
+                                                                                                          str) else glycan + composition_to_mass(
+            {}, sample_prep = sample_prep, modification = modification) - composition_to_mass({}, sample_prep = sample_prep)
     except:
         return False
     ions = get_ion_mzs(mz + (mass_tag or 0), max_charge = int(max(permitted_charges)) * (1 if mode == 'positive' else -1),
@@ -1517,9 +1605,9 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
         except ValueError:
             pass
         ionization = -PROTON_MASS if mode == 'negative' else PROTON_MASS
-        mass_offset = modification_mass_dict.get(modification, 0) + (
-            METHYL_MASS if modification == 'reduced' and sample_prep == 'permethylated' else 0) + (
-                              mass_tag or 0) + ionization
+        # Reducing-end modification as glycowork adds it, including the group a derivatized alditol gains on its extra free OH
+        mass_offset = composition_to_mass({}, sample_prep = sample_prep, modification = modification) - composition_to_mass(
+            {}, sample_prep = sample_prep) + (mass_tag or 0) + ionization
         mass_dic = mass_dic if mass_dic else make_mass_dic(glycans, glycan_class, filter_out, df_use,
                                                            taxonomy_class = taxonomy_class, sample_prep = sample_prep)
         df_out = possibles(df_out, mass_dic, mass_offset)

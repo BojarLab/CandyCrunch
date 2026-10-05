@@ -29,8 +29,8 @@ TEST_DICTS = [
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
-# Batch F1 on rows with MS2 evidence was 0.709-0.721 (GPST000029) and 0.634 (GPST000017) over seeds 0-2
-BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.58}
+# Batch F1 on rows with MS2 evidence was 0.701-0.720 (GPST000029) and 0.705-0.713 (GPST000017) over seeds 0-2
+BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.65}
 
 
 def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array2_alt = None):
@@ -249,3 +249,17 @@ def test_xic_quantification():
     areas = extract_xic_areas(ms1, [p[0] for p in peaks], [8.05, 8.55, 12.1], charges = [p[1] for p in peaks], weights = [4, 1, 2])
     truth = np.array([p[3] for p in peaks]) * sigma * np.sqrt(2 * np.pi)
     assert np.allclose(areas, truth, rtol = 0.05)
+
+
+def test_precursor_refinement():
+    # Three survey scans: a jittering z = 1 isotope envelope at 600.2 and a precursor at 700.2 with an unrelated weak peak 1 Da below it
+    jitter, scale = [-0.02, 0.02, 0.0], [0.9, 1.0, 1.1]
+    scans = [[(600.2 + d, 1000 * f), (601.2 + d, 300 * f), (602.2 + d, 60 * f), (699.2, 100), (700.2, 1000)] for d, f in zip(jitter, scale)]
+    ms1 = (np.array([10.0, 10.05, 10.1]), np.array([m for scan in scans for m, _ in scan], dtype = np.float32),
+           np.array([i for scan in scans for _, i in scan], dtype = np.float32), np.arange(4, dtype = np.int64) * 5)
+    mono = np.average([600.18, 600.22, 600.2], weights = [900, 1000, 1100])
+    out, drop = refine_precursor_mz(ms1, [600.31, 601.25, 601.25, 700.3], [10.06, 10.07, 10.08, 10.06], [1, 1, 1, 1], [True, True, False, True])
+    # The trigger moves onto the averaged monoisotopic centroid, an M+1 trigger is walked down and dropped as its monoisotopic precursor was
+    # fragmented itself, a header charge state is trusted, and an unrelated lighter peak is not mistaken for the monoisotopic one
+    assert np.allclose(out[:2], mono, atol = 1e-3) and out[2] == 601.25 and abs(out[3] - 700.2) < 1e-3
+    assert list(drop) == [False, True, False, False]

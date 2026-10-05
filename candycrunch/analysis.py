@@ -13,7 +13,7 @@ import networkx.algorithms.isomorphism as iso
 import numpy as np
 import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
-from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, METHYL_MASS as CH2_MASS
+from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, calculate_adduct_mass
 from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
 from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
 from scipy.stats import ttest_ind
@@ -147,6 +147,7 @@ mono_attributes = {
                         '+Na': +22.989218, '+K': 38.963158}}
 }
 WATER_MASS = 18.0105546
+CH2_MASS = calculate_adduct_mass('CH2')
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond'], 3: ['peptide_a', 'peptide_b', 'peptide_c'],
                     4: ['peptide_y', 'peptide_z', 'peptide_w']}
 # Neutral radical lost from a z. ion by Cbeta-Cgamma homolysis, giving the w ion; residues without a
