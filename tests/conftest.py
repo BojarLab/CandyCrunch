@@ -5,6 +5,7 @@ from collections import defaultdict
 import pytest
 import json
 import os
+import pandas as pd
 from datetime import datetime
 
 
@@ -37,6 +38,8 @@ class ResultCollector:
         self.dict_full_results = defaultdict(lambda: defaultdict(list))
         self.log_file = "test_results_log.json"
         self.previous_results = self.load_previous_results()
+        self.gt_hashes = {}
+        self.regressed = set()
 
     def load_previous_results(self):
         if os.path.exists(self.log_file):
@@ -45,24 +48,30 @@ class ResultCollector:
         return {}
 
     def save_current_results(self):
-        # Calculate final averages for each test_dict
-        final_results = {}
+        # Start from the previous log, so a partial run (one input format, a -k subset) keeps the baselines it did not touch
+        final_results = dict(self.previous_results)
         for dict_name, param_results in self.dict_results.items():
-            averaged_results = {
-                str(params): np.mean(scores)  # Convert tuple to str for JSON serialization
-                for params, scores in param_results.items()
-            }
+            prev = self.previous_results.get(dict_name, {})
+            # Baselines scored against a different ground truth are dropped, not carried over
+            scores = dict(prev.get('scores', {})) if prev.get('gt_hash') in (None, self.gt_hashes.get(dict_name)) else {}
+            for params, run_scores in param_results.items():
+                # A regressed score must not become the new baseline, or the regression passes silently on the next run
+                if (dict_name, str(params)) not in self.regressed:
+                    scores[str(params)] = np.mean(run_scores)
             final_results[dict_name] = {
-                'scores': averaged_results,
+                'scores': scores,
+                'gt_hash': self.gt_hashes.get(dict_name),
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
         # Save to log file
         with open(self.log_file, 'w') as f:
             json.dump(final_results, f, indent=4)
     
-    def check_performance(self, test_dict_name, param_key, current_score):
-        """Check if current score is at least as good as previous best"""
-        if test_dict_name in self.previous_results:
+    def check_performance(self, test_dict_name, param_key, current_score, gt):
+        """Check that the current score has not dropped below the previous run's on the same ground truth"""
+        # Editing the ground truth (e.g., adding newly found glycans) moves scores without any code change, so baselines are tied to its content
+        self.gt_hashes[test_dict_name] = str(pd.util.hash_pandas_object(gt, index = False).sum())
+        if test_dict_name in self.previous_results and self.previous_results[test_dict_name].get('gt_hash') in (None, self.gt_hashes[test_dict_name]):
             prev_scores = self.previous_results[test_dict_name]['scores']
             # The log stores scores without the dataset name, so the key must drop it to ever match
             param_key_str = str(param_key[1:])
@@ -70,6 +79,7 @@ class ResultCollector:
                 prev_score = prev_scores[param_key_str]
                 # Unseeded runs differ by up to 0.02 per dataset, so only a ~2x larger drop is a regression
                 if current_score < prev_score - 0.04:
+                    self.regressed.add((test_dict_name, param_key_str))
                     raise AssertionError(
                         f"\nPerformance regression detected for {test_dict_name}!"
                         f"\nPrevious score: {prev_score:.3f}"

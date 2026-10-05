@@ -2,6 +2,7 @@ import copy
 import math
 from collections import Counter
 import re
+import warnings
 from itertools import combinations_with_replacement, product
 from operator import neg
 import bisect
@@ -13,8 +14,9 @@ import networkx.algorithms.isomorphism as iso
 import numpy as np
 import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
-from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, calculate_adduct_mass
-from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
+from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, calculate_adduct_mass, \
+    composition_to_mass, glycan_to_composition, get_core, get_modification
+from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies
 from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
 from scipy.stats import ttest_ind
 
@@ -45,16 +47,6 @@ mono_attributes = {
                'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], '24X': [1, 2, 3, 6, 7, 8, 9],
                          '02A': [4, 5, 6, 7, 8, 9],
                          '04A': [6, 7, 8, 9], '24A': [4, 5], 'Neu5Gc': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
-    'Neu5Ac8S': {'mass': {'02X': 70.0055, '04X': 170.0453, '24X': 271.0124, '02A': 301.0467,
-                          '04A': 201.0069, '24A': 100.0398, 'Neu5Ac8S': 371.0522},
-                 'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], '24X': [1, 2, 3, 6, 7, 8, 9],
-                           '02A': [4, 5, 6, 7, 8, 9],
-                           '04A': [6, 7, 8, 9], '24A': [4, 5], 'Neu5Ac8S': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
-    'Neu5Gc8S': {'mass': {'02X': 70.0055, '04X': 186.0402, '24X': 271.0124, '02A': 317.0416,
-                          '04A': 201.0069, '24A': 116.0347, 'Neu5Gc8S': 387.0471},
-                 'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], '24X': [1, 2, 3, 6, 7, 8, 9],
-                           '02A': [4, 5, 6, 7, 8, 9],
-                           '04A': [6, 7, 8, 9], '24A': [4, 5], 'Neu5Gc8S': [1, 2, 3, 4, 5, 6, 7, 8, 9]}},
     'Kdn': {'mass': {'02X': 70.0055, '04X': 129.0188, '24X': 191.0556, '02A': 180.0634,
                      '04A': 121.0501, '24A': 59.0133, 'Kdn': 250.0689},
             'atoms': {'02X': [1, 2, 3], '04X': [1, 2, 3, 4, 5], '24X': [1, 2, 3, 6, 7, 8, 9], '02A': [4, 5, 6, 7, 8, 9],
@@ -62,9 +54,6 @@ mono_attributes = {
     'HexA': {'mass': {'02X': 42.0106, '02A': 134.02159, '24X': 116.01099, '24A': 60.0211, 'HexA': 176.03209},
              'atoms': {'02X': [1, 2], '02A': [3, 4, 5, 6], '24X': [1, 2, 5, 6], '24A': [3, 4],
                        'HexA': [1, 2, 3, 4, 5, 6]}},
-    'HexA3S': {'mass': {'02X': 42.0106, '02A': 213.97839, '24X': 116.01099, '24A': 139.9779, 'HexA3S': 255.98889},
-               'atoms': {'02X': [1, 2], '02A': [3, 4, 5, 6], '24X': [1, 2, 5, 6], '24A': [3, 4],
-                         'HexA3S': [1, 2, 3, 4, 5, 6]}},
     'dHex': {'mass': {'02X': 42.0106, '02A': 104.0474, '25X': 58.0055, '25A': 88.0524, 'dHex': 146.0579},
              'atoms': {'02X': [1, 2], '02A': [3, 4, 5, 6], '25X': [1, 2], '25A': [3, 4, 5, 6],
                        'dHex': [1, 2, 3, 4, 5, 6]}},
@@ -72,75 +61,6 @@ mono_attributes = {
                      '12X': 102.0317, '03X': 72.0211, '02X': 42.0106, 'Pen': 132.0423},
             'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5], '15X': [1], '15A': [2, 3, 4, 5],
                       '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Pen': [1, 2, 3, 4, 5]}},
-    'HexNAc4S': {
-        'mass': {'04A': 60.0211, '24A': 139.9779, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041, '25X': 99.0321,
-                 '02A': 199.9991, '24X': 143.0583, '14A': 211.015044, '15A': 255.041259, '15X': 27.994941,
-                 '04X': 223.0151, '35X': 129.0426,
-                 '14X': 72.021156, '13X': 181.988541, '13A': 101.047659, 'HexNAc4S': 283.0362},
-        'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6], '25X': [1, 2],
-                  '02A': [3, 4, 5, 6], '24X': [1, 2, 5, 6], '14A': [2, 3, 4], '15A': [2, 3, 4, 5, 6], '15X': [1],
-                  '04X': [1, 2, 3, 4], '35X': [1, 2, 3],
-                  '14X': [1, 5, 6], '13X': [1, 4, 5, 6], '13A': [2, 3], 'HexNAc4S': [1, 2, 3, 4, 5, 6]}},
-    'HexNAc6S': {
-        'mass': {'04A': 139.9779, '24A': 60.0211, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041, '25X': 99.0321,
-                 '02A': 199.9991, '24X': 223.0151, '14A': 131.058244, '15A': 255.041259, '15X': 27.994941,
-                 '04X': 143.0583, '35X': 129.0426,
-                 '14X': 151.977956, '13X': 181.988541, '13A': 101.047659, 'HexNAc6S': 283.0362},
-        'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6], '25X': [1, 2],
-                  '02A': [3, 4, 5, 6], '24X': [1, 2, 5, 6], '14A': [2, 3, 4], '15A': [2, 3, 4, 5, 6], '15X': [1],
-                  '04X': [1, 2, 3, 4], '35X': [1, 2, 3],
-                  '14X': [1, 5, 6], '13X': [1, 4, 5, 6], '13A': [2, 3], 'HexNAc6S': [1, 2, 3, 4, 5, 6]}},
-    'HexNAcOS': {
-        'mass': {'04A': 139.9779, '24A': 139.9779, '35A': 153.9936, '03A': 169.9885, '25A': 184.0041, '25X': 99.0321,
-                 '02A': 199.9991, '24X': 223.0151, '14A': 131.058244, '15A': 255.041259, '15X': 27.994941,
-                 '04X': 143.0583, '35X': 129.0426,
-                 '14X': 151.977956, '13X': 181.988541, '13A': 101.047659, 'HexNAcOS': 283.0362},
-        'atoms': {'04A': [5, 6], '24A': [3, 4], '35A': [4, 5, 6], '03A': [4, 5, 6], '25A': [3, 4, 5, 6], '25X': [1, 2],
-                  '02A': [3, 4, 5, 6], '24X': [1, 2, 5, 6], '14A': [2, 3, 4], '15A': [2, 3, 4, 5, 6], '15X': [1],
-                  '04X': [1, 2, 3, 4], '35X': [1, 2, 3],
-                  '14X': [1, 5, 6], '13X': [1, 4, 5, 6], '13A': [2, 3], 'HexNAcOS': [1, 2, 3, 4, 5, 6]}},
-    'Hex6S': {'mass': {'02X': 42.0106, '03X': 72.0211, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211, '04A': 139.9779,
-                       '35A': 153.9936, '25A': 184.0041,
-                       '02A': 199.9991, '03A': 169.9885, '15A': 214.014659, '24X': 181.9885, '04X': 102.0317,
-                       '35X': 88.016, 'Hex6S': 242.0096},
-              'atoms': {'02X': [1, 2], '03X': [1, 2, 3], '15X': [1], '13A': [2, 3], '24A': [3, 4], '04A': [5, 6],
-                        '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                        '02A': [3, 4, 5, 6], '03A': [4, 5, 6], '15A': [2, 3, 4, 5, 6], '24X': [1, 2, 5, 6],
-                        '04X': [1, 2, 3, 4], '35X': [1, 2, 3], 'Hex6S': [1, 2, 3, 4, 5, 6]}},
-    'Hex3S': {
-        'mass': {'02X': 42.0106, '03X': 151.9779, '15X': 27.9949, '13A': 139.9779, '24A': 139.9779, '04A': 60.0211,
-                 '35A': 74.0368, '25A': 184.0041,
-                 '02A': 199.9991, '03A': 90.0317, '15A': 214.014659, '24X': 102.0317, '04X': 181.9885, '35X': 167.9728,
-                 'Hex3S': 242.0096},
-        'atoms': {'02X': [1, 2], '03X': [1, 2, 3], '15X': [1], '13A': [2, 3], '24A': [3, 4], '04A': [5, 6],
-                  '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                  '02A': [3, 4, 5, 6], '03A': [4, 5, 6], '15A': [2, 3, 4, 5, 6], '24X': [1, 2, 5, 6],
-                  '04X': [1, 2, 3, 4], '35X': [1, 2, 3], 'Hex3S': [1, 2, 3, 4, 5, 6]}},
-    'HexOS': {
-        'mass': {'02X': 42.0106, '03X': 151.9779, '15X': 27.9949, '13A': 139.9779, '24A': 139.9779, '04A': 139.9779,
-                 '35A': 153.9936, '25A': 184.0041,
-                 '02A': 199.9991, '03A': 169.9885, '15A': 214.014659, '24X': 181.9885, '04X': 181.9885, '35X': 167.9728,
-                 'HexOS': 242.0096},
-        'atoms': {'02X': [1, 2], '03X': [1, 2, 3], '15X': [1], '13A': [2, 3], '24A': [3, 4], '04A': [5, 6],
-                  '35A': [4, 5, 6], '25A': [3, 4, 5, 6],
-                  '02A': [3, 4, 5, 6], '03A': [4, 5, 6], '15A': [2, 3, 4, 5, 6], '24X': [1, 2, 5, 6],
-                  '04X': [1, 2, 3, 4], '35X': [1, 2, 3], 'HexOS': [1, 2, 3, 4, 5, 6]}},
-    'Man6P': {'mass': {'03X': 72.0211, '02X': 42.0106, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211, '03A': 169.998,
-                       '15A': 214.024159,
-                       '04A': 139.9874, '35A': 154.0031, '25A': 184.0136, '02A': 200.0086, '24X': 181.998,
-                       '04X': 102.0317, '35X': 88.016, 'Man6P': 242.0191},
-              'atoms': {'03X': [1, 2, 3], '02X': [1, 2], '15X': [1], '13A': [2, 3], '24A': [3, 4], '03A': [4, 5, 6],
-                        '15A': [2, 3, 4, 5, 6],
-                        '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], '24X': [1, 2, 5, 6],
-                        '04X': [1, 2, 3, 4], '35X': [1, 2, 3], 'Man6P': [1, 2, 3, 4, 5, 6]}},
-    'Hex6P': {'mass': {'03X': 72.0211, '02X': 42.0106, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211, '03A': 169.998,
-                       '15A': 214.024159,
-                       '04A': 139.9874, '35A': 154.0031, '25A': 184.0136, '02A': 200.0086, '24X': 181.998,
-                       '04X': 102.0317, '35X': 88.016, 'Hex6P': 242.0191},
-              'atoms': {'03X': [1, 2, 3], '02X': [1, 2], '15X': [1], '13A': [2, 3], '24A': [3, 4], '03A': [4, 5, 6],
-                        '15A': [2, 3, 4, 5, 6],
-                        '04A': [5, 6], '35A': [4, 5, 6], '25A': [3, 4, 5, 6], '02A': [3, 4, 5, 6], '24X': [1, 2, 5, 6],
-                        '04X': [1, 2, 3, 4], '35X': [1, 2, 3], 'Hex6P': [1, 2, 3, 4, 5, 6]}},
     'Global': {'mass': {'H2O': -18.0105546, 'NH3': -17.026549, 'CH2O': -30.0106, 'C2H2O': -42.0106, 'CO2': -43.9898,
                         'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, '+Acetonitrile': +41.0265, 'C2H4O2': -60.0211,
                         '+Acetate': 59.013851,
@@ -191,40 +111,35 @@ bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WAT
                'peptide_z': -(17.026549 - 1.007825),
                'peptide_w': -(17.026549 - 1.007825),  # plus a residue-specific side-chain loss
                'peptide_a': -(WATER_MASS + 27.994915)}  # z here is the EThcD radical z. convention
-# Atom positions carrying methylatable -OH (or -COOH) groups per base monosaccharide.
-# C1 is excluded: consumed by the glycosidic bond in the residue mass convention.
-# Amide N-H (e.g., C2 of HexNAc) is included: standard permethylation does
-# methylate acetamido NH under Ciucanu/Kerek conditions.
-methyl_oh_atoms = {
-    'Hex': {2, 3, 4, 6},
-    'HexNAc': {2, 3, 4, 6},
-    'dHex': {2, 3, 4},
-    'Pen': {2, 3, 4},
-    'Neu5Ac': {1, 4, 7, 8, 9},
-    'Neu5Gc': {1, 4, 7, 8, 9},
-    'Kdn': {1, 4, 7, 8, 9},
-    'HexA': {2, 3, 4, 6},
-    'HexA3S': {2, 4, 6},
-    'Hex6S': {2, 3, 4},
-    'Hex3S': {2, 4, 6},
-    'HexOS': {2, 4},
-    'HexNAc4S': {2, 3, 6},
-    'HexNAc6S': {2, 3, 4},
-    'HexNAcOS': {2, 3},
-    'Neu5Ac8S': {1, 4, 7, 9},
-    'Neu5Gc8S': {1, 4, 7, 9},
-    'Man6P': {2, 3, 4},
-    'Hex6P': {2, 3, 4},
-}
-permethylated_bond_masses = {
-    'bond': -CH2_MASS,
-    'no_bond': -(WATER_MASS + CH2_MASS),
-    'red_bond': WATER_MASS,
-    'peptide_b': -WATER_MASS,
-    'peptide_c': -(WATER_MASS - 17.026549),
-    'peptide_z': -(17.026549 - 1.007825),  # z here is the EThcD radical z. convention
-    'peptide_w': -(17.026549 - 1.007825),
-}
+# Atom positions whose -OH (or amide N-H, -NH2, -COOH) groups get derivatized, per base monosaccharide; C1 (C2 of the
+# nonulosonic acids) is excluded as the glycosidic bond takes it in the residue mass convention. A position carrying two
+# groups is listed twice (the free amine of HexN, the N-glycolyl of Neu5Gc). Permethylation also methylates amide N-H and
+# carboxylic acids, peracetylation does neither
+derivatization_sites = {
+    'permethylated': {'Hex': (2, 3, 4, 6), 'HexNAc': (2, 3, 4, 6), 'HexN': (2, 2, 3, 4, 6), 'dHex': (2, 3, 4),
+                      'Pen': (2, 3, 4), 'HexA': (2, 3, 4, 6), 'Neu5Ac': (1, 4, 5, 7, 8, 9),
+                      'Neu5Gc': (1, 4, 5, 5, 7, 8, 9), 'Kdn': (1, 4, 5, 7, 8, 9)},
+    'peracetylated': {'Hex': (2, 3, 4, 6), 'HexNAc': (3, 4, 6), 'HexN': (2, 3, 4, 6), 'dHex': (2, 3, 4),
+                      'Pen': (2, 3, 4), 'HexA': (2, 3, 4), 'Neu5Ac': (4, 7, 8, 9), 'Neu5Gc': (4, 5, 7, 8, 9),
+                      'Kdn': (4, 5, 7, 8, 9)}}
+DERIVATIZATION_MASSES = {'permethylated': CH2_MASS, 'peracetylated': calculate_adduct_mass('C2H2O')}
+# Substituents of modified monosaccharides (GlcNAc6S, Neu5Ac9Ac, ...) and of compositions, with how each changes the
+# number of derivatized groups as glycowork has it (an O-sulfate takes a hydroxyl out of permethylation: -1, ...)
+SUBSTITUENTS = {s: {'mass': composition_to_mass({s: 1}) - composition_to_mass({})} | {
+    prep: round((composition_to_mass({s: 1}, sample_prep = prep) - composition_to_mass({}, sample_prep = prep) -
+                 composition_to_mass({s: 1}) + composition_to_mass({})) / deriv_mass)
+    for prep, deriv_mass in DERIVATIZATION_MASSES.items()} for s in ('S', 'P', 'Me', 'Ac', 'PCho', 'PEtN', '-H2O')}
+# HexN is HexNAc without the N-acetyl on C2
+mono_attributes['HexN'] = {
+    'atoms': {'HexN' if f == 'HexNAc' else f: atoms for f, atoms in mono_attributes['HexNAc']['atoms'].items()},
+    'mass': {
+        'HexN' if f == 'HexNAc' else f: m - SUBSTITUENTS['Ac']['mass'] * (2 in mono_attributes['HexNAc']['atoms'][f])
+        for f, m in mono_attributes['HexNAc']['mass'].items()}}
+# how many derivatized groups each fragment of a base monosaccharide keeps
+for mono in derivatization_sites['permethylated']:
+    mono_attributes[mono] |= {prep: {frag: sum(s in atoms for s in sites[mono]) for frag, atoms in
+                                     mono_attributes[mono]['atoms'].items()} for prep, sites in
+                              derivatization_sites.items()}
 # to be updated with a more empirical estimation once we have clear-cut annotation data
 fragmentation_priors = {
     'cleavage_type': {
@@ -289,7 +204,7 @@ def global_mod_mass(global_mod, mode_mass = 0.0):
 
 
 def glycan_to_graph_monos(glycan):
-    """Monosaccharide-only view of glycowork's glycan graph; a floating part ({...}) is placed at its first possible position\n
+    """Monosaccharide-only view of glycowork's glycan graph; every floating part ({...}) is placed at its first possible position\n
     | Arguments:
     | :-
     | glycan (string): IUPAC-condensed glycan sequence\n
@@ -299,9 +214,44 @@ def glycan_to_graph_monos(glycan):
     | (2) an adjacency matrix of size monosaccharide X monosaccharide
     | (3) a dictionary of node : monosaccharide/linkage
     """
-    ggraph = glycan_to_nxGraph(graph_to_string(get_possible_topologies(glycan)[0]) if '{' in glycan else glycan)
+    # get_possible_topologies places one floating part per call, and a part left floating breaks the even/odd node order
+    while '{' in glycan:
+        glycan = get_possible_topologies(glycan)[0]
+    ggraph = glycan_to_nxGraph(glycan)
     all_mask_dic = nx.get_node_attributes(ggraph, 'string_labels')
     mono_mask_dic = {k // 2: v for k, v in all_mask_dic.items() if not k % 2}
+    # A modified monosaccharide (GlcNAc6S, Neu5Ac9Ac, IdoA2S, GlcNS, ...) gets the tables of its base residue: each
+    # substituent adds its mass and derivatization change to the cross-ring fragments keeping its position. One at an
+    # unknown position (GalOS, ManOMe) is taken to sit on every fragment keeping a hydroxyl (the peracetylation sites) it
+    # could occupy, as a sulfate carries the charge of the fragments that get observed
+    for label in set(mono_mask_dic.values()):
+        if (key := map_to_basic(label, obfuscate_ptm = False)) in mono_attributes:
+            continue
+        try:
+            comp = glycan_to_composition(label)
+        except ValueError:
+            continue
+        base = [k for k in comp if k not in SUBSTITUENTS]
+        modification = get_modification(label)
+        positions = re.findall(r'(\d|O)?(PCho|PEtN|Ac|Me|S|P)', modification)
+        # glycowork's composition drops what it does not know (Qui3NAc becomes dHex, ManNAcA HexNAc), so a residue is
+        # only derived if its substituents, an alditol, a stereo prefix, a lactone or an aglycone fully explain it
+        if (len(base) != 1 or comp[base[0]] != 1 or base[0] not in derivatization_sites['permethylated'] or
+                Counter(s for _, s in positions) != {k: v for k, v in comp.items() if k in SUBSTITUENTS and k != '-H2O'} or
+                re.sub(r'(\d|O)?(PCho|PEtN|Ac|Me|S|P)|\d,\dlactone|^[DL]-|-ol$|^1(Ser|Thr|Asn|Cer)$', '', modification)):
+            continue
+        base = base[0]
+        # a substituent without a number sits on the amine of a hexosamine (GlcNS), one on O at an unknown hydroxyl
+        subs = [(s, int(p) if p.isdigit() else 2 if not p and get_core(label).endswith('N') else None) for p, s in
+                positions] + [('-H2O', None)] * comp.get('-H2O', 0)
+        base_attr = mono_attributes[base]
+        frags = list(base_attr['mass'])
+        hydroxyls = set(derivatization_sites['peracetylated'][base])
+        in_frag = {f: [s for s, p in subs if p in base_attr['atoms'][f] or (p is None and hydroxyls & set(base_attr['atoms'][f]))]
+                   for f in frags}
+        mono_attributes[key] = {'atoms': {key if f == base else f: base_attr['atoms'][f] for f in frags}} | {
+            prop: {key if f == base else f: base_attr[prop][f] + sum(SUBSTITUENTS[s][prop] for s in in_frag[f])
+                   for f in frags} for prop in ['mass', *DERIVATIZATION_MASSES]}
     adj_matrix = np.zeros((len(mono_mask_dic), len(mono_mask_dic)), dtype = int)
     # glycowork alternates monosaccharide (even) and linkage (odd) nodes, with edges pointing parent -> linkage -> child
     for parent, link in ggraph.edges():
@@ -491,7 +441,8 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
                 atomic_mod_dict[bond[1]][1] = 4
             continue
         elif bond[0] in subg.nodes():
-            red_breakage = int(bond_label[1])
+            # the child's own carbon in the bond, with or without an anomeric letter (a2-3, or 1-5 in teichoic acids)
+            red_breakage = int(bond_label.split('-')[0][-1])
             atomic_mod_dict[bond[0]][red_breakage] = 2
         else:
             # '?' linkages take the first free position, most common linkage first, so that two unknown
@@ -614,7 +565,7 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
     | all_terminal_perms (list): all possible bond fragmentation dictionaries
     | terminal_labels (list): string labels of nodes in terminals
     | global_mods (list): possible global modifications
-    | sample_prep (string): underivatized/permethylated
+    | sample_prep (string): underivatized/permethylated/peracetylated
     | charge (int): negative/positive charge state of precursor\n
     | Returns:
     | :-
@@ -622,19 +573,18 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
     | (2) a nested list with the mass of each bond fragmentation option per terminal node
     | (3) a list of masses corresponding to each of the global mods
     """
-    permethylated = sample_prep == 'permethylated'
+    deriv_mass = DERIVATIZATION_MASSES.get(sample_prep, 0)
     all_mono_mod_masses = []
     for mods, label in zip(all_mono_mods, terminal_labels):
         label_basic = map_to_basic(label, obfuscate_ptm = False)
         masses = []
         for mod in mods:
             mod_basic = map_to_basic(mod, obfuscate_ptm = False)
-            m = mono_attributes[label_basic]['mass'][mod_basic]
-            if permethylated:
-                m += get_methyl_count(label_basic, mod_basic) * CH2_MASS
-            masses.append(m)
+            masses.append(mono_attributes[label_basic]['mass'][mod_basic] +
+                          get_derivatization_count(label_basic, mod_basic, sample_prep) * deriv_mass)
         all_mono_mod_masses.append(masses)
-    active_bond_masses = permethylated_bond_masses if permethylated else bond_masses
+    # a glycosidic cleavage frees the hydroxyl the bond had taken, which stays underivatized
+    active_bond_masses = bond_masses | {'bond': -deriv_mass, 'no_bond': -(WATER_MASS + deriv_mass)} if deriv_mass else bond_masses
     all_atom_dict_masses = []
     for node, label in zip(all_terminal_perms, terminal_labels):
         node_dict_masses = []
@@ -678,7 +628,7 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
     | mass_tag (float): mass of the glycan label or reducing end modification
     | charge (int): assumed charge of glycan
     | perm_indices (array): one row per permutation to calculate, holding the option index of each terminal node
-    | sample_prep (string): underivatized/permethylated\n
+    | sample_prep (string): underivatized/permethylated/peracetylated\n
     | Returns:
     | :-
     | Returns a list every single mass of each modification combination for each cross ring combination
@@ -692,22 +642,16 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
         root_node_idx = terminals.index(bonus_root_node)
         root_mods = mono_mod_perms[root_node_idx]
         is_not_A = np.array([rm not in A_cross_rings for rm in root_mods])
-        bonus = np.where(is_not_A, WATER_MASS + mass_tag, 0.0)
-        if sample_prep == 'permethylated':
-            bonus = np.where(is_not_A, bonus + CH2_MASS, bonus)
-            if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
-                bonus = np.where(is_not_A, bonus + CH2_MASS, bonus)
+        # a derivatized reducing end carries one more group, and an alditol (mass_tag of 2 H) one more again
+        re_deriv = DERIVATIZATION_MASSES.get(sample_prep, 0) * (1 + (abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01))
+        bonus = np.where(is_not_A, WATER_MASS + mass_tag + re_deriv, 0.0)
         if root_label is not None:
             root_basic = map_to_basic(root_label, obfuscate_ptm = False)
             for idx in np.where(~is_not_A)[0]:
                 rm = root_mods[idx]
                 if 1 in mono_attributes.get(root_basic, {}).get('atoms', {}).get(
                         map_to_basic(rm, obfuscate_ptm = False), []):
-                    bonus[idx] += mass_tag
-                    if sample_prep == 'permethylated':
-                        bonus[idx] += CH2_MASS
-                        if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
-                            bonus[idx] += CH2_MASS
+                    bonus[idx] += mass_tag + re_deriv
         base_masses += bonus[perm_indices[:, root_node_idx]]
     if not global_mods_mass:
         return base_masses.tolist()
@@ -844,7 +788,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     | threshold (float): the range around the observed mass in which constrain potential fragments
     | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
     | charge (int): the maximum possible charge on the fragments to be matched; default:-1
-    | sample_prep (string): underivatized/permethylated
+    | sample_prep (string): underivatized/permethylated/peracetylated
     | disable_A_cross_rings (bool): whether to strip out any A-type cross-rings; default: False\n
     | Returns:
     | :-
@@ -869,7 +813,11 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     min_global_mass = min(present_global_masses)
     # degree lookups on subgraph views are slow, so terminals are found via neighbor sets of the parent graph
     neighbor_dict = {v: set(nx_mono.predecessors(v)) | set(nx_mono.successors(v)) for v in nx_mono.nodes}
-    min_bond_mass = min(bond_masses.values()) - max(W_SIDE_CHAIN_LOSSES.values())
+    deriv_mass = DERIVATIZATION_MASSES.get(sample_prep, 0)
+    full_masses = {k: mono_attributes[v]['mass'][v] + get_derivatization_count(v, v, sample_prep) * deriv_mass for k, v in
+                   node_dict_basic.items()}
+    # a derivatized glycosidic cleavage loses one more group, which the lower bound has to allow for
+    min_bond_mass = min(bond_masses.values()) - deriv_mass - max(W_SIDE_CHAIN_LOSSES.values())
     for i, subg in enumerate(subgraphs):
         terminals = get_terminals(neighbor_dict, subg)
         new_terminals = [x for x in terminals if x not in all_other_terminals]
@@ -877,20 +825,10 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             continue
         other_terminals = [x for x in subg.nodes if x in all_other_terminals and x not in terminals]
         terminals = terminals + other_terminals
-        inner_mass = sum(
-            [mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in subg.nodes() if
-             m not in terminals])
-        if sample_prep == 'permethylated':
-            inner_mass += sum([len(methyl_oh_atoms.get(node_dict_basic[m], set())) * CH2_MASS for m in subg.nodes() if
-                               m not in terminals])
-            inner_mass -= subg.number_of_edges() * CH2_MASS
-        max_graph_mass = inner_mass + sum(
-            [mono_attributes[node_dict_basic[m]]['mass'][node_dict_basic[m]] for m in terminals]) + WATER_MASS * len(
-            terminals)
-        max_graph_mass += max_global_mass + max(mass_tag, 0) + PROTON_MASS
-        if sample_prep == 'permethylated':
-            max_graph_mass += sum(
-                len(methyl_oh_atoms.get(node_dict_basic[m], set())) * CH2_MASS for m in terminals) + 2 * CH2_MASS
+        # every glycosidic bond takes one derivatizable group of the residue it is attached to
+        inner_mass = sum(full_masses[m] for m in subg.nodes() if m not in terminals) - subg.number_of_edges() * deriv_mass
+        max_graph_mass = inner_mass + sum(full_masses[m] for m in terminals) + WATER_MASS * len(terminals)
+        max_graph_mass += max_global_mass + max(mass_tag, 0) + PROTON_MASS + 2 * deriv_mass
         min_terminal_mass = sum(
             min(mono_attributes[node_dict_basic[m]]['mass'].values()) + min_bond_mass for m in terminals)
         min_graph_mass = inner_mass + min_terminal_mass + min_global_mass
@@ -1226,9 +1164,11 @@ def subgraphs_to_domon_costello(nx_mono, subgs, chain_rank = None):
         in_children.setdefault(bonded_node, []).append((bonding_node, atts['bond_label'][-1]))
     for subg in subgs:
         cuts = []
-        global_mods = nx.get_node_attributes(subg, 'global_mod')
-        mono_mod_dict = nx.get_node_attributes(subg, 'mod_labels')
-        atomic_mod_dict = nx.get_node_attributes(subg, 'atomic_mod_dict')
+        # plain reads of the node data, as nx.get_node_attributes costs more than the naming itself
+        node_data = subg.nodes(data = True)
+        global_mods = {n: d['global_mod'] for n, d in node_data if 'global_mod' in d}
+        mono_mod_dict = {n: d['mod_labels'] for n, d in node_data if 'mod_labels' in d}
+        atomic_mod_dict = {n: d['atomic_mod_dict'] for n, d in node_data if 'atomic_mod_dict' in d}
         for node, atom_mods in atomic_mod_dict.items():
             cut_children = set()
             for atom, atom_mod in atom_mods.items():
@@ -1288,23 +1228,10 @@ def score_fragment_prior(dc_name, charge):
     return score
 
 
-def compute_fragment_lability(nx_mono, subg):
-    """Scores how labile the broken glycosidic bonds are; higher means more expected cleavage"""
-    node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
-    subg_nodes = set(subg.nodes())
-    total = 0.0
-    n = 0
-    for u, v, d in nx_mono.edges(data = True):
-        if (u in subg_nodes) == (v in subg_nodes):
-            continue
-        bond = d.get('bond_label', '')
-        if bond in ('glycosite', 'peptide'):
-            continue
-        child_label = map_to_basic(node_dict[u], obfuscate_ptm = False)
-        link_pos = bond[1:] if bond and bond[0].isalpha() else bond
-        total += linkage_lability.get((child_label, link_pos), DEFAULT_LABILITY)
-        n += 1
-    return total / max(n, 1)
+def compute_fragment_lability(edge_lability, subg):
+    """Scores how labile the broken glycosidic bonds are (edge_lability: bond lability by edge of the parent glycan); higher means more expected cleavage"""
+    broken = [lability for (u, v), lability in edge_lability.items() if (u in subg) != (v in subg)]
+    return sum(broken) / max(len(broken), 1)
 
 
 def merge_gp_global_mods(gp_names):
@@ -1441,21 +1368,6 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_f
         return [[], [], [], [], []]
 
 
-def observed_fragments_checker(possible_fragments, observed_fragments):
-    """Calculates for each possible fragment the largest overlap of cleavages with previous fragments\n
-    | Arguments:
-    | :-
-    | possible_fragments (list): a list of Domon-Costello fragment names grouped by mass
-    | observed_fragments (list): a nested list of Domon-Costello fragment names already selected for output\n
-    | Returns:
-    | :-
-    | Returns a list containing integers corresponding to the largest overlap each possible fragment had with all previously observed fragments
-    """
-    observed_fragments = [f for sublist in observed_fragments for f in sublist if f]
-    sums = [sum(len(set(pf) & set(of)) for of in observed_fragments if of) for pf in possible_fragments]
-    return [sums[i] - 1 if 'M' in ''.join(f) else sums[i] for i, f in enumerate(possible_fragments)]
-
-
 def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = None, charge = -1, prior_weight = 1.0,
                        lability_scores = None, mass_threshold = 0.5):
     """Sorts a list of possible fragments for each observed mass into a list of one fragment per observed mass\n
@@ -1485,6 +1397,8 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
             observed_frags.append([paired[0][0]])
         return observed_frags
     observed_frags = [[] for _ in dc_names]
+    # how many of the fragments chosen so far contain each cleavage, so an option's overlap with them is one lookup per cleavage
+    seen_cuts = Counter()
     order = sorted(range(len(dc_names)), key = lambda j: -intensities[j]) if intensities else list(range(len(dc_names)))
     for i in order:
         possible_frags = sorted(dc_names[i], key = len)
@@ -1494,7 +1408,8 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
             observed_frags[i] = [possible_frags[0]]
         else:
             frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
-            max_overlaps_seen = observed_fragments_checker(frag_options, observed_frags)
+            # a shared global modification is not evidence of a shared cleavage
+            max_overlaps_seen = [sum(seen_cuts[c] for c in set(f)) - any(c[0] == 'M' for c in f) for f in frag_options]
             prior_scores = [score_fragment_prior(f, charge) for f in frag_options]
             min_cleavages = len(possible_frags[0])
             if lability_scores and lability_scores[i]:
@@ -1511,6 +1426,7 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
                           for overlap, prior, lability in zip(max_overlaps_seen, prior_scores, option_lability)]
             max_overlap_idx = np.argsort(scores, kind = 'stable')[-1]
             observed_frags[i] = [frag_options[max_overlap_idx]]
+        seen_cuts.update(set(observed_frags[i][0]))
     return observed_frags
 
 
@@ -1753,13 +1669,9 @@ def glycopeptide_string_to_input(gpep_string):
         return input_dict
 
 
-def get_methyl_count(mono_type, fragment_type):
-    """Returns the number of methylatable OH positions retained in a fragment."""
-    sites = methyl_oh_atoms.get(mono_type)
-    atoms_entry = mono_attributes.get(mono_type, {}).get('atoms', {}).get(fragment_type)
-    if sites is None or atoms_entry is None:
-        return 0
-    return len(sites & set(atoms_entry))
+def get_derivatization_count(mono_type, fragment_type, sample_prep = 'permethylated'):
+    """Returns the number of derivatized groups (methyls when permethylated, acetyls when peracetylated) a fragment keeps"""
+    return mono_attributes.get(mono_type, {}).get(sample_prep, {}).get(fragment_type, 0)
 
 
 def _build_composition_fragments(composition, re_bonus, sample_prep = 'underivatized',
@@ -1767,35 +1679,32 @@ def _build_composition_fragments(composition, re_bonus, sample_prep = 'underivat
     """Builds glycan fragment options from a monosaccharide composition\n
     | Arguments:
     | :-
-    | composition (dict): monosaccharide composition, e.g., {'Hex': 5, 'HexNAc': 4}
+    | composition (dict): monosaccharide composition, e.g., {'Hex': 5, 'HexNAc': 4, 'S': 1}
     | re_bonus (float): mass bonus for fragments retaining the reducing end (Y/Z/M)
-    | sample_prep (string): underivatized/permethylated
+    | sample_prep (string): underivatized/permethylated/peracetylated
     | disable_X_cross_rings (bool): whether to disable X-type cross-ring cleavages\n
     | Returns:
     | :-
     | Returns a list of (mass_without_mode, label_string, n_cleavages) tuples
     """
-    permethylated = sample_prep == 'permethylated'
-    mono_types = sorted(m for m in composition if m in mono_attributes and composition[m] > 0)
+    deriv_mass = DERIVATIZATION_MASSES.get(sample_prep, 0)
+    mono_types = sorted(m for m in composition if m in derivatization_sites['permethylated'] and composition[m] > 0)
     if not mono_types:
         return []
+    # a substituent (S, P, Ac, ...) of a composition can sit on any residue, so a fragment can carry any number of them
+    parts = mono_types + sorted(m for m in composition if m in SUBSTITUENTS and composition[m] > 0)
+    part_masses = {m: mono_attributes[m]['mass'][m] + get_derivatization_count(m, m, sample_prep) * deriv_mass if
+                   m in mono_types else SUBSTITUENTS[m]['mass'] + SUBSTITUENTS[m].get(sample_prep, 0) * deriv_mass for m in parts}
     frags = []
-    if permethylated:
-        ion_adj = {'Y': (-CH2_MASS, re_bonus), 'Z': (-(WATER_MASS + CH2_MASS), re_bonus),
-                   'B': (0, 0), 'C': (WATER_MASS, 0)}
-    else:
-        ion_adj = {'Y': (0, re_bonus), 'Z': (-WATER_MASS, re_bonus),
-                   'B': (0, 0), 'C': (WATER_MASS, 0)}
-    for combo in product(*(range(composition[m] + 1) for m in mono_types)):
-        sub_comp = {m: c for m, c in zip(mono_types, combo) if c > 0}
-        if not sub_comp:
+    ion_adj = {'Y': (-deriv_mass, re_bonus), 'Z': (-(WATER_MASS + deriv_mass), re_bonus), 'B': (0, 0), 'C': (WATER_MASS, 0)}
+    for combo in product(*(range(composition[m] + 1) for m in parts)):
+        sub_comp = {m: c for m, c in zip(parts, combo) if c > 0}
+        n_monos = sum(c for m, c in sub_comp.items() if m in mono_types)
+        if not n_monos:
             continue
-        residue_sum = sum(mono_attributes[m]['mass'][m] * c for m, c in sub_comp.items())
-        if permethylated:
-            n_sub = sum(sub_comp.values())
-            residue_sum += (sum(len(methyl_oh_atoms.get(m, set())) * c for m, c in sub_comp.items()) - max(n_sub - 1,
-                                                                                                           0)) * CH2_MASS
-        is_full = all(sub_comp.get(m, 0) == composition[m] for m in mono_types)
+        # every glycosidic bond within the fragment takes one derivatizable group
+        residue_sum = sum(part_masses[m] * c for m, c in sub_comp.items()) - (n_monos - 1) * deriv_mass
+        is_full = all(sub_comp.get(m, 0) == composition[m] for m in parts)
         comp_str = '/'.join(f"{m}({c})" for m, c in sorted(sub_comp.items()))
         if is_full:
             frags.append((residue_sum + re_bonus, f'M {comp_str}', 0))
@@ -1808,7 +1717,7 @@ def _build_composition_fragments(composition, re_bonus, sample_prep = 'underivat
             if frag_type == mono:
                 continue
             if frag_type in A_cross_rings or frag_type in allowed_X:
-                frags.append((frag_mass + (get_methyl_count(mono, frag_type) * CH2_MASS if permethylated else 0),
+                frags.append((frag_mass + get_derivatization_count(mono, frag_type, sample_prep) * deriv_mass,
                               f'{frag_type} {mono}', 1))
     return frags
 
@@ -1830,7 +1739,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
     | simplify (bool): whether to condense fragment options to the most likely; default:True
     | disable_global_mods (bool): whether to disable global modifications; default:False
     | disable_X_cross_rings (bool): whether to disable X-type cross-ring cleavages; default:False
-    | sample_prep (string): underivatized/permethylated
+    | sample_prep (string): underivatized/permethylated/peracetylated
     | peptide_seq (string): amino acid sequence; when provided, generates glycopeptide fragments; default:None
     | glycosites (list): 0-indexed peptide positions for each glycan; inferred from sequence if None; default:None\n
     | Returns:
@@ -1844,7 +1753,6 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         mass_tag = 0 if is_glycopeptide else 2 * HYDROGEN_MASS
     mode_mass = -PROTON_MASS if charge < 0 else PROTON_MASS
     modifier = np.sign(charge)
-    permethylated = sample_prep == 'permethylated'
     frag_dict = {}
     if is_glycopeptide:
         compositions = [composition] if isinstance(composition, dict) else list(composition)
@@ -1930,15 +1838,12 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                 add(gm + mode_mass, [['No Peptide']] + glyc, gc)
     else:
         # Pure composition (existing behavior)
-        valid_monos = {m: c for m, c in composition.items() if m in mono_attributes and c > 0}
-        if not valid_monos:
-            return {m: None for m in fragment_masses}
-        re_bonus = WATER_MASS + mass_tag
-        if permethylated:
-            re_bonus += CH2_MASS
-            if abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01:
-                re_bonus += CH2_MASS
+        # a derivatized reducing end carries one more group, and an alditol (mass_tag of 2 H) one more again
+        re_bonus = WATER_MASS + mass_tag + DERIVATIZATION_MASSES.get(sample_prep, 0) * (
+                1 + (abs(mass_tag - 2 * HYDROGEN_MASS) < 0.01))
         glycan_frags = _build_composition_fragments(composition, re_bonus, sample_prep, disable_X_cross_rings)
+        if not glycan_frags:
+            return {m: None for m in fragment_masses}
         for gm, gl, gc in glycan_frags:
             frag_dict.setdefault(round(gm + mode_mass, 5), []).append(([gl], gc))
     # Global modifications (shared)
@@ -2030,7 +1935,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
     | iupac (bool): whether to add the fragment sequence in IUPAC-condensed nomenclature to the annotations; default:False
     | disable_A_cross_rings (bool): whether to strip out any A-type cross-rings; default: False
-    | sample_prep (string): underivatized/permethylated
+    | sample_prep (string): underivatized/permethylated/peracetylated
     | prior_weight (float): weighting of prior-informed scoring in simplify=True
     | glycan_class (string): "N" or "O" if relevant (only used to assign candidate sites in glycopeptides, nowhere else)
     | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD' to restrict peptide backbone ion types; default:None (all)
@@ -2058,11 +1963,12 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         mass_threshold = min(mass_threshold, max(fragment_masses) * abs(charge) * mass_threshold_ppm / 1e6)
     if disable_A_cross_rings is None:
         disable_A_cross_rings = charge > 0
+        # a warning shows once per session, while a print repeated for every glycan CandyCrunch scores in positive mode
+        if disable_A_cross_rings:
+            warnings.warn(
+                "A-type cross-ring fragmentation auto-disabled for positive mode; reducing-end X-type cross-rings kept (Na+/CID diagnostic). Override A with disable_A_cross_rings=False")
     if disable_X_cross_rings is None:
         disable_X_cross_rings = False
-    if charge > 0 and disable_A_cross_rings:
-        print(
-            "A-type cross-ring fragmentation auto-disabled for positive mode; reducing-end X-type cross-rings kept (Na+/CID diagnostic). Override A with disable_A_cross_rings=False")
     composition = None
     if isinstance(input_string, dict):
         if 'peptide' in input_string:
@@ -2114,7 +2020,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                                         simplify = simplify,
                                         disable_global_mods = disable_global_mods,
                                         disable_X_cross_rings = disable_X_cross_rings,
-                                        sample_prep = sample_prep, glycan_class = glycan_class)
+                                        sample_prep = sample_prep, glycan_class = glycan_class,
+                                        max_global_mods = max_global_mods, mass_threshold_ppm = mass_threshold_ppm)
     hit_dict = {}
     input_dict = glycopeptide_string_to_input(input_string)
     if input_dict['peptide'] and input_dict['glycans']:
@@ -2159,6 +2066,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                                        sample_prep = sample_prep, disable_A_cross_rings = disable_A_cross_rings)
     sorted_frag_keys = sorted(subg_frags.keys())
     chain_rank = None if input_dict['peptide'] else list(rank_chains(nx_mono))
+    # the lability of every glycosidic bond is looked up once, not for every candidate fragment
+    edge_lability = {(u, v): linkage_lability.get((map_to_basic(node_labels[u], obfuscate_ptm = False), d['bond_label'][1:] if
+                                                   d['bond_label'][0].isalpha() else d['bond_label']), DEFAULT_LABILITY)
+                     for u, v, d in nx_mono.edges(data = True) if d['bond_label'] not in ('glycosite', 'peptide')}
     downstream_values = []
     if input_dict['peptide']:
         peptide = True
@@ -2179,7 +2090,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 all_gp_names.append(merge_gp_global_mods([rf_names] + dc_names))
                 keep.append(idx)
             fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
-            lability = [compute_fragment_lability(nx_mono, sg) for sg in fragment_properties[-1]]
+            lability = [compute_fragment_lability(edge_lability, sg) for sg in fragment_properties[-1]]
             downstream_values.append((*fragment_properties, all_gp_names, lability))
     else:
         peptide = False
@@ -2187,8 +2098,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
             fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge,
                                                             sorted_frag_keys, mass_threshold_ppm = mass_threshold_ppm)
             dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1], chain_rank)
-            lability = [compute_fragment_lability(nx_mono, sg) for sg in fragment_properties[-1]] if \
-                fragment_properties[-1] else []
+            lability = [compute_fragment_lability(edge_lability, sg) for sg in fragment_properties[-1]]
             downstream_values.append((*fragment_properties, dc_names, lability))
     filtered_results = [priority_filter(x[5], x[2], peptide = peptide, charge = charge, lability = x[6]) if x[0]
                         else ([], [], []) for x in downstream_values]
@@ -2224,7 +2134,7 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
     | fragment (string/list): fragment in Domon-Costello nomenclature, either compact ("0,2A5a", "B1a/M-H2O") or as the list CandyCrumbs returns (['02A_5_Alpha'])
     | charge (int): charge state of the fragment ion, sign sets the ion mode; default:-1
     | mass_tag (float): mass of the glycan label or reducing end modification; default:2.0156
-    | sample_prep (string): underivatized/permethylated
+    | sample_prep (string): underivatized/permethylated/peracetylated
     | max_cleavages (int): maximum number of allowed concurrent fragmentations; default:3\n
     | Returns:
     | :-
@@ -2560,6 +2470,13 @@ OXONIUM_IONS = {
     'Neu5Ac-H2O': _oxonium_mass(['Neu5Ac'], [WATER_MASS]),
     'Neu5Gc': _oxonium_mass(['Neu5Gc']),
     'Neu5Gc-H2O': _oxonium_mass(['Neu5Gc'], [WATER_MASS]),
+    'HexNAcdHex': _oxonium_mass(['HexNAc', 'dHex']),
+    'HexNAc2': _oxonium_mass(['HexNAc', 'HexNAc']),
+    'Neu5AcHex': _oxonium_mass(['Neu5Ac', 'Hex']),
+    'HexHexNAcdHex': _oxonium_mass(['Hex', 'HexNAc', 'dHex']),
+    'Hex2HexNAc': _oxonium_mass(['Hex', 'Hex', 'HexNAc']),
+    'Neu5AcHexHexNAc': _oxonium_mass(['Neu5Ac', 'Hex', 'HexNAc']),
+    'Neu5GcHexHexNAc': _oxonium_mass(['Neu5Gc', 'Hex', 'HexNAc']),
 }
 PEAK_COLORS = {'oxonium': '#b8860b', 'backbone_n': '#1f77b4', 'backbone_c': '#2ca02c',
                'glycopeptide': '#d62728', 'glycan': '#d62728'}
@@ -2721,7 +2638,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | mass_threshold (float): maximum tolerated mass difference for fragment matching; default:None (see CandyCrumbs)
     | max_cleavages (int): maximum concurrent fragmentations per mass; default:3
     | mass_tag (float): mass of the glycan label or reducing end modification; default:None
-    | sample_prep (string): underivatized/permethylated; default:'underivatized'
+    | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
     | disable_global_mods (bool): whether to disable global modifications; default:False
     | prior_weight (float): weighting of prior-informed scoring; default:1.0
     | charge (int): charge state of the precursor ion; taken from the dataframe when available; default:None

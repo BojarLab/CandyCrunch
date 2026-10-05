@@ -200,7 +200,7 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
             test_params[key] if key != 'test_dict' else test_params['test_dict']['name']
             for key in test_params
         )
-        result_collector.check_performance(test_dict['name'], param_key, eval_scores[0])
+        result_collector.check_performance(test_dict['name'], param_key, eval_scores[0], loaded_gt)
     print("Adding results to collector")  # Debug print
     if test_outputs:
         print(f'avg_score:{np.mean([x[0] for x in test_outputs])}')
@@ -231,7 +231,7 @@ def test_candycrunch_batch(result_collector, verbose):
         # Report like the per-file tests, so batch scores reach the summary tables, the results log and the regression check
         result_collector.add_result({'test_dict': {'name': f'{name}_batch'}, 'supplement': True, 'experimental': True,
                                      'format': 'mzML'}, eval_scores[0], eval_scores)
-        result_collector.check_performance(f'{name}_batch', (f'{name}_batch', True, True, 'mzML'), eval_scores[0])
+        result_collector.check_performance(f'{name}_batch', (f'{name}_batch', True, True, 'mzML'), eval_scores[0], gt)
         assert eval_scores[0] > BATCH_F1_THRESHOLDS[name]
     # Feature table: one row per isomer group with per-file abundances and evidence
     assert {'top1_pred', 'm/z', 'RT', 'n_files_ms2'}.issubset(combined.columns)

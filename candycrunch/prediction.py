@@ -1385,6 +1385,11 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
 
         loaded_file['peak_d'] = loaded_file['peak_d'].apply(parse_peak_dict)
         loaded_file = loaded_file[loaded_file['peak_d'].notnull()].reset_index(drop = True)
+        # Files written by extract_spectra carry the ion mode and analyzer detected from their raw file
+        for k in ('mode', 'trap'):
+            if k in loaded_file.columns:
+                detected = loaded_file.pop(k).dropna()
+                loaded_file.attrs[f'detected_{k}'] = detected.iloc[0] if len(detected) else None
         return loaded_file
     if ext == ".csv":
         storage = DictStorage()
@@ -1392,6 +1397,30 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         return loaded_file
     raise FileNotFoundError(
         'Incorrect filepath or extension, please ensure it is in the intended directory and is one of the supported formats')
+
+
+def extract_spectra(spectra_filepath, output_filepath = None):
+    """extracts the MS/MS spectra of an .mzML/.mzXML/.mgf file into a lightweight .xlsx that wrap_inference reads directly\n
+   | Arguments:
+   | :-
+   | spectra_filepath (string): absolute filepath ending in ".mzML", ".mzXML", or ".mgf"
+   | output_filepath (string): .xlsx filepath to write; default:None (spectra_filepath with an .xlsx extension)\n
+   | Returns:
+   | :-
+   | Returns the filepath of the written .xlsx; precursor m/z values are already refined from MS1 and isotope-triggered repeat spectra removed,
+   | but MS1 itself is not kept, so predictions from the .xlsx are quantified by precursor intensity instead of XIC areas
+   """
+    df = load_spectra_filepath(spectra_filepath)
+    # Rounding keeps the file small and every peak dictionary below Excel's 32,767-character cell limit; 4 decimals and 4 significant
+    # digits sit far below the binning and fragment-annotation tolerances
+    df['peak_d'] = [str({round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()}) for d in df['peak_d']]
+    # Ion mode and analyzer detected from the raw file would not survive the export, so they travel as columns that load_spectra_filepath
+    # turns back into the attrs wrap_inference checks
+    for k in ('mode', 'trap'):
+        df[k] = df.attrs.get(f'detected_{k}')
+    output_filepath = output_filepath or os.path.splitext(spectra_filepath)[0] + '.xlsx'
+    df.to_excel(output_filepath, index = False)
+    return output_filepath
 
 
 def combine_charge_states(df_out):

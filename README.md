@@ -94,7 +94,7 @@ Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `C
 - spectra_filepath, type = string: a filepath to an mzML/mzXML/mgf file or a .xlsx file <br />
 - glycan_class,type = string: the glycan class measured ("N", "O", "lipid"/"free")
 </pre>
-mzML/mzXML/mgf files are internally processed into extracted spectra. xlsx files need to be already extracted in the format as the example file in `examples/`.
+mzML/mzXML/mgf files are internally processed into extracted spectra. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `CandyCrunch.prediction`) writes such an xlsx from an mzML/mzXML/mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the raw file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept).
 <details>
 <summary>
 
@@ -221,8 +221,9 @@ annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan, fragment_masses =
 max_cleavages, type=int: maximum number of allowed concurrent cleavages per possible fragment; default:3 <br />
 simplify, type=bool: whether to select a single fragment for each mass based on mass difference, number of cleavages, and other fragments; default:True <br />
 charge, type=int: the charge state of the precursor ion (singly-charged, doubly-charged, etc.); default:-1 <br />
-label_mass, type=float: mass of the glycan label or reducing end modification; default:2.0156 <br />
+mass_tag, type=float: mass of the glycan label or reducing end modification; default:2.0156 <br />
 iupac, type=bool: whether to also return the fragment sequence in IUPAC-condensed nomenclature; default:False <br />
+sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
 </pre>
 </details>
 

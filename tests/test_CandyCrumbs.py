@@ -1,6 +1,7 @@
 import pytest
 import unittest
-from candycrunch.analysis import CandyCrumbs
+from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES
+from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, HYDROGEN_MASS, PROTON_MASS
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
 'charge': -2,
@@ -113,4 +114,46 @@ def test_candycrumbs_accuracy_top5(test_dict):
     score = correct_annotations / total_annotations
     # Set a threshold for acceptable performance (e.g., 80% correct)
     print(f"Score: {score:.2f}, Threshold: {TOP5_THRESHOLD}")
-    assert score > TOP5_THRESHOLD 
+    assert score > TOP5_THRESHOLD
+
+
+DERIVATIZATION_GLYCANS = ['Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc',
+                          'Neu5Gc(a2-3)Gal(b1-3)[Neu5Ac(a2-6)]GalNAc', 'Kdn(a2-3)Gal(b1-4)Glc',
+                          'Man6P(a1-2)Man(a1-2)Man',
+                          'GalOS(b1-3)GalNAc', 'Neu5Ac9Ac(a2-3)Gal(b1-4)Glc', 'GlcNS6S(a1-4)IdoA2S(a1-4)GlcNS',
+                          'Gal(b1-4)GlcN(a1-6)Glc', 'Xyl(b1-2)Man(b1-4)GlcNAc', 'Fuc(a1-2)Gal4S(b1-3)GalNAc']
+
+
+@pytest.mark.parametrize("glycan", DERIVATIZATION_GLYCANS)
+@pytest.mark.parametrize("sample_prep", ['underivatized', 'permethylated', 'peracetylated'])
+def test_candycrumbs_precursor_matches_glycowork(glycan, sample_prep):
+    # The intact ion is the sum of every residue, substituent, derivatization and reducing-end table CandyCrumbs uses
+    for mass_tag, modification in ((2 * HYDROGEN_MASS, 'reduced'), (0, None)):
+        expected = glycan_to_mass(glycan, sample_prep = sample_prep, modification = modification) - PROTON_MASS
+        assert abs(get_fragment_mass(glycan, 'M', charge = -1, mass_tag = mass_tag,
+                                     sample_prep = sample_prep) - expected) < 1e-3
+
+
+def test_derivatization_sites_match_glycowork():
+    for prep, sites in derivatization_sites.items():
+        for mono, positions in sites.items():
+            # glycowork's residue masses assume one glycosidic bond taking a site
+            n = (composition_to_mass({mono: 1}, sample_prep = prep) - composition_to_mass({}, sample_prep = prep) -
+                 composition_to_mass({mono: 1}) + composition_to_mass({})) / DERIVATIZATION_MASSES[prep]
+            assert len(positions) == round(n) + 1, (prep, mono)
+
+
+def test_candycrumbs_floating_parts():
+    # Every floating part gets placed, so no linkage ends up as a monosaccharide node
+    glycan = '{Fuc(a1-3)}{Neu5Ac(a2-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    assert all(v in {'Fuc', 'Neu5Ac', 'Gal', 'GlcNAc', 'Man'} for v in glycan_to_graph_monos(glycan)[0].values())
+    result = CandyCrumbs(glycan, [290.09], 0.1, charge = -2)
+    assert result[290.09]['Domon-Costello nomenclatures'][0] == ['B_1_Alpha']
+
+
+def test_candycrumbs_composition_substituents():
+    # A sulfate of a composition is a sulfate, not a serine residue, and can sit on any fragment
+    result = CandyCrumbs('Hex1HexNAc1S1', [241.0, 282.03, 464.11], 0.02, charge = -1)
+    assert [result[m]['Domon-Costello nomenclatures'][0] for m in (241.0, 282.03)] == [['B Hex(1)/S(1)'],
+                                                                                       ['B HexNAc(1)/S(1)']]
+    assert result[464.11]['Domon-Costello nomenclatures'][0] == ['M Hex(1)/HexNAc(1)/S(1)']
