@@ -10,6 +10,7 @@ import json
 from typing import Dict
 import numpy as np
 import numpy_indexed as npi
+import opentfraw
 import pandas as pd
 import pymzml
 import torch
@@ -264,6 +265,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     """
     highest_i_dict = {}
     rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
+    detected_mode, detected_trap = None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     with mzxml.read(filepath) as reader:
         for spectrum in reader:
@@ -273,6 +275,11 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                 ms1_mzs.append(spectrum['m/z array'][order].astype(np.float32))
                 ms1_ints.append(spectrum['intensity array'][order].astype(np.float32))
             if spectrum['msLevel'] == ms_level:
+                # mzXML scans carry their polarity and, if converted from Thermo files, the filter line naming the analyzer
+                if detected_mode is None and spectrum.get('polarity') in ('+', '-'):
+                    detected_mode = 'negative' if spectrum['polarity'] == '-' else 'positive'
+                if detected_trap is None and str(spectrum.get('filterLine', '')).startswith(('ITMS', 'FTMS')):
+                    detected_trap = 'linear' if spectrum['filterLine'].startswith('ITMS') else 'orbitrap'
                 mz_array = spectrum['m/z array']
                 intensity_array = spectrum['intensity array']
                 num_peaks_to_extract = min(num_peaks, len(mz_array))
@@ -315,6 +322,111 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine)
     df_out = df_out[~drop].reset_index(drop = True)
+    df_out.attrs['detected_mode'] = detected_mode
+    df_out.attrs['detected_trap'] = detected_trap
+    if extract_ms1:
+        df_out.attrs['ms1'] = ms1
+    return df_out
+
+
+def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = False, extract_ms1 = False):
+    """function extracting all MS/MS spectra from a Thermo .raw file\n
+   | Arguments:
+   | :-
+   | filepath (string): absolute filepath to the .raw file
+   | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+   | ms_level (int): which MS^n level to extract; default:2
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
+   | Returns:
+   | :-
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, and activation as in
+   | process_mzML_stack; precursor m/z, charge and intensity follow ThermoRawFileParser, which converted the mzML files CandyCrunch was validated on
+   """
+    raw = opentfraw.RawFile(filepath)
+    table = raw.scan_table()
+    peak_ds, rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], [], []
+    detected_mode, detected_trap = None, None
+    ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
+    for i, scan in enumerate(range(raw.first_scan, raw.last_scan + 1)):
+        if table['ms_level'][i] not in (1, ms_level):
+            continue
+        peak_mzs, peak_ints = raw.peaks(scan)
+        # Ion-trap profile scans come without centroids. Like Thermo's centroider (which made the centroids of mzML files from such runs, all at least
+        # 0.5 m/z apart), the profile is split at the lowest point between maxima (ignoring maxima below 1e-6 of the scan's highest point, which are
+        # numerical noise) and neighboring centroids closer than 0.5 m/z are merged, each carrying the summed signal of its share of the profile at
+        # its intensity-weighted m/z
+        if not len(peak_mzs) and table['scan_mode'][i] == 'profile' and table['analyzer'][i] != 'FTMS':
+            prof_mzs, prof_ints = raw.profile(scan)
+            apex = np.where((prof_ints[1:-1] > prof_ints[:-2]) & (prof_ints[1:-1] >= prof_ints[2:]) & (prof_ints[1:-1] > 1e-6 * prof_ints.max(initial = 0)))[0] + 1
+            edges = np.array([0] + [a + 1 + np.argmin(prof_ints[a + 1:b]) for a, b in zip(apex[:-1], apex[1:])], dtype = np.int64)
+            while len(apex):
+                peak_ints = np.add.reduceat(prof_ints, edges)
+                peak_mzs = np.add.reduceat(prof_ints * prof_mzs, edges) / peak_ints
+                gaps = np.diff(peak_mzs)
+                if not len(gaps) or gaps.min() >= 0.5:
+                    break
+                # Merges every pair closer than 0.5 m/z whose gap is the smallest among its neighbouring gaps, until none is left
+                left, right = np.concatenate([[np.inf], gaps[:-1]]), np.concatenate([gaps[1:], [np.inf]])
+                edges = np.delete(edges, np.where((gaps < 0.5) & (gaps <= left) & (gaps < right))[0] + 1)
+        if not len(peak_mzs):
+            continue
+        if table['ms_level'][i] == 1:
+            order = np.argsort(peak_mzs, kind = 'stable')
+            ms1_index[scan] = len(ms1_rts)
+            ms1_rts.append(table['retention_time'][i])
+            ms1_mzs.append(peak_mzs[order].astype(np.float32))
+            ms1_ints.append(peak_ints[order].astype(np.float32))
+            continue
+        filt = table['filter_string'][i] or ''
+        # The filter string ends with this stage's isolation m/z and activation(s), e.g. 1022.47@etd50.00@hcd25.00
+        stage = re.findall(r'([\d.]+)((?:@[a-z]+[\d.]+)+)', filt)
+        precursor_mz = table['precursor_mz'][i]
+        if not precursor_mz:
+            continue
+        # precursor_mz is the instrument's monoisotopic m/z where it determined one; like ThermoRawFileParser, the isolation m/z replaces it if a
+        # firmware bug put it outside the isolation window
+        iso, half = float(stage[-1][0]) if stage else precursor_mz, (table['isolation_width'][i] or 0) / 2
+        if not ((iso - 3 <= precursor_mz <= iso + 2.5) if half <= 2 else (iso - half <= precursor_mz <= iso + half)):
+            precursor_mz = iso
+        if detected_mode is None:
+            detected_mode = 'negative' if table['polarity'][i] == '-' else 'positive'
+            detected_trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(table['analyzer'][i])
+        top = np.argsort(-peak_ints, kind = 'stable')[:num_peaks]
+        peak_ds.append(dict(zip(peak_mzs[top].tolist(), peak_ints[top].tolist())))
+        mzs.append(precursor_mz)
+        rts.append(table['retention_time'][i])
+        scans.append(scan)
+        methods = re.findall(r'@([a-z]+)', stage[-1][1]) if stage else []
+        etd = 'etd' in methods
+        # Supplemental activation without a named method (ETD + sa) is ambiguous, as in process_mzXML_stack
+        activations.append('EThcD' if etd and 'hcd' in methods else 'ETciD' if etd and 'cid' in methods else None if etd and ' sa ' in filt else
+                           'ETD' if etd else 'ECD' if 'ecd' in methods else 'HCD' if 'hcd' in methods else 'CID' if 'cid' in methods else None)
+        raw_charge = table['charge'][i]
+        ms1_scans.append(len(ms1_rts) - 1)
+        refine.append(raw_charge is None)
+        charges.append(raw_charge if raw_charge is not None and raw_charge > 1 else None)
+        if intensity:
+            # ThermoRawFileParser's precursor intensity: summed centroids within 1.5 m/z of the isolation m/z in the scan that triggered this one
+            s = ms1_index.get(table['master_scan_number'][i], len(ms1_rts) - 1)
+            intensities.append(float(ms1_ints[s][(ms1_mzs[s] >= iso - 1.5) & (ms1_mzs[s] < iso + 1.5)].sum()) if s >= 0 else np.nan)
+    df_out = pd.DataFrame({
+        'm/z': mzs,
+        'peak_d': peak_ds,
+        'RT': rts,
+        'precursor_charge': charges,
+    })
+    if intensity:
+        df_out['intensity'] = intensities
+    df_out['scan'], df_out['activation'] = scans, activations
+    # Same flat MS1 store and precursor refinement as process_mzML_stack
+    ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
+           np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
+           np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine)
+    df_out = df_out[~drop].reset_index(drop = True)
+    df_out.attrs['detected_mode'] = detected_mode
+    df_out.attrs['detected_trap'] = detected_trap
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
     return df_out
@@ -1354,6 +1466,8 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         return process_mzML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mzxml":
         return process_mzXML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
+    if ext == ".raw":
+        return process_raw_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mgf":
         rows = []
         with mgf.read(spectra_filepath, use_index = False) as reader:
@@ -1422,10 +1536,10 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
 
 
 def extract_spectra(spectra_filepath, output_filepath = None):
-    """extracts the MS/MS spectra of an .mzML/.mzXML/.mgf file into a lightweight .xlsx that wrap_inference reads directly\n
+    """extracts the MS/MS spectra of a .raw/.mzML/.mzXML/.mgf file into a lightweight .xlsx that wrap_inference reads directly\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".mzML", ".mzXML", or ".mgf"
+   | spectra_filepath (string): absolute filepath ending in ".raw", ".mzML", ".mzXML", or ".mgf"
    | output_filepath (string): .xlsx filepath to write; default:None (spectra_filepath with an .xlsx extension)\n
    | Returns:
    | :-
@@ -1847,7 +1961,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".mzML",".mzXML", ".mgf", or ".xlsx" pointing to a file containing spectra or preprocessed spectra
+   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to a file containing spectra or preprocessed spectra
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | model (PyTorch): trained CandyCrunch model
    | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
@@ -1893,7 +2007,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type == glycan_class])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
     multiplier = -1 if mode == 'negative' else 1
-    loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml')))
+    loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.raw')))
     ms1 = loaded_file.attrs.pop('ms1', None)
     detected_mode = getattr(loaded_file, 'attrs', {}).get('detected_mode')
     detected_trap = getattr(loaded_file, 'attrs', {}).get('detected_trap')
@@ -2088,7 +2202,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
-   | spectra_filepath_list (list): list of absolute filepaths ending in ".mzML",".mzXML", ".mgf", or ".xlsx" pointing to files containing spectra
+   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to files containing spectra
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group
    | top_n_isomers (int): number of different isomer groups at each composition to retain; default:5

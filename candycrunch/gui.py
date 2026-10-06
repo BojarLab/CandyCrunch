@@ -53,7 +53,7 @@ LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD')]
-SPECTRA_SUFFIXES = ('.mzml', '.mzxml', '.mgf')
+SPECTRA_SUFFIXES = ('.raw', '.mzml', '.mzxml', '.mgf')
 # What the worker reports while wrap_inference(_batch) runs, keyed by the prediction.py function that starts each step
 STAGES = {'load_spectra_filepath': 'Reading {}', 'condense_dataframe': 'Grouping spectra into chromatographic peaks',
           'assign_candidate_structures': 'Matching precursor compositions', 'assign_annotation_scores_pooled': 'Scoring fragment evidence',
@@ -708,7 +708,7 @@ class SettingsPanel(QScrollArea):
         for button in (self.add_files, self.add_folder, self.remove):
             row.addWidget(button)
         layout.addLayout(row)
-        self.file_hint = _label('mzML, mzXML, mgf, or an .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, mzML, mzXML, mgf, or an .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         layout.addWidget(_label('Sample'))
@@ -716,7 +716,7 @@ class SettingsPanel(QScrollArea):
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.inputs['glycan_class'] = _combo(GLYCAN_CLASSES)
         self.mode = _combo([('Negative', 'negative'), ('Positive', 'positive')])
-        self.mode.setToolTip('Overridden by the polarity stored in mzML/mzXML files')
+        self.mode.setToolTip('Overridden by the polarity stored in .raw/mzML/mzXML files')
         self.charge = _spin(1, 8, 1)
         self.charge.setToolTip('Highest absolute precursor charge considered for composition matching')
         self.inputs['modification'] = _combo(REDUCING_ENDS)
@@ -725,7 +725,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['sample_prep'] = _combo(SAMPLE_PREPS)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
-        self.inputs['trap'].setToolTip('Overridden by the instrument stored in mzML/mzXML files')
+        self.inputs['trap'].setToolTip('Overridden by the instrument stored in .raw/mzML/mzXML files')
         form.addRow('Glycans', self.inputs['glycan_class'])
         form.addRow('Ion mode', self.mode)
         form.addRow('Max. charge', self.charge)
@@ -1697,13 +1697,13 @@ class MainWindow(QMainWindow):
 
     def choose_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Add LC-MS/MS runs', self.store.value('folder', os.path.expanduser('~')),
-                                                'Spectra (*.mzML *.mzXML *.mgf *.xlsx);;All files (*)')
+                                                'Spectra (*.raw *.RAW *.mzML *.mzXML *.mgf *.xlsx);;All files (*)')
         if paths:
             self.store.setValue('folder', os.path.dirname(paths[0]))
             self.settings.add_paths(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add every mzML, mzXML, and mgf file of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add every .raw, mzML, mzXML, and mgf file of a folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
             self.store.setValue('folder', path)
             self.settings.add_paths([path])

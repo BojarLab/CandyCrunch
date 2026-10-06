@@ -14,7 +14,7 @@ def str_to_bool(value):
 def main():
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
     #parser.add_argument('-c', '--config', help='Path to the config file', required=True)
-    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files and/or folders of .mzML/.mzXML/.mgf files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
+    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files and/or folders of Thermo .raw/.mzML/.mzXML/.mgf files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
@@ -46,9 +46,9 @@ def main():
     args = parser.parse_args()
     if not args.output.endswith(('.csv', '.xlsx')):
         parser.error('--output has to end with .csv or .xlsx')
-    filepaths = [f for p in args.spectra_filepath for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.mzml', '.mzxml', '.mgf'))] if os.path.isdir(p) else [p])]
+    filepaths = [f for p in args.spectra_filepath for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.mzml', '.mzxml', '.mgf'))] if os.path.isdir(p) else [p])]
     if not filepaths:
-        parser.error('no .mzML/.mzXML/.mgf files found in --spectra_filepath')
+        parser.error('no .raw/.mzML/.mzXML/.mgf files found in --spectra_filepath')
     if len(filepaths) > 1 and args.intra_cat_thresh is None:
         parser.error('--intra_cat_thresh is required when processing several files')
     args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}

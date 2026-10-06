@@ -26,21 +26,21 @@ The notebook contains an example pipeline ready to run, which can be copied, exe
 The example file included in the notebook is the same as in `examples/` and is ready for use in the notebook workflow. 
 
 ## Using CandyCrunch &ndash; Desktop app
-No Python or command line needed: download `CandyCrunch-<version>-Windows-Setup.exe` (Windows) or `CandyCrunch-<version>-macOS.dmg` (macOS) from the [latest release](https://github.com/BojarLab/CandyCrunch/releases/latest), install it, and start CandyCrunch from the Start menu or Applications. The Windows installer needs no administrator rights; afterwards, mzML/mzXML/mgf files can be opened with CandyCrunch from their right-click menu, and saved results open with a double-click. The macOS app is not notarized, so on first start macOS asks you to allow it once under System Settings > Privacy & Security > Open Anyway.
+No Python or command line needed: download `CandyCrunch-<version>-Windows-Setup.exe` (Windows) or `CandyCrunch-<version>-macOS.dmg` (macOS) from the [latest release](https://github.com/BojarLab/CandyCrunch/releases/latest), install it, and start CandyCrunch from the Start menu or Applications. The Windows installer needs no administrator rights; afterwards, Thermo .raw, mzML, mzXML, and mgf files can be opened with CandyCrunch from their right-click menu, and saved results open with a double-click. The macOS app is not notarized, so on first start macOS asks you to allow it once under System Settings > Privacy & Security > Open Anyway.
 
 Python users get the same app with
 ```bash
 pip install "candycrunch[gui]"
 candycrunch_gui
 ```
-The desktop app runs CandyCrunch on one or several mzML/mzXML/mgf/xlsx files without any code, with a progress bar that shows how far a run is and about how long it will still take. Results come as a table with SNFG drawings, and each glycan peak shows its annotated MS² spectrum, fragment table, candidate structures and position on a retention time vs. m/z map. Several runs are harmonized into a feature table with per-run abundances. Predictions can be curated (assign another candidate, enter a structure, exclude a peak), exported as CSV or Excel (optionally with SNFG drawings), and saved to reopen later without rerunning. The CandyCrumbs tab annotates any peak list with any glycan, composition, or glycopeptide.
+The desktop app runs CandyCrunch on one or several Thermo .raw, mzML, mzXML, mgf, or xlsx files without any code, with a progress bar that shows how far a run is and about how long it will still take. Results come as a table with SNFG drawings, and each glycan peak shows its annotated MS² spectrum, fragment table, candidate structures and position on a retention time vs. m/z map. Several runs are harmonized into a feature table with per-run abundances. Predictions can be curated (assign another candidate, enter a structure, exclude a peak), exported as CSV or Excel (optionally with SNFG drawings), and saved to reopen later without rerunning. The CandyCrumbs tab annotates any peak list with any glycan, composition, or glycopeptide.
 
 ## Using CandyCrunch &ndash; Command line interface:
 If you would like to run our main inference function from the command line, you can do so using the `candycrunch_predict` command included in this repository.
 
 #### Requires at a minimum:
 <pre>
---spectra_filepath, type=string(s): one or more filepaths to mzML/mzXML/mgf files or .xlsx files, and/or folders containing mzML/mzXML/mgf files; several files are processed together via `wrap_inference_batch` <br />
+--spectra_filepath, type=string(s): one or more filepaths to Thermo .raw, mzML, mzXML, or mgf files or .xlsx files, and/or folders containing such files; several files are processed together via `wrap_inference_batch` <br />
 --glycan_class, type=string: the glycan class measured ("N", "O", "lipid"/"free") <br />
 --output, type=string: an output filepath ending with `.csv` or `.xlsx`
 </pre>
@@ -90,7 +90,7 @@ If you would like to run our main inference function from the command line, you 
 /Users/xurbja $ candycrunch_predict --spectra_filepath path_to_my_files/file.mzML --glycan_class 'O' --output path_to_my_outputs/output_file.csv 
 ```
 
-Several files, or a folder of mzML/mzXML/mgf files, are harmonized across runs with `wrap_inference_batch`. The output file then holds a feature table with one row per isomer group (top1 prediction, consensus m/z and RT, number of files with MS2 evidence) and its relative abundance and evidence (MS2 or MS1-only) in every file, and each file's predictions are written next to it as `output_file_<file name>.csv`:
+Several files, or a folder of Thermo .raw, mzML, mzXML, or mgf files, are harmonized across runs with `wrap_inference_batch`. The output file then holds a feature table with one row per isomer group (top1 prediction, consensus m/z and RT, number of files with MS2 evidence) and its relative abundance and evidence (MS2 or MS1-only) in every file, and each file's predictions are written next to it as `output_file_<file name>.csv`:
 ```console
 /Users/xurbja $ candycrunch_predict --spectra_filepath path_to_my_files/ --glycan_class 'O' --intra_cat_thresh 1.75 --top_n_isomers 2 --output path_to_my_outputs/output_file.csv
 ```
@@ -101,10 +101,10 @@ Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `C
   
 #### Requires at a minimum:  
 <pre>
-- spectra_filepath, type = string: a filepath to an mzML/mzXML/mgf file or a .xlsx file <br />
+- spectra_filepath, type = string: a filepath to a Thermo .raw, mzML, mzXML, or mgf file or a .xlsx file <br />
 - glycan_class,type = string: the glycan class measured ("N", "O", "lipid"/"free")
 </pre>
-mzML/mzXML/mgf files are internally processed into extracted spectra. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `CandyCrunch.prediction`) writes such an xlsx from an mzML/mzXML/mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the raw file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept).
+Thermo .raw, mzML, mzXML, and mgf files are internally processed into extracted spectra; .raw files are read directly (via [opentfraw](https://github.com/Sigilweaver/OpenTFRaw)), without any conversion or Thermo software. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `CandyCrunch.prediction`) writes such an xlsx from a .raw, mzML, mzXML or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept).
 <details>
 <summary>
 
@@ -175,11 +175,11 @@ The feature table has one row per isomer group with its top1 prediction, consens
 Precursors are clustered by m/z across files within the mass tolerance, and glycan predictions are assigned to groups based on the most common prediction in the group across files. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
 
 The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_threshold.  
-At each composition, the top_n_isomers isomer groups are kept, preferring groups seen in more files and then more abundant ones. For mzML files, an isomer group without MS2 in a file is filled in from MS1 if the file shows a genuine chromatographic peak for it within intra_cat_threshold that is at least as intense as the weakest precursor that got MS2 in that file <br />
+At each composition, the top_n_isomers isomer groups are kept, preferring groups seen in more files and then more abundant ones. For files with MS1 scans (.raw, mzML, mzXML), an isomer group without MS2 in a file is filled in from MS1 if the file shows a genuine chromatographic peak for it within intra_cat_threshold that is at least as intense as the weakest precursor that got MS2 in that file <br />
 
 #### Requires at a minimum:  
 <pre>
-- spectra_filepath_list, type = list: list of filepaths to mzML/mzXML/mgf files and/or .xlsx files <br />
+- spectra_filepath_list, type = list: list of filepaths to Thermo .raw, mzML, mzXML, or mgf files and/or .xlsx files <br />
 - glycan_class, type = string: the glycan class measured ("N", "O", "lipid"/"free") <br />
 - intra_cat_threshold, type = float: minutes the RT of a structure can differ from the mean of a group. <br />
 </pre>
@@ -272,7 +272,7 @@ GlycoDraw(fragment_iupac)
 ## Modules
 #### `prediction` <br>
 - Includes all functions used in `wrap_inference`. 
-- Contains `process_mzML_stack` and `process_mzXML_stack` to extract spectra from .mzML and .mzXML files <br>
+- Contains `process_raw_stack`, `process_mzML_stack` and `process_mzXML_stack` to extract spectra from Thermo .raw, .mzML, and .mzXML files <br>
 #### `analysis` <br>
 - Includes all functions used in `CandyCrumbs`.
 - Contains functions to analyze and compare averaged spectra

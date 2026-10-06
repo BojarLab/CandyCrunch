@@ -29,6 +29,7 @@ dependencies = [
     "seaborn",
     "pandas",
     "pymzml", 
+    "opentfraw>=2.0", 
     "pyteomics",
     "lxml",
     "openpyxl",

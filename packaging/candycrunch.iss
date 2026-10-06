@@ -44,7 +44,7 @@ Name: "{autoprograms}\CandyCrunch"; Filename: "{app}\CandyCrunch.exe"
 Name: "{autodesktop}\CandyCrunch"; Filename: "{app}\CandyCrunch.exe"; Tasks: desktopicon
 
 [Registry]
-; Saved results open in the app on double-click, and mzML, mzXML and mgf files offer "Open with CandyCrunch"
+; Saved results open in the app on double-click, and Thermo .raw, mzML, mzXML, and mgf files offer "Open with CandyCrunch"
 Root: HKA; Subkey: "Software\Classes\.candycrunch"; ValueType: string; ValueName: ""; ValueData: "CandyCrunch.Results"; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\CandyCrunch.Results"; ValueType: string; ValueName: ""; ValueData: "CandyCrunch results"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\CandyCrunch.Results\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\CandyCrunch.exe,0"
@@ -54,6 +54,7 @@ Root: HKA; Subkey: "Software\Classes\CandyCrunch.Spectra\shell\open\command"; Va
 Root: HKA; Subkey: "Software\Classes\.mzML\OpenWithProgids"; ValueType: string; ValueName: "CandyCrunch.Spectra"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\.mzXML\OpenWithProgids"; ValueType: string; ValueName: "CandyCrunch.Spectra"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\.mgf\OpenWithProgids"; ValueType: string; ValueName: "CandyCrunch.Spectra"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.raw\OpenWithProgids"; ValueType: string; ValueName: "CandyCrunch.Spectra"; ValueData: ""; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\CandyCrunch.exe"; Description: "{cm:LaunchProgram,CandyCrunch}"; Flags: nowait postinstall skipifsilent
