@@ -345,6 +345,53 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
    """
     raw = opentfraw.RawFile(filepath)
     table = raw.scan_table()
+    # opentfraw 2.0.0 misreads the scan events of version 66 files from ion traps (LTQ, LTQ XL, LTQ Orbitrap Velos with Xcalibur 4): they are
+    # self-describing (136-byte preamble, then counted 56-byte reactions, 16-byte scan windows and 8-byte coefficients, then 3 u32), not of the
+    # fixed size it assumes. Its peaks, profile intensities, retention times and trailers are right, so if this layout walks exactly over the event
+    # stream, the columns read below are rebuilt from the events and the trailer
+    index_addr, data_addr = 0, 0
+    with open(filepath, 'rb') as f:
+        f.seek(36)
+        if int.from_bytes(f.read(4), 'little') >= 66:
+            # Skips the sequence row (64 bytes, 31 strings with a u32 after the 16th) and the autosampler info (24 bytes, a string), each string
+            # being a u32 count of UTF-16 characters followed by them
+            f.seek(1420)
+            for size in [None] * 16 + [4] + [None] * 15 + [24, None]:
+                f.seek(size or 2 * int.from_bytes(f.read(4), 'little'), 1)
+            info = f.read(824)
+            addrs = f.read(16 * max(int.from_bytes(info[28:32], 'little'), 2))
+            # The MS controller's run header has scan events or the file's data address
+            for a in range(0, len(addrs), 16):
+                f.seek(int.from_bytes(addrs[a:a + 8], 'little'))
+                run_header = f.read(7464)
+                n_events = int.from_bytes(run_header[7376:7380], 'little')
+                if int.from_bytes(addrs[a:a + 8], 'little') and (n_events or run_header[7416:7424] == info[808:816]):
+                    break
+            trailer_addr, params_addr = int.from_bytes(run_header[7448:7456], 'little'), int.from_bytes(run_header[7456:7464], 'little')
+            f.seek(trailer_addr + 4)
+            stream = f.read(max(params_addr - trailer_addr - 4, 0))
+            starts, pos = [], 0
+            while pos + 148 <= len(stream) and len(starts) < n_events:
+                starts.append(pos)
+                pos += 140 + 56 * int.from_bytes(stream[pos + 136:pos + 140], 'little')
+                pos += 4 + 16 * int.from_bytes(stream[pos:pos + 4], 'little')
+                pos += 16 + 8 * int.from_bytes(stream[pos:pos + 4], 'little')
+            if pos == len(stream) and len(starts) == len(table['ms_level']) and len(set(np.diff(starts + [pos]))) > 1:
+                index_addr, data_addr = int.from_bytes(run_header[7408:7416], 'little'), int.from_bytes(info[808:816], 'little')
+                for i, s in enumerate(starts):
+                    level = max(stream[s + 6], 1)
+                    reactions = [np.frombuffer(stream, '<f8', 3, s + 140 + 56 * k) for k in range(int.from_bytes(stream[s + 136:s + 140], 'little'))]
+                    act = {1: 'hcd', 3: 'etd', 4: 'cid', 5: 'ecd'}.get(stream[s + 24], '')
+                    params = (raw.scan_parameters(raw.first_scan + i) or {}) if level > 1 else {}
+                    mono, charge = params.get('Monoisotopic M/Z:') or 0, int(params.get('Charge State:') or 0)
+                    table['ms_level'][i] = level
+                    table['polarity'][i] = {0: '-', 1: '+'}.get(stream[s + 4])
+                    table['scan_mode'][i] = {0: 'centroid', 1: 'profile'}.get(stream[s + 5])
+                    table['analyzer'][i] = {0: 'ITMS', 1: 'TQMS', 2: 'SQMS', 3: 'TOFMS', 4: 'FTMS', 5: 'Sector'}.get(stream[s + 40])
+                    table['filter_string'][i] = ' '.join(f'{mz:.4f}@{act}{energy:.2f}' for mz, width, energy in reactions if mz > 0)
+                    table['precursor_mz'][i] = mono if mono > 0 else float(reactions[-1][0]) if reactions else None
+                    table['charge'][i] = charge if charge > 0 else None
+                    table['isolation_width'][i] = params.get('MS2 Isolation Width:') or params.get('MSn Isolation Width:')
     peak_ds, rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], [], []
     detected_mode, detected_trap = None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
@@ -352,13 +399,29 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         if table['ms_level'][i] not in (1, ms_level):
             continue
         peak_mzs, peak_ints = raw.peaks(scan)
-        # Ion-trap profile scans come without centroids. Like Thermo's centroider (which made the centroids of mzML files from such runs, all at least
-        # 0.5 m/z apart), the profile is split at the lowest point between maxima (ignoring maxima below 1e-6 of the scan's highest point, which are
-        # numerical noise) and neighboring centroids closer than 0.5 m/z are merged, each carrying the summed signal of its share of the profile at
-        # its intensity-weighted m/z
+        # Ion-trap profile scans come without centroids. Like Thermo's centroider, which made the centroids of mzML files from such runs, profile
+        # points below 1 are dropped, the profile is split at the lowest point between maxima and neighboring centroids closer than 0.5 m/z are
+        # merged, each carrying the summed signal of its share of the profile at its intensity-weighted m/z
         if not len(peak_mzs) and table['scan_mode'][i] == 'profile' and table['analyzer'][i] != 'FTMS':
             prof_mzs, prof_ints = raw.profile(scan)
-            apex = np.where((prof_ints[1:-1] > prof_ints[:-2]) & (prof_ints[1:-1] >= prof_ints[2:]) & (prof_ints[1:-1] > 1e-6 * prof_ints.max(initial = 0)))[0] + 1
+            if index_addr:
+                # opentfraw 2.0.0 also converts these profiles with coefficients of the misread events, but ion-trap profile bins are m/z already,
+                # so each chunk's m/z are rebuilt from the scan's packet: 40-byte header, 8 bytes per further segment, then the profile
+                with open(filepath, 'rb') as f:
+                    f.seek(index_addr + 88 * i + 72)
+                    f.seek(data_addr + int.from_bytes(f.read(8), 'little'))
+                    head = f.read(40)
+                    f.seek(8 * max(int.from_bytes(head[:4], 'little') - 1, 0), 1)
+                    prof = f.read(4 * int.from_bytes(head[4:8], 'little'))
+                (first_value, step), fudge, pos, prof_mzs = np.frombuffer(prof, '<f8', 2), head[12] > 0, 24, [np.zeros(0)]
+                for _ in range(int.from_bytes(prof[16:20], 'little')):
+                    first_bin, n = np.frombuffer(prof, '<u4', 2, pos)
+                    fudge_mz = np.frombuffer(prof, '<f4', 1, pos + 8)[0] if fudge else 0
+                    prof_mzs.append(first_value + np.arange(first_bin, first_bin + n) * step + fudge_mz)
+                    pos += 8 + 4 * fudge + 4 * int(n)
+                prof_mzs = np.concatenate(prof_mzs)
+            prof_ints = np.where(prof_ints < 1, 0, prof_ints)
+            apex = np.where((prof_ints[1:-1] > prof_ints[:-2]) & (prof_ints[1:-1] >= prof_ints[2:]) & (prof_ints[1:-1] > 0))[0] + 1
             edges = np.array([0] + [a + 1 + np.argmin(prof_ints[a + 1:b]) for a, b in zip(apex[:-1], apex[1:])], dtype = np.int64)
             while len(apex):
                 peak_ints = np.add.reduceat(prof_ints, edges)
@@ -369,6 +432,10 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
                 # Merges every pair closer than 0.5 m/z whose gap is the smallest among its neighbouring gaps, until none is left
                 left, right = np.concatenate([[np.inf], gaps[:-1]]), np.concatenate([gaps[1:], [np.inf]])
                 edges = np.delete(edges, np.where((gaps < 0.5) & (gaps <= left) & (gaps < right))[0] + 1)
+            if len(apex):
+                # Thermo's centroids of up to 8 profile points sit one bin above their weighted mean on this axis, those of wider peaks on it
+                peak_mzs = peak_mzs + (prof_mzs[1] - prof_mzs[0]) * (
+                            np.add.reduceat((prof_ints > 0).astype(int), edges) < 9)
         if not len(peak_mzs):
             continue
         if table['ms_level'][i] == 1:
@@ -407,8 +474,9 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         refine.append(raw_charge is None)
         charges.append(raw_charge if raw_charge is not None and raw_charge > 1 else None)
         if intensity:
-            # ThermoRawFileParser's precursor intensity: summed centroids within 1.5 m/z of the isolation m/z in the scan that triggered this one
-            s = ms1_index.get(table['master_scan_number'][i], len(ms1_rts) - 1)
+            # ThermoRawFileParser's precursor intensity: summed centroids within 1.5 m/z of the isolation m/z in the trailer's master scan (tribrids
+            # acquire MS2 in parallel with the next survey scan), else in the preceding survey scan; LTQ trailers only carry a 'Master Index:', no scan
+            s = ms1_index.get((raw.scan_parameters(scan) or {}).get('Master Scan Number:'), len(ms1_rts) - 1)
             intensities.append(float(ms1_ints[s][(ms1_mzs[s] >= iso - 1.5) & (ms1_mzs[s] < iso + 1.5)].sum()) if s >= 0 else np.nan)
     df_out = pd.DataFrame({
         'm/z': mzs,
