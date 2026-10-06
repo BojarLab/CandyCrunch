@@ -26,7 +26,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from pyteomics import mgf, mzxml
 from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
-from candycrunch.analysis import CandyCrumbs
+from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES
 
 this_dir, this_filename = os.path.split(__file__)
 data_path = os.path.join(this_dir, 'glycans.pkl')
@@ -149,11 +149,13 @@ def process_mzML_stack(filepath, num_peaks = 1000,
    | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
-   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, and intensity if True
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan (the scan= number of the native
+   | spectrum ID, else the whole ID), and activation ('CID', 'HCD', 'ETD', 'ECD', 'EThcD', 'ETciD', the fragmentation_method values of CandyCrumbs,
+   | with EAD as 'ECD' for its c/z ions; None if not stated)
    """
     run = pymzml.run.Reader(filepath)
     highest_i_dict = {}
-    rts, intensities, mzs, charges = [], [], [], []
+    rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
     detected_mode, detected_trap = None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     for spectrum in run:
@@ -193,10 +195,22 @@ def process_mzML_stack(filepath, num_peaks = 1000,
             if mz_i_dict:
                 if not spectrum.selected_precursors:
                     continue
-                key = f"{spectrum.ID}_{spectrum.selected_precursors[0]['mz']}"
+                # pymzml's ID is not unique for non-Thermo native IDs (SCIEX cycle=1 experiment=2 and cycle=2 experiment=2 both give 2),
+                # which overwrote spectra of the same precursor m/z here, so the native ID keys them
+                native_id = spectrum.element.get('id', '')
+                key = f"{native_id}_{spectrum.selected_precursors[0]['mz']}"
                 highest_i_dict[key] = mz_i_dict
                 mzs.append(float(key.split('_')[-1]))
                 rts.append(spectrum.scan_time_in_minutes())
+                # Search engines identify glycopeptide spectra by scan number, and HCD and EThcD scans of one precursor alternate in
+                # glycoproteomics runs; the scan= number of the native ID, else the native ID itself
+                scans.append(int(m.group(1)) if (m := re.search(r'\bscan=(\d+)', native_id)) else native_id)
+                # EThcD/ETciD are written as their own terms or as ETD plus a (supplemental) beam-type or resonance collisional activation
+                terms = {cv.get('accession', '') for cv in spectrum.element.iter('{http://psi.hupo.org/ms/mzml}cvParam')}
+                etd, hcd, cid = 'MS:1000598' in terms, {'MS:1000422', 'MS:1002481', 'MS:1002678'}, {'MS:1000133', 'MS:1000433', 'MS:1002679'}
+                activations.append('EThcD' if 'MS:1002631' in terms or (etd and terms & hcd) else
+                                   'ETciD' if 'MS:1003182' in terms or (etd and terms & cid) else 'ETD' if etd else
+                                   'ECD' if terms & {'MS:1000250', 'MS:1003294'} else 'HCD' if terms & hcd else 'CID' if terms & cid else None)
                 raw_charge = spectrum.selected_precursors[0].get('charge', None)
                 # Without a charge state the instrument never determined the monoisotopic peak, so its trigger m/z gets refined from MS1
                 ms1_scans.append(len(ms1_rts) - 1)
@@ -220,6 +234,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     })
     if intensity:
         df_out['intensity'] = intensities
+    df_out['scan'], df_out['activation'] = scans, activations
     # Flat MS1 store (rts, mzs, intensities, offsets): the peaks of scan i are mzs[offsets[i]:offsets[i + 1]]
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
@@ -244,10 +259,11 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
    | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
-   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, and intensity if True
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, and activation as in
+   | process_mzML_stack
     """
     highest_i_dict = {}
-    rts, intensities, mzs, charges = [], [], [], []
+    rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     with mzxml.read(filepath) as reader:
         for spectrum in reader:
@@ -268,6 +284,10 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                     highest_i_dict[key] = mz_i_dict
                     mzs.append(float(precursor_mz))
                     rts.append(spectrum['retentionTime'])
+                    scans.append(int(spectrum['num']))
+                    # mzXML names the method itself; ambiguous ones (ETD+SA) stay None
+                    activations.append({k.upper(): k for k in PEPTIDE_ION_TYPES if k}.get(
+                        str(spectrum['precursorMz'][0].get('activationMethod')).upper()))
                     raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
                     ms1_scans.append(len(ms1_rts) - 1)
                     refine.append(raw_charge is None)
@@ -288,6 +308,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     })
     if intensity:
         df_out['intensity'] = intensities
+    df_out['scan'], df_out['activation'] = scans, activations
     # Same flat MS1 store and precursor refinement as process_mzML_stack
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
@@ -1346,8 +1367,9 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
                 charge = abs(int(params['charge'][0])) if params.get('charge') else None
                 peak_d = dict(sorted(zip(spectrum['m/z array'].tolist(), spectrum['intensity array'].tolist()), key = lambda x: x[1], reverse = True)[:1000])
                 rows.append([float(params['pepmass'][0]), peak_d, float(params['rtinseconds']) / 60,
-                             charge if charge != 1 else None, params['pepmass'][1] if params['pepmass'][1] is not None else np.nan])
-        return pd.DataFrame(rows, columns = ['m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity'])
+                             charge if charge != 1 else None, params['pepmass'][1] if params['pepmass'][1] is not None else np.nan,
+                             int(params['scans']) if str(params.get('scans')).isdigit() else params.get('scans'), None])
+        return pd.DataFrame(rows, columns = ['m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity', 'scan', 'activation'])
     if ext == ".pkl":
         loaded_file = pd.read_pickle(spectra_filepath)
         return loaded_file

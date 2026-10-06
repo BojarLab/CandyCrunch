@@ -1,6 +1,7 @@
 import pytest
 import unittest
 import os
+import base64
 import pathlib
 import sys
 from tabulate import tabulate
@@ -263,3 +264,44 @@ def test_precursor_refinement():
     # fragmented itself, a header charge state is trusted, and an unrelated lighter peak is not mistaken for the monoisotopic one
     assert np.allclose(out[:2], mono, atol = 1e-3) and out[2] == 601.25 and abs(out[3] - 700.2) < 1e-3
     assert list(drop) == [False, True, False, False]
+
+def test_spectra_scan_activation(tmp_path):
+    # A glycoproteomics run alternates HCD and EThcD (ETD + supplemental beam-type CID) scans of one precursor; both are kept apart by scan
+    # number and activation, which a search engine's identification and CandyCrumbs' fragmentation_method need
+    def cv(acc, name, value = ''):
+        return f'<cvParam cvRef="MS" accession="{acc}" name="{name}" value="{value}"/>'
+    def spectrum(i, native_id, level, rt, activation = ()):
+        arrays = ''.join(f'<binaryDataArray encodedLength="0">{cv("MS:1000523", "64-bit float")}{cv("MS:1000576", "no compression")}{cv(acc, name)}'
+                         f'<binary>{base64.b64encode(np.array(values, dtype = "<f8").tobytes()).decode()}</binary></binaryDataArray>'
+                         for acc, name, values in (('MS:1000514', 'm/z array', [204.0867, 1189.512, 1392.591]), ('MS:1000515', 'intensity array', [100.0, 50.0, 80.0])))
+        precursor = (f'<precursorList count="1"><precursor><selectedIonList count="1"><selectedIon>{cv("MS:1000744", "selected ion m/z", 878.69)}'
+                     f'{cv("MS:1000041", "charge state", 3)}</selectedIon></selectedIonList><activation>{"".join(cv(a, "") for a in activation)}</activation>'
+                     '</precursor></precursorList>') if level == 2 else ''
+        return (f'<spectrum index="{i}" id="{native_id}" defaultArrayLength="3">{cv("MS:1000511", "ms level", level)}'
+                f'{cv("MS:1000130", "positive scan")}<scanList count="1"><scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" '
+                f'unitName="minute"/></scan></scanList>{precursor}'
+                f'<binaryDataArrayList count="2">{arrays}</binaryDataArrayList></spectrum>')
+    def write(name, spectra):
+        path = tmp_path / name
+        path.write_text(f'<?xml version="1.0" encoding="utf-8"?><mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1.0"><run id="r"><spectrumList count="{len(spectra)}">' +
+                        ''.join(spectrum(i, *x) for i, x in enumerate(spectra)) + '</spectrumList></run></mzML>')
+        return str(path)
+    thermo = write('thermo.mzML', [(f'controllerType=0 controllerNumber=1 scan={i + 1}', *x) for i, x in
+                                   enumerate([(1, 10.0), (2, 10.01, ['MS:1000422']), (2, 10.02, ['MS:1000598', 'MS:1002678'])])])
+    df = load_spectra_filepath(thermo)
+    assert df['scan'].tolist() == [2, 3] and df['activation'].tolist() == ['HCD', 'EThcD']
+    assert df.attrs['detected_mode'] == 'positive' and df['precursor_charge'].tolist() == [3, 3]
+    # Both survive the .xlsx export that wrap_inference reads directly
+    df_xlsx = load_spectra_filepath(extract_spectra(thermo))
+    assert df_xlsx['scan'].tolist() == [2, 3] and df_xlsx['activation'].tolist() == ['HCD', 'EThcD']
+    # SCIEX native IDs have no scan= number and repeat their experiment number every cycle, so the whole ID identifies a spectrum; EAD gives
+    # c/z ions like ECD, and ETciD and low-energy CID have terms of their own
+    sciex = write('sciex.mzML', [(f'sample=1 period=1 cycle={c} experiment={e}', *x) for c, e, x in
+                                 [(1, 1, (1, 10.0)), (1, 2, (2, 10.01, ['MS:1003294'])), (2, 2, (2, 10.02, ['MS:1000433'])), (3, 2, (2, 10.03, ['MS:1003182']))]])
+    df = load_spectra_filepath(sciex)
+    assert df['scan'].tolist() == [f'sample=1 period=1 cycle={c} experiment=2' for c in (1, 2, 3)]
+    assert df['activation'].tolist() == ['ECD', 'CID', 'ETciD']
+    # MGF scan numbers are integers as in mzML
+    mgf_path = tmp_path / 'glycopeptides.mgf'
+    mgf_path.write_text('BEGIN IONS\nTITLE=s1\nPEPMASS=878.69 1000\nCHARGE=3+\nRTINSECONDS=600\nSCANS=1234\n204.0867 100\n1189.512 50\nEND IONS\n')
+    assert load_spectra_filepath(str(mgf_path))['scan'].tolist() == [1234]
