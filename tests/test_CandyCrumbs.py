@@ -250,4 +250,18 @@ def test_rank_glycopeptide_structures_published():
                                       mass_threshold_ppm = None)
     top = [s[0] for s, r in zip(df['structures'], df['rank']) if r == 1]
     assert 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-6)[Neu5Ac(a2-3)Gal(b1-3)]GalNAc' in top
-    assert {re.sub(r'a2-[36]', 'a2-?', s) for s in top} == {'Neu5Ac(a2-?)Gal(b1-4)GlcNAc(b1-6)[Neu5Ac(a2-?)Gal(b1-3)]GalNAc'}
+    assert {re.sub(r'a2-[36]', 'a2-?', s) for s in top} == {
+        'Neu5Ac(a2-?)Gal(b1-4)GlcNAc(b1-6)[Neu5Ac(a2-?)Gal(b1-3)]GalNAc'}
+
+
+def test_candycrumbs_ms3_precursor():
+    # MS3 of the Neu5Ac B1 ion (290.09) of Neu5Ac(a2-6)GalNAc-ol: its water loss is a fragment of that fragment, while the GalNAc-ol Y1/Z1 ions
+    # and the 0,3A cross-ring of GalNAc (also 272.08) are not; MS3 of the Y1 ion keeps Z1 (its water loss), not the 2,4X/3,5A reading of 204
+    g = 'Neu5Ac(a2-6)GalNAc'
+    out = CandyCrumbs(g, [204.07, 222.12, 272.1], charge = -1, simplify = False, ms3_precursor = 290.11)
+    assert out[204.07] is None and out[222.12] is None and out[272.1]['Domon-Costello nomenclatures'] == [
+        ['B_1_Alpha', 'M_H2O']]
+    out = CandyCrumbs(g, [204.07], charge = -1, simplify = False, ms3_precursor = 222.12)
+    assert out[204.07]['Domon-Costello nomenclatures'] == [['Z_1_Alpha'], ['M_H2O', 'Y_1_Alpha']]
+    # A precursor that is no fragment of the glycan leaves its MS3 spectrum unexplained
+    assert all(v is None for v in CandyCrumbs(g, [222.12, 272.1], charge = -1, ms3_precursor = 500.0).values())

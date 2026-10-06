@@ -305,3 +305,40 @@ def test_spectra_scan_activation(tmp_path):
     mgf_path = tmp_path / 'glycopeptides.mgf'
     mgf_path.write_text('BEGIN IONS\nTITLE=s1\nPEPMASS=878.69 1000\nCHARGE=3+\nRTINSECONDS=600\nSCANS=1234\n204.0867 100\n1189.512 50\nEND IONS\n')
     assert load_spectra_filepath(str(mgf_path))['scan'].tolist() == [1234]
+
+
+def test_ms3_spectra(tmp_path):
+    # Thermo DDA isolates the base peak of an MS2 spectrum for MS3; the MS3 precursors are listed latest stage first, each referencing its parent
+    # scan, so MS3 spectra end up with their MS2 spectrum (in .xlsx exports, too), and files without MS3 get no column
+    def cv(acc, name, value = ''):
+        return f'<cvParam cvRef="MS" accession="{acc}" name="{name}" value="{value}"/>'
+
+    def spectrum(i, level, rt, peaks, precursors = ()):
+        arrays = ''.join(
+            f'<binaryDataArray encodedLength="0">{cv("MS:1000523", "64-bit float")}{cv("MS:1000576", "no compression")}{cv(acc, name)}'
+            f'<binary>{base64.b64encode(np.array(values, dtype = "<f8").tobytes()).decode()}</binary></binaryDataArray>'
+            for acc, name, values in (('MS:1000514', 'm/z array', [m for m, _ in peaks]),
+                                      ('MS:1000515', 'intensity array', [x for _, x in peaks])))
+        precursor = ''.join(
+            f'<precursor spectrumRef="scan={ref}"><selectedIonList count="1"><selectedIon>{cv("MS:1000744", "selected ion m/z", mz)}'
+            f'</selectedIon></selectedIonList><activation>{cv("MS:1000133", "")}</activation></precursor>' for ref, mz
+            in precursors)
+        return (
+            f'<spectrum index="{i}" id="scan={i + 1}" defaultArrayLength="{len(peaks)}">{cv("MS:1000511", "ms level", level)}{cv("MS:1000129", "negative scan")}'
+            f'<scanList count="1"><scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" unitName="minute"/></scan></scanList>'
+            f'{"<precursorList>" + precursor + "</precursorList>" if precursors else ""}<binaryDataArrayList count="2">{arrays}</binaryDataArrayList></spectrum>')
+
+    def write(name, spectra):
+        path = tmp_path / name
+        path.write_text(
+            f'<?xml version="1.0" encoding="utf-8"?><mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1.0"><run id="r"><spectrumList count="{len(spectra)}">' +
+            ''.join(spectrum(i, *x) for i, x in enumerate(spectra)) + '</spectrumList></run></mzML>')
+        return str(path)
+
+    ms1, ms2 = (1, 10.0, [(675.25, 1e5), (676.25, 3e4)]), [(290.09, 100.0), (384.15, 40.0)]
+    path = write('ms3.mzML', [ms1, (2, 10.01, ms2, [(1, 675.25)]), (2, 10.02, ms2, [(1, 675.25)]),
+                              (3, 10.03, [(272.08, 20.0), (170.05, 10.0)], [(2, 290.09), (1, 675.25)])])
+    df = load_spectra_filepath(path)
+    assert [[(p, list(d)) for p, d in x] for x in df['ms3']] == [[(290.09, [272.08, 170.05])], []]
+    assert load_spectra_filepath(extract_spectra(path))['ms3'].tolist() == df['ms3'].tolist()
+    assert 'ms3' not in load_spectra_filepath(write('ms2.mzML', [ms1, (2, 10.01, ms2, [(1, 675.25)])])).columns

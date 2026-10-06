@@ -1968,7 +1968,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = None,
                 disable_A_cross_rings = None, sample_prep = 'underivatized', prior_weight = 1.0, glycan_class = None,
                 fragmentation_method = None, allow_internal_peptide_fragments = False, mass_threshold_ppm = None,
-                max_global_mods = None):
+                max_global_mods = None, ms3_precursor = None):
     """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
     | Arguments:
     | :-
@@ -1989,7 +1989,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; default:None
     | max_global_mods (int): how many global modifications may co-occur on one fragment; 2 captures the
     |                        sequential water losses of the oxonium series. Counts as one cleavage either way;
-    |                        default:None (2 for glycopeptides, 1 for free glycans)\n
+    |                        default:None (2 for glycopeptides, 1 for free glycans)
+    | ms3_precursor (float): m/z of the MS2 fragment that was isolated for an MS3 spectrum whose peaks are fragment_masses; these are then only
+    |                        annotated as fragments of what that MS2 fragment can be in this glycan (within max_cleavages), with up to
+    |                        max_cleavages further cleavages, and all are None if it cannot be any fragment of it; glycan structures only; default:None\n
     | Returns:
     | :-
     | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
@@ -2106,10 +2109,27 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                                                             disable_global_mods = disable_global_mods,
                                                             max_global_mods = max_global_mods)
     allowed_X_cleavages = [] if disable_X_cross_rings else X_cross_rings
+    parents, subgraphs = None, None
+    if ms3_precursor is not None and not input_dict['peptide']:
+        # An MS3 peak is a fragment of the isolated MS2 fragment, so it can only come from inside one of that fragment's least-cleaved
+        # annotations, of no higher charge, keeping its cross-ring cleavages
+        prec_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = max_cleavages,
+                                           fragment_masses = [ms3_precursor], threshold = mass_threshold, mass_tag = mass_tag,
+                                           charge = charge, sample_prep = sample_prep, disable_A_cross_rings = disable_A_cross_rings)
+        parents = list(zip(*match_fragment_properties(prec_frags, ms3_precursor, mass_threshold, charge,
+                                                      mass_threshold_ppm = mass_threshold_ppm)[1:]))
+        if not parents:
+            return {m: None for m in fragment_masses}
+        cuts = [len(x) for x in subgraphs_to_domon_costello(nx_mono, [p[3] for p in parents])]
+        parents = [p for p, c in zip(parents, cuts) if c == min(cuts)]
+        subgraphs = [s for s in enumerate_subgraphs(nx_mono) + [set(nx_mono)] if any(s <= set(p[3]) for p in parents)]
+        node_basic = {k: map_to_basic(v, obfuscate_ptm = False) for k, v in node_labels.items()}
+        max_cleavages = 2 * max_cleavages
     subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,
                                        max_cleavages = max_cleavages, fragment_masses = fragment_masses,
-                                       threshold = mass_threshold, mass_tag = mass_tag, charge = charge,
-                                       sample_prep = sample_prep, disable_A_cross_rings = disable_A_cross_rings)
+                                       subgraphs = subgraphs, threshold = mass_threshold, mass_tag = mass_tag,
+                                       charge = charge, sample_prep = sample_prep,
+                                       disable_A_cross_rings = disable_A_cross_rings)
     sorted_frag_keys = sorted(subg_frags.keys())
     if input_dict['peptide']:
         # each glycan's chains are ranked once, on the integer nodes of the free glycan: rank_chains orders equal-mass chains (the two arms
@@ -2152,6 +2172,12 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         for observed_mass in fragment_masses:
             fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge,
                                                             sorted_frag_keys, mass_threshold_ppm = mass_threshold_ppm)
+            if parents is not None:
+                keep = [i for i, (mass, z, g) in enumerate(zip(fragment_properties[1], fragment_properties[3], fragment_properties[4])) if any(
+                    mass < p_mass and abs(z) <= abs(p_z) and set(g) <= set(p_g) and all(
+                        p_g.nodes[n].get('mod_labels') in (None, node_basic[n], g.nodes[n].get('mod_labels')) for n in g)
+                    for p_mass, _, p_z, p_g in parents)]
+                fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
             dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1], chain_rank)
             lability = [compute_fragment_lability(edge_lability, sg) for sg in fragment_properties[-1]]
             downstream_values.append((*fragment_properties, dc_names, lability))

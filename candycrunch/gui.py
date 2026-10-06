@@ -62,11 +62,11 @@ STAGES = {'load_spectra_filepath': 'Reading {}', 'condense_dataframe': 'Grouping
           'assign_candidate_structures': 'Matching precursor compositions', 'assign_annotation_scores_pooled': 'Scoring fragment evidence',
           'get_topk': 'Predicting structures', 'assign_categories': 'Harmonizing isomer groups across files', 'augment_predictions': 'Adding biosynthetic and database candidates',
           'finalise_predictions': 'Quantifying and finalizing'}
-# Share of a file's run time per step, measured on the test datasets with 2 CPU cores (model inference ~60%, fragment scoring ~30%, more for
+# Share of a file's run time per step, measured on the test datasets with 2 CPU cores (model inference ~45%, fragment scoring ~40%, more for
 # N-glycans); after each single-file run the app blends in the shares measured on this computer, so its time estimates adapt to the machine
-STAGE_WEIGHTS = {'load_spectra_filepath': 0.05, 'condense_dataframe': 0.03, 'assign_candidate_structures': 0.01,
-                 'assign_annotation_scores_pooled': 0.28, 'get_topk': 0.58, 'augment_predictions': 0.04,
-                 'finalise_predictions': 0.01}
+STAGE_WEIGHTS = {'load_spectra_filepath': 0.06, 'condense_dataframe': 0.04, 'assign_candidate_structures': 0.01,
+                 'assign_annotation_scores_pooled': 0.37, 'get_topk': 0.45, 'augment_predictions': 0.05,
+                 'finalise_predictions': 0.02}
 # Share of a batch's time spent on harmonizing, augmenting and finalizing after every file has been predicted
 TAIL_WEIGHT = 0.06
 # Per process: where progress goes and where each step starts within a file, read by the wrappers _install_progress puts around prediction.py
@@ -204,7 +204,8 @@ def _install_progress(messages, weights, n_files):
     crumbs = cp.CandyCrumbs
     def counted(*args, **kwargs):
         result = crumbs(*args, **kwargs)
-        if _PROGRESS['stage'] == 'assign_annotation_scores_pooled':
+        # The step's todo counts candidate structures, i.e., MS2 calls; the extra calls for MS3 spectra are not counted
+        if _PROGRESS['stage'] == 'assign_annotation_scores_pooled' and kwargs.get('ms3_precursor') is None:
             advance(1)
         return result
     cp.CandyCrumbs = counted
