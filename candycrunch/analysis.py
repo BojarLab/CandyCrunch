@@ -307,13 +307,13 @@ def mono_graph_to_nx(mono_graph, directed = True):
 
 
 def enumerate_subgraphs(nx_mono):
-    """Returns all connected induced subgraphs of a graph\n
+    """Returns the node sets of all connected induced subgraphs of a graph\n
     | Arguments:
     | :-
     | nx_mono (networkx_object): monosaccharide only graph\n
     | Returns:
     | :-
-    | Returns a list of all networkx subgraphs
+    | Returns a list of node sets, one per connected induced subgraph (nx_mono.subgraph(node_set) gives the subgraph)
     """
     all_subgraphs = []
     if nx_mono.number_of_nodes() > 1:
@@ -356,17 +356,16 @@ def extend_subgraph(subgraph, extension, node, k, k_subgraphs, neighbor_dict, nx
     | k_subgraphs (list): list used to accumulate all subgraphs already found of size k
     | neighbor_dict (dict): mapping of all nodes and their neighbours in the original graph
     | nx_mono (networkx_object): the original monosaccharide only graph being searched
-    | all_sizes (bool): whether to also collect every smaller subgraph passed on the way to size k; default:False\n
+    | all_sizes (bool): whether to also collect every smaller subgraph passed on the way to size k, as node sets instead of subgraph views; default:False\n
     | Returns:
     | :-
     | Returns None
     """
     if len(subgraph) == k:
-        graph_obj = nx_mono.subgraph(subgraph)
-        k_subgraphs.append(graph_obj)
+        k_subgraphs.append(subgraph if all_sizes else nx_mono.subgraph(subgraph))
         return None
     if all_sizes:
-        k_subgraphs.append(nx_mono.subgraph(subgraph))
+        k_subgraphs.append(subgraph)
     while extension:
         w = min(extension)
         extension.discard(w)
@@ -823,6 +822,12 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     min_bond_mass = min(bond_masses.values()) - deriv_mass - max(W_SIDE_CHAIN_LOSSES.values())
     peptide_graph = isinstance(true_root_node, str)
     for i, subg in enumerate(subgraphs):
+        # most node sets from enumerate_subgraphs have too many cleavages, which their nodes alone tell, so only the rest get a subgraph view
+        # (slow to create; built from the same node set as before, so it iterates its nodes in the same order)
+        if isinstance(subg, set):
+            if sum(not neighbor_dict[x] <= subg and x not in all_other_terminals for x in subg) > max_cleavages:
+                continue
+            subg = nx_mono.subgraph(subg)
         # a view of few nodes iterates them in set order, which for the string nodes of a glycopeptide follows PYTHONHASHSEED and decided
         # between equally good fragments (02X_5_Alpha or 02X_5_Beta), so those are walked in the order of the parent graph
         nodes = [v for v in nx_mono if v in subg] if peptide_graph else subg
@@ -832,8 +837,8 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             continue
         other_terminals = [x for x in nodes if x in all_other_terminals and x not in terminals]
         terminals = terminals + other_terminals
-        # every glycosidic bond takes one derivatizable group of the residue it is attached to
-        inner_mass = sum(full_masses[m] for m in nodes if m not in terminals) - subg.number_of_edges() * deriv_mass
+        # every glycosidic bond takes one derivatizable group of the residue it is attached to (a view's edges are slow to count, so only if derivatized)
+        inner_mass = sum(full_masses[m] for m in nodes if m not in terminals) - (subg.number_of_edges() * deriv_mass if deriv_mass else 0)
         max_graph_mass = inner_mass + sum(full_masses[m] for m in terminals) + WATER_MASS * len(terminals)
         max_graph_mass += max_global_mass + max(mass_tag, 0) + PROTON_MASS + 2 * deriv_mass
         min_terminal_mass = sum(
@@ -853,7 +858,14 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             subg_copy.add_edges_from((u, v, d) for u, v, d in nx_mono.edges(data = True) if u in subg and v in subg)
             subg = subg_copy
         else:
-            subg = subg.copy()
+            # what copying the view gives (its node order, each node's out-edges in parent order, attribute dicts copied), built straight
+            # from the parent graph, as copying through the view's filtered adjacency is slow
+            subg_copy = nx.DiGraph()
+            subg_copy.graph.update(nx_mono.graph)
+            subg_copy.add_nodes_from((v, nx_mono.nodes[v].copy()) for v in subg)
+            subg_copy.add_edges_from(
+                (u, v, d.copy()) for u in subg_copy for v, d in nx_mono.succ[u].items() if v in subg_copy)
+            subg = subg_copy
         bonus_root_mass, bonus_root_node = temporary_root_calc_func(subg, nx_mono)
         terminal_labels = [node_dict_basic[x] for x in terminals]
         subg_global_mods = update_global_mods(subg, global_mods, special_residues)

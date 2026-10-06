@@ -62,10 +62,10 @@ STAGES = {'load_spectra_filepath': 'Reading {}', 'condense_dataframe': 'Grouping
           'assign_candidate_structures': 'Matching precursor compositions', 'assign_annotation_scores_pooled': 'Scoring fragment evidence',
           'get_topk': 'Predicting structures', 'assign_categories': 'Harmonizing isomer groups across files', 'augment_predictions': 'Adding biosynthetic and database candidates',
           'finalise_predictions': 'Quantifying and finalizing'}
-# Share of a file's run time per step, measured on the test datasets with 2 CPU cores (model inference dominates); after each single-file run
-# the app blends in the shares measured on this computer, so its time estimates adapt to the machine
-STAGE_WEIGHTS = {'load_spectra_filepath': 0.06, 'condense_dataframe': 0.03, 'assign_candidate_structures': 0.01,
-                 'assign_annotation_scores_pooled': 0.10, 'get_topk': 0.74, 'augment_predictions': 0.05,
+# Share of a file's run time per step, measured on the test datasets with 2 CPU cores (model inference ~60%, fragment scoring ~30%, more for
+# N-glycans); after each single-file run the app blends in the shares measured on this computer, so its time estimates adapt to the machine
+STAGE_WEIGHTS = {'load_spectra_filepath': 0.05, 'condense_dataframe': 0.03, 'assign_candidate_structures': 0.01,
+                 'assign_annotation_scores_pooled': 0.28, 'get_topk': 0.58, 'augment_predictions': 0.04,
                  'finalise_predictions': 0.01}
 # Share of a batch's time spent on harmonizing, augmenting and finalizing after every file has been predicted
 TAIL_WEIGHT = 0.06

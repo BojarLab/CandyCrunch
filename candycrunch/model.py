@@ -90,16 +90,23 @@ class ResUnit(nn.Module):
         self.conv_out = nn.Conv1d(in_channels // 2, in_channels, 1)
 
     def forward(self, inp):
-        x = inp
-        if self.in_ln:
-            x = self.ln1(x)
-        x = nn.functional.leaky_relu(x, inplace = self.in_ln)
-        x = nn.functional.leaky_relu(self.ln2(self.conv_in(x)), inplace = True)
-        x = self.conv_dilated(x)
-        if self.causal and self.size > 1:
-            x = x[:, :, :-self.dilation * (self.size - 1)]
-        x = nn.functional.leaky_relu(self.ln3(x), inplace = True)
-        return self.conv_out(x).add_(inp)
+        # Instance norms run as group norms with one channel per group (the same normalization, ~4x faster on CPU) and the convolutions as
+        # batched matrix products, the causal one as one product per tap on the shifted input (conv1d is slow for dilated kernel-2 convolutions)
+        n = inp.shape[0]
+        x = F.group_norm(inp, inp.shape[1], self.ln1.weight, self.ln1.bias, self.ln1.eps) if self.in_ln else inp
+        x = F.leaky_relu(x, inplace = self.in_ln)
+        x = torch.baddbmm(self.conv_in.bias[None, :, None], self.conv_in.weight[:, :, 0].expand(n, -1, -1), x)
+        x = F.leaky_relu(F.group_norm(x, x.shape[1], self.ln2.weight, self.ln2.bias, self.ln2.eps), inplace = True)
+        if self.causal:
+            w = self.conv_dilated.weight
+            y = torch.baddbmm(self.conv_dilated.bias[None, :, None], w[:, :, -1].expand(n, -1, -1), x)
+            for tap in range(self.size - 1):
+                shift = (self.size - 1 - tap) * self.dilation
+                y[:, :, shift:].baddbmm_(w[:, :, tap].expand(n, -1, -1), x[:, :, :-shift])
+        else:
+            y = self.conv_dilated(x)
+        x = F.leaky_relu(F.group_norm(y, y.shape[1], self.ln3.weight, self.ln3.bias, self.ln3.eps), inplace = True)
+        return torch.baddbmm(self.conv_out.bias[None, :, None], self.conv_out.weight[:, :, 0].expand(n, -1, -1), x).add_(inp)
 
 
 class CandyCrunch_CNN(torch.nn.Module):

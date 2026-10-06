@@ -715,12 +715,17 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
     # Retention time normalization
     max_rt = max(max(df['RT']), rt_max_default)
     df['RT2'] = df['RT'] / max_rt
+    # Candidate structures of one composition share spectrum and composition vector, i.e., the model input, so every distinct input is
+    # predicted once (input_id points each row to its input)
+    input_ids = {}
+    df['input_id'] = [input_ids.setdefault((s, tuple(v)), len(input_ids)) for s, v in zip(df['spec_id'], df['compositional_vector'])]
+    df_in = df.drop_duplicates('input_id')
     # Dataloader generation
-    X = list(zip(df.binned_intensities.values.tolist(), df.mz_remainder.values.tolist(),
-                 df.compositional_vector.values.tolist(), df.glycan_type.values.tolist(),
-                 df.RT2.values.tolist(), df['mode'].values.tolist(), df.lc.values.tolist(),
-                 df.modification.values.tolist(), df.trap.values.tolist()))
-    y = df['glycan']
+    X = list(zip(df_in.binned_intensities.values.tolist(), df_in.mz_remainder.values.tolist(),
+                 df_in.compositional_vector.values.tolist(), df_in.glycan_type.values.tolist(),
+                 df_in.RT2.values.tolist(), df_in['mode'].values.tolist(), df_in.lc.values.tolist(),
+                 df_in.modification.values.tolist(), df_in.trap.values.tolist()))
+    y = df_in['glycan'].reset_index(drop = True)
     X = unwrap([[k] * 5 for k in X])
     y = y.repeat(5).reset_index(drop = True)
     dset = SimpleDataset(X, y, transform_mz = transform_mz, transform_rt = transform_rt)
@@ -842,6 +847,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     df['rounded_mz'] = np.round(df[idx_col] * 2) / 2
     df['rounded_RT'] = np.round(df['RT'], 1)
     df.sort_values(by = ['rounded_mz', 'rounded_RT'], inplace = True)
+    rounded_mz = df['rounded_mz'].to_numpy()
     df.drop(['rounded_mz', 'rounded_RT'], axis = 1, inplace = True)
     # Initialize the first cluster
     mz_arr = df[idx_col].to_numpy()
@@ -859,11 +865,16 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         'apex_mz': mz_arr[0],
         'apex_rt': rt_arr[0]
     })
+    active = list(clusters)
     # Loop through the sorted dataframe starting from the second row
     for r in range(1, len(mz_arr)):
         mz, rt, intensity, peak_d = mz_arr[r], rt_arr[r], int_arr[r], peak_arr[r]
+        # Rows come sorted by m/z rounded to 0.5, so a cluster whose reference m/z lies more than mz_diff below this rounding bin can never
+        # match again; dropping those keeps the scan from growing with every cluster made so far (the first matching cluster is unchanged)
+        if rounded_mz[r] != rounded_mz[r - 1]:
+            active = [c for c in active if (c['apex_mz'] if c['apex_int'] > 0 else c['m/z'][-1]) >= rounded_mz[r] - 0.5 - mz_diff]
         found = False
-        for cluster in clusters:
+        for cluster in active:
             last_max = cluster['apex_int']
             if last_max > 0:
                 last_mz, last_rt = cluster['apex_mz'], cluster['apex_rt']
@@ -890,6 +901,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 'apex_mz': mz,
                 'apex_rt': rt
             })
+            active.append(clusters[-1])
     # Create a condensed dataframe
     condensed_data = []
     for cluster in clusters:
@@ -1112,8 +1124,10 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
     groups = df_in.groupby('candidate_structure', sort = False).indices
     comp_map = dict(zip(unq_structs.candidate_structure, unq_structs.composition))
     charge_vals = np.asarray(df_in['charge'].values, dtype = float)
-    mz_vals, peak_vals = df_in[idx_col].values, df_in['peak_d'].values
+    mz_vals, peak_vals, spec_ids = df_in[idx_col].values, df_in['peak_d'].values, df_in['spec_id'].values
     scores_out = np.zeros(len(df_in))
+    # A spectrum is a row of every candidate structure it matched, so its deisotoped fragments are computed once per charge state
+    rounded_masses = {}
     for struct, rows in groups.items():
         grp_charges = charge_vals[rows]
         row_charge = np.nanmax(grp_charges) if not np.all(np.isnan(grp_charges)) else 1.0
@@ -1125,8 +1139,9 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
             np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance) or
             np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) * charges_arr - spec_masses) < mass_tolerance)
             for adduct in adduct_list)
-        rounded_mass_rows = [[np.round(y, 1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15] for x in
-                             peak_vals[rows]]
+        rounded_mass_rows = [rounded_masses[key] if (key := (spec, row_charge)) in rounded_masses else
+                             rounded_masses.setdefault(key, [np.round(y, 1) for y in deisotope_ms2(x, int(abs(row_charge)), 0.05)][:15])
+                             for spec, x in zip(spec_ids[rows], peak_vals[rows])]
         unq_rounded_masses = set([x for y in rounded_mass_rows for x in y])
         cc_out = CandyCrumbs(struct, unq_rounded_masses, mass_tolerance, simplify = False,
                              charge = int(multiplier * abs(row_charge)),
@@ -1394,14 +1409,26 @@ def impute(df_out, pred_thresh, mode = 'negative', modification = 'reduced', sam
         # O-glycans may carry a sulfated GlcNAc branch that is interchangeable with the unsulfated form
         seqs = [p[0][0] for p in predictions_list if p and ("GlcNAc6S(b1-6)" in p[0][0] or "GlcNAc(b1-6)" in p[0][0])]
         variants.update(set(unwrap([_get_all_variants(s, 'GlcNAc6S(b1-6)', 'GlcNAc(b1-6)') for s in seqs])))
+    # Every empty row tries the same variants (first match in sorted order, as mass_check would find it), so their masses and ion m/z are
+    # computed once per charge state instead of once per row and variant
+    variants = sorted(variants)
+    variant_masses, ion_mzs = [], {}
+    for v in variants:
+        try:
+            variant_masses.append(glycan_to_mass(v, sample_prep = sample_prep, modification = modification))
+        except Exception:
+            variant_masses.append(np.nan)
+    variant_masses = np.array(variant_masses) + (mass_tag or 0)
     for i, k in enumerate(predictions_list):
-        if len(k) < 1:
-            for v in sorted(variants):
-                if mass_check(index_list[i], v, mode = mode, modification = modification, mass_tag = mass_tag,
-                              sample_prep = sample_prep,
-                              permitted_charges = [abs(charge_list[i])]):
-                    df_out.iat[i, 0] = [(v, pred_thresh)]
-                    break
+        if len(k) < 1 and variants:
+            z = abs(charge_list[i])
+            if z not in ion_mzs:
+                ions = get_ion_mzs(variant_masses, max_charge = int(z) * (1 if mode == 'positive' else -1), adducts = get_adduct_list(mode),
+                                   min_mass = {2: 900, 3: 1500, 4: 3500})
+                ion_mzs[z] = np.array([m for ion, m in ions.items() if int(ion.rsplit(']', 1)[1][:-1] or 1) == z])
+            hits = np.flatnonzero((np.abs(index_list[i] - ion_mzs[z]) < 0.5).any(axis = 0))
+            if hits.size:
+                df_out.iat[i, 0] = [(variants[hits[0]], pred_thresh)]
     return df_out
 
 
@@ -2126,8 +2153,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         preds.append(list(combs.keys()))
         pred_conf.append(list(combs.values()))
     df_out['rel_abundance'] = df_out['intensity']
-    df_out['predictions'] = [[(pred, conf) for pred, conf in zip(pred_row, conf_row)] for pred_row, conf_row in
-                             zip(preds, pred_conf)]
+    df_out['predictions'] = [[(pred, conf) for pred, conf in zip(preds[i], pred_conf[i])] for i in df_out['input_id']]
     _raw_predictions = df_out['predictions'].tolist()
     # Check correctness of glycan class & mass
     df_out['predictions'] = [[g for g in preds if g[1] > pred_thresh and get_comp(g[0]) == comp] for preds, comp in
