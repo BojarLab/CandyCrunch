@@ -58,3 +58,11 @@ Root: HKA; Subkey: "Software\Classes\.raw\OpenWithProgids"; ValueType: string; V
 
 [Run]
 Filename: "{app}\CandyCrunch.exe"; Description: "{cm:LaunchProgram,CandyCrunch}"; Flags: nowait postinstall skipifsilent
+; The app's own updater runs this installer with /SILENT /RELAUNCH=1, so the new version starts once it is installed
+Filename: "{app}\CandyCrunch.exe"; Flags: nowait runasoriginaluser; Check: Relaunch
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;

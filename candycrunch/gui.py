@@ -9,11 +9,14 @@ import os
 import pickle
 import queue
 import re
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
 import types
+import urllib.request
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
@@ -1203,7 +1206,7 @@ class ResultsView(QWidget):
         if image is None:
             self.drawing.setText('Drawing…')
         elif image.isNull():
-            self.drawing.setText('')
+            self.drawing.clear()
         else:
             ratio = self.devicePixelRatioF()
             width = min(image.width() * 0.3, max(120, self.drawing.width() - 10))
@@ -1516,8 +1519,10 @@ class CrumbsTab(QWidget):
         image = self.images.get(text, compact = False, urgent = True) if text and '*' not in text else QImage()
         if image is None:
             self.preview.setText('Drawing…')
+        elif not text or '*' in text:
+            self.preview.clear()
         elif image.isNull():
-            self.preview.setText('' if not text or '*' in text else 'GlycoDraw cannot draw this; CandyCrumbs may still read it')
+            self.preview.setText('GlycoDraw cannot draw this; CandyCrumbs may still read it')
         else:
             ratio = self.devicePixelRatioF()
             pixmap = QPixmap.fromImage(image.scaledToWidth(int(min(image.width() * 0.3, self.preview.width() - 10) * ratio), Qt.SmoothTransformation))
@@ -1550,6 +1555,9 @@ class CrumbsTab(QWidget):
 
 class MainWindow(QMainWindow):
     taxa_ready = Signal(object)
+    update_found = Signal(str)
+    update_progress = Signal(int)
+    update_downloaded = Signal(bool)
 
     def __init__(self, paths):
         super().__init__()
@@ -1630,6 +1638,11 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_text, 1)
         self.statusBar().addPermanentWidget(self.elapsed)
         self.statusBar().addPermanentWidget(self.progress)
+        self.update_button, self.update_url, self.update_path = QPushButton(), None, None
+        self.update_button.setFlat(True)
+        self.update_button.setStyleSheet(f'color: {CANDY}; font-weight: 600;')
+        self.update_button.hide()
+        self.statusBar().addPermanentWidget(self.update_button)
         self.clock = QTimer(self)
         self.clock.setInterval(1000)
         self.clock.timeout.connect(self.tick)
@@ -1662,6 +1675,10 @@ class MainWindow(QMainWindow):
         self.settings.inputs['taxonomy_level'].currentTextChanged.connect(self.load_taxa)
         self.taxa_ready.connect(lambda taxa: self.settings.taxa.setModel(QStringListModel(taxa, self.settings.taxa)))
         self.images.ready.connect(self.image_ready)
+        self.update_button.clicked.connect(self.install_update)
+        self.update_found.connect(lambda tag: (self.update_button.setText(f'Update to CandyCrunch {tag}'), self.update_button.show()))
+        self.update_progress.connect(lambda percent: self.update_button.setText(f'Downloading update… {percent}%'))
+        self.update_downloaded.connect(lambda ok: (self.update_button.setEnabled(True), self.update_button.setText('Install update and restart' if ok else 'Download failed, retry')))
         self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
         if self.store.value('settings'):
             stored = json.loads(self.store.value('settings'))
@@ -1676,6 +1693,21 @@ class MainWindow(QMainWindow):
         if sessions:
             self.open_session(sessions[0])
         self.load_taxa()
+        if getattr(sys, 'frozen', False) and sys.platform == 'win32':
+            # The installed app offers the newest GitHub release that carries a Windows installer; without network access it simply offers nothing
+            def check():
+                try:
+                    from importlib.metadata import version
+                    from packaging.version import Version
+                    with urllib.request.urlopen('https://api.github.com/repos/BojarLab/CandyCrunch/releases/latest', timeout = 10) as response:
+                        release = json.load(response)
+                    asset = next(a for a in release['assets'] if a['name'].endswith('-Windows-Setup.exe'))
+                    if Version(release['tag_name'].lstrip('v')) > Version(version('candycrunch')):
+                        self.update_url = asset['browser_download_url']
+                        self.update_found.emit(release['tag_name'].lstrip('v'))
+                except Exception:
+                    pass
+            threading.Thread(target = check, daemon = True).start()
 
     def load_taxa(self):
         level = self.settings.inputs['taxonomy_level'].currentText()
@@ -1864,6 +1896,31 @@ class MainWindow(QMainWindow):
         self.save_action.setEnabled(True)
         self.tabs.setCurrentWidget(self.split)
         self.status_text.setText(f'{os.path.basename(path)}: results from {payload.get("finished", "an earlier run")}')
+
+    def install_update(self):
+        if self.update_path:
+            # Closing first releases the app's files (and asks if a run is still going); the installer updates the same folder in place and starts the new version
+            if self.close():
+                subprocess.Popen([self.update_path, '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RELAUNCH=1'])
+            return
+        self.update_button.setEnabled(False)
+        self.update_button.setText('Downloading update…')
+        def work():
+            path = os.path.join(tempfile.gettempdir(), self.update_url.rsplit('/', 1)[1])
+            try:
+                with urllib.request.urlopen(self.update_url, timeout = 30) as response, open(path + '.part', 'wb') as file:
+                    total, done = int(response.headers.get('Content-Length') or 0), 0
+                    while chunk := response.read(1 << 20):
+                        file.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            self.update_progress.emit(done * 100 // total)
+                os.replace(path + '.part', path)
+                self.update_path = path
+            except Exception:
+                pass
+            self.update_downloaded.emit(self.update_path is not None)
+        threading.Thread(target = work, daemon = True).start()
 
     def about(self):
         from importlib.metadata import version
