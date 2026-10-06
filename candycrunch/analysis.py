@@ -2680,7 +2680,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                            simplify = True, charge = charge, mass_tag = mass_tag, sample_prep = sample_prep,
                            disable_global_mods = disable_global_mods, prior_weight = prior_weight, **kwargs)
     peptide, glycans, glycosites = resolve_spectrum_input(input_string)
-    glycan_string = glycans[0] if glycans and isinstance(glycans[0], str) else None
+    glycan_string = glycans[0] if glycans and isinstance(glycans[0], str) and not is_composition(glycans[0]) else None
     ladder_ax = None
     cartoon_room = 0.26 if draw_glycans and glycan_string else 0.02
     if ax is None:
@@ -2701,7 +2701,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
             continue
         dc_name = hit['Domon-Costello nomenclatures'][0]
         kind = classify_fragment(dc_name)
-        oxonium = identify_oxonium(mz) if kind in ('oxonium', 'glycan') else None
+        oxonium = identify_oxonium(mz) if kind in ('oxonium', 'glycan') and charge > 0 else None
         flat = [y for sub in dc_name for y in sub] if dc_name and isinstance(dc_name[0], list) else list(dc_name)
         shown = [x for x in flat if x != 'No Peptide' and not str(x).startswith('loss of')]
         label = oxonium if oxonium else domon_costello_to_mpl(shown or ['M'])

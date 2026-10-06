@@ -25,6 +25,16 @@ If you are looking for a **convenient** and **easy-to-run** version of the code 
 The notebook contains an example pipeline ready to run, which can be copied, executed, and customised in any way.  
 The example file included in the notebook is the same as in `examples/` and is ready for use in the notebook workflow. 
 
+## Using CandyCrunch &ndash; Desktop app
+No Python or command line needed: download `CandyCrunch-<version>-Windows-Setup.exe` (Windows) or `CandyCrunch-<version>-macOS.dmg` (macOS) from the [latest release](https://github.com/BojarLab/CandyCrunch/releases/latest), install it, and start CandyCrunch from the Start menu or Applications. The Windows installer needs no administrator rights; afterwards, mzML/mzXML/mgf files can be opened with CandyCrunch from their right-click menu, and saved results open with a double-click. The macOS app is not notarized, so on first start macOS asks you to allow it once under System Settings > Privacy & Security > Open Anyway.
+
+Python users get the same app with
+```bash
+pip install "candycrunch[gui]"
+candycrunch_gui
+```
+The desktop app runs CandyCrunch on one or several mzML/mzXML/mgf/xlsx files without any code, with a progress bar that shows how far a run is and about how long it will still take. Results come as a table with SNFG drawings, and each glycan peak shows its annotated MS² spectrum, fragment table, candidate structures and position on a retention time vs. m/z map. Several runs are harmonized into a feature table with per-run abundances. Predictions can be curated (assign another candidate, enter a structure, exclude a peak), exported as CSV or Excel (optionally with SNFG drawings), and saved to reopen later without rerunning. The CandyCrumbs tab annotates any peak list with any glycan, composition, or glycopeptide.
+
 ## Using CandyCrunch &ndash; Command line interface:
 If you would like to run our main inference function from the command line, you can do so using the `candycrunch_predict` command included in this repository.
 

@@ -40,15 +40,21 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/BojarLab/CandyCrunch"
 
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+
 [project.scripts]
 candycrunch_predict = "candycrunch.cli:main"
+
+[project.gui-scripts]
+candycrunch_gui = "candycrunch.gui:main"
 
 [tool.setuptools]
 include-package-data = false
 packages = ["candycrunch"]
 
 [tool.setuptools.package-data]
-candycrunch = ["*.csv", "*.pkl", "*.jpg", "*.pt"]
+candycrunch = ["*.csv", "*.pkl", "*.jpg", "*.pt", "*.png"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["tests*", "*.ipynb"]
