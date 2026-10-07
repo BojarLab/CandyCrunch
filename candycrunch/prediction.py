@@ -44,7 +44,7 @@ candycrunch.load_state_dict(sdict)
 candycrunch = candycrunch.eval()
 _trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 
-NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'Acetonitrile', 'HCO3-']
+NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'HCO3-']
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']

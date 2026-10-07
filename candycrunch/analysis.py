@@ -1466,7 +1466,7 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False, max_gl
     if disable_global_mods:
         return [None], []
     global_mods = [x for x in mono_attributes['Global']['mass'] if x not in ['CO2', 'SO4', 'PO4']]
-    charge_mods = {-1: ['+Na', '+K'], 1: ['+Acetate', '+Acetonitrile']}
+    charge_mods = {-1: ['+Na', '+K', '+Acetonitrile'], 1: ['+Acetate', '+Acetonitrile']}
     global_mods = [mod for mod in global_mods if mod not in charge_mods[np.sign(charge)]]
     node_labels = ''.join(v for v in nx.get_node_attributes(nx_mono, 'string_labels').values() if len(v) > 1)
     special_mod_residues = ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn', 'S', 'P']
@@ -1891,7 +1891,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
     # Global modifications (shared)
     if not disable_global_mods:
         adduct_mods = {'+Na', '+K', '+Acetate', '+Acetonitrile'}
-        charge_exclude = {-1: ['+Na', '+K'], 1: ['+Acetate', '+Acetonitrile']}
+        charge_exclude = {-1: ['+Na', '+K', '+Acetonitrile'], 1: ['+Acetate', '+Acetonitrile']}
         excluded = set(charge_exclude.get(np.sign(charge), []))
         if not is_glycopeptide:
             excluded.add('NH3')
@@ -2607,14 +2607,9 @@ def domon_costello_to_mpl(dc_name):
             else:
                 mpl_parts.append(f"${frag_type}_{{{number}{chain_greek}}}$")
         elif len(parts) >= 2 and parts[0] == 'M':
-            loss = '_'.join(parts[1:])
-            formatted = []
-            for ch in loss:
-                if ch.isnumeric():
-                    formatted.append(f"_{ch}")
-                else:
-                    formatted.append(ch)
-            mpl_parts.append(f"$M - {''.join(formatted)}$")
+            # Adducts (+Na) are gains, everything else a loss; element counts become subscripts, a leading count (2H2O) stays a multiplier
+            terms = ''.join(f" + {x[1:]}" if x.startswith('+') else f" - {x}" for x in '_'.join(parts[1:]).split('|'))
+            mpl_parts.append('$M' + re.sub(r'(?<=[A-Za-z])(\d+)', r'_{\1}', terms) + '$')
         elif parts[0] == 'M':
             mpl_parts.append('$M$')
         else:
@@ -2874,7 +2869,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
             continue
         dc_name = hit['Domon-Costello nomenclatures'][0]
         kind = classify_fragment(dc_name)
-        oxonium = identify_oxonium(mz) if kind in ('oxonium', 'glycan') and charge > 0 else None
+        oxonium = identify_oxonium(hit['Theoretical fragment masses'][0]) if kind in ('oxonium', 'glycan') and charge > 0 else None
         flat = [y for sub in dc_name for y in sub] if dc_name and isinstance(dc_name[0], list) else list(dc_name)
         shown = [x for x in flat if x != 'No Peptide' and not str(x).startswith('loss of')]
         label = oxonium if oxonium else domon_costello_to_mpl(shown or ['M'])
