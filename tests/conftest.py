@@ -195,10 +195,6 @@ def result_collector():
 
 def pytest_configure(config):
     config.collector = collector
-    config.addinivalue_line(
-        "filterwarnings",
-        "ignore:Testing an element's truth value:DeprecationWarning:pymzml",
-    )
 
 
 def pytest_sessionfinish():

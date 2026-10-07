@@ -5,9 +5,9 @@ import os
 import sys
 from importlib.metadata import version
 from PyInstaller.utils.hooks import collect_data_files, copy_metadata
-datas = collect_data_files('candycrunch') + collect_data_files('glycowork') + collect_data_files('glycorender') + collect_data_files('pymzml')
+datas = collect_data_files('candycrunch') + collect_data_files('glycowork') + collect_data_files('glycorender')
 # These read their own version from package metadata at import
-for package in ('candycrunch', 'glycowork', 'glycorender', 'pymzml', 'pyteomics'):
+for package in ('candycrunch', 'glycowork', 'glycorender'):
     datas += copy_metadata(package)
 icon = os.path.join(SPECPATH, 'candycrunch.icns' if sys.platform == 'darwin' else 'candycrunch.ico')
 a = Analysis([os.path.join(SPECPATH, 'candycrunch_app.py')], datas = datas,

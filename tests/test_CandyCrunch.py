@@ -342,3 +342,39 @@ def test_ms3_spectra(tmp_path):
     assert [[(p, list(d)) for p, d in x] for x in df['ms3']] == [[(290.09, [272.08, 170.05])], []]
     assert load_spectra_filepath(extract_spectra(path))['ms3'].tolist() == df['ms3'].tolist()
     assert 'ms3' not in load_spectra_filepath(write('ms2.mzML', [ms1, (2, 10.01, ms2, [(1, 675.25)])])).columns
+
+
+def test_spectra_readers(tmp_path):
+    # MS-Numpress arrays (encoded with the reference implementation, pynumpress), mzXML scans nested in their MS1 scan (yielded by scan
+    # number, so the MS1 scan comes first), and the mgf CHARGE and PEPMASS formats
+    def cv(acc, value = ''):
+        return f'<cvParam cvRef="MS" accession="{acc}" name="" value="{value}"/>'
+    def spectrum(i, level, arrays):
+        return (f'<spectrum index="{i}" id="scan={i + 1}" defaultArrayLength="4">{cv("MS:1000511", level)}<scanList count="1"><scan>'
+                f'<cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="600" unitName="second"/></scan></scanList>'
+                f'<binaryDataArrayList count="2">' + ''.join(f'<binaryDataArray encodedLength="0">{cv(comp)}{cv(acc)}<binary>{data}</binary></binaryDataArray>'
+                                                            for acc, comp, data in arrays) + '</binaryDataArrayList></spectrum>')
+    path = tmp_path / 'numpress.mzML'
+    path.write_text('<?xml version="1.0" encoding="utf-8"?><mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1.0"><run id="r"><spectrumList count="2">' +
+                    spectrum(0, 1, [('MS:1000514', 'MS:1002312', 'QVBZ7oAAAADmUyQ0rGuLXYBHSuj3'), ('MS:1000515', 'MS:1002313', 'ZGYjYFcw')]) +
+                    spectrum(1, 2, [('MS:1000514', 'MS:1002746', 'eJxzDIh818DAwPAsWMVkTXZ3bIO714vvAFVHCNk='), ('MS:1000515', 'MS:1002314', 'QMu8AAAAAAD//xjawfPlTA==')]) +
+                    '</spectrumList></run></mzML>')
+    ms1, ms2 = read_mzml(str(path))
+    assert ms1['ms_level'] == 1 and ms1['rt'] == 10.0 and ms1['precursor'] is None
+    assert np.allclose(ms1['peaks'], [[204.0867, 100], [366.1395, 50], [528.1923, 80], [1189.512, 3]], rtol = 1e-9)
+    assert np.array_equal(ms2['peaks'][:, 0], ms1['peaks'][:, 0]) and np.allclose(ms2['peaks'][:, 1], ms1['peaks'][:, 1], rtol = 1e-4)
+    path = tmp_path / 'nested.mzXML'
+    path.write_text('<?xml version="1.0"?><mzXML xmlns="http://sashimi.sourceforge.net/schema_revision/mzXML_3.2"><msRun>'
+                    '<scan num="1" msLevel="1" retentionTime="PT600.5S" polarity="-"><peaks precision="32" byteOrder="network" compressionType="zlib">'
+                    'eJxz0bjA4H44gMFFU4DB7VUCAwApEgSk</peaks><scan num="2" msLevel="2" retentionTime="PT601S"><precursorMz precursorScanNum="1" '
+                    'precursorCharge="2" activationMethod="CID">675.25</precursorMz><peaks precision="32" byteOrder="network" compressionType="none">'
+                    'Q5ELhULIAABDwBMzQiAAAA==</peaks></scan></scan></msRun></mzXML>')
+    scans = list(read_mzxml(str(path)))
+    assert [s['num'] for s in scans] == ['1', '2'] and scans[0]['retentionTime'] == 600.5 / 60
+    assert scans[1]['precursorMz'] == [{'precursorScanNum': '1', 'precursorCharge': 2, 'activationMethod': 'CID', 'precursorMz': 675.25}]
+    assert scans[0]['m/z array'].tolist() == [675.25, 676.25] and scans[1]['intensity array'].tolist() == [100.0, 40.0]
+    path = tmp_path / 'charges.mgf'
+    path.write_text('CHARGE=2+\nBEGIN IONS\nPEPMASS=675.25\nRTINSECONDS=600\n290.09 100\nEND IONS\nBEGIN IONS\nPEPMASS=675.25 1e5 3-\nRTINSECONDS=601\n'
+                    '290.09 100 1+\nEND IONS\nBEGIN IONS\nPEPMASS=675.25\nCHARGE=2+ and 3+\n# a comment\nRTINSECONDS=602\nEND IONS\n')
+    params = [s['params'] for s in read_mgf(str(path))]
+    assert [p['charge'] for p in params] == [[2], [-3], [2, 3]] and [p['pepmass'] for p in params] == [(675.25, None), (675.25, 1e5), (675.25, None)]

@@ -2944,7 +2944,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
             cartoons_drawn = True
     ax.set_xlabel('m/z')
     ax.set_ylabel('Relative Intensity (%)')
-    title = f'Annotated MS\u00b2 spectrum: {peptide + "*" + str(glycan_string) if peptide else input_string}'
+    stage = f'MS\u00b3 spectrum of m/z {kwargs["ms3_precursor"]:.2f}' if kwargs.get('ms3_precursor') is not None else 'MS\u00b2 spectrum'
+    title = f'Annotated {stage}: {peptide + "*" + str(glycan_string) if peptide else input_string}'
     title_size = 9 if len(title) > 90 else 'large'
     if ladder_ax is not None:
         ladder_ax.set_title(title, fontsize = title_size)

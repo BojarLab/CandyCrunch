@@ -9,10 +9,8 @@ from concurrent.futures import ProcessPoolExecutor
 import json
 from typing import Dict
 import numpy as np
-import numpy_indexed as npi
 import opentfraw
 import pandas as pd
-import pymzml
 import torch
 import torch.nn.functional as F
 from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
@@ -25,9 +23,9 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           glycan_to_mass, modification_formula_dict, calculate_adduct_mass,
                                           mz_to_composition, structure_to_basic, mass_dict)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
-from pyteomics import mgf, mzxml
 from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES
+from candycrunch.utils import read_mzml, read_mzxml, read_mgf
 
 this_dir, this_filename = os.path.split(__file__)
 data_path = os.path.join(this_dir, 'glycans.pkl')
@@ -155,37 +153,32 @@ def process_mzML_stack(filepath, num_peaks = 1000,
    | with EAD as 'ECD' for its c/z ions; None if not stated), and, if the file has MS3 spectra, ms3 (a list of (MS3 precursor m/z, peak dictionary)
    | tuples per MS2 spectrum)
    """
-    run = pymzml.run.Reader(filepath)
     highest_i_dict = {}
     rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
     detected_mode, detected_trap = None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     ms3s, row_of = [], {}
-    for spectrum in run:
-        if spectrum.ms_level == ms_level + 1 and spectrum.selected_precursors and mzs:
+    for spectrum in read_mzml(filepath, centroid_levels = (ms_level, ms_level + 1)):
+        if spectrum['ms_level'] == ms_level + 1 and spectrum['precursor'] and mzs:
             # An MS3 spectrum fragments one fragment of an MS2 spectrum; its precursors are listed latest stage first, each referencing its
             # parent scan by native ID (else, as in old converters, it belongs to the latest MS2 spectrum)
-            ref = next(spectrum.element.iter('{http://psi.hupo.org/ms/mzml}precursor')).get('spectrumRef')
+            ref = next(spectrum['element'].iter('{http://psi.hupo.org/ms/mzml}precursor')).get('spectrumRef')
             row = row_of.get(ref, len(mzs) - 1 if ref is None else None)
-            if row is not None and len(spectrum.peaks("raw")):
-                peaks = spectrum.highest_peaks(min(num_peaks, len(spectrum.peaks("raw"))))
-                ms3s[row].append((float(spectrum.selected_precursors[0]['mz']), dict(sorted(((float(m), float(i)) for m, i in peaks),
-                                                                                              key = lambda x: x[1], reverse = True))))
-        if spectrum.ms_level == 1:
-            peaks_raw = spectrum.peaks("raw")
+            peaks = spectrum['peaks']
+            if row is not None and len(peaks):
+                ms3s[row].append((spectrum['precursor']['mz'], dict(sorted(((float(m), float(i)) for m, i in peaks[peaks[:, 1].argsort()][-num_peaks:]),
+                                                                           key = lambda x: x[1], reverse = True))))
+        if spectrum['ms_level'] == 1:
+            peaks_raw = spectrum['peaks']
             if len(peaks_raw) > 0:
-                ms1_rts.append(spectrum.scan_time_in_minutes())
+                ms1_rts.append(spectrum['rt'])
                 # float32 halves the memory of MS1 data and still resolves ~0.2 mDa at m/z 2000
                 ms1_mzs.append(peaks_raw[:, 0].astype(np.float32))
                 ms1_ints.append(peaks_raw[:, 1].astype(np.float32))
-        if spectrum.ms_level == ms_level:
-            try:
-                temp = spectrum.highest_peaks(2)
-            except:
-                continue
+        if spectrum['ms_level'] == ms_level:
             if detected_mode is None or detected_trap is None:
                 ns_uri = '{http://psi.hupo.org/ms/mzml}'
-                for cv in spectrum.element.iter(f'{ns_uri}cvParam'):
+                for cv in spectrum['element'].iter(f'{ns_uri}cvParam'):
                     acc = cv.get('accession', '')
                     if acc == 'MS:1000129':
                         detected_mode = 'negative'
@@ -200,32 +193,30 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                     elif acc in ('MS:1000484', 'MS:1000079'):
                         # orbitrap / FT-ICR analyzer terms; vendor-neutral fallback when no Thermo filter string is present
                         detected_trap = 'orbitrap'
-            mz_i_dict = {}
-            num_actual_peaks = min(num_peaks, len(spectrum.peaks("raw")))
-            for mz, i in spectrum.highest_peaks(num_actual_peaks):
-                mz_i_dict[mz] = i
+            peaks = spectrum['peaks']
+            mz_i_dict = dict(peaks[peaks[:, 1].argsort()][-num_peaks:])
             if mz_i_dict:
-                if not spectrum.selected_precursors:
+                if not spectrum['precursor']:
                     continue
-                # pymzml's ID is not unique for non-Thermo native IDs (SCIEX cycle=1 experiment=2 and cycle=2 experiment=2 both give 2),
-                # which overwrote spectra of the same precursor m/z here, so the native ID keys them
-                native_id = spectrum.element.get('id', '')
-                key = f"{native_id}_{spectrum.selected_precursors[0]['mz']}"
+                # The native ID keys the spectra, as scan numbers are not unique for non-Thermo native IDs (SCIEX cycle=1 experiment=2 and
+                # cycle=2 experiment=2 both give 2)
+                native_id = spectrum['element'].get('id', '')
+                key = f"{native_id}_{spectrum['precursor']['mz']}"
                 highest_i_dict[key] = mz_i_dict
                 row_of[native_id] = len(mzs)
                 ms3s.append([])
                 mzs.append(float(key.split('_')[-1]))
-                rts.append(spectrum.scan_time_in_minutes())
+                rts.append(spectrum['rt'])
                 # Search engines identify glycopeptide spectra by scan number, and HCD and EThcD scans of one precursor alternate in
                 # glycoproteomics runs; the scan= number of the native ID, else the native ID itself
                 scans.append(int(m.group(1)) if (m := re.search(r'\bscan=(\d+)', native_id)) else native_id)
                 # EThcD/ETciD are written as their own terms or as ETD plus a (supplemental) beam-type or resonance collisional activation
-                terms = {cv.get('accession', '') for cv in spectrum.element.iter('{http://psi.hupo.org/ms/mzml}cvParam')}
+                terms = {cv.get('accession', '') for cv in spectrum['element'].iter('{http://psi.hupo.org/ms/mzml}cvParam')}
                 etd, hcd, cid = 'MS:1000598' in terms, {'MS:1000422', 'MS:1002481', 'MS:1002678'}, {'MS:1000133', 'MS:1000433', 'MS:1002679'}
                 activations.append('EThcD' if 'MS:1002631' in terms or (etd and terms & hcd) else
                                    'ETciD' if 'MS:1003182' in terms or (etd and terms & cid) else 'ETD' if etd else
                                    'ECD' if terms & {'MS:1000250', 'MS:1003294'} else 'HCD' if terms & hcd else 'CID' if terms & cid else None)
-                raw_charge = spectrum.selected_precursors[0].get('charge', None)
+                raw_charge = spectrum['precursor'].get('charge', None)
                 # Without a charge state the instrument never determined the monoisotopic peak, so its trigger m/z gets refined from MS1
                 ms1_scans.append(len(ms1_rts) - 1)
                 refine.append(raw_charge is None)
@@ -235,7 +226,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                     raw_charge = None
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                 if intensity:
-                    inty = spectrum.selected_precursors[0].get('i', np.nan)
+                    inty = spectrum['precursor'].get('i', np.nan)
                     intensities.append(inty)
     # Sort the highest_i_dict by values
     for key in highest_i_dict.keys():
@@ -284,53 +275,52 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     detected_mode, detected_trap = None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     ms3s, row_of = [], {}
-    with mzxml.read(filepath) as reader:
-        for spectrum in reader:
-            if spectrum['msLevel'] == ms_level + 1 and spectrum.get('precursorMz') and len(spectrum['m/z array']) and mzs:
-                # As in process_mzML_stack; mzXML names the parent scan as precursorScanNum (nested scans are yielded one by one)
-                prec = next((p for p in spectrum['precursorMz'] if int(p.get('precursorScanNum', -1)) in row_of), spectrum['precursorMz'][0])
-                row = row_of.get(int(prec.get('precursorScanNum', -1)), len(mzs) - 1 if 'precursorScanNum' not in prec else None)
-                if row is not None:
-                    top_idx = np.argsort(spectrum['intensity array'])[::-1][:num_peaks]
-                    ms3s[row].append((float(prec['precursorMz']), {float(m): float(i) for m, i in zip(spectrum['m/z array'][top_idx],
-                                                                                                    spectrum['intensity array'][top_idx])}))
-            if spectrum['msLevel'] == 1 and len(spectrum['m/z array']):
-                order = np.argsort(spectrum['m/z array'], kind = 'stable')
-                ms1_rts.append(float(spectrum['retentionTime']))
-                ms1_mzs.append(spectrum['m/z array'][order].astype(np.float32))
-                ms1_ints.append(spectrum['intensity array'][order].astype(np.float32))
-            if spectrum['msLevel'] == ms_level:
-                # mzXML scans carry their polarity and, if converted from Thermo files, the filter line naming the analyzer
-                if detected_mode is None and spectrum.get('polarity') in ('+', '-'):
-                    detected_mode = 'negative' if spectrum['polarity'] == '-' else 'positive'
-                if detected_trap is None and str(spectrum.get('filterLine', '')).startswith(('ITMS', 'FTMS')):
-                    detected_trap = 'linear' if spectrum['filterLine'].startswith('ITMS') else 'orbitrap'
-                mz_array = spectrum['m/z array']
-                intensity_array = spectrum['intensity array']
-                num_peaks_to_extract = min(num_peaks, len(mz_array))
-                top_idx = np.argsort(intensity_array)[::-1][:num_peaks_to_extract]
-                mz_i_dict = {mz: i for mz, i in zip(mz_array[top_idx], intensity_array[top_idx])}
-                if mz_i_dict:
-                    precursor_mz = spectrum['precursorMz'][0]['precursorMz']
-                    key = f"{spectrum['id']}_{precursor_mz}"
-                    highest_i_dict[key] = mz_i_dict
-                    row_of[int(spectrum['num'])] = len(mzs)
-                    ms3s.append([])
-                    mzs.append(float(precursor_mz))
-                    rts.append(spectrum['retentionTime'])
-                    scans.append(int(spectrum['num']))
-                    # mzXML names the method itself; ambiguous ones (ETD+SA) stay None
-                    activations.append({k.upper(): k for k in PEPTIDE_ION_TYPES if k}.get(
-                        str(spectrum['precursorMz'][0].get('activationMethod')).upper()))
-                    raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
-                    ms1_scans.append(len(ms1_rts) - 1)
-                    refine.append(raw_charge is None)
-                    if raw_charge is not None and abs(int(raw_charge)) == 1:
-                        raw_charge = None
-                    charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
-                    if intensity:
-                        inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
-                        intensities.append(inty)
+    for spectrum in read_mzxml(filepath):
+        if spectrum['msLevel'] == ms_level + 1 and spectrum.get('precursorMz') and len(spectrum['m/z array']) and mzs:
+            # As in process_mzML_stack; mzXML names the parent scan as precursorScanNum (nested scans are yielded one by one)
+            prec = next((p for p in spectrum['precursorMz'] if int(p.get('precursorScanNum', -1)) in row_of), spectrum['precursorMz'][0])
+            row = row_of.get(int(prec.get('precursorScanNum', -1)), len(mzs) - 1 if 'precursorScanNum' not in prec else None)
+            if row is not None:
+                top_idx = np.argsort(spectrum['intensity array'])[::-1][:num_peaks]
+                ms3s[row].append((float(prec['precursorMz']), {float(m): float(i) for m, i in zip(spectrum['m/z array'][top_idx],
+                                                                                                spectrum['intensity array'][top_idx])}))
+        if spectrum['msLevel'] == 1 and len(spectrum['m/z array']):
+            order = np.argsort(spectrum['m/z array'], kind = 'stable')
+            ms1_rts.append(float(spectrum['retentionTime']))
+            ms1_mzs.append(spectrum['m/z array'][order].astype(np.float32))
+            ms1_ints.append(spectrum['intensity array'][order].astype(np.float32))
+        if spectrum['msLevel'] == ms_level:
+            # mzXML scans carry their polarity and, if converted from Thermo files, the filter line naming the analyzer
+            if detected_mode is None and spectrum.get('polarity') in ('+', '-'):
+                detected_mode = 'negative' if spectrum['polarity'] == '-' else 'positive'
+            if detected_trap is None and str(spectrum.get('filterLine', '')).startswith(('ITMS', 'FTMS')):
+                detected_trap = 'linear' if spectrum['filterLine'].startswith('ITMS') else 'orbitrap'
+            mz_array = spectrum['m/z array']
+            intensity_array = spectrum['intensity array']
+            num_peaks_to_extract = min(num_peaks, len(mz_array))
+            top_idx = np.argsort(intensity_array)[::-1][:num_peaks_to_extract]
+            mz_i_dict = {mz: i for mz, i in zip(mz_array[top_idx], intensity_array[top_idx])}
+            if mz_i_dict:
+                precursor_mz = spectrum['precursorMz'][0]['precursorMz']
+                key = f"{spectrum['id']}_{precursor_mz}"
+                highest_i_dict[key] = mz_i_dict
+                row_of[int(spectrum['num'])] = len(mzs)
+                ms3s.append([])
+                mzs.append(float(precursor_mz))
+                rts.append(spectrum['retentionTime'])
+                scans.append(int(spectrum['num']))
+                # mzXML names the method itself; ambiguous ones (ETD+SA) stay None
+                activations.append({k.upper(): k for k in PEPTIDE_ION_TYPES if k}.get(
+                    str(spectrum['precursorMz'][0].get('activationMethod')).upper()))
+                raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
+                ms1_scans.append(len(ms1_rts) - 1)
+                refine.append(raw_charge is None)
+                if raw_charge is not None and abs(int(raw_charge)) == 1:
+                    raw_charge = None
+                charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
+                if intensity:
+                    inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
+                    intensities.append(inty)
     # Sort the highest_i_dict by values
     for key in highest_i_dict.keys():
         highest_i_dict[key] = dict(sorted(highest_i_dict[key].items(), key = lambda x: x[1], reverse = True))
@@ -586,10 +576,12 @@ def bin_intensities(peak_d, frames):
         return binned_intensities, mz_diff
     bin_indices = np.digitize(mzs, frames, right = True)
     mz_remainder = mzs - frames[bin_indices - 1]
-    unique_bins, max_intensities = npi.group_by(bin_indices).max(intensities)
+    order = np.argsort(bin_indices, kind = 'stable')
+    unique_bins, starts = np.unique(bin_indices[order], return_index = True)
+    max_intensities = np.maximum.reduceat(intensities[order], starts)
     mz_remainder = mz_remainder * (intensities == max_intensities[np.searchsorted(unique_bins, bin_indices)])
-    unique_bins, summed_intensities = npi.group_by(bin_indices).sum(intensities)
-    _, max_mz_remainder = npi.group_by(bin_indices).max(mz_remainder)
+    summed_intensities = np.add.reduceat(intensities[order], starts)
+    max_mz_remainder = np.maximum.reduceat(mz_remainder[order], starts)
     binned_intensities[unique_bins - 1] = summed_intensities
     mz_diff[unique_bins - 1] = max_mz_remainder
     return binned_intensities, mz_diff
@@ -1630,19 +1622,18 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         return process_raw_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mgf":
         rows = []
-        with mgf.read(spectra_filepath, use_index = False) as reader:
-            for spectrum in reader:
-                params = spectrum['params']
-                if not len(spectrum['m/z array']):
-                    continue
-                if 'rtinseconds' not in params:
-                    raise ValueError(f"MGF spectrum '{params.get('title', '')}' has no RTINSECONDS entry; CandyCrunch needs retention times")
-                # Same conventions as process_mzML_stack: top 1000 peaks sorted by intensity, charge 1 treated as undetermined
-                charge = abs(int(params['charge'][0])) if params.get('charge') else None
-                peak_d = dict(sorted(zip(spectrum['m/z array'].tolist(), spectrum['intensity array'].tolist()), key = lambda x: x[1], reverse = True)[:1000])
-                rows.append([float(params['pepmass'][0]), peak_d, float(params['rtinseconds']) / 60,
-                             charge if charge != 1 else None, params['pepmass'][1] if params['pepmass'][1] is not None else np.nan,
-                             int(params['scans']) if str(params.get('scans')).isdigit() else params.get('scans'), None])
+        for spectrum in read_mgf(spectra_filepath):
+            params = spectrum['params']
+            if not len(spectrum['m/z array']):
+                continue
+            if 'rtinseconds' not in params:
+                raise ValueError(f"MGF spectrum '{params.get('title', '')}' has no RTINSECONDS entry; CandyCrunch needs retention times")
+            # Same conventions as process_mzML_stack: top 1000 peaks sorted by intensity, charge 1 treated as undetermined
+            charge = abs(int(params['charge'][0])) if params.get('charge') else None
+            peak_d = dict(sorted(zip(spectrum['m/z array'].tolist(), spectrum['intensity array'].tolist()), key = lambda x: x[1], reverse = True)[:1000])
+            rows.append([float(params['pepmass'][0]), peak_d, float(params['rtinseconds']) / 60,
+                         charge if charge != 1 else None, params['pepmass'][1] if params['pepmass'][1] is not None else np.nan,
+                         int(params['scans']) if str(params.get('scans')).isdigit() else params.get('scans'), None])
         return pd.DataFrame(rows, columns = ['m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity', 'scan', 'activation'])
     if ext == ".pkl":
         loaded_file = pd.read_pickle(spectra_filepath)
@@ -2159,7 +2150,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | plot_glycans (bool): whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions; default:False\n
    | Returns:
    | :-
-   | Returns dataframe of predictions for spectra in file
+   | Returns dataframe of predictions for spectra in file; if spectra=True, a tuple of (dataframe, list of its MS2 spectra), and files with MS3 spectra
+   | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row)
    """
     # ppm_thresh is the only tolerance the user sets; derive the flat-Da window everything downstream needs from it here
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
@@ -2349,7 +2341,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_out['predictions'] = reranked
     df_out = df_out[
         ['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d', 'annotation_score', 'rel_abundance',
-         'top_fragments']]
+         'top_fragments'] + (['ms3'] if 'ms3' in df_out.columns else [])]
     if not df_out.empty:
         # Deduplicate identical predictions for different spectra
         df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
@@ -2373,8 +2365,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
     if plot_glycans:
         from glycowork.motif.draw import plot_glycans_excel
-        plot_glycans_excel(df_out.reset_index(), os.path.dirname(spectra_filepath), glycan_col_num = 'top1_pred')
-    return (df_out, spectra_out) if spectra else df_out
+        plot_glycans_excel(df_out.drop(columns = ['ms3'], errors = 'ignore').reset_index(),
+                           os.path.dirname(spectra_filepath), glycan_col_num = 'top1_pred')
+    # MS3 spectra are output like the MS2 spectra, only with spectra=True
+    return (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'], errors = 'ignore')
 
 
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers = 5, model = candycrunch,
@@ -2426,7 +2420,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | n_jobs (int): number of files to process in parallel (separate processes); default:1\n
    | Returns:
    | :-
-   | Returns a tuple of (feature table with one row per isomer group: top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True)
+   | Returns a tuple of (feature table with one row per isomer group: top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column ms3 for files with MS3 spectra, as in wrap_inference)
    """
     mode = "negative" if max_charge < 0 else "positive"
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
@@ -2579,9 +2573,12 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
         if plot_glycans and not df_out.empty:
             from glycowork.motif.draw import plot_glycans_excel
-            plot_glycans_excel(df_out.reset_index(), os.path.splitext(spectra_filepath)[0] + '_output.xlsx',
+            plot_glycans_excel(df_out.drop(columns = ['ms3'], errors = 'ignore').reset_index(),
+                               os.path.splitext(spectra_filepath)[0] + '_output.xlsx',
                                glycan_col_num = 'top1_pred')
-        inference_dfs[file_label] = (df_out, spectra_out) if spectra else df_out
+        # MS3 spectra are output like the MS2 spectra, only with spectra=True
+        inference_dfs[file_label] = (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'],
+                                                                                      errors = 'ignore')
     all_outputs = [d for d in (v[0] if spectra else v for v in inference_dfs.values()) if not d.empty]
     if not all_outputs:
         return pd.DataFrame(), inference_dfs

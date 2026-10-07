@@ -18,24 +18,14 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "glycowork[ml]>=1.10.2",
-    "requests",
-    "regex",
+    "glycowork>=1.10.2",
     "networkx",
     "scipy",
     "torch~=2.1",
-    "torchmetrics",
-    "numpy_indexed",
-    "seaborn",
     "pandas",
-    "pymzml", 
     "opentfraw>=2.0,<3", 
-    "pyteomics",
-    "lxml",
     "openpyxl",
-    "tabulate",
     "matplotlib",
-    "pytest"
 ]
 
 [project.urls]
@@ -43,6 +33,7 @@ Homepage = "https://github.com/BojarLab/CandyCrunch"
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.5"]
+train = ["glycowork[ml]>=1.10.2", "torchmetrics"]
 
 [project.scripts]
 candycrunch_predict = "candycrunch.cli:main"

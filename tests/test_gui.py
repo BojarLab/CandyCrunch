@@ -45,3 +45,42 @@ def test_gui_results_curation(app):
     view.toggle_excluded()
     out = view.export_frame(view.current_frame())
     assert out['top1_pred'].tolist() == ['Gal(b1-4)GlcNAc'] and out['curation'].tolist() == ['reassigned']
+
+
+def test_gui_ms3(app):
+    from candycrunch import gui
+    df = pd.DataFrame({'top1_pred': ['Fuc(a1-2)Gal(b1-3)GalNAc'], 'predictions': [[('Fuc(a1-2)Gal(b1-3)GalNAc', 0.8)]],
+                       'composition': [{'Hex': 1, 'HexNAc': 1, 'dHex': 1}],
+                       'num_spectra': [5], 'charge': [-1], 'RT': [26.8], 'rel_abundance': [100.0],
+                       'evidence': ['strong'], 'notes': [''], 'ppm_error': [20.0],
+                       'GlyTouCan_ID': [''], 'ms3': [
+            [(384.15, {204.09: 10.0, 222.1: 50.0}), (384.2, {222.0: 30.0}), (325.1, {163.06: 5.0})]]},
+                      index = pd.Index([530.2], name = 'm/z'))
+    view = gui.ResultsView(gui.GlycanImages())
+    view.set_results(
+        {'files': ['a.mzML'], 'settings': dict(gui.DEFAULTS), 'tables': {'a': (df, [{384.15: 100.0, 325.1: 40.0}])},
+         'features': None})
+    view.select_row(0)
+    # MS3 spectra are pooled per isolated fragment, merging peaks within half the mass tolerance
+    assert [(round(p, 3), len(peaks), n) for p, peaks, n in view.ms3_groups] == [(325.1, 1, 1), (384.175, 2, 2)]
+    assert view.tabs.isTabVisible(view.tabs.indexOf(view.ms3_tab))
+    view.open_ms3(1)
+    assert view.tabs.currentWidget() is view.ms3_tab and view.ms3_panel.request['kwargs']['ms3_precursor'] == \
+           view.ms3_groups[1][0]
+    assert 'ms3' not in view.export_frame(view.current_frame()).columns
+
+
+def test_gui_experiments(app):
+    from candycrunch import gui
+    panel = gui.SettingsPanel()
+    panel.add_paths([os.path.abspath(f'{name}.mzML') for name in ('a', 'b', 'c')])
+    gui._set_combo(panel.inputs['glycan_class'], 'O')
+    panel.move_runs([panel.files.topLevelItem(0).child(2)], panel.add_experiment(panel.values()))
+    gui._set_combo(panel.inputs['glycan_class'], 'N')
+    # Every experiment keeps its own settings, and only its own runs are harmonized
+    assert [(name, len(files), settings['glycan_class']) for name, files, settings in panel.experiments()] == [('Experiment 1', 2, 'O'), ('Experiment 2', 1, 'N')]
+    panel.files.setCurrentItem(panel.files.topLevelItem(0))
+    assert panel.inputs['glycan_class'].currentData() == 'O' and panel.batch.isVisibleTo(panel)
+    # Moving the last run out of an experiment removes it
+    panel.move_runs([panel.files.topLevelItem(1).child(0)], panel.files.topLevelItem(0))
+    assert [name for name, _, _ in panel.experiments()] == ['Experiment 1'] and len(panel.paths()) == 3

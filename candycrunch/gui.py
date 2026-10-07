@@ -15,7 +15,6 @@ import tempfile
 import threading
 import time
 import traceback
-import types
 import urllib.request
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
@@ -25,9 +24,9 @@ try:
     from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QBrush, QShortcut, QFontDatabase
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
                                    QToolButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QTextBrowser, QListWidget,
-                                   QListWidgetItem, QTableView, QAbstractItemView, QSplitter, QStackedWidget, QTabWidget, QScrollArea,
+                                   QListWidgetItem, QTreeWidget, QTreeWidgetItem, QTableView, QAbstractItemView, QSplitter, QStackedWidget, QTabWidget, QScrollArea,
                                    QFrame, QFileDialog, QMessageBox, QInputDialog, QDockWidget, QProgressBar, QStyledItemDelegate, QStyleOptionViewItem,
-                                   QStyle, QMenu, QCompleter)
+                                   QStyle, QMenu, QCompleter, QSizePolicy)
 except ImportError as error:
     raise ImportError('The CandyCrunch app needs PySide6, which comes with: pip install "candycrunch[gui]"') from error
 from matplotlib.figure import Figure
@@ -74,6 +73,9 @@ _PROGRESS = {}
 INK, MUTED, LILAC, LILAC_LIGHT, WASH, CANDY = '#2a2133', '#857a90', '#8c5bb5', '#e6d9f1', '#f6f2f9', '#c8243f'
 # matplotlib's mathtext parser is not thread-safe, so the annotation threads and the window never lay out text at the same time
 MPL_LOCK = threading.Lock()
+# glycowork's modules import each other in a cycle, so two threads importing them at once (the drawing, annotation, and taxonomy threads all
+# start with an import) can hit Python's import deadlock detection, which killed the drawing thread or failed the first annotation
+IMPORT_LOCK = threading.Lock()
 CONFIDENCE_MAP = LinearSegmentedColormap.from_list('candy', ['#d9c8ea', LILAC, CANDY])
 STYLE = f"""
 QWidget#settings {{ background: {WASH}; }}
@@ -115,18 +117,20 @@ def _worker_main(jobs, messages):
             continue
         if job is None:
             return
-        files, settings, weights = job
-        _install_progress(messages, weights, len(files))
-        kwargs = {k: v for k, v in settings.items() if k not in BATCH_KEYS}
-        start = time.time()
+        experiments, weights = job
+        start, results = time.time(), []
         try:
-            if len(files) == 1:
-                df, spectra = cp.wrap_inference(files[0], spectra = True, **kwargs)
-                tables, features = {os.path.splitext(os.path.basename(files[0]))[0]: (df, spectra)}, None
-            else:
-                features, tables = cp.wrap_inference_batch(files, spectra = True, **kwargs, **{k: settings[k] for k in BATCH_KEYS})
-            messages.put(('result', {'files': files, 'settings': settings, 'tables': tables, 'features': features,
-                                     'elapsed': time.time() - start, 'finished': time.strftime('%Y-%m-%d %H:%M')}))
+            # Experiments one after the other, each with its own settings; only the runs of one experiment are harmonized into a feature table
+            for name, files, settings in experiments:
+                _install_progress(messages, weights, len(files))
+                kwargs = {k: v for k, v in settings.items() if k not in BATCH_KEYS}
+                if len(files) == 1:
+                    df, spectra = cp.wrap_inference(files[0], spectra = True, **kwargs)
+                    tables, features = {os.path.splitext(os.path.basename(files[0]))[0]: (df, spectra)}, None
+                else:
+                    features, tables = cp.wrap_inference_batch(files, spectra = True, **kwargs, **{k: settings[k] for k in BATCH_KEYS})
+                results.append({'name': name, 'files': files, 'settings': settings, 'tables': tables, 'features': features})
+            messages.put(('result', {'experiments': results, 'elapsed': time.time() - start, 'finished': time.strftime('%Y-%m-%d %H:%M')}))
         except Exception:
             messages.put(('error', traceback.format_exc()))
 
@@ -162,21 +166,6 @@ def _install_progress(messages, weights, n_files):
             for batch in self.loader:
                 yield batch
                 advance(1)
-    class Reader:
-        """pymzml's reader, counting spectra against the count in the mzML header"""
-        def __init__(self, *args, **kwargs):
-            self.reader = real_pymzml.run.Reader(*args, **kwargs)
-            try:
-                _PROGRESS['todo'] = self.reader.get_spectrum_count() or 0
-            except Exception:
-                pass
-        def __getattr__(self, name):
-            return getattr(self.reader, name)
-        def __iter__(self):
-            for n, spectrum in enumerate(self.reader, 1):
-                yield spectrum
-                if n % 100 == 0:
-                    advance(100)
     def staged(func, name):
         def run(*args, **kwargs):
             p = _PROGRESS
@@ -209,12 +198,17 @@ def _install_progress(messages, weights, n_files):
             advance(1)
         return result
     cp.CandyCrumbs = counted
-    real_pymzml = cp.pymzml
-    shim, run_shim = types.ModuleType('pymzml'), types.ModuleType('pymzml.run')
-    shim.__dict__.update(real_pymzml.__dict__)
-    run_shim.__dict__.update(real_pymzml.run.__dict__)
-    run_shim.Reader, shim.run = Reader, run_shim
-    cp.pymzml = shim
+    real_read_mzml = cp.read_mzml
+    def read_mzml(filepath, *args, **kwargs):
+        """read_mzml, counting spectra against the count in the mzML header"""
+        with open(filepath, 'rb') as f:
+            count = re.search(rb'<spectrumList[^>]*\scount="(\d+)"', f.read(1 << 20))
+        _PROGRESS['todo'] = int(count.group(1)) if count else 0
+        for n, spectrum in enumerate(real_read_mzml(filepath, *args, **kwargs), 1):
+            yield spectrum
+            if n % 100 == 0:
+                advance(100)
+    cp.read_mzml = read_mzml
     def pool(max_workers = None, initializer = None, initargs = ()):
         # Spawned on every platform; each pool process installs the same wrappers and reports through the same queue
         p = _PROGRESS
@@ -248,9 +242,10 @@ class InferenceRunner(QObject):
         self.process.start()
         self.timer.start()
 
-    def submit(self, files, settings, weights):
+    def submit(self, experiments, weights):
+        """experiments: (name, files, settings) per experiment"""
         self.busy = True
-        self.jobs.put((files, settings, weights))
+        self.jobs.put((experiments, weights))
 
     def cancel(self):
         self.process.terminate()
@@ -317,8 +312,9 @@ class GlycanImages(QObject):
 
     def render_loop(self):
         try:
-            from glycowork.motif.draw import GlycoDraw
-            from glycorender.render import convert_svg_to_png
+            with IMPORT_LOCK:
+                from glycowork.motif.draw import GlycoDraw
+                from glycorender.render import convert_svg_to_png
         except ImportError:
             # Without the drawing stack every structure is shown as text
             GlycoDraw = convert_svg_to_png = None
@@ -356,16 +352,26 @@ class Annotator(QObject):
             request_id, request = self.request
             width, height = request['figsize']
             try:
-                from candycrunch.analysis import plot_annotated_spectrum
+                with IMPORT_LOCK:
+                    from candycrunch.analysis import plot_annotated_spectrum
                 figure = Figure(figsize = request['figsize'], dpi = 100)
                 FigureCanvasAgg(figure)
                 # Margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it
                 bottom = 0.55 / height
                 figure.subplots_adjust(left = 0.65 / width, right = 1 - 0.2 / width, bottom = bottom, top = bottom + (1 - 0.4 / height - bottom) / 1.4 if request['cartoons'] else 1 - 0.4 / height)
                 with MPL_LOCK:
-                    hit_dict, _ = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
-                                                          charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                          ax = figure.add_subplot(), draw_glycans = request['cartoons'], **request['kwargs'])
+                    hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
+                                                           charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
+                                                           ax = figure.add_subplot(), draw_glycans = request['cartoons'], **request['kwargs'])
+                    if request['ms3']:
+                        # A triangle under every peak that was isolated for MS3 and an invisible stick over that peak, both clickable
+                        mzs, ints = np.array(request['mzs']), np.array(request['intensities'])
+                        near = [int(np.argmin(np.abs(mzs - p))) for p in request['ms3']]
+                        hit = [abs(mzs[k] - p) <= request['tolerance'] for k, p in zip(near, request['ms3'])]
+                        xs = [mzs[k] if h else p for k, h, p in zip(near, hit, request['ms3'])]
+                        figure.ms3_artists = (ax.scatter(xs, [0] * len(xs), marker = '^', s = 70, c = CANDY, edgecolors = 'white', linewidths = 0.8, zorder = 6,
+                                                         clip_on = False, picker = True),
+                                              ax.vlines(xs, 0, [ints[k] / (ints.max() or 1) * 100 if h else 0 for k, h in zip(near, hit)], colors = 'none', picker = 5))
                 self.done.emit(request_id, figure, hit_dict, '')
             except Exception as error:
                 self.done.emit(request_id, None, None, f'{type(error).__name__}: {error}')
@@ -413,14 +419,16 @@ def _number_column(title, values, decimals, tip = None):
 
 def _mass_tag(settings):
     """The reducing-end mass CandyCrumbs takes, built as in assign_annotation_scores_pooled"""
-    from glycowork.motif.tokenization import modification_formula_dict, calculate_adduct_mass
+    with IMPORT_LOCK:
+        from glycowork.motif.tokenization import modification_formula_dict, calculate_adduct_mass
     modification = settings.get('modification')
     label = calculate_adduct_mass(modification_formula_dict[modification]) if modification in modification_formula_dict else 0
     return label + (settings.get('mass_tag') or 0)
 
 
 def _composition(composition):
-    from glycowork.glycan_data.loader import stringify_dict
+    with IMPORT_LOCK:
+        from glycowork.glycan_data.loader import stringify_dict
     return stringify_dict(composition) if isinstance(composition, dict) and composition else ''
 
 
@@ -578,7 +586,8 @@ class ChartView(QWidget):
 
 
 class SpectrumPanel(QWidget):
-    """Annotated MS2 spectrum (plot_annotated_spectrum) plus a fragment table; shared by the results view and the CandyCrumbs tab"""
+    """Annotated MS2 (or MS3) spectrum (plot_annotated_spectrum) plus a fragment table; shared by the results view and the CandyCrumbs tab"""
+    ms3_clicked = Signal(int)
 
     def __init__(self):
         super().__init__()
@@ -588,6 +597,8 @@ class SpectrumPanel(QWidget):
         self.controls.setContentsMargins(6, 4, 6, 0)
         self.summary = _label('', 'hint')
         self.summary.setWordWrap(False)
+        # Ignored: the summary's length changes with every annotation, and as a minimum width it resized the panel, which re-annotated it, endlessly
+        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.tolerance = _spin(0.001, 2.0, 0.05, 3, ' Da')
         self.tolerance.setValue(DEFAULTS['ppm_thresh'] * MZ_REF / 1e6)
         self.tolerance.setToolTip('Maximum difference between an observed peak and a theoretical fragment mass')
@@ -624,9 +635,10 @@ class SpectrumPanel(QWidget):
         self.relayout.setInterval(400)
         self.relayout.timeout.connect(self.resubmit)
 
-    def annotate(self, structure, mzs, intensities, charge, mass_tag, sample_prep, **kwargs):
+    def annotate(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), **kwargs):
+        """ms3: m/z of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index"""
         self.request = {'structure': structure, 'mzs': [float(x) for x in mzs], 'intensities': [float(x) for x in intensities], 'charge': int(charge),
-                        'mass_tag': mass_tag, 'sample_prep': sample_prep, 'kwargs': kwargs}
+                        'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(x) for x in ms3], 'kwargs': kwargs}
         self.resubmit()
 
     def resubmit(self):
@@ -664,6 +676,8 @@ class SpectrumPanel(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self.canvas = Canvas(figure)
+        # Pan and zoom hold the canvas' widgetlock, so clicks while using them never count as picks
+        self.canvas.mpl_connect('pick_event', lambda event: event.artist in getattr(figure, 'ms3_artists', ()) and len(event.ind) and self.ms3_clicked.emit(int(event.ind[0])))
         self.toolbar = NavigationToolbar2QT(self.canvas, self, coordinates = False)
         self.toolbar.setIconSize(QSize(16, 16))
         self.controls.insertWidget(0, self.toolbar)
@@ -672,7 +686,10 @@ class SpectrumPanel(QWidget):
         peaks = dict(zip(self.request['mzs'], self.request['intensities']))
         total, top = sum(peaks.values()) or 1, max(peaks.values()) or 1
         hits = {mz: hit for mz, hit in hit_dict.items() if hit}
-        self.summary.setText(f'{len(hits)} of {len(peaks)} peaks annotated, {sum(peaks.get(mz, 0) for mz in hits) / total:.0%} of the ion current')
+        self.summary.setText(f'{len(hits)} of {len(peaks)} peaks annotated, {sum(peaks.get(mz, 0) for mz in hits) / total:.0%} of the ion current' + (
+            f'; \u25b2 marks the {len(self.request["ms3"])} peak(s) with MS3 spectra, click one to annotate them' if self.request['ms3'] else ''))
+        if self.request['kwargs'].get('ms3_precursor') is not None and not hits:
+            self.summary.setText(f'm/z {self.request["kwargs"]["ms3_precursor"]:.2f} is no fragment of {self.request["structure"]}, so none of its MS3 peaks can be annotated')
         from candycrunch.analysis import domon_costello_to_html
         rows = []
         for mz in sorted(hits):
@@ -701,21 +718,28 @@ class SettingsPanel(QScrollArea):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(14, 8, 14, 14)
         layout.addWidget(_label('LC-MS/MS runs'))
-        self.files = QListWidget()
+        # Experiments (top level, each carrying its own settings as .settings) with their runs; only runs of one experiment are harmonized
+        self.files, self.shown = QTreeWidget(), None
+        self.files.setHeaderHidden(True)
+        self.files.setRootIsDecorated(False)
         self.files.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.files.setMinimumHeight(90)
-        self.files.setMaximumHeight(170)
-        self.files.setToolTip('One file is predicted on its own; several are predicted together and harmonized into one feature table')
+        self.files.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.files.setMinimumHeight(110)
+        self.files.setMaximumHeight(240)
+        self.files.setToolTip('Runs of one experiment are predicted together and harmonized into one feature table; experiments are predicted and reported '
+                              'separately, each with its own settings. Double-click an experiment to rename it, right-click runs to move them.')
         layout.addWidget(self.files)
-        row = QHBoxLayout()
-        self.add_files, self.add_folder, self.remove = QPushButton('Add files…'), QPushButton('Add folder…'), QPushButton('Remove')
-        for button in (self.add_files, self.add_folder, self.remove):
-            row.addWidget(button)
-        layout.addLayout(row)
+        buttons = QGridLayout()
+        self.add_files, self.add_folder, self.experiment_button, self.remove = QPushButton('Add files…'), QPushButton('Add folder…'), QPushButton('New experiment'), QPushButton('Remove')
+        self.experiment_button.setToolTip('Moves the selected runs into a new experiment with its own settings, for samples that must not be compared with the others')
+        for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
+            buttons.addWidget(button, n // 2, n % 2)
+        layout.addLayout(buttons)
         self.file_hint = _label('Thermo .raw, mzML, mzXML, mgf, or an .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
-        layout.addWidget(_label('Sample'))
+        self.sample_heading = _label('Sample')
+        layout.addWidget(self.sample_heading)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.inputs['glycan_class'] = _combo(GLYCAN_CLASSES)
@@ -822,31 +846,136 @@ class SettingsPanel(QScrollArea):
         self.inputs['experimental'].toggled.connect(lambda on: (self.inputs['taxonomy_level'].setEnabled(on), self.inputs['taxonomy_filter'].setEnabled(on)))
         self.reset.clicked.connect(lambda: self.set_values(DEFAULTS))
         self.remove.clicked.connect(self.remove_selected)
+        self.experiment_button.clicked.connect(
+            lambda: self.move_runs([item for item in self.files.selectedItems() if item.parent() is not None],
+                                   self.add_experiment(self.values()), rename = True))
         QShortcut(QKeySequence.Delete, self.files, self.remove_selected)
-        self.files_changed.connect(lambda: self.batch.setVisible(self.files.count() > 1))
+        self.files.currentItemChanged.connect(lambda: self.show_experiment(self.current_experiment()))
+        self.files.itemChanged.connect(self.rename_experiment)
+        self.files.customContextMenuRequested.connect(self.files_menu)
+        self.files_changed.connect(lambda: self.show_experiment(self.current_experiment()))
         self.set_values(DEFAULTS)
         self.batch.setVisible(False)
 
+    def current_experiment(self):
+        """The experiment of the current item, else the last one"""
+        item = self.files.currentItem() or self.files.topLevelItem(self.files.topLevelItemCount() - 1)
+        return item if item is None or item.parent() is None else item.parent()
+
+    def add_experiment(self, settings, name = None):
+        names = {self.files.topLevelItem(i).text(0) for i in range(self.files.topLevelItemCount())}
+        item = QTreeWidgetItem(
+            [name or next(f'Experiment {n}' for n in itertools.count(1) if f'Experiment {n}' not in names)])
+        item.setFlags(item.flags() | Qt.ItemIsEditable)
+        font = item.font(0)
+        font.setBold(True)
+        item.setFont(0, font)
+        item.settings = settings
+        self.files.addTopLevelItem(item)
+        item.setExpanded(True)
+        return item
+
+    def show_experiment(self, item):
+        """Keeps the panel's values with the experiment they were shown for, then shows the settings of item"""
+        if self.shown is not None and self.files.indexOfTopLevelItem(self.shown) >= 0:
+            self.shown.settings = self.values()
+        self.shown = item
+        if item is not None:
+            self.set_values(item.settings)
+        self.sample_heading.setText('Sample' if item is None else f'Sample: {item.text(0)}')
+        self.batch.setVisible(item is not None and item.childCount() > 1)
+
+    def rename_experiment(self, item):
+        if item.parent() is not None:
+            return
+        others = {self.files.topLevelItem(i).text(0) for i in range(self.files.topLevelItemCount()) if
+                  self.files.topLevelItem(i) is not item}
+        name = item.text(0).strip() or 'Experiment'
+        name = next(x for x in itertools.chain([name], (f'{name} {n}' for n in itertools.count(2))) if x not in others)
+        if name != item.text(0):
+            item.setText(0, name)
+        elif item is self.shown:
+            self.sample_heading.setText(f'Sample: {name}')
+
+    def move_runs(self, runs, experiment, rename = False):
+        """Moves runs into experiment and shows it; experiments they leave empty are removed"""
+        sources = [run.parent() for run in runs]
+        for run in runs:
+            run.parent().takeChild(run.parent().indexOfChild(run))
+            experiment.addChild(run)
+        self.files.setCurrentItem(experiment)
+        for source in sources:
+            if source is not experiment and not source.childCount() and self.files.indexOfTopLevelItem(source) >= 0:
+                self.files.takeTopLevelItem(self.files.indexOfTopLevelItem(source))
+        self.files_changed.emit()
+        if rename:
+            self.files.editItem(experiment, 0)
+
+    def files_menu(self, position):
+        runs = [item for item in self.files.selectedItems() if item.parent() is not None]
+        if not runs:
+            return
+        menu = QMenu(self)
+        for i in range(self.files.topLevelItemCount()):
+            menu.addAction(f'Move to {self.files.topLevelItem(i).text(0)}',
+                           lambda experiment = self.files.topLevelItem(i): self.move_runs(runs, experiment))
+        menu.addAction('Move to a new experiment',
+                       lambda: self.move_runs(runs, self.add_experiment(self.values()), rename = True))
+        menu.exec(self.files.viewport().mapToGlobal(position))
+
+    def select_experiment(self, name):
+        found = self.files.findItems(name, Qt.MatchExactly)
+        if found and found[0] is not self.current_experiment():
+            self.files.setCurrentItem(found[0])
+
+    def set_experiments(self, experiments):
+        """Shows the experiments of saved results: their runs and the settings they were predicted with"""
+        self.shown = None
+        self.files.blockSignals(True)
+        self.files.clear()
+        self.files.blockSignals(False)
+        for experiment in experiments:
+            self.files.setCurrentItem(self.add_experiment(dict(experiment['settings']), experiment['name']))
+            self.add_paths(experiment['files'])
+        self.files.setCurrentItem(self.files.topLevelItem(0))
+
     def add_paths(self, paths):
-        existing = set(self.paths())
+        """Adds runs to the current experiment, or to a new one with the settings shown"""
+        existing, target = set(self.paths()), self.current_experiment()
         for path in paths:
-            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) else [path]
+            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if
+                     x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) else [path]
             for file in found:
                 if file.lower().endswith(SPECTRA_SUFFIXES + ('.xlsx',)) and os.path.abspath(file) not in existing:
                     existing.add(os.path.abspath(file))
-                    item = QListWidgetItem(os.path.basename(file))
-                    item.setData(Qt.UserRole, os.path.abspath(file))
-                    item.setToolTip(os.path.abspath(file))
-                    self.files.addItem(item)
+                    if target is None:
+                        target = self.add_experiment(self.values())
+                    item = QTreeWidgetItem([os.path.basename(file)])
+                    item.setData(0, Qt.UserRole, os.path.abspath(file))
+                    item.setToolTip(0, os.path.abspath(file))
+                    target.addChild(item)
+        if target is not None and target is not self.current_experiment():
+            self.files.setCurrentItem(target)
         self.files_changed.emit()
 
     def remove_selected(self):
         for item in self.files.selectedItems():
-            self.files.takeItem(self.files.row(item))
+            if item.parent() is None:
+                self.files.takeTopLevelItem(self.files.indexOfTopLevelItem(item))
+            else:
+                item.parent().removeChild(item)
         self.files_changed.emit()
 
+    def experiments(self):
+        """(name, paths, settings) of every experiment with runs, with the panel's values kept for the experiment they are shown for"""
+        if self.shown is not None and self.files.indexOfTopLevelItem(self.shown) >= 0:
+            self.shown.settings = self.values()
+        items = [self.files.topLevelItem(i) for i in range(self.files.topLevelItemCount())]
+        return [(e.text(0), [e.child(j).data(0, Qt.UserRole) for j in range(e.childCount())], e.settings) for e in items
+                if e.childCount()]
+
     def paths(self):
-        return [self.files.item(i).data(Qt.UserRole) for i in range(self.files.count())]
+        return [path for _, paths, _ in self.experiments() for path in paths]
 
     def values(self):
         values = {}
@@ -889,13 +1018,17 @@ class ResultsView(QWidget):
     """Result tables with SNFG drawings, a detail pane for the selected glycan peak, its annotated MS2 spectrum, a glycan map, and curation"""
     open_in_crumbs = Signal(object)
     status = Signal(str)
+    experiment_shown = Signal(str)
 
     def __init__(self, images):
         super().__init__()
         self.images, self.payload, self.frame, self.row, self.source, self.glytoucan = images, None, None, None, None, None
-        self.alternative = None
+        self.alternative, self.ms3_groups, self.ms3_args = None, [], None
         top = QHBoxLayout()
         top.setContentsMargins(8, 6, 8, 4)
+        self.experiment = QComboBox()
+        self.experiment.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.experiment.setToolTip('Experiments are predicted and harmonized separately')
         self.dataset = QComboBox()
         self.dataset.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.search = QLineEdit()
@@ -907,6 +1040,7 @@ class ResultsView(QWidget):
         self.export.setPopupMode(QToolButton.InstantPopup)
         self.export_menu = QMenu(self)
         self.export.setMenu(self.export_menu)
+        top.addWidget(self.experiment)
         top.addWidget(self.dataset)
         top.addWidget(self.search, 1)
         top.addWidget(self.counter)
@@ -977,11 +1111,20 @@ class ResultsView(QWidget):
         self.spectrum_file = QComboBox()
         self.spectrum_file.setToolTip('Run whose MS2 spectrum is shown for this feature')
         self.spectrum.controls.insertWidget(1, self.spectrum_file)
+        # MS3 spectra of the selected peak, pooled per isolated MS2 fragment, annotated as fragments of that fragment
+        self.ms3_panel, self.ms3_fragment, self.ms3_tab = SpectrumPanel(), QComboBox(), QSplitter(Qt.Vertical)
+        self.ms3_fragment.setToolTip('MS2 fragment whose MS3 spectra are shown (pooled)')
+        self.ms3_panel.controls.insertWidget(1, self.ms3_fragment)
+        self.ms3_tab.addWidget(self.ms3_panel)
+        self.ms3_tab.addWidget(self.ms3_panel.fragments)
+        self.ms3_tab.setSizes([320, 120])
         self.map, self.across = ChartView(), ChartView()
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self.spectrum, 'MS2 spectrum')
         self.tabs.addTab(self.spectrum.fragments, 'Fragments')
+        self.tabs.addTab(self.ms3_tab, 'MS3 spectrum')
+        self.tabs.setTabVisible(2, False)
         self.tabs.addTab(self.map, 'Glycan map')
         self.tabs.addTab(self.across, 'Across runs')
         bottom = QSplitter(Qt.Horizontal)
@@ -997,6 +1140,7 @@ class ResultsView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(top)
         layout.addWidget(self.splitter, 1)
+        self.experiment.currentIndexChanged.connect(self.show_experiment)
         self.dataset.currentIndexChanged.connect(lambda: self.show_dataset())
         self.search.textChanged.connect(self.filter)
         self.table.selectionModel().selectionChanged.connect(self.selection_changed)
@@ -1008,22 +1152,39 @@ class ResultsView(QWidget):
         self.exclude.clicked.connect(self.toggle_excluded)
         self.crumbs.clicked.connect(self.send_to_crumbs)
         self.spectrum_file.currentIndexChanged.connect(self.show_source)
+        self.spectrum.ms3_clicked.connect(self.open_ms3)
+        self.ms3_fragment.currentIndexChanged.connect(self.annotate_ms3)
+        self.tabs.currentChanged.connect(lambda: self.tabs.currentWidget() is self.ms3_tab and self.annotate_ms3())
         self.map.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and self.select_row(int(event.ind[0])))
         images.ready.connect(self.image_ready)
 
-    def set_results(self, payload):
-        """Takes a worker result or a saved session; tables are kept with m/z as a column and get the curation columns once"""
-        for label, (df, spectra) in payload['tables'].items():
-            df = df.reset_index() if df.index.name == 'm/z' else df
-            for column, empty in (('curation', ''), ('excluded', False)):
-                if column not in df.columns:
-                    df[column] = empty
-            payload['tables'][label] = (df, list(spectra) + [None] * (len(df) - len(spectra)))
-        if payload['features'] is not None:
-            for column, empty in (('curation', ''), ('excluded', False)):
-                if column not in payload['features'].columns:
-                    payload['features'][column] = empty
-        self.payload = payload
+    def set_results(self, session):
+        """Takes a worker result or a saved session (older ones hold a single experiment); tables are kept with m/z as a column and get the curation columns once"""
+        if 'experiments' not in session:
+            session = {'experiments': [{'name': 'Experiment 1', **{k: session[k] for k in ('files', 'settings', 'tables', 'features')}}],
+                       **{k: v for k, v in session.items() if k not in ('files', 'settings', 'tables', 'features')}}
+        for experiment in session['experiments']:
+            for label, (df, spectra) in experiment['tables'].items():
+                df = df.reset_index() if df.index.name == 'm/z' else df
+                for column, empty in (('curation', ''), ('excluded', False)):
+                    if column not in df.columns:
+                        df[column] = empty
+                experiment['tables'][label] = (df, list(spectra) + [None] * (len(df) - len(spectra)))
+            if experiment['features'] is not None:
+                for column, empty in (('curation', ''), ('excluded', False)):
+                    if column not in experiment['features'].columns:
+                        experiment['features'][column] = empty
+        self.session = session
+        self.experiment.blockSignals(True)
+        self.experiment.clear()
+        self.experiment.addItems([experiment['name'] for experiment in session['experiments']])
+        self.experiment.blockSignals(False)
+        self.experiment.setVisible(self.experiment.count() > 1)
+        self.show_experiment()
+
+    def show_experiment(self):
+        """self.payload is the experiment shown: its files, settings, tables, and feature table"""
+        payload = self.payload = self.session['experiments'][max(self.experiment.currentIndex(), 0)]
         self.dataset.blockSignals(True)
         self.dataset.clear()
         if payload['features'] is not None:
@@ -1039,6 +1200,7 @@ class ResultsView(QWidget):
             self.export_menu.addAction('All tables as CSV…', lambda: self.export_all('.csv'))
             self.export_menu.addAction('All tables as Excel…', lambda: self.export_all('.xlsx'))
         self.show_dataset()
+        self.experiment_shown.emit(payload['name'])
 
     def current_frame(self):
         label = self.dataset.currentData()
@@ -1050,8 +1212,8 @@ class ResultsView(QWidget):
             return
         df = self.current_frame()
         self.frame, self.row = df, None
-        self.tabs.setTabVisible(3, label == FEATURES)
-        if label != FEATURES and self.tabs.currentIndex() == 3:
+        self.tabs.setTabVisible(self.tabs.indexOf(self.across), label == FEATURES)
+        if label != FEATURES and self.tabs.currentWidget() is self.across:
             self.tabs.setCurrentIndex(0)
         structures = list(df['top1_pred'])
         compositions = [_composition(c) for c in df['composition']]
@@ -1083,6 +1245,9 @@ class ResultsView(QWidget):
                                           'CandyCrunch confidence of the structure shown'))
             columns.append(_number_column('Fragment score', df.get('annotation_score', [None] * len(df)), 0, 'CandyCrumbs fragment annotation score'))
             columns.append(_number_column('Spectra', df['num_spectra'], 0, 'MS2 spectra pooled into this peak'))
+            if 'ms3' in df.columns:
+                columns.append(_number_column('MS3', [len({round(p) for p, _ in x}) if isinstance(x, list) and x else None for x in df['ms3']], 0,
+                                              'MS2 fragments of this peak with MS3 spectra'))
             columns.append(_number_column('ppm', df.get('ppm_error', [None] * len(df)), 0, 'Precursor mass error'))
             texts = [e if isinstance(e, str) else '' for e in evidence]
             columns.append({'title': 'Evidence', 'kind': 'text', 'raw': texts, 'text': texts})
@@ -1249,17 +1414,61 @@ class ResultsView(QWidget):
     def annotate(self):
         table, spectra = self.payload['tables'][self.source[0]]
         r = self.source[1]
-        peaks = spectra[r]
+        peaks, settings = spectra[r], self.payload['settings']
         structure = self.alternative or table['top1_pred'].iat[r]
         if not isinstance(structure, str):
             structure = _composition(table['composition'].iat[r]) or None
+        # MS3 spectra pooled per isolated MS2 fragment (rounded to 1 m/z, as the pipeline scores them), merging peaks within half the mass tolerance
+        ms3, groups, self.ms3_groups = table['ms3'].iat[r] if 'ms3' in table.columns else None, {}, []
+        for p, spectrum in ms3 if isinstance(ms3, list) and isinstance(peaks, dict) and peaks and structure else []:
+            groups.setdefault(round(p), []).append((p, spectrum))
+        for _, members in sorted(groups.items()):
+            pairs, pooled, group = sorted((m, i) for _, spectrum in members for m, i in spectrum.items()), {}, []
+            for m, i in pairs + [(np.inf, 0)]:
+                if group and m - group[0][0] > settings['ppm_thresh'] * MZ_REF / 2e6:
+                    ms, ints = zip(*group)
+                    pooled[float(np.average(ms, weights = ints)) if sum(ints) else float(np.mean(ms))] = float(
+                        sum(ints))
+                    group = []
+                group.append((m, i))
+            if pooled:
+                self.ms3_groups.append((float(np.median([p for p, _ in members])), pooled, len(members)))
+        self.ms3_args = (structure, int(table['charge'].iat[r]))
+        self.ms3_fragment.blockSignals(True)
+        self.ms3_fragment.clear()
+        for p, _, n in self.ms3_groups:
+            self.ms3_fragment.addItem(f'Fragment m/z {p:.2f}, {n} spectr{"um" if n == 1 else "a"}')
+        self.ms3_fragment.blockSignals(False)
+        if not self.ms3_groups and self.tabs.currentWidget() is self.ms3_tab:
+            self.tabs.setCurrentIndex(0)
+        self.tabs.setTabVisible(self.tabs.indexOf(self.ms3_tab), bool(self.ms3_groups))
         if not isinstance(peaks, dict) or not peaks:
             self.spectrum.show_message('No MS2 spectrum: this peak was only found by its MS1 signal')
         elif structure is None:
             self.spectrum.show_message('Neither a structure nor a composition to annotate this spectrum with')
         else:
+            self.spectrum.annotate(structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]),
+                                   _mass_tag(settings), settings['sample_prep'],
+                                   ms3 = [p for p, _, _ in self.ms3_groups])
+            if self.tabs.currentWidget() is self.ms3_tab:
+                self.annotate_ms3()
+
+    def open_ms3(self, index):
+        self.ms3_fragment.blockSignals(True)
+        self.ms3_fragment.setCurrentIndex(index)
+        self.ms3_fragment.blockSignals(False)
+        if self.tabs.currentWidget() is self.ms3_tab:
+            self.annotate_ms3()
+        else:
+            self.tabs.setCurrentWidget(self.ms3_tab)
+
+    def annotate_ms3(self):
+        if 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups):
+            p, peaks, _ = self.ms3_groups[self.ms3_fragment.currentIndex()]
             settings = self.payload['settings']
-            self.spectrum.annotate(structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]), _mass_tag(settings), settings['sample_prep'])
+            self.ms3_panel.annotate(self.ms3_args[0], list(peaks.keys()), list(peaks.values()), self.ms3_args[1],
+                                    _mass_tag(settings), settings['sample_prep'],
+                                    ms3_precursor = p)
 
     def pick_alternative(self, item):
         self.alternative = item.data(Qt.UserRole)
@@ -1397,7 +1606,7 @@ class ResultsView(QWidget):
 
     def export_frame(self, df):
         """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
-        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded'])
+        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3'], errors = 'ignore')
         return out.drop(columns = ['curation']) if not out['curation'].astype(bool).any() else out
 
     def write(self, df, path, kind):
@@ -1672,6 +1881,7 @@ class MainWindow(QMainWindow):
         self.runner.finished.connect(self.finished)
         self.runner.failed.connect(self.failed)
         self.results.status.connect(lambda text: self.statusBar().showMessage(text, 6000))
+        self.results.experiment_shown.connect(self.settings.select_experiment)
         self.results.open_in_crumbs.connect(lambda request: (self.tabs.setCurrentWidget(self.crumbs), self.crumbs.load(request)))
         self.settings.inputs['taxonomy_level'].currentTextChanged.connect(self.load_taxa)
         self.taxa_ready.connect(lambda taxa: self.settings.taxa.setModel(QStringListModel(taxa, self.settings.taxa)))
@@ -1713,9 +1923,10 @@ class MainWindow(QMainWindow):
     def load_taxa(self):
         level = self.settings.inputs['taxonomy_level'].currentText()
         def work():
-            from glycowork.glycan_data.loader import df_glycan
-            # Imported here only so the first spectrum annotation does not wait for it
-            import candycrunch.analysis  # noqa: F401
+            with IMPORT_LOCK:
+                from glycowork.glycan_data.loader import df_glycan
+                # Imported here only so the first spectrum annotation does not wait for it
+                import candycrunch.analysis  # noqa: F401
             self.taxa_ready.emit(sorted({t for taxa in df_glycan[level] for t in (taxa if isinstance(taxa, list) else [taxa]) if isinstance(t, str)}))
         threading.Thread(target = work, daemon = True).start()
 
@@ -1754,18 +1965,21 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.split)
 
     def run(self):
-        files = self.settings.paths()
-        if not files:
+        experiments = self.settings.experiments()
+        if not experiments:
             self.statusBar().showMessage('Add at least one LC-MS/MS run first', 6000)
             return
+        files = [file for _, paths, _ in experiments for file in paths]
         settings = self.settings.values()
         self.store.setValue('settings', json.dumps({**settings, 'filter_out': sorted(settings['filter_out'])}))
         self.weights = {**STAGE_WEIGHTS, **json.loads(self.store.value('stage_weights', '{}'))}
-        self.runner.submit(files, settings, self.weights)
+        self.runner.submit(experiments, self.weights)
         self.started, self.stage_text = time.time(), 'Waiting for the CandyCrunch model to load' if self.status_text.text().startswith('Loading') else 'Starting'
         # Progress per file (keyed like the worker keys them, weighted by file size as runs of different length go through in parallel) and of a
         # batch's harmonization; the time estimate starts with the first progress report
-        self.file_progress, self.tail_progress, self.fraction, self.first_report, self.stage_times = dict.fromkeys(map(os.path.normcase, files), 0.0), 0.0, 0.0, None, []
+        self.file_progress, self.fraction, self.first_report, self.stage_times = dict.fromkeys(map(os.path.normcase, files), 0.0), 0.0, None, []
+        # Experiments run one after the other, so a batch's harmonization belongs to the experiment of the latest file that reported
+        self.groups, self.tail_progress, self.active = [[os.path.normcase(f) for f in paths] for _, paths, _ in experiments], [0.0] * len(experiments), 0
         self.file_sizes = {os.path.normcase(f): max(os.path.getsize(f), 1) if os.path.exists(f) else 1 for f in files}
         self.history = {}
         self.run_button.setEnabled(False)
@@ -1776,7 +1990,9 @@ class MainWindow(QMainWindow):
         self.clock.start()
         self.log.clear()
         self.welcome_text.hide()
-        self.append_log(f'Running CandyCrunch on {len(files)} file{"s" if len(files) > 1 else ""}\n')
+        # The progress lives on the start page, so earlier results make way for it until this run is done
+        self.pages.setCurrentIndex(0)
+        self.append_log(f'Running CandyCrunch on {len(files)} file{"s" if len(files) > 1 else ""} in {len(experiments)} experiment{"s" if len(experiments) > 1 else ""}\n')
         self.tick()
 
     def tick(self):
@@ -1808,12 +2024,16 @@ class MainWindow(QMainWindow):
     def show_progress(self, update):
         key, value = update
         if key == 'tail':
-            self.file_progress, self.tail_progress = dict.fromkeys(self.file_progress, 1.0), value
+            self.file_progress.update(dict.fromkeys(self.groups[self.active], 1.0))
+            self.tail_progress[self.active] = value
         elif key in self.file_progress:
+            self.active = next(n for n, group in enumerate(self.groups) if key in group)
             self.file_progress[key] = value
             self.history.setdefault(key, []).append((time.time(), value))
-        files = sum(value * self.file_sizes[key] for key, value in self.file_progress.items()) / sum(self.file_sizes.values())
-        self.fraction = max(self.fraction, files if len(self.file_progress) == 1 else (1 - TAIL_WEIGHT) * files + TAIL_WEIGHT * self.tail_progress)
+        # Every experiment counts by the size of its files, of which a batch spends TAIL_WEIGHT on harmonization
+        done = sum(sum(self.file_progress[k] * self.file_sizes[k] for k in group) if len(group) == 1 else
+                   sum(((1 - TAIL_WEIGHT) * self.file_progress[k] + TAIL_WEIGHT * tail) * self.file_sizes[k] for k in group) for group, tail in zip(self.groups, self.tail_progress))
+        self.fraction = max(self.fraction, done / sum(self.file_sizes.values()))
         self.history.setdefault('all', []).append((time.time(), self.fraction))
         if self.first_report is None:
             self.first_report = (time.time(), self.fraction)
@@ -1838,6 +2058,8 @@ class MainWindow(QMainWindow):
         self.welcome_text.show()
         self.elapsed.setText('')
         self.status_text.setText(message)
+        if self.results.payload is not None:
+            self.pages.setCurrentWidget(self.results)
 
     def finished(self, payload):
         seconds = int(time.time() - self.started)
@@ -1850,8 +2072,8 @@ class MainWindow(QMainWindow):
             scale = sum(self.weights[name] for name in measured) / (sum(measured.values()) or 1)
             self.store.setValue('stage_weights', json.dumps({name: 0.5 * self.weights[name] + 0.5 * measured[name] * scale if name in measured else self.weights[name]
                                                              for name in STAGE_WEIGHTS}))
-        peaks = sum(len(df) for df, _ in payload['tables'].values())
-        self.stop(f'Finished in {seconds // 60}:{seconds % 60:02d}: {peaks} glycan peaks in {len(payload["tables"])} run{"s" if len(payload["tables"]) > 1 else ""}')
+        peaks, runs = sum(len(df) for e in payload['experiments'] for df, _ in e['tables'].values()), sum(len(e['tables']) for e in payload['experiments'])
+        self.stop(f'Finished in {seconds // 60}:{seconds % 60:02d}: {peaks} glycan peaks in {runs} run{"s" if runs > 1 else ""}')
         self.append_log(self.status_text.text() + '\n')
         if not peaks:
             QMessageBox.information(self, 'CandyCrunch', 'CandyCrunch found no glycan peaks. Check the glycan class, ion mode, and reducing end, '
@@ -1878,7 +2100,7 @@ class MainWindow(QMainWindow):
                                               'CandyCrunch results (*.candycrunch)')
         if path:
             with open(path, 'wb') as file:
-                pickle.dump(self.results.payload, file)
+                pickle.dump(self.results.session, file)
             self.statusBar().showMessage(f'Saved {os.path.basename(path)}', 6000)
 
     def open_session(self, path = None):
@@ -1893,6 +2115,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'Open results', f'Could not read {path}:\n{error}')
             return
         self.results.set_results(payload)
+        self.settings.set_experiments(self.results.session['experiments'])
         self.pages.setCurrentWidget(self.results)
         self.save_action.setEnabled(True)
         self.tabs.setCurrentWidget(self.split)
@@ -1964,9 +2187,9 @@ def main():
         panel, runner, outcome, log = SettingsPanel(), InferenceRunner(), [], []
         panel.set_values({**DEFAULTS, 'glycan_class': sys.argv[2], 'n_jobs': len(files)})
         runner.log.connect(log.append)
-        runner.finished.connect(lambda payload: (outcome.append(sum(len(df) for df, _ in payload['tables'].values())), app.quit()))
+        runner.finished.connect(lambda payload: (outcome.append(sum(len(df) for e in payload['experiments'] for df, _ in e['tables'].values())), app.quit()))
         runner.failed.connect(lambda text: (log.append(text), app.quit()))
-        runner.submit(files, panel.values(), STAGE_WEIGHTS)
+        runner.submit([('Self-test', files, panel.values())], STAGE_WEIGHTS)
         app.exec()
         runner.shutdown()
         with open('candycrunch_self_test.log', 'w', encoding = 'utf-8') as file:
