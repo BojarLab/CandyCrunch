@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
-    parser.add_argument('--modification', help='glycan derivatization', type=str, required=False)
+    parser.add_argument('--modification', help='Reducing-end modification; custom: a label of --mass_tag Da', type=str, choices=['reduced', '2AA', '2AB', 'procainamide', 'custom'], required=False)
     parser.add_argument('--mass_tag', help='custom tag mass', type=float, required=False)
     parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'peracetylated'], required=False)
     parser.add_argument('--lc', help='LC type', type=str, choices=['PGC', 'C18', 'other'], required=False)
@@ -66,7 +66,8 @@ def main():
     for path, df_out in tables:
         if isinstance(df_out, tuple):
             df_out, spectra_out = df_out
-            df_out['peak_d'] = spectra_out
+            # Rounded as in extract_spectra, which keeps every peak dictionary below Excel's 32,767-character cell limit
+            df_out['peak_d'] = [{round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()} if isinstance(d, dict) else d for d in spectra_out]
         # Per-file tables are indexed by m/z; the combined feature table has a plain row index that is not worth writing
         df_flat = df_out.reset_index() if df_out.index.name else df_out
         if path.endswith('.csv'):

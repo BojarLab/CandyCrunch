@@ -170,6 +170,8 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
     elif input_format == "mzml":
         mzml = [x for x in test_files if x.endswith(".mzML")]
         test_files = mzml if mzml else test_files  # fall back to xlsx if no mzML present
+    if not test_files:
+        pytest.skip(f"no test file for {test_dict['name']} {test_dict['args']}")
     for filename in test_files:
         inference_params = {k: v for k,v in test_params.items() if 'posthoc' not in k if k not in ('test_dict', 'format')}
         posthoc_params = {k: v for k,v in test_params.items() if 'posthoc' in k}

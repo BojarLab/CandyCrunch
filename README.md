@@ -54,7 +54,7 @@ If you would like to run our main inference function from the command line, you 
 --mode, type=string: mass spectrometry mode; options are 'negative' or 'positive'; default: 'negative' <br />
 --max_charge, type=int: maximum precursor charge to consider; default:3 <br />
 --sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
---modification, type=string: chemical derivatization of glycans; options are “reduced”, “permethylated”, “2AA”, “2AB” or “custom”; default:”reduced”
+--modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 --lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
@@ -63,9 +63,8 @@ If you would like to run our main inference function from the command line, you 
 --rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 <br />
 --rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 --spectra, type=bool: whether to also output the actual spectra used for prediction, as a peak_d column; default:False <br />
---get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False
-|
-|--filter_out, type=set: only if get_missing = "True", set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />  
+--get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
+--filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
 --ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
 --pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
 --crumbs_thresh, type=float: minimum CandyCrumbs annotation score to keep a prediction; default:3 <br />
@@ -116,7 +115,7 @@ glycans, type=list: ordered list of glycans used to train CandyCrunch which can 
 bin_num, type=list: number of bins to separate the ms2 spectrum into <br />
 frag_num, type=list: number of top fragments to show in df_out per spectrum; default:100 <br />
 max_charge, type=int: maximum signed charge to consider; the sign sets the mass spectrometry mode (negative or positive); default:-3 <br />
-modification, type=string: chemical derivatization of glycans; options are “reduced”, “permethylated”, “2AA”, “2AB” or “custom”; default:”reduced”
+modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
@@ -126,10 +125,9 @@ rt_max, type=float: whether only spectra up to a maximum retention time (in minu
 rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
 temperature, type=float: the temperature factor used to calibrate logits; default:1.15 <br />
-spectra, type=float: whether to also output the actual spectra used for prediction; default:False <br />
-get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False
-|
-|--filter_out, type=set: only if get_missing = "True", set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Kdn', 'P', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
+spectra, type=bool: whether to also output the actual spectra used for prediction; default:False <br />
+get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
+filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
 ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
 crumbs_thresh, type=float: minimum CandyCrumbs annotation score to keep a prediction; default:3 <br />
 sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
@@ -144,7 +142,7 @@ experimental, type=bool: whether to impute missing predictions via database sear
 |--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia'
 |
 |--df_use, type=DataFrame: only if experimental = "True", sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan <br />
-plot_glycans, type=bool: whether you want to save an output.xlsx file that contains SNFG images of all top1 predictions, will be saved in the same folder as spectra_filepath; default:False 
+plot_glycans, type=bool: whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False
 
 </pre>
 </details>

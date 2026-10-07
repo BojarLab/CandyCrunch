@@ -107,12 +107,12 @@ embs = pd.concat([embs, embs2], axis=1)
 embs = embs.apply(pd.to_numeric, errors='coerce').fillna(0).astype(np.float32)
 dist = pairwise_distances(embs, metric='cosine')
 dist = dist*1000*20
-dist2 = torch.tensor(dist, requires_grad=True).to(device)
+dist2 = torch.tensor(dist).to(device)
 comps = [glycan_to_composition(k) for k in glycans]
 comp_df = pd.DataFrame.from_dict(comps).fillna(0)
 dist = pairwise_distances(comp_df, metric='cosine')
 dist = dist*1000*50
-dist3 = torch.tensor(dist, requires_grad=True).to(device)
+dist3 = torch.tensor(dist).to(device)
 
 print("Preparing the model")
 model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = len(comp_vector_order))

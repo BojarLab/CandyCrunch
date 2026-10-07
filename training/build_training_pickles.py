@@ -13,6 +13,7 @@ import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit
 
 from candycrunch.prediction import bin_intensities
+from glycowork.motif.processing import get_class
 
 full_dataset_path = Path("full_dataset.xlsx")
 metadata_path = Path("file_checklist_template.csv")
@@ -22,7 +23,7 @@ output_dir = Path("prepared_datasets")
 test_size = 0.15
 random_state = 42
 
-MODE_MAP = {"negative": 0, "positive": 1}
+MODE_MAP = {"negative": 1, "positive": 0}
 LC_MAP = {"pgc": 0, "c18": 1}
 MOD_MAP = {"reduced": 0, "permethylated": 1}
 TRAP_MAP = {"linear": 0, "orbitrap": 1, "amazon": 2}
@@ -83,9 +84,9 @@ def _process_retention_times(df):
 
 def _infer_glycan_types(df):
     def classify(g):
-        if g.endswith(("GalNAc", "GalNAc6S", "GalNAcOS", "Fuc", "Man", "Gal")):
+        if g.endswith(("GalNAc", "GalNAc4S", "GalNAc6S", "GalNAcOS", "Fuc", "Man", "Gal")):
             return 0
-        if "GlcNAc(b1-4)GlcNAc" in g:
+        if get_class(g) == 'N':
             return 1
         if g.endswith(("Glc", "GlcOS", "GlcNAc", "Ins", "Cer")):
             return 2

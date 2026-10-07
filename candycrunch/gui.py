@@ -221,6 +221,9 @@ def _pool_initializer(messages, weights, n_files, initializer, initargs):
     if initializer is not None:
         initializer(*initargs)
     _install_progress(messages, weights, n_files)
+    # Cancel and quit end the worker; without this its pool processes would finish their file unseen and then wait forever
+    parent = mp.parent_process()
+    threading.Thread(target = lambda: (parent.join(), os._exit(1)), daemon = True).start()
 
 
 class InferenceRunner(QObject):
@@ -690,11 +693,13 @@ class SpectrumPanel(QWidget):
             f'; \u25b2 marks the {len(self.request["ms3"])} peak(s) with MS3 spectra, click one to annotate them' if self.request['ms3'] else ''))
         if self.request['kwargs'].get('ms3_precursor') is not None and not hits:
             self.summary.setText(f'm/z {self.request["kwargs"]["ms3_precursor"]:.2f} is no fragment of {self.request["structure"]}, so none of its MS3 peaks can be annotated')
-        from candycrunch.analysis import domon_costello_to_html
+        from candycrunch.analysis import domon_costello_to_html, PROTON_MASS
         rows = []
         for mz in sorted(hits):
             hit = hits[mz]
             for n, (names, theo, z) in enumerate(zip(hit['Domon-Costello nomenclatures'], hit['Theoretical fragment masses'], hit['Fragment charges'])):
+                # CandyCrumbs gives a multiply charged fragment as its singly charged mass, so it is turned into the m/z it is observed at
+                theo = (theo + np.sign(z) * (abs(z) - 1) * PROTON_MASS) / abs(z)
                 flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
                 first = f'<td>{mz:.4f}</td><td align="right">{peaks.get(mz, 0) / top * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
                 rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{theo - mz:+.3f}</td><td align="right">{z}</td></tr>')
@@ -849,7 +854,8 @@ class SettingsPanel(QScrollArea):
         self.experiment_button.clicked.connect(
             lambda: self.move_runs([item for item in self.files.selectedItems() if item.parent() is not None],
                                    self.add_experiment(self.values()), rename = True))
-        QShortcut(QKeySequence.Delete, self.files, self.remove_selected)
+        # Only while the run list has focus, else Delete in any other widget would remove the selected runs
+        QShortcut(QKeySequence.Delete, self.files, self.remove_selected).setContext(Qt.WidgetShortcut)
         self.files.currentItemChanged.connect(lambda: self.show_experiment(self.current_experiment()))
         self.files.itemChanged.connect(self.rename_experiment)
         self.files.customContextMenuRequested.connect(self.files_menu)
@@ -1060,7 +1066,8 @@ class ResultsView(QWidget):
         self.table.horizontalHeader().setHighlightSections(False)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.structure_delegate, self.bar_delegate = StructureDelegate(images, self.table), BarDelegate(self.table)
-        QShortcut(QKeySequence.Copy, self.table, self.copy_rows)
+        # Only while the table has focus, so Ctrl+C in the structure box still copies its text
+        QShortcut(QKeySequence.Copy, self.table, self.copy_rows).setContext(Qt.WidgetShortcut)
         # Detail pane: drawing, facts, alternatives, and curation of the selected peak
         info = QWidget()
         info_layout = QVBoxLayout(info)
@@ -1187,7 +1194,7 @@ class ResultsView(QWidget):
         payload = self.payload = self.session['experiments'][max(self.experiment.currentIndex(), 0)]
         self.dataset.blockSignals(True)
         self.dataset.clear()
-        if payload['features'] is not None:
+        if payload['features'] is not None and not payload['features'].empty:
             self.dataset.addItem(f'All {len(payload["tables"])} runs (feature table)', FEATURES)
         for label in payload['tables']:
             self.dataset.addItem(label, label)
@@ -1493,7 +1500,7 @@ class ResultsView(QWidget):
         else:
             color, color_label = np.array([p[0][1] if isinstance(p, (list, tuple)) and p else np.nan for p in df['predictions']], dtype = float), 'Confidence'
             size = (df['rel_abundance'] if 'rel_abundance' in df.columns else df['num_spectra']).astype(float).values
-        size = 12 + 380 * np.sqrt(np.nan_to_num(size) / (np.nanmax(size) or 1))
+        size = 12 + 380 * np.sqrt(np.nan_to_num(size) / (np.nanmax(size, initial = 0) or 1))
         known = ~np.isnan(color)
         ax.scatter(df['RT'].values[~known], df['m/z'].values[~known], s = size[~known], c = '#cccccc', edgecolors = 'white', linewidths = 0.5)
         points = ax.scatter(df['RT'].values, df['m/z'].values, s = size, c = np.where(known, color, np.nan), cmap = CONFIDENCE_MAP,

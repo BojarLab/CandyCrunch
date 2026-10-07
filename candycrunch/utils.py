@@ -32,9 +32,9 @@ def read_mzml(filepath, centroid_levels = ()):
         if tag != 'spectrum':
             continue
         ns = el.tag[:-len(tag)]
-        ref = el.find(f'{ns}referenceableParamGroupRef')
-        if ref is not None and ref.get('ref') in groups:
-            el.append(groups[ref.get('ref')])
+        # Param groups can be referenced by the spectrum and any of its parts (binary data arrays naming their type and encoding), and several times
+        for parent, ref in [(p, r) for p in el.iter() for r in p.findall(f'{ns}referenceableParamGroupRef')]:
+            parent.extend(groups.get(ref.get('ref'), ()))
         # The first element of each CV term anywhere in the spectrum
         first = {}
         for e in el.iter():
@@ -96,7 +96,9 @@ def read_mzml(filepath, centroid_levels = ()):
             peaks = np.array(centroids).reshape(-1, 2)
         rt = first.get('MS:1000016')
         if rt is not None:
-            unit, rt = rt.get('unitName', '').lower(), float(rt.get('value'))
+            # The unit by name, else by its unit ontology accession (unitName is optional)
+            unit = (rt.get('unitName') or {'UO:0000010': 'second', 'UO:0000028': 'millisecond', 'UO:0000032': 'hour'}.get(rt.get('unitAccession'), 'minute')).lower()
+            rt = float(rt.get('value'))
             rt = rt * 60.0 if unit == 'hour' else rt / {'minute': 1, 'second': 60.0, 'millisecond': 60000.0}[unit]
         precursor = {key: conv(first[acc].get('value')) for key, acc, conv in (('mz', 'MS:1000744', float), ('charge', 'MS:1000041', int),
                                                                                ('i', 'MS:1000042', float)) if acc in first} if 'MS:1000744' in first else None
@@ -162,7 +164,7 @@ def read_mgf(filepath):
    | tuple, charge as a list of ints, rtinseconds as float), m/z array and intensity array
    """
     header, params, started = {}, None, False
-    with open(filepath, encoding = 'utf-8') as f:
+    with open(filepath, encoding = 'utf-8', errors = 'replace') as f:
         for line in f:
             sline = line.strip()
             if sline == 'BEGIN IONS':
@@ -180,7 +182,9 @@ def read_mgf(filepath):
                     # e.g. 2+, 3+ and 4+
                     params['charge'] = [int(c[-1] + c[:-1]) if c[-1:] in ('+', '-') else int(c) for c in re.split(r',\s*|\s*and\s*', params['charge'])]
                 if 'rtinseconds' in params:
-                    params['rtinseconds'] = float(params['rtinseconds'])
+                    # A retention time, or ranges and lists of them (e.g., 600.5-612.5): the middle of their span
+                    rts = [float(v) for v in re.findall(r'\d*\.?\d+(?:[eE][-+]?\d+)?', params['rtinseconds'])]
+                    params['rtinseconds'] = (min(rts) + max(rts)) / 2
                 yield {'params': params, 'm/z array': np.array(mzs), 'intensity array': np.array(ints)}
                 params = None
             elif not sline or sline[0] in '#;!/':

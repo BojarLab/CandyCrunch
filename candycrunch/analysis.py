@@ -78,7 +78,9 @@ W_SIDE_CHAIN_LOSSES = {'C': 32.979896, 'D': 44.997655, 'E': 59.013305, 'F': 77.0
                        'W': 116.049024, 'Y': 93.034040}
 W_SIDE_CHAIN_LOSSES['c'] = 90.001360  # Carbamidomethyl Cys, cleaved at Cbeta-Sgamma
 W_SIDE_CHAIN_LOSSES['m'] = W_SIDE_CHAIN_LOSSES['M'] + 15.994915  # Met sulfoxide, the lost radical keeps the oxygen
-W_SIDE_CHAIN_LOSSES['j'] = W_SIDE_CHAIN_LOSSES['k'] = W_SIDE_CHAIN_LOSSES['K']
+# the radical lost by a labeled Lys keeps the label on its Nepsilon (j: guanidinyl CH2N2, k: TMT)
+W_SIDE_CHAIN_LOSSES['j'] = W_SIDE_CHAIN_LOSSES['K'] + 42.02180
+W_SIDE_CHAIN_LOSSES['k'] = W_SIDE_CHAIN_LOSSES['K'] + 229.16293
 cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B',
                  '13A': '13A', '14A': '14A', '15A': '15A', '24A': '24A', '04A': '04A', '35A': '35A', '03A': '03A',
                  '25A': '25A', '02A': '02A',
@@ -429,7 +431,8 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
     for terminal, terminal_label in zip(terminals, terminal_labels):
         terminal_label = map_to_basic(terminal_label, obfuscate_ptm = False)
         atomic_mod_dict[terminal] = {y: 0 for y in mono_attributes[terminal_label]['atoms'][terminal_label]}
-    for bond, bond_label in present_breakages.items():
+    # bonds at a known position come first, so that an ambiguous (3/4) or unknown (?) linkage cannot take an atom another bond is at
+    for bond, bond_label in sorted(present_breakages.items(), key = lambda x: not x[1].split('-')[-1].isdigit()):
         if bond_label == 'glycosite':
             if bond[0] in subg.nodes():
                 atomic_mod_dict[bond[0]][3] = 1
@@ -447,11 +450,11 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
             red_breakage = int(bond_label.split('-')[0][-1])
             atomic_mod_dict[bond[0]][red_breakage] = 2
         else:
-            # '?' linkages take the first free position, most common linkage first, so that two unknown
-            # linkages on one residue cannot collapse onto the same atom
+            # an ambiguous linkage takes the last free position it lists (3/4: 4, else 3), a '?' linkage the first free position, most common
+            # linkage first, so that two such linkages on one residue (Lewis a/x: Fuc(a1-3/4)[Gal(b1-3/4)]GlcNAc) cannot collapse onto one atom
             free = atomic_mod_dict[bond[1]]
-            breakage = int(bond_label[-1]) if bond_label[-1].isdigit() else next(
-                (a for a in (3, 6, 2, 4, 5) if a in free and not free[a]), 3)
+            positions = [int(p) for p in bond_label.split('-')[-1].split('/') if p.isdigit()][::-1] or [3, 6, 2, 4, 5]
+            breakage = next((a for a in positions if a in free and not free[a]), positions[0])
             atomic_mod_dict[bond[1]][breakage] = 1
     return atomic_mod_dict
 
@@ -706,14 +709,17 @@ def update_global_mods(subg, global_mods, special_residues):
     if all(len(v) > 1 for v in all_labels):
         excluded |= PEPTIDE_ONLY_GLOBAL_MODS
     subg_global_mods = [x for x in global_mods if not (excluded & set(parse_global_mod(x)))]
-    present_specials = [x for x in special_residues if x in node_labels]
+    # residue by residue (the joined labels of Glc(a1-4)Ara contain GlcA), with every uronic acid (IdoA, GalA) as HexA and only phosphate
+    # substituents (Man6P, GlcNAcOP) as P, not the P of Pen, Pse, Pyr or Prop
+    present_specials = [x for x in special_residues if any(re.search(r'(\d|O)P(?![a-z])', v) if x == 'P' else x in v or (
+        x == 'HexA' and map_to_basic(v, obfuscate_ptm = False).startswith(x)) for v in all_labels if len(v) > 1)]
     if not present_specials:
         return subg_global_mods
     if any(k in present_specials for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
         subg_global_mods.append('CO2')
     if 'S' in present_specials:
         subg_global_mods.append('SO4')
-    if 'P' in node_labels:
+    if 'P' in present_specials:
         subg_global_mods.append('PO4')
     return subg_global_mods
 
@@ -1111,6 +1117,11 @@ def domon_costello_to_fragIUPAC(glycan_string, fragment):
     for k, v in skelly_dict.items():
         if v[-1] == 'A':
             excluded_nodes.update(nx_mono.nodes() ^ nx.ancestors(nx_mono, k).union({k}))
+            # as in get_fragment_mass, an A-type cross-ring takes any branch attached to a ring atom it does not retain
+            retained_atoms = mono_attributes[map_to_basic(nx_mono.nodes[k]['string_labels'], obfuscate_ptm = False)]['atoms'][v]
+            for child, _ in nx_mono.in_edges(k):
+                if (pos := nx_mono.edges[child, k]['bond_label'][-1]).isdigit() and int(pos) not in retained_atoms:
+                    excluded_nodes.update(nx.ancestors(nx_mono, child) | {child})
         elif v[-1] in {'B', 'C'}:
             excluded_nodes.update(nx_mono.nodes() ^ nx.ancestors(nx_mono, post_mono).union({post_mono, k}))
         elif v[-1] in {'X', 'Y', 'Z'}:
@@ -1160,12 +1171,12 @@ def domon_costello_to_html(dc_name):
             frag_type = html_nom_parts[0]
             if len(frag_type) > 1:
                 html_nom = html_nom.replace(f'{frag_type}', f"<sup>{frag_type[0]},{frag_type[1]}</sup>{frag_type[2]}")
-        if len(html_nom_parts) == 2:
-            mass_loss = list(html_nom_parts[1])
-            for i, char in enumerate(mass_loss):
-                if char.isnumeric():
-                    mass_loss[i] = f"<sub>{char}</sub>"
-            html_nom = html_nom.replace(f'_{html_nom_parts[1]}', f" - {''.join(mass_loss)}")
+        if len(html_nom_parts) == 2 and html_nom_parts[0] in N_TERM_IONS | C_TERM_IONS:
+            html_nom = f"{html_nom_parts[0]}<sub>{html_nom_parts[1]}</sub>"
+        elif len(html_nom_parts) >= 2 and html_nom_parts[0] == 'M':
+            # as in domon_costello_to_mpl: adducts (+Na) are gains, a leading count (2H2O) stays a multiplier, combinations are split at |
+            terms = ''.join(f" + {x[1:]}" if x.startswith('+') else f" - {x}" for x in '_'.join(html_nom_parts[1:]).split('|'))
+            html_nom = 'M' + re.sub(r'(?<=[A-Za-z])(\d+)', r'<sub>\1</sub>', terms)
         html_name.append(html_nom)
     return ", ".join(html_name)
 
@@ -1187,7 +1198,7 @@ def subgraphs_to_domon_costello(nx_mono, subgs, chain_rank = None):
         chain_rank = list(rank_chains(nx_mono))
     in_children = {}
     for bonding_node, bonded_node, atts in nx_mono.edges(data = True):
-        in_children.setdefault(bonded_node, []).append((bonding_node, atts['bond_label'][-1]))
+        in_children.setdefault(bonded_node, []).append((bonding_node, atts['bond_label'].split('-')[-1]))
     for subg in subgs:
         cuts = []
         # plain reads of the node data, as nx.get_node_attributes costs more than the naming itself
@@ -1199,9 +1210,9 @@ def subgraphs_to_domon_costello(nx_mono, subgs, chain_rank = None):
             cut_children = set()
             for atom, atom_mod in atom_mods.items():
                 if atom_mod in {'bond', 'no_bond'}:
-                    children = [(c, pos) for c, pos in in_children.get(node, []) if c not in cut_children]
-                    cut_node = [c for c, pos in children if pos == str(atom)] or [c for c, pos in children if
-                                                                                  pos == '?']
+                    # only children outside the fragment were cut off; one at an ambiguous (3/4) or unknown (?) position sits wherever atom_mods_init put it
+                    children = [(c, pos) for c, pos in in_children.get(node, []) if c not in cut_children and c not in subg]
+                    cut_node = [c for c, pos in children if pos == str(atom)] or [c for c, pos in children if not pos.isdigit()]
                     if cut_node:
                         cut_children.add(cut_node[0])
                         cuts.append((atom_mod, cut_node[0], node))
@@ -1468,9 +1479,12 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False, max_gl
     global_mods = [x for x in mono_attributes['Global']['mass'] if x not in ['CO2', 'SO4', 'PO4']]
     charge_mods = {-1: ['+Na', '+K', '+Acetonitrile'], 1: ['+Acetate', '+Acetonitrile']}
     global_mods = [mod for mod in global_mods if mod not in charge_mods[np.sign(charge)]]
-    node_labels = ''.join(v for v in nx.get_node_attributes(nx_mono, 'string_labels').values() if len(v) > 1)
+    labels = [v for v in nx.get_node_attributes(nx_mono, 'string_labels').values() if len(v) > 1]
     special_mod_residues = ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn', 'S', 'P']
-    present_special_residues = [x for x in special_mod_residues if x in node_labels]
+    # residue by residue (the joined labels of Glc(a1-4)Ara contain GlcA), with every uronic acid (IdoA, GalA) as HexA and only phosphate
+    # substituents (Man6P, GlcNAcOP) as P, not the P of Pen, Pse, Pyr or Prop
+    present_special_residues = [x for x in special_mod_residues if any(re.search(r'(\d|O)P(?![a-z])', v) if x == 'P' else x in v or (
+        x == 'HexA' and map_to_basic(v, obfuscate_ptm = False).startswith(x)) for v in labels)]
     combos = sorted(global_mods)
     if max_global_mods > 1:
         repeatable = [x for x in combos if x in REPEATABLE_GLOBAL_MODS]
@@ -1516,6 +1530,8 @@ def build_glycopeptide_input(peptide, modification_str, structures = None):
     glycosites = []
     for mod in modification_str.split(';'):
         mod = mod.strip()
+        if not mod:
+            continue
         aa = mod[0]
         rest = mod[1:]
         pos_match = re.match(r'\d+', rest)
@@ -1903,10 +1919,10 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                 for combo in combinations_with_replacement(repeatable, n):
                     global_mods_dict[combine_global_mods(combo)] = sum(global_mods_dict[x] for x in combo)
         all_comps = compositions if is_glycopeptide else [composition]
-        all_mono_labels = ''.join(m * c for comp in all_comps for m, c in comp.items())
-        if any(x in all_mono_labels for x in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
+        # per residue, as the joined labels of {'Hex': 2, 'Ac': 1} contain HexA
+        if any(m in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn'] for comp in all_comps for m in comp):
             global_mods_dict['CO2'] = mono_attributes['Global']['mass']['CO2']
-        if 'S' in all_mono_labels:
+        if any('S' in comp for comp in all_comps):
             global_mods_dict['SO4'] = mono_attributes['Global']['mass']['SO4']
         if any(m == 'P' or m.endswith('P') for comp in all_comps for m in comp):
             global_mods_dict['PO4'] = mono_attributes['Global']['mass']['PO4']
@@ -1997,6 +2013,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | :-
     | Returns a list of tuples containing the observed mass and all of the possible fragment names within the threshold
     """
+    if not len(fragment_masses):
+        return {}
+    if isinstance(input_string, dict) and 'peptide' in input_string and not input_string['peptide'] and len(input_string.get('glycans', [])) == 1:
+        input_string = input_string['glycans'][0]
     glycopeptide_input = (isinstance(input_string, dict) and bool(input_string.get('peptide'))) or (
             isinstance(input_string, str) and '*' in input_string)
     if max_global_mods is None:

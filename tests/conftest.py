@@ -36,7 +36,7 @@ class ResultCollector:
         self.current_dict = None
         self.dict_results = defaultdict(lambda: defaultdict(list))
         self.dict_full_results = defaultdict(lambda: defaultdict(list))
-        self.log_file = "test_results_log.json"
+        self.log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_results_log.json")
         self.previous_results = self.load_previous_results()
         self.gt_hashes = {}
         self.regressed = set()

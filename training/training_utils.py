@@ -180,4 +180,5 @@ def train_model(model, model_name, dataloaders, criterion, optimizer,
  #plt.legend(['Validation Accuracy'], loc = 'best')
   plt.legend()
   plt.savefig(f'{model_name}_metric_plots.png')
+  model.load_state_dict(best_model_wts)
   return model
