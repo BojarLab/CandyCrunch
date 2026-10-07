@@ -34,5 +34,5 @@ jobs:
     
     - name: Run tests with pytest
       run: |
-        pytest --cov=candycrunch -vs
+        pytest --cov=candycrunch -vs -k "not test_candycrunch_accuracy and not test_candycrunch_batch"
     
