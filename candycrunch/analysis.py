@@ -914,7 +914,12 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             continue
         valid_idx = (inner_idx[:, np.newaxis] * len(subg_global_mods) + np.arange(len(subg_global_mods))).ravel()[keep]
         permutation_list = nested_lazy_product_vect(mono_mod_perms, atom_dict_perms, subg_global_mods, valid_idx)
-        for perms, mass in zip(permutation_list, np.round(initial_masses[keep], 5)):
+        # an alditol (or reductively aminated) reducing end has no ring, so its cross-ring only stands in for a cleavage of the open chain on its own;
+        # stacked onto another cleavage it read the Neu5Ac-HexNAc B ion (493) as Neu5Ac on the reduced GalNAc (1,5A + 1,5X, 1,3A - C2H4O2)
+        root_pos = terminals.index(root_node) if mass_tag and root_node == true_root_node else None
+        for perms, mass, count in zip(permutation_list, np.round(initial_masses[keep], 5), counts[keep]):
+            if root_pos is not None and count > 1 and perms[0][root_pos] in A_cross_rings:
+                continue
             annotated_subg = annotate_subgraph(subg, perms[:2], perms[2], terminals)
             subgraph_fragments = add_to_subgraph_fragments(subgraph_fragments, [annotated_subg], [mass])
     return subgraph_fragments

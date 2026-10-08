@@ -280,3 +280,11 @@ def test_supporting_ions():
     # Nothing here tells where the core 1 Gal sits, so its alternatives stay open
     assert not residues['Gal(b1-3) on reducing-end GalNAc']['support'] and residues['Gal(b1-3) on reducing-end GalNAc']['open']
     assert [(c['structure'], [s[0] for s in c['support']], c['against']) for c in out['candidates']] == [(isomer, [510.19], [])]
+
+
+def test_candycrumbs_alditol_cross_ring_alone():
+    # 493.17 is the Neu5Ac-HexNAc B ion, not a fragment of the reduced GalNAc: a cross-ring of an alditol reducing end stands alone (0,4A of a
+    # 6-linked branch, 919.09 in TEST_DICTS[3]), never next to another cleavage (1,5A + 1,5X, or 1,3A - C2H4O2, of Neu5Ac on GalNAc-ol)
+    for g, a_ring in (('Gal(b1-3)[Neu5Ac(a2-6)]GalNAc', '15A_2_Alpha'), ('Neu5Ac(a2-3)Gal(b1-3)GalNAc', '13A_3_Alpha')):
+        out = CandyCrumbs(g, [493.17], charge = -1, simplify = False)[493.17]
+        assert not out or not any(a_ring in x for x in out['Domon-Costello nomenclatures'])
