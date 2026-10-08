@@ -21,12 +21,13 @@ import numpy as np
 import pandas as pd
 try:
     from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRectF, QSize, QUrl, QStringListModel
-    from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QBrush, QShortcut, QFontDatabase
+    from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QBrush, QShortcut, QFontDatabase, \
+        QCursor
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
                                    QToolButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QTextBrowser, QListWidget,
                                    QListWidgetItem, QTreeWidget, QTreeWidgetItem, QTableView, QAbstractItemView, QSplitter, QStackedWidget, QTabWidget, QScrollArea,
                                    QFrame, QFileDialog, QMessageBox, QInputDialog, QDockWidget, QProgressBar, QStyledItemDelegate, QStyleOptionViewItem,
-                                   QStyle, QMenu, QCompleter, QSizePolicy)
+                                   QStyle, QMenu, QCompleter, QSizePolicy, QToolTip)
 except ImportError as error:
     raise ImportError('The CandyCrunch app needs PySide6, which comes with: pip install "candycrunch[gui]"') from error
 from matplotlib.figure import Figure
@@ -301,11 +302,12 @@ class GlycanImages(QObject):
         self.images, self.pending, self.requests, self.order = {}, set(), queue.PriorityQueue(), itertools.count()
         threading.Thread(target = self.render_loop, daemon = True).start()
 
-    def get(self, glycan, compact = True, urgent = False):
-        """Returns the QImage (null if GlycoDraw cannot draw it), or None while it is still being rendered"""
+    def get(self, glycan, compact = True, urgent = False, highlight = None):
+        """Returns the QImage (null if GlycoDraw cannot draw it), or None while it is still being rendered; highlight: (residue indices to keep in full
+        color while the rest is faded, index of the residue whose linkage to mark), e.g., the fragment of a supporting peak and its cleaved bond"""
         if not isinstance(glycan, str) or not glycan:
             return QImage()
-        key = (glycan, compact)
+        key = (glycan, compact) + ((highlight,) if highlight else ())
         if key in self.images:
             return self.images[key]
         if key not in self.pending or urgent:
@@ -326,7 +328,9 @@ class GlycanImages(QObject):
             if key in self.images:
                 continue
             try:
-                image = QImage.fromData(convert_svg_to_png(GlycoDraw(key[0], compact = key[1], suppress = True).as_svg(), None, return_bytes = True, scale = 2))
+                # A hover highlight fades everything but the fragment and marks the cleaved bond in red, on the plain drawing's canvas, so nothing moves
+                highlight = {'highlight_residues': list(key[2][0]), 'highlight_linkages': [key[2][1]] if key[2][1] is not None else None} if len(key) > 2 else {}
+                image = QImage.fromData(convert_svg_to_png(GlycoDraw(key[0], compact = key[1], suppress = True, **highlight).as_svg(), None, return_bytes = True, scale = 2))
             except Exception:
                 image = QImage()
             self.images[key] = image
@@ -334,8 +338,9 @@ class GlycanImages(QObject):
 
 
 class Annotator(QObject):
-    """Runs plot_annotated_spectrum in a background thread; only the newest request is worked on, so scrolling through a table never queues up stale spectra"""
+    """Runs plot_annotated_spectrum, then supporting_ions, in a background thread; only the newest request is worked on, so scrolling through a table never queues up stale spectra"""
     done = Signal(int, object, object, str)
+    support = Signal(int, object)
 
     def __init__(self):
         super().__init__()
@@ -356,7 +361,7 @@ class Annotator(QObject):
             width, height = request['figsize']
             try:
                 with IMPORT_LOCK:
-                    from candycrunch.analysis import plot_annotated_spectrum
+                    from candycrunch.analysis import plot_annotated_spectrum, supporting_ions
                 figure = Figure(figsize = request['figsize'], dpi = 100)
                 FigureCanvasAgg(figure)
                 # Margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it
@@ -376,6 +381,16 @@ class Annotator(QObject):
                                                          clip_on = False, picker = True),
                                               ax.vlines(xs, 0, [ints[k] / (ints.max() or 1) * 100 if h else 0 for k, h in zip(near, hit)], colors = 'none', picker = 5))
                 self.done.emit(request_id, figure, hit_dict, '')
+                # The peaks supporting each residue of a structure (not of a composition, glycopeptide, or MS3 spectrum) follow the spectrum, as they take
+                # up to a second for large glycans
+                if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get(
+                        'ms3_precursor') is None and self.request[0] == request_id:
+                    try:
+                        support = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])), charge = request['charge'],
+                                                  candidates = request['candidates'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'])
+                    except Exception:
+                        support = None
+                    self.support.emit(request_id, support)
             except Exception as error:
                 self.done.emit(request_id, None, None, f'{type(error).__name__}: {error}')
 
@@ -591,11 +606,15 @@ class ChartView(QWidget):
 class SpectrumPanel(QWidget):
     """Annotated MS2 (or MS3) spectrum (plot_annotated_spectrum) plus a fragment table; shared by the results view and the CandyCrumbs tab"""
     ms3_clicked = Signal(int)
+    # (structure, fragment residues, residue of the cleaved linkage) while the mouse is on a supporting peak's marker, None when it leaves it
+    support_hovered = Signal(object)
 
     def __init__(self):
         super().__init__()
         self.annotator, self.request, self.latest, self.canvas, self.toolbar = Annotator(), None, 0, None, None
         self.annotator.done.connect(self.show_figure)
+        self.annotator.support.connect(self.show_support)
+        self.fragment_html, self.hover_targets, self.hovered = '', [], None
         self.controls = QHBoxLayout()
         self.controls.setContentsMargins(6, 4, 6, 0)
         self.summary = _label('', 'hint')
@@ -638,10 +657,11 @@ class SpectrumPanel(QWidget):
         self.relayout.setInterval(400)
         self.relayout.timeout.connect(self.resubmit)
 
-    def annotate(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), **kwargs):
-        """ms3: m/z of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index"""
+    def annotate(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), **kwargs):
+        """ms3: m/z of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index; candidates: competing structures
+        whose distinguishing peaks are listed"""
         self.request = {'structure': structure, 'mzs': [float(x) for x in mzs], 'intensities': [float(x) for x in intensities], 'charge': int(charge),
-                        'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(x) for x in ms3], 'kwargs': kwargs}
+                        'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(x) for x in ms3], 'candidates': list(candidates), 'kwargs': kwargs}
         self.resubmit()
 
     def resubmit(self):
@@ -659,7 +679,10 @@ class SpectrumPanel(QWidget):
             self.relayout.start()
 
     def show_message(self, text):
-        self.request = None
+        self.request, self.hover_targets = None, []
+        if self.hovered is not None:
+            self.hovered = None
+            self.support_hovered.emit(None)
         self.latest = self.annotator.counter + 1
         self.message.setText(text)
         self.stack.setCurrentWidget(self.message)
@@ -678,7 +701,10 @@ class SpectrumPanel(QWidget):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
-        self.canvas = Canvas(figure)
+        self.canvas, self.hover_targets = Canvas(figure), []
+        if self.hovered is not None:
+            self.hovered = None
+            self.support_hovered.emit(None)
         # Pan and zoom hold the canvas' widgetlock, so clicks while using them never count as picks
         self.canvas.mpl_connect('pick_event', lambda event: event.artist in getattr(figure, 'ms3_artists', ()) and len(event.ind) and self.ms3_clicked.emit(int(event.ind[0])))
         self.toolbar = NavigationToolbar2QT(self.canvas, self, coordinates = False)
@@ -703,9 +729,61 @@ class SpectrumPanel(QWidget):
                 flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
                 first = f'<td>{mz:.4f}</td><td align="right">{peaks.get(mz, 0) / top * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
                 rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{theo - mz:+.3f}</td><td align="right">{z}</td></tr>')
-        self.fragments.setHtml(f'<table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Observed m/z</th>'
-                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
-                               f'<th align="right">z</th></tr>{"".join(rows)}</table>')
+        self.fragment_html = (f'<table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Observed m/z</th>'
+                              f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
+                              f'<th align="right">z</th></tr>{"".join(rows)}</table>')
+        self.fragments.setHtml(self.fragment_html)
+
+
+    def show_support(self, request_id, support):
+        """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red) and lists them above the fragment table"""
+        if request_id != self.latest or not support or not (support['residues'] or support['candidates']):
+            return
+        from candycrunch.analysis import domon_costello_to_html
+        tested = [e for e in support['residues'] if e['support'] or e['open']]
+        self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) for e in tested)} of {len(tested)} residues placed by diagnostic fragments')
+        ax = self.canvas.figure.axes[0]
+        # Each marker carries what hovering it shows: the supported residues' fragment and cleaved bond in the drawing (lilac) and a tooltip naming the fragment
+        points = {'support': {}, 'against': {}}
+        for e in support['residues']:
+            for s in e['support']:
+                points['support'].setdefault(s[0], [s[1], (self.request['structure'], s[5], s[6]), f'{s[0]:.2f}: {domon_costello_to_html(list(s[2]))} = {s[3]}<br>places'])[2] += f'<br>{e["name"]}'
+            for a in e['against']:
+                points['against'].setdefault(a[0], [a[1], None, f'{a[0]:.2f}: {domon_costello_to_html(list(a[2]))} = {a[3]}<br>fits'])[2] += f'<br>{a[4]}'
+        for color, side in ((LILAC, 'support'), (CANDY, 'against')):
+            if points[side]:
+                artist = ax.scatter(list(points[side]), [v[0] * 100 + 3 for v in points[side].values()], marker = 'v', s = 45, c = color, edgecolors = 'white',
+                                    linewidths = 0.6, zorder = 7, clip_on = False)
+                self.hover_targets.append((artist, [v[1:] for v in points[side].values()]))
+        self.canvas.mpl_connect('motion_notify_event', self.hover)
+        self.canvas.draw_idle()
+        rows = [f'<tr><td>{e["name"]}</td><td>{"<br>".join(f"{s[0]:.2f} {domon_costello_to_html(list(s[2]))} = {s[3]}" for s in e["support"][:3]) or "none"}</td>'
+                f'<td>{", ".join(e["open"][:3]) + (", ..." if len(e["open"]) > 3 else "")}</td>'
+                f'<td style="color:{CANDY}">{"<br>".join(f"{a[0]:.2f} fits {a[4]}" for a in e["against"][:2])}</td></tr>' for e in tested]
+        rows += [f'<tr><td>vs {c["structure"]}</td><td>{"<br>".join(f"{s[0]:.2f} {domon_costello_to_html(list(s[2]))}" for s in c["support"][:3]) or "none"}</td><td></td>'
+                 f'<td style="color:{CANDY}">{"<br>".join(f"{a[0]:.2f} {domon_costello_to_html(list(a[2]))}" for a in c["against"][:3])}</td></tr>' for c in support['candidates']]
+        self.fragments.setHtml(f'<p><b>Supported by</b> <span style="color:{MUTED}">(intense peaks of a single glycosidic cleavage that no other placement of the residue, '
+                               f'or the other candidate, can form with up to two cleavages; marked lilac in the spectrum, peaks that fit only the alternative in red)'
+                               f'</span></p><table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Residue</th>'
+                               f'<th align="left">Supporting peaks</th><th align="left">Not told apart from</th><th align="left">Peaks against</th></tr>{"".join(rows)}'
+                               f'</table><br>' + self.fragment_html)
+
+
+    def hover(self, event):
+        """Shows the fragment of the supporting (or contradicting) peak under the mouse as a tooltip, and its supported part in the SNFG drawing"""
+        highlight, tip = None, ''
+        for artist, meta in self.hover_targets:
+            hit, info = artist.contains(event)
+            if hit:
+                highlight, tip = meta[info['ind'][0]]
+                break
+        if tip:
+            QToolTip.showText(QCursor.pos(), tip, self.canvas)
+        elif self.hovered is not None or QToolTip.isVisible():
+            QToolTip.hideText()
+        if highlight != self.hovered:
+            self.hovered = highlight
+            self.support_hovered.emit(highlight)
 
 
 class SettingsPanel(QScrollArea):
@@ -1029,7 +1107,7 @@ class ResultsView(QWidget):
     def __init__(self, images):
         super().__init__()
         self.images, self.payload, self.frame, self.row, self.source, self.glytoucan = images, None, None, None, None, None
-        self.alternative, self.ms3_groups, self.ms3_args = None, [], None
+        self.alternative, self.ms3_groups, self.ms3_args, self.support_highlight = None, [], None, None
         top = QHBoxLayout()
         top.setContentsMargins(8, 6, 8, 4)
         self.experiment = QComboBox()
@@ -1160,6 +1238,7 @@ class ResultsView(QWidget):
         self.crumbs.clicked.connect(self.send_to_crumbs)
         self.spectrum_file.currentIndexChanged.connect(self.show_source)
         self.spectrum.ms3_clicked.connect(self.open_ms3)
+        self.spectrum.support_hovered.connect(lambda highlight: (setattr(self, 'support_highlight', highlight), self.row is not None and self.update_drawing()))
         self.ms3_fragment.currentIndexChanged.connect(self.annotate_ms3)
         self.tabs.currentChanged.connect(lambda: self.tabs.currentWidget() is self.ms3_tab and self.annotate_ms3())
         self.map.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and self.select_row(int(event.ind[0])))
@@ -1248,8 +1327,8 @@ class ResultsView(QWidget):
             evidence = list(df.get('evidence', [None] * len(df)))
             column.update(kind = 'bar', bar = [None if v is None else (v / top, e == 'ms1_only') for v, e in zip(column['raw'], evidence)])
             columns.append(column)
-            columns.append(_number_column('Confidence', [p[0][1] if isinstance(p, (list, tuple)) and p else None for p in df['predictions']], 2,
-                                          'CandyCrunch confidence of the structure shown'))
+            columns.append(_number_column('Confidence', [next((x[1] for x in p if x[0] == t and len(x) > 1), None) if isinstance(p, (list, tuple)) else None
+                                                         for p, t in zip(df['predictions'], df['top1_pred'])], 2, 'CandyCrunch confidence of the structure shown'))
             columns.append(_number_column('Fragment score', df.get('annotation_score', [None] * len(df)), 0, 'CandyCrumbs fragment annotation score'))
             columns.append(_number_column('Spectra', df['num_spectra'], 0, 'MS2 spectra pooled into this peak'))
             if 'ms3' in df.columns:
@@ -1305,7 +1384,7 @@ class ResultsView(QWidget):
             self.show_row(self.proxy.mapToSource(rows[0]).row())
 
     def show_row(self, row):
-        self.row, self.alternative = row, None
+        self.row, self.alternative, self.support_highlight = row, None, None
         df = self.frame
         if self.dataset.currentData() == FEATURES:
             # The feature table keeps no link to the per-run rows, so the row of each run is the one with the same structure closest in m/z and RT
@@ -1347,7 +1426,7 @@ class ResultsView(QWidget):
         else:
             preds = df['predictions'].iat[row]
             facts += [('Abundance', f'{_fmt(df["rel_abundance"].iat[row], 2)} %' if 'rel_abundance' in df.columns else ''),
-                      ('Confidence', _fmt(preds[0][1], 3) if isinstance(preds, (list, tuple)) and preds else ''),
+                      ('Confidence', _fmt(next((p[1] for p in preds if p[0] == structure and len(p) > 1), None), 3) if isinstance(preds, (list, tuple)) else ''),
                       ('Fragment score', _fmt(df['annotation_score'].iat[row], 0) if 'annotation_score' in df.columns else ''),
                       ('Spectra', str(df['num_spectra'].iat[row])), ('ppm error', _fmt(df['ppm_error'].iat[row], 1) if 'ppm_error' in df.columns else ''),
                       ('Evidence', str(df['evidence'].iat[row]) if 'evidence' in df.columns and isinstance(df['evidence'].iat[row], str) else ''),
@@ -1375,7 +1454,10 @@ class ResultsView(QWidget):
 
     def update_drawing(self):
         structure = self.alternative or self.frame['top1_pred'].iat[self.row]
-        image = self.images.get(structure, compact = False, urgent = True)
+        # While a supporting peak is hovered, its fragment and cleaved bond are highlighted; the plain drawing stays until that version is rendered (or
+        # if the installed glycowork cannot draw it)
+        image = self.images.get(structure, compact = False, urgent = True, highlight = self.support_highlight[1:]) if self.support_highlight and self.support_highlight[0] == structure else None
+        image = image if image is not None and not image.isNull() else self.images.get(structure, compact = False, urgent = True)
         if image is None:
             self.drawing.setText('Drawing…')
         elif image.isNull():
@@ -1454,9 +1536,11 @@ class ResultsView(QWidget):
         elif structure is None:
             self.spectrum.show_message('Neither a structure nor a composition to annotate this spectrum with')
         else:
+            preds = table['predictions'].iat[r]
             self.spectrum.annotate(structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]),
                                    _mass_tag(settings), settings['sample_prep'],
-                                   ms3 = [p for p, _, _ in self.ms3_groups])
+                                   ms3 = [p for p, _, _ in self.ms3_groups],
+                                   candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [])
             if self.tabs.currentWidget() is self.ms3_tab:
                 self.annotate_ms3()
 
@@ -1478,7 +1562,7 @@ class ResultsView(QWidget):
                                     ms3_precursor = p)
 
     def pick_alternative(self, item):
-        self.alternative = item.data(Qt.UserRole)
+        self.alternative, self.support_highlight = item.data(Qt.UserRole), None
         self.update_drawing()
         self.annotate()
 
@@ -1498,7 +1582,8 @@ class ResultsView(QWidget):
             color, color_label = df['n_files_ms2'].astype(float).values, 'Runs with MS2'
             size = df[[run for run in self.payload['tables'] if run in df.columns]].fillna(0).mean(axis = 1).values
         else:
-            color, color_label = np.array([p[0][1] if isinstance(p, (list, tuple)) and p else np.nan for p in df['predictions']], dtype = float), 'Confidence'
+            color, color_label = np.array([next((x[1] for x in p if x[0] == t and len(x) > 1), np.nan) if isinstance(p, (list, tuple)) else np.nan
+                                           for p, t in zip(df['predictions'], df['top1_pred'])], dtype = float), 'Confidence'
             size = (df['rel_abundance'] if 'rel_abundance' in df.columns else df['num_spectra']).astype(float).values
         size = 12 + 380 * np.sqrt(np.nan_to_num(size) / (np.nanmax(size, initial = 0) or 1))
         known = ~np.isnan(color)
@@ -1551,6 +1636,9 @@ class ResultsView(QWidget):
             self.glytoucan = pickle.load(open(os.path.join(os.path.dirname(__file__), 'glytoucan_mapping.pkl'), 'rb'))
         df = self.frame
         df.loc[df.index[self.row], ['top1_pred', 'curation']] = [structure, how]
+        # The pipeline's supporting peaks were found for the old structure; the spectrum panel shows those of the new one
+        if 'supported_by' in df.columns:
+            df.loc[df.index[self.row], 'supported_by'] = np.nan
         if 'GlyTouCan_ID' in df.columns:
             df.loc[df.index[self.row], 'GlyTouCan_ID'] = self.glytoucan.get(structure, '')
         self.status.emit(f'Assigned {structure}')
@@ -1729,11 +1817,16 @@ class CrumbsTab(QWidget):
         self.structure.returnPressed.connect(self.annotate)
         self.modification.currentIndexChanged.connect(lambda: self.mass_tag.setEnabled(self.modification.currentData() == 'custom'))
         self.go.clicked.connect(self.annotate)
-        images.ready.connect(lambda key: key == (self.structure.text().strip(), False) and self.update_preview())
+        images.ready.connect(lambda key: key[:2] == (self.structure.text().strip(), False) and self.update_preview())
+        self.support_highlight = None
+        self.spectrum.support_hovered.connect(lambda highlight: (setattr(self, 'support_highlight', highlight), self.update_preview()))
 
     def update_preview(self):
         text = self.structure.text().strip()
-        image = self.images.get(text, compact = False, urgent = True) if text and '*' not in text else QImage()
+        # While a supporting peak is hovered, its fragment and cleaved bond are highlighted; the plain drawing stays until that version is rendered (or
+        # if the installed glycowork cannot draw it)
+        image = self.images.get(text, compact = False, urgent = True, highlight = self.support_highlight[1:]) if self.support_highlight and self.support_highlight[0] == text else None
+        image = image if image is not None and not image.isNull() else self.images.get(text, compact = False, urgent = True) if text and '*' not in text else QImage()
         if image is None:
             self.preview.setText('Drawing…')
         elif not text or '*' in text:

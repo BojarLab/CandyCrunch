@@ -24,7 +24,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           mz_to_composition, structure_to_basic, mass_dict)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
-from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES
+from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions
 from candycrunch.utils import read_mzml, read_mzxml, read_mgf
 
 this_dir, this_filename = os.path.split(__file__)
@@ -2018,9 +2018,22 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode, modification, m
     df_out = df_out.drop(columns = ['theo_mz'])
     df_out = combine_charge_states(df_out)
     df_out = combine_adduct_species(df_out, rt_diff = rt_diff)
-    # Map GlyTouCan IDs
-    df_out["GlyTouCan_ID"] = [glytoucan_mapping[g[0][0]] if g and g[0][0] in glytoucan_mapping else '' for g in
-                              df_out["predictions"]]
+    # Map GlyTouCan IDs of the structure reported, which can differ from the first candidate
+    df_out["GlyTouCan_ID"] = [glytoucan_mapping.get(g, '') if isinstance(g, str) else '' for g in df_out['top1_pred']]
+    # MS2 peaks that support the reported structure, per residue: intense single glycosidic cleavages that no other placement of that residue could form
+    # (residues without any other placement are not counted), and peaks that only another placement explains
+    supported_by = []
+    for top1, preds, peaks, charge in zip(df_out['top1_pred'], df_out['predictions'], df_out['peak_d'], df_out['charge']):
+        support = supporting_ions(top1, peaks, charge = int(charge), candidates = [p[0] for p in preds if p[0] != top1],
+                                  mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0), sample_prep = sample_prep) if isinstance(
+            top1, str) and isinstance(peaks, dict) else {'residues': []}
+        tested, texts = [e for e in support['residues'] if e['support'] or e['open']], []
+        for e in tested:
+            names = [re.sub(r'_(\d+)_(.).*', lambda m: m[1] + m[2].lower(), s[2][0]) for s in e['support'][:2]]
+            texts += [e['name'] + ' (' + ', '.join(f'{s[0]:.1f} {n}' for s, n in zip(e['support'], names)) + ')'] if names else []
+            texts += [f"against {e['name']} ({a[0]:.1f} fits {a[4]})" for a in e['against'][:1]]
+        supported_by.append(f"{sum(bool(e['support']) for e in tested)}/{len(tested)} residues supported" + (': ' + '; '.join(texts) if texts else '') if tested else '')
+    df_out['supported_by'] = supported_by
     if (df_out['rel_abundance'] == 0).all():
         df_out = df_out.drop(columns = ['rel_abundance'])
     spectra_out = df_out.pop('peak_d').values.tolist()

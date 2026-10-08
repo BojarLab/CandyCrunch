@@ -40,6 +40,10 @@ def test_gui_results_curation(app):
     assert view.proxy.rowCount() == 1
     view.filter('')
     view.select_row(0)
+    # A hovered supporting peak must leave the glycan map's selection marker alone
+    view.spectrum.support_hovered.emit(('Gal(b1-3)GalNAc', (0,), None))
+    view.show_row(1)
+    view.show_row(0)
     view.curate('Gal(b1-4)GlcNAc', 'reassigned')
     view.select_row(1)
     view.toggle_excluded()
@@ -84,3 +88,45 @@ def test_gui_experiments(app):
     # Moving the last run out of an experiment removes it
     panel.move_runs([panel.files.topLevelItem(1).child(0)], panel.files.topLevelItem(0))
     assert [name for name, _, _ in panel.experiments()] == ['Experiment 1'] and len(panel.paths()) == 3
+
+
+def test_gui_supporting_ions(app):
+    import time
+    from candycrunch import gui
+    panel = gui.SpectrumPanel()
+    panel.annotate('Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc', [510.19, 715.27], [30.0, 100.0], -1, 2.0156, 'underivatized',
+                   candidates = ['Fuc(a1-2)Gal(b1-3)[Gal(b1-4)GlcNAc(b1-6)]GalNAc'])
+    end = time.time() + 120
+    while 'Supported by' not in panel.fragments.toPlainText() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.05)
+    # The supporting peaks sit above the fragment table, which is kept, and their count goes into the summary line
+    text = panel.fragments.toPlainText()
+    assert 'Fuc(a1-2) on Gal(b1-4)GlcNAc' in text and '510.19' in text and 'vs Fuc(a1-2)Gal(b1-3)' in text and 'Observed m/z' in text
+    assert 'residues placed by diagnostic fragments' in panel.summary.text()
+
+
+def test_gui_support_hover(app):
+    import time
+    from matplotlib.backend_bases import MouseEvent
+    from candycrunch import gui
+    panel, hovered = gui.SpectrumPanel(), []
+    panel.support_hovered.connect(hovered.append)
+    g = 'Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc'
+    panel.annotate(g, [510.19, 715.27], [30.0, 100.0], -1, 2.0156, 'underivatized')
+    end = time.time() + 120
+    while not panel.hover_targets and time.time() < end:
+        app.processEvents()
+        time.sleep(0.05)
+    # The mouse on the lilac marker of the B3 ion highlights its residues (Fuc, Gal, GlcNAc of the 6-arm) and the cleaved GlcNAc(b1-6) bond, and moving
+    # off it clears the highlight
+    artist = panel.hover_targets[0][0]
+    x, y = artist.axes.transData.transform(artist.get_offsets()[list(artist.get_offsets()[:, 0]).index(510.19)])
+    panel.hover(MouseEvent('motion_notify_event', panel.canvas, x, y))
+    panel.hover(MouseEvent('motion_notify_event', panel.canvas, 1, 1))
+    assert hovered == [(g, (0, 1, 2), 2), None]
+    # The drawing with that highlight renders
+    images = gui.GlycanImages()
+    while images.get(g, compact = False, highlight = ((0, 1, 2), 2)) is None and time.time() < end:
+        time.sleep(0.05)
+    assert not images.get(g, compact = False, highlight = ((0, 1, 2), 2)).isNull()

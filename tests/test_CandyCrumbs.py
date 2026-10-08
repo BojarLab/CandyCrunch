@@ -3,7 +3,7 @@ import unittest
 import re
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, WATER_MASS
+    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
@@ -265,3 +265,18 @@ def test_candycrumbs_ms3_precursor():
     assert out[204.07]['Domon-Costello nomenclatures'] == [['Z_1_Alpha'], ['M_H2O', 'Y_1_Alpha']]
     # A precursor that is no fragment of the glycan leaves its MS3 spectrum unexplained
     assert all(v is None for v in CandyCrumbs(g, [222.12, 272.1], charge = -1, ms3_precursor = 500.0).values())
+
+
+def test_supporting_ions():
+    # The B3 ion Fuc(a1-2)Gal(b1-4)GlcNAc places the Fuc on the 6-arm Gal, as no other placement of it forms that mass, and is the peak that only this
+    # structure (not its isomer with the Fuc on the core 1 Gal) explains; the Z1 ion of the 6-arm places its Gal and GlcNAc
+    g, isomer = 'Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc', 'Fuc(a1-2)Gal(b1-3)[Gal(b1-4)GlcNAc(b1-6)]GalNAc'
+    out = supporting_ions(g, {510.19: 30.0, 715.27: 100.0}, candidates = [isomer])
+    residues = {e['name']: e for e in out['residues']}
+    fuc = residues['Fuc(a1-2) on Gal(b1-4)GlcNAc']
+    assert fuc['residue'] == 0 and [(s[0], s[2], s[3]) for s in fuc['support']] == [(510.19, ('B_3_Alpha',), 'Fuc(a1-2)Gal(b1-4)GlcNAc')]
+    assert 'Fuc on Gal(b1-3)GalNAc' in fuc['support'][0][4] and not fuc['against']
+    assert [s[2] for s in residues['GlcNAc(b1-6) on reducing-end GalNAc']['support']] == [('Z_1_Beta',)]
+    # Nothing here tells where the core 1 Gal sits, so its alternatives stay open
+    assert not residues['Gal(b1-3) on reducing-end GalNAc']['support'] and residues['Gal(b1-3) on reducing-end GalNAc']['open']
+    assert [(c['structure'], [s[0] for s in c['support']], c['against']) for c in out['candidates']] == [(isomer, [510.19], [])]

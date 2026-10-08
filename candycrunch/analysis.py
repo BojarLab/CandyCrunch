@@ -1,5 +1,7 @@
 import copy
 import math
+import os
+import pickle
 from collections import Counter
 import re
 import warnings
@@ -16,7 +18,7 @@ import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
 from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, calculate_adduct_mass, \
     composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures
-from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies
+from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
 from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
 from scipy.stats import ttest_ind
 
@@ -2225,6 +2227,151 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         else:
             hit_dict[fragment_masses[i]] = None
     return hit_dict
+
+
+_PLACEMENTS = {}
+
+
+def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance = 0.3, top_n_peaks = 20, mass_tag = None, sample_prep = 'underivatized',
+                    reference_glycans = None):
+    """Ties a glycan structure to the MS2 peaks that support it, so a prediction can be checked instead of taken at face value: for each residue, the
+    intense peaks that a single glycosidic cleavage of the structure explains and that no other placement of that residue could explain with up to
+    two cleavages (other placements: the residue with everything attached to it on any other residue of the structure that it is linked to in known
+    glycans of the same class, at a free position); and for each competing candidate structure, the peaks only one of the two explains. On the curated
+    test spectra, such peaks point to the true placement in about 85% of cases, and 43% of residues with other placements get at least one\n
+    | Arguments:
+    | :-
+    | glycan (string): glycan in IUPAC-condensed nomenclature
+    | peaks (dict): MS2 spectrum as m/z : intensity
+    | charge (int): signed precursor charge; default:-1
+    | candidates (list): competing structures (e.g., the other predictions) to compare the glycan with; default:()
+    | mass_tolerance (float): fragment tolerance in Da; default:0.3
+    | top_n_peaks (int): how many of the most intense peaks can support a residue; default:20
+    | mass_tag (float): mass of the glycan label or reducing end modification, as in CandyCrumbs; default:None (alditol)
+    | sample_prep (string): underivatized/permethylated/peracetylated
+    | reference_glycans (list): known structures that define where a donor can attach; default:None (the CandyCrunch vocabulary)\n
+    | Returns:
+    | :-
+    | Returns a dict with 'residues', one dict per residue with a fully specified linkage: 'residue' (index among the monosaccharides of the glycan
+    | string, as GlycoDraw's per_residue), 'name' (donor, linkage and the residue it sits on), 'support' (peaks as (m/z, relative intensity, fragment
+    | names, fragment IUPAC, the placements it rules out, indices of the residues in the fragment, index of the residue whose linkage was cleaved (as
+    | GlycoDraw's highlight_linkages))), 'against' (peaks an alternative placement explains by one glycosidic cleavage and the
+    | glycan cannot, as (m/z, relative intensity, fragment names, fragment IUPAC, placement)) and 'open' (placements no peak rules out); and
+    | 'candidates', one dict per competing structure: 'structure', 'support' and 'against' (peaks only the glycan or only the candidate explains, by a
+    | single glycosidic cleavage, as (m/z, relative intensity, fragment names, fragment IUPAC, residues in the fragment, residue of the cleaved
+    | linkage), residue indices referring to the candidate for 'against')
+    """
+    if not isinstance(glycan, str) or '{' in glycan or not peaks:
+        return {'residues': [], 'candidates': []}
+    glycan_class = get_class(glycan)
+    key = ('default' if reference_glycans is None else hash(tuple(reference_glycans)), glycan_class)
+    if key not in _PLACEMENTS:
+        if reference_glycans is None:
+            with open(os.path.join(os.path.dirname(__file__), 'glycans.pkl'), 'rb') as file:
+                reference_glycans = pickle.load(file)
+        triples = set()
+        for g in reference_glycans:
+            try:
+                gr = glycan_to_nxGraph(g) if '{' not in g and (not glycan_class or get_class(g) == glycan_class) else None
+            except Exception:
+                gr = None
+            if gr is not None:
+                labels = nx.get_node_attributes(gr, 'string_labels')
+                triples.update((labels[next(iter(gr.succ[n]))], labels[n], labels[next(iter(gr.pred[n]))]) for n in gr if n % 2)
+        _PLACEMENTS[key] = triples
+    triples = _PLACEMENTS[key]
+    gr = glycan_to_nxGraph(glycan)
+    labels, paths, canonical = nx.get_node_attributes(gr, 'string_labels'), {}, graph_to_string(gr)
+    for n in sorted(gr, reverse = True):
+        paths[n] = paths.get(next(iter(gr.pred[n]), None), ()) + (labels[n],)
+    monos, root = [p for k, p in paths.items() if k % 2 == 0], max(gr)
+    def node_name(q):
+        # A residue is named by its path towards the reducing end, as far as it takes to tell it apart from every other residue
+        if q == root:
+            return f'reducing-end {labels[q]}'
+        path, d = paths[q], 1
+        while d < len(path) and sum(p[-d:] == path[-d:] for p in monos) > 1:
+            d += 2
+        return path[-1] + ''.join(f'({path[-k]}){path[-k - 1]}' for k in range(2, d + 1, 2))
+    residues = []
+    for n in sorted(gr):
+        if not n % 2 or '?' in labels[n] or '/' in labels[n]:
+            continue
+        child, parent, donor = next(iter(gr.succ[n])), next(iter(gr.pred[n])), labels[n].split('-')[0]
+        placements, subtree = {}, nx.descendants(gr, n)
+        for q in sorted(gr):
+            if q % 2 or q in subtree:
+                continue
+            used = {labels[s].split('-')[1] for s in gr.succ[q] if s != n}
+            # Glycosidic fragments do not depend on the position on the new parent, so one free position this donor takes there is enough
+            link = next((link for c, link, p in sorted(triples) if c == labels[child] and p == labels[q] and link.startswith(donor + '-') and '?' not in link and
+                         '/' not in link and link.split('-')[1] not in used), None)
+            if link is None or q == parent:
+                continue
+            variant = gr.copy()
+            variant.remove_edge(parent, n)
+            variant.add_edge(q, n)
+            variant.nodes[n]['string_labels'] = link
+            variant = graph_to_string(variant)
+            if variant != canonical:
+                placements[variant] = f'{labels[child]} on {node_name(q)}'
+        residues.append((child // 2, f'{labels[child]}({labels[n]}) on {node_name(parent)}', placements))
+    # What explains each of the top peaks in every structure: the single glycosidic cleavages (names, IUPAC) and whether any fragment with up to two
+    # cleavages (a cross-ring only alone) does. The other structures only matter at peaks the glycan explains by a single cleavage (could they
+    # explain it too?) or not at all (do they?), so only those are searched, and the first fragment settles the former
+    top = sorted(peaks.items(), key = lambda x: -x[1])[:top_n_peaks]
+    observed, explained, alternatives = [(float(mz), intensity / (top[0][1] or 1)) for mz, intensity in top], {}, {v for _, _, p in residues for v in p}
+    for g in [glycan] + sorted(alternatives | {c for c in candidates if isinstance(c, str) and '{' not in c and c != glycan}):
+        relevant = range(len(observed)) if g == glycan else [i for i, (single, any_fragment) in explained[glycan].items() if single or not any_fragment]
+        try:
+            nx_mono, _ = input_to_graph(glycopeptide_string_to_input(g))
+            global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = True)
+            subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, [], max_cleavages = 2, fragment_masses = [observed[i][0] for i in relevant],
+                                               threshold = mass_tolerance, mass_tag = mass_tag, charge = charge, sample_prep = sample_prep,
+                                               disable_A_cross_rings = charge > 0 or g in alternatives) if relevant else {}
+        except Exception:
+            continue
+        frag_keys, chain_rank, explained[g] = sorted(subg_frags), list(rank_chains(nx_mono)), {}
+        for i in relevant:
+            single, any_fragment, names_needed = [], False, g == glycan or not explained[glycan][i][1]
+            for z in range(1, abs(charge) + 1):
+                target = observed[i][0] * z - (z - 1) * PROTON_MASS * np.sign(charge)
+                for mass in frag_keys[bisect.bisect_left(frag_keys, target - mass_tolerance):bisect.bisect_right(frag_keys, target + mass_tolerance)]:
+                    graphs = [x for x in subg_frags[mass] if z <= x.number_of_nodes()]
+                    for frag, names in zip(graphs, subgraphs_to_domon_costello(nx_mono, graphs, chain_rank)):
+                        types = [x.split('_')[0] for x in names]
+                        if not types or (len(types) > 1 and any(t[-1] in 'AX' for t in types)):
+                            continue
+                        any_fragment = True
+                        if names_needed and len(types) == 1 and types[0] in ('B', 'C', 'Y', 'Z'):
+                            single.append((tuple(names), mono_frag_to_string(frag), tuple(sorted(frag)),
+                                           next((u for u, v in nx_mono.edges() if (u in frag) != (v in frag)), None)))
+                    if any_fragment and not names_needed:
+                        break
+            explained[g][i] = (single, any_fragment)
+    if glycan not in explained:
+        return {'residues': [], 'candidates': []}
+    out = {'residues': [], 'candidates': []}
+    for residue, name, placements in residues:
+        placements = {v: p for v, p in placements.items() if v in explained}
+        support, against, ruled_out = [], [], set()
+        for i, (mz, rel) in enumerate(observed):
+            beaten = [p for v, p in placements.items() if not explained[v][i][1]] if explained[glycan][i][0] else []
+            # A fragment counts once, at its most intense peak
+            if beaten and explained[glycan][i][0][0][0] not in [s[2] for s in support]:
+                support.append((round(mz, 2), round(rel, 3)) + explained[glycan][i][0][0][:2] + (beaten,) + explained[glycan][i][0][0][2:])
+            ruled_out.update(beaten)
+            if not explained[glycan][i][1]:
+                against += [(round(mz, 2), round(rel, 3), explained[v][i][0][0][0], explained[v][i][0][0][1], p) for v, p in placements.items() if explained[v][i][0]]
+        out['residues'].append({'residue': residue, 'name': name, 'support': support, 'against': against,
+                                'open': [p for p in placements.values() if p not in ruled_out]})
+    for c in candidates:
+        if c in explained and c != glycan:
+            out['candidates'].append({'structure': c, 'support': [(round(mz, 2), round(rel, 3)) + explained[glycan][i][0][0] for i, (mz, rel) in enumerate(observed)
+                                                               if explained[glycan][i][0] and not explained[c][i][1]],
+                                      'against': [(round(mz, 2), round(rel, 3)) + explained[c][i][0][0] for i, (mz, rel) in enumerate(observed)
+                                                  if not explained[glycan][i][1] and explained[c][i][0]]})
+    return out
 
 
 def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, intensities = None, charge = 2, structures = None,
