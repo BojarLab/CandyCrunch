@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
 from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, \
     graph_to_string
-from glycowork.motif.processing import enforce_class
+from glycowork.motif.processing import enforce_class, canonicalize_iupac
 from glycowork.motif.annotate import get_molecular_properties
 from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           glycan_to_composition, PROTON_MASS,
@@ -2124,8 +2124,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to a file containing spectra or preprocessed spectra;
    |                            MS3 spectra in it (.raw/.mzML/.mzXML, or .xlsx from extract_spectra) are used automatically, as fragment evidence and to rank isomers
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
-   | model (PyTorch): trained CandyCrunch model
-   | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
+   | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable that takes a dataframe with one row per
+   |                              (pooled spectrum, candidate composition) input, in input order (index m/z; columns spec_id, RT, intensity, peak_d,
+   |                              num_spectra, precursor_charge, charge (unsigned), composition, compositional_vector, annotation_score; run settings
+   |                              glycan_class, mode, modification, mass_tag, lc, trap, sample_prep in .attrs) and returns, per row, a list of
+   |                              (IUPAC structure, probability) tuples; temperature and test-time augmentation only apply to a CandyCrunch model
+   | glycans (list): full list of glycans used for training CandyCrunch, and the vocabulary a callable model's structures are written like; don't change default without changing model
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
@@ -2222,18 +2226,42 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = modification, lc = lc,
                                            trap = trap,
                                            rt_max_default = rt_max_default, tta_thresh = crumbs_thresh)
-    # Predict glycans from spectra
-    preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
-    # Max over the 5 augmented copies of each test-time augmented input (they come first in the loader), a plain input has one copy
-    tta = df_out.drop_duplicates('input_id')['tta'].values
-    order = np.concatenate([np.flatnonzero(tta), np.flatnonzero(~tta)])
-    sizes = np.where(tta[order], 5, 1)
-    preds_in, conf_in = [None] * len(tta), [None] * len(tta)
-    for i, start, n in zip(order, np.cumsum(sizes) - sizes, sizes):
-        combs = [{p: c for p, c in zip(cp, cc)} for cp, cc in zip(preds[start:start + n], pred_conf[start:start + n])]
-        combs = dict(sorted(average_dicts(combs, mode = 'max').items(), key = lambda x: x[1], reverse = True))
-        preds_in[i], conf_in[i] = list(combs.keys()), list(combs.values())
-    preds, pred_conf = preds_in, conf_in
+    if isinstance(model, torch.nn.Module):
+        # Predict glycans from spectra
+        preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
+        # Max over the 5 augmented copies of each test-time augmented input (they come first in the loader), a plain input has one copy
+        tta = df_out.drop_duplicates('input_id')['tta'].values
+        order = np.concatenate([np.flatnonzero(tta), np.flatnonzero(~tta)])
+        sizes = np.where(tta[order], 5, 1)
+        preds_in, conf_in = [None] * len(tta), [None] * len(tta)
+        for i, start, n in zip(order, np.cumsum(sizes) - sizes, sizes):
+            combs = [{p: c for p, c in zip(cp, cc)} for cp, cc in zip(preds[start:start + n], pred_conf[start:start + n])]
+            combs = dict(sorted(average_dicts(combs, mode = 'max').items(), key = lambda x: x[1], reverse = True))
+            preds_in[i], conf_in[i] = list(combs.keys()), list(combs.values())
+        preds, pred_conf = preds_in, conf_in
+    else:
+        # Any other model is a callable from the distinct inputs (one row per input_id, in order; run settings in attrs) to (structure, probability)
+        # lists. Its structures are written like the vocabulary in glycans (same glycan, same string; no -ol, the reducing end is `modification`),
+        # so GlyTouCan IDs, deduplication, biosynthesis and supporting peaks treat them alike, and repeats of one structure (e.g. beams) add up
+        df_in = df_out.drop_duplicates('input_id').drop(columns = ['input_id', 'tta'])
+        df_in.attrs.update(glycan_class = glycan_class, mode = mode, modification = modification, mass_tag = mass_tag, lc = lc, trap = trap,
+                           sample_prep = sample_prep)
+        vocab = {canonicalize_iupac(g): g for g in glycans}
+        written = {}
+        preds, pred_conf = [], []
+        for ranked in model(df_in):
+            combs = defaultdict(float)
+            for g, c in ranked:
+                if g not in written:
+                    try:
+                        written[g] = canonicalize_iupac(g[:-3] if g.endswith('-ol') else g)
+                    except Exception:
+                        written[g] = g  # unparseable structures have no composition and fail the composition check below
+                    written[g] = vocab.get(written[g], written[g])
+                combs[written[g]] += float(c)
+            combs = sorted(combs.items(), key = lambda x: x[1], reverse = True)
+            preds.append([g for g, _ in combs])
+            pred_conf.append([c for _, c in combs])
     df_out['rel_abundance'] = df_out['intensity']
     df_out['predictions'] = [[(pred, conf) for pred, conf in zip(preds[i], pred_conf[i])] for i in df_out['input_id']]
     _raw_predictions = df_out['predictions'].tolist()
@@ -2406,7 +2434,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group
    | top_n_isomers (int): number of different isomer groups at each composition to retain; default:5
-   | model (PyTorch): trained CandyCrunch model
+   | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable (see wrap_inference); with n_jobs > 1 it has to be picklable (a module-level function or class instance)
    | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3

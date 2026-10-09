@@ -299,7 +299,7 @@ class GlycanImages(QObject):
 
     def __init__(self):
         super().__init__()
-        self.images, self.pending, self.requests, self.order = {}, set(), queue.PriorityQueue(), itertools.count()
+        self.images, self.pending, self.requests, self.order, self.highlights = {}, set(), queue.PriorityQueue(), itertools.count(), []
         threading.Thread(target = self.render_loop, daemon = True).start()
 
     def get(self, glycan, compact = True, urgent = False, highlight = None):
@@ -330,10 +330,19 @@ class GlycanImages(QObject):
             try:
                 # A hover highlight fades everything but the fragment and marks the cleaved bond in red, on the plain drawing's canvas, so nothing moves
                 highlight = {'highlight_residues': list(key[2][0]), 'highlight_linkages': [key[2][1]] if key[2][1] is not None else None} if len(key) > 2 else {}
-                image = QImage.fromData(convert_svg_to_png(GlycoDraw(key[0], compact = key[1], suppress = True, **highlight).as_svg(), None, return_bytes = True, scale = 2))
+                # Compact drawings are shown at up to 0.4 px per SVG unit (tables, candidate lists), so 0.8 stays sharp on 2x screens at a sixth of the memory
+                image = QImage.fromData(convert_svg_to_png(GlycoDraw(key[0], compact = key[1], suppress = True, **highlight).as_svg(), None, return_bytes = True,
+                                                           scale = 0.8 if key[1] else 2))
             except Exception:
                 image = QImage()
             self.images[key] = image
+            if len(key) > 2:
+                # Hover highlights are throwaway and a full N-glycan drawing takes ~2.4 MB, so only the newest 30 are kept
+                self.highlights.append(key)
+                if len(self.highlights) > 30:
+                    old = self.highlights.pop(0)
+                    self.images.pop(old, None)
+                    self.pending.discard(old)
             self.ready.emit(key)
 
 
@@ -554,7 +563,7 @@ class StructureDelegate(QStyledItemDelegate):
         opt.text = ''
         opt.widget.style().drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
         rect = opt.rect.adjusted(6, 4, -6, -4)
-        scale = min(rect.width() / image.width(), rect.height() / image.height(), 0.2)
+        scale = min(rect.width() / image.width(), rect.height() / image.height(), 0.5)
         painter.save()
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         if opt.font.strikeOut():
@@ -741,13 +750,14 @@ class SpectrumPanel(QWidget):
             return
         from candycrunch.analysis import domon_costello_to_html
         tested = [e for e in support['residues'] if e['support'] or e['open']]
-        self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) for e in tested)} of {len(tested)} residues placed by diagnostic fragments')
+        partly = sum(bool(e['support'] and e['open']) for e in tested)
+        self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) and not e["open"] for e in tested)} of {len(tested)} residues placed by diagnostic fragments' + (f', {partly} narrowed down' if partly else ''))
         ax = self.canvas.figure.axes[0]
         # Each marker carries what hovering it shows: the supported residues' fragment and cleaved bond in the drawing (lilac) and a tooltip naming the fragment
         points = {'support': {}, 'against': {}}
         for e in support['residues']:
             for s in e['support']:
-                points['support'].setdefault(s[0], [s[1], (self.request['structure'], s[5], s[6]), f'{s[0]:.2f}: {domon_costello_to_html(list(s[2]))} = {s[3]}<br>places'])[2] += f'<br>{e["name"]}'
+                points['support'].setdefault(s[0], [s[1], (self.request['structure'], s[5], s[6]), f'{s[0]:.2f}: {domon_costello_to_html(list(s[2]))} = {s[3]}<br>rules out'])[2] += f'<br>{", ".join(s[4])}'
             for a in e['against']:
                 points['against'].setdefault(a[0], [a[1], None, f'{a[0]:.2f}: {domon_costello_to_html(list(a[2]))} = {a[3]}<br>fits'])[2] += f'<br>{a[4]}'
         for color, side in ((LILAC, 'support'), (CANDY, 'against')):
@@ -1107,7 +1117,7 @@ class ResultsView(QWidget):
     def __init__(self, images):
         super().__init__()
         self.images, self.payload, self.frame, self.row, self.source, self.glytoucan = images, None, None, None, None, None
-        self.alternative, self.ms3_groups, self.ms3_args, self.support_highlight = None, [], None, None
+        self.alternative, self.ms3_groups, self.ms3_args, self.support_highlight, self.dirty = None, [], None, None, False
         top = QHBoxLayout()
         top.setContentsMargins(8, 6, 8, 4)
         self.experiment = QComboBox()
@@ -1252,15 +1262,16 @@ class ResultsView(QWidget):
         for experiment in session['experiments']:
             for label, (df, spectra) in experiment['tables'].items():
                 df = df.reset_index() if df.index.name == 'm/z' else df
-                for column, empty in (('curation', ''), ('excluded', False)):
+                # _top1 keeps the pipeline's structure, which ties a feature to its per-run rows however either of them is curated
+                for column, empty in (('curation', ''), ('excluded', False), ('_top1', df.get('top1_pred'))):
                     if column not in df.columns:
                         df[column] = empty
                 experiment['tables'][label] = (df, list(spectra) + [None] * (len(df) - len(spectra)))
             if experiment['features'] is not None:
-                for column, empty in (('curation', ''), ('excluded', False)):
+                for column, empty in (('curation', ''), ('excluded', False), ('_top1', experiment['features'].get('top1_pred'))):
                     if column not in experiment['features'].columns:
                         experiment['features'][column] = empty
-        self.session = session
+        self.session, self.dirty = session, False
         self.experiment.blockSignals(True)
         self.experiment.clear()
         self.experiment.addItems([experiment['name'] for experiment in session['experiments']])
@@ -1271,6 +1282,11 @@ class ResultsView(QWidget):
     def show_experiment(self):
         """self.payload is the experiment shown: its files, settings, tables, and feature table"""
         payload = self.payload = self.session['experiments'][max(self.experiment.currentIndex(), 0)]
+        # Spectra are annotated with the tolerance this experiment was predicted with, as the pipeline scored them
+        for panel in (self.spectrum, self.ms3_panel):
+            panel.tolerance.blockSignals(True)
+            panel.tolerance.setValue(payload['settings'].get('ppm_thresh', DEFAULTS['ppm_thresh']) * MZ_REF / 1e6)
+            panel.tolerance.blockSignals(False)
         self.dataset.blockSignals(True)
         self.dataset.clear()
         if payload['features'] is not None and not payload['features'].empty:
@@ -1330,6 +1346,11 @@ class ResultsView(QWidget):
             columns.append(_number_column('Confidence', [next((x[1] for x in p if x[0] == t and len(x) > 1), None) if isinstance(p, (list, tuple)) else None
                                                          for p, t in zip(df['predictions'], df['top1_pred'])], 2, 'CandyCrunch confidence of the structure shown'))
             columns.append(_number_column('Fragment score', df.get('annotation_score', [None] * len(df)), 0, 'CandyCrumbs fragment annotation score'))
+            supported = [s if isinstance(s, str) and s else None for s in df.get('supported_by', [None] * len(df))]
+            counts = [re.match(r'(\d+)/(\d+)', s) if s else None for s in supported]
+            columns.append({'title': 'Support', 'kind': 'number', 'raw': [int(m[1]) / int(m[2]) if m and int(m[2]) else None for m in counts],
+                            'text': [f'{m[1]}/{m[2]}' if m else '' for m in counts], 'tips': supported,
+                            'tip': 'Residues placed by diagnostic MS2 peaks, of those with another possible placement; hover a cell for the peaks'})
             columns.append(_number_column('Spectra', df['num_spectra'], 0, 'MS2 spectra pooled into this peak'))
             if 'ms3' in df.columns:
                 columns.append(_number_column('MS3', [len({round(p) for p, _ in x}) if isinstance(x, list) and x else None for x in df['ms3']], 0,
@@ -1368,7 +1389,10 @@ class ResultsView(QWidget):
 
     def select_row(self, row):
         if row is None:
-            self.row = None
+            # An empty table (a run without glycan peaks) leaves nothing of the previous table's peak in the detail pane
+            self.row, self.source, self.alternative = None, None, None
+            for widget in (self.structure, self.composition, self.facts, self.drawing, self.alternatives):
+                widget.clear()
             self.spectrum.show_message('No glycan peaks to show')
             return
         index = self.proxy.mapFromSource(self.model.index(row, 0))
@@ -1395,7 +1419,7 @@ class ResultsView(QWidget):
                 evidence = df[f'evidence_{run}'].iat[row] if f'evidence_{run}' in df.columns else None
                 if not isinstance(evidence, str) or evidence == 'ms1_only' or table.empty:
                     continue
-                same = (table['top1_pred'] == df['top1_pred'].iat[row]) if isinstance(df['top1_pred'].iat[row], str) else table['top1_pred'].isna()
+                same = (table['_top1'] == df['_top1'].iat[row]) if isinstance(df['_top1'].iat[row], str) else table['_top1'].isna()
                 distance = (table['m/z'] - df['m/z'].iat[row]).abs() * 10 + (table['RT'] - df['RT'].iat[row]).abs()
                 distance = distance[same & ((table['m/z'] - df['m/z'].iat[row]).abs() < 1)]
                 if len(distance):
@@ -1633,14 +1657,25 @@ class ResultsView(QWidget):
         if self.row is None or not isinstance(structure, str):
             return
         if self.glytoucan is None:
-            self.glytoucan = pickle.load(open(os.path.join(os.path.dirname(__file__), 'glytoucan_mapping.pkl'), 'rb'))
-        df = self.frame
-        df.loc[df.index[self.row], ['top1_pred', 'curation']] = [structure, how]
-        # The pipeline's supporting peaks were found for the old structure; the spectrum panel shows those of the new one
-        if 'supported_by' in df.columns:
-            df.loc[df.index[self.row], 'supported_by'] = np.nan
-        if 'GlyTouCan_ID' in df.columns:
-            df.loc[df.index[self.row], 'GlyTouCan_ID'] = self.glytoucan.get(structure, '')
+            with open(os.path.join(os.path.dirname(__file__), 'glytoucan_mapping.pkl'), 'rb') as file:
+                self.glytoucan = pickle.load(file)
+        if structure not in self.glytoucan:
+            with IMPORT_LOCK:
+                from glycowork.motif.processing import glytoucan_to_glycan
+            # A structure outside CandyCrunch's vocabulary (entered by hand) gets the ID glycowork's database has for it, or for its alditol
+            ids = glytoucan_to_glycan([structure, f'{structure}-ol'], revert = True, verbose = False)
+            self.glytoucan[structure] = next((i for g, i in zip((structure, f'{structure}-ol'), ids) if i != g), '')
+        # A feature's structure also goes to the per-run rows it was matched to, so their tables, exports, and the spectrum shown agree with it
+        targets = [(self.frame, self.row)] + ([(self.payload['tables'][run][0], r) for run, r in (self.spectrum_file.itemData(i) for i in range(self.spectrum_file.count()))]
+                                             if self.dataset.currentData() == FEATURES else [])
+        for df, row in targets:
+            df.loc[df.index[row], ['top1_pred', 'curation']] = [structure, how]
+            # The pipeline's supporting peaks were found for the old structure; the spectrum panel shows those of the new one
+            if 'supported_by' in df.columns:
+                df.loc[df.index[row], 'supported_by'] = np.nan
+            if 'GlyTouCan_ID' in df.columns:
+                df.loc[df.index[row], 'GlyTouCan_ID'] = self.glytoucan.get(structure, '')
+        self.dirty = True
         self.status.emit(f'Assigned {structure}')
         self.refresh()
 
@@ -1655,6 +1690,8 @@ class ResultsView(QWidget):
         from glycowork.motif.tokenization import glycan_to_composition
         try:
             structure = canonicalize_iupac(text.strip())
+            # Like the pipeline's structures, reduced glycans go without -ol, since the experiment's reducing end already says so
+            structure = structure[:-3] if structure.endswith('-ol') and self.payload['settings'].get('modification') == 'reduced' else structure
             composition = glycan_to_composition(structure)
         except Exception as error:
             QMessageBox.warning(self, 'Enter structure', f'glycowork cannot read this structure:\n{error}')
@@ -1671,6 +1708,7 @@ class ResultsView(QWidget):
         if self.row is not None:
             df = self.frame
             df.loc[df.index[self.row], 'excluded'] = not df['excluded'].iat[self.row]
+            self.dirty = True
             self.refresh()
 
     def context_menu(self, position):
@@ -1701,7 +1739,7 @@ class ResultsView(QWidget):
 
     def export_frame(self, df):
         """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
-        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3'], errors = 'ignore')
+        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3', '_top1'], errors = 'ignore')
         return out.drop(columns = ['curation']) if not out['curation'].astype(bool).any() else out
 
     def write(self, df, path, kind):
@@ -1776,7 +1814,8 @@ class CrumbsTab(QWidget):
                                       'pasting straight from Excel or a spectrum viewer works.')
         layout.addWidget(self.peaks, 1)
         form = QFormLayout()
-        self.charge = _combo([(f'{z:+d}', z) for z in (-1, -2, -3, -4, 1, 2, 3, 4)])
+        # Up to 8 as in the Predict tab; glycopeptides often carry 5+ and more
+        self.charge = _combo([(f'{z:+d}', z) for z in [*range(-1, -9, -1), *range(1, 9)]])
         self.modification = _combo(REDUCING_ENDS)
         self.mass_tag = _spin(-1000, 3000, 1, 4, ' Da')
         self.sample_prep = _combo(SAMPLE_PREPS)
@@ -1850,7 +1889,9 @@ class CrumbsTab(QWidget):
         self.annotate()
 
     def annotate(self):
-        peaks = [[float(x) for x in re.findall(r'\d+(?:\.\d+)?(?:[eE][-+]?\d+)?', line)[:2]] for line in self.peaks.toPlainText().splitlines()]
+        # A line split by tabs or semicolons without any '.' has decimal commas (Excel or CSV in comma-decimal locales): 1234,5678<Tab>100
+        peaks = [[float(x) for x in re.findall(r'\d+(?:\.\d+)?(?:[eE][-+]?\d+)?', line.replace(',', '.') if '.' not in line and re.search(r'[\t;]', line) else line)[:2]]
+                 for line in self.peaks.toPlainText().splitlines()]
         peaks = [p for p in peaks if p and p[0] > 0]
         if not self.structure.text().strip() or not peaks:
             self.spectrum.show_message('Enter a structure and at least one peak')
@@ -2065,9 +2106,20 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.split)
 
     def run(self):
+        # The results shown are replaced once this run is done
+        if not self.keep_curation():
+            return
         experiments = self.settings.experiments()
         if not experiments:
             self.statusBar().showMessage('Add at least one LC-MS/MS run first', 6000)
+            return
+        if self.runner.dead:
+            QMessageBox.critical(self, 'CandyCrunch', 'The CandyCrunch model could not be loaded, so nothing can be predicted; the error is in the log (View > Log).')
+            return
+        missing = [path for _, paths, _ in experiments for path in paths if not os.path.exists(path)]
+        if missing:
+            QMessageBox.warning(self, 'CandyCrunch', 'These runs are no longer where they were added (moved, renamed, or on another computer); remove them and '
+                                'add them again:\n\n' + '\n'.join(missing))
             return
         files = [file for _, paths, _ in experiments for file in paths]
         settings = self.settings.values()
@@ -2198,12 +2250,29 @@ class MainWindow(QMainWindow):
     def save_session(self):
         path, _ = QFileDialog.getSaveFileName(self, 'Save results', os.path.join(self.store.value('folder', os.path.expanduser('~')), 'results.candycrunch'),
                                               'CandyCrunch results (*.candycrunch)')
-        if path:
-            with open(path, 'wb') as file:
-                pickle.dump(self.results.session, file)
-            self.statusBar().showMessage(f'Saved {os.path.basename(path)}', 6000)
+        if not path:
+            return False
+        with open(path, 'wb') as file:
+            pickle.dump(self.results.session, file)
+        self.results.dirty = False
+        self.statusBar().showMessage(f'Saved {os.path.basename(path)}', 6000)
+        return True
+
+    def keep_curation(self):
+        """Offers to save curated results before a run or other results replace them or the app closes; False if the user cancels"""
+        if not self.results.dirty:
+            return True
+        answer = QMessageBox.question(self, 'CandyCrunch', 'Your curation of the current results is not saved yet. Save it first?',
+                                      QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        return self.save_session() if answer == QMessageBox.Save else answer == QMessageBox.Discard
 
     def open_session(self, path = None):
+        if self.runner.busy:
+            # Opening would replace the run list while results of the runs it held are still to come
+            self.statusBar().showMessage('Wait for the run to finish or cancel it before opening results', 6000)
+            return
+        if not self.keep_curation():
+            return
         if not path:
             path, _ = QFileDialog.getOpenFileName(self, 'Open results', self.store.value('folder', os.path.expanduser('~')), 'CandyCrunch results (*.candycrunch)')
         if not path:
@@ -2254,6 +2323,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.runner.busy and QMessageBox.question(self, 'CandyCrunch', 'A run is still going. Quit anyway?') != QMessageBox.Yes:
+            event.ignore()
+            return
+        if not self.keep_curation():
             event.ignore()
             return
         self.store.setValue('geometry', self.saveGeometry())
