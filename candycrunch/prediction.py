@@ -25,7 +25,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions
-from candycrunch.utils import read_mzml, read_mzxml, read_mgf
+from candycrunch.utils import read_mzml, read_mzxml, read_mgf, centroid_ion_trap
 
 this_dir, this_filename = os.path.split(__file__)
 data_path = os.path.join(this_dir, 'glycans.pkl')
@@ -131,7 +131,7 @@ def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotop
             if len(t_mzs) and np.abs(t_mzs - scan_mzs[mono]).min() <= 0.2:
                 pos.append(t_mzs[np.argmin(np.abs(t_mzs - scan_mzs[mono]))])
                 wts.append(t_ints[np.argmin(np.abs(t_mzs - scan_mzs[mono]))])
-        out[i] = float(np.average(pos, weights = wts))
+        out[i] = float(np.average(pos, weights = wts)) if sum(wts) > 0 else float(scan_mzs[mono])
     # An isotope-triggered MS2 repeats its monoisotopic precursor's fragmentation with partly 13C-shifted fragments; if that precursor was
     # fragmented itself within a minute, the isotope spectrum only blurs the cluster (and can become its apex), so it is dropped
     out_arr, walked, rts = np.array(out), np.array(walked), np.asarray(rts, dtype = float)
@@ -162,7 +162,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     ms3s, row_of = [], {}
-    for spectrum in read_mzml(filepath, centroid_levels = (ms_level, ms_level + 1)):
+    # Survey scans are centroided too: precursor refinement and XIC quantification work on centroids, and profile points of msconvert files (zero
+    # intensities included) crashed the refinement or walked it along a peak's flank
+    for spectrum in read_mzml(filepath, centroid_levels = (1, ms_level, ms_level + 1)):
         if spectrum['ms_level'] == ms_level + 1 and spectrum['precursor'] and mzs:
             # An MS3 spectrum fragments one fragment of an MS2 spectrum; its precursors are listed latest stage first, each referencing its
             # parent scan by native ID (else, as in old converters, it belongs to the latest MS2 spectrum)
@@ -228,16 +230,21 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                                    'ETciD' if 'MS:1003182' in terms or (etd and terms & cid) else 'ETD' if etd else
                                    'ECD' if terms & {'MS:1000250', 'MS:1003294'} else 'HCD' if terms & hcd else 'CID' if terms & cid else None)
                 raw_charge = spectrum['precursor'].get('charge', None)
-                # Without a charge state the instrument never determined the monoisotopic peak, so its trigger m/z gets refined from MS1
-                ms1_scans.append(len(ms1_rts) - 1)
-                refine.append(raw_charge is None)
                 # Some vendor software defaults to charge=1 when undetermined, but Thermo files (filter string) only carry a charge state the
                 # instrument determined from resolved isotopes (orbitrap survey or zoom scans), so their charge 1 is kept
                 if raw_charge is not None and abs(int(raw_charge)) == 1 and 'MS:1000512' not in terms:
                     raw_charge = None
+                # Without a determined charge state the instrument never determined the monoisotopic peak (Bruker's charge 1 precursors are the
+                # isolation m/z, e.g., 384.39 for the T antigen at 384.16), so its trigger m/z gets refined from MS1
+                ms1_scans.append(len(ms1_rts) - 1)
+                refine.append(raw_charge is None)
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                 if intensity:
                     inty = spectrum['precursor'].get('i', np.nan)
+                    # Files without precursor intensities (Bruker) get the summed centroids within 1.5 m/z of the precursor in the preceding survey
+                    # scan, as ThermoRawFileParser computes it; without them, a peak's representative spectrum and abundances were arbitrary
+                    if not inty > 0 and ms1_mzs:
+                        inty = float(ms1_ints[-1][(ms1_mzs[-1] >= mzs[-1] - 1.5) & (ms1_mzs[-1] < mzs[-1] + 1.5)].sum())
                     intensities.append(inty)
     # Sort the highest_i_dict by values
     for key in highest_i_dict.keys():
@@ -327,14 +334,17 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                 activations.append({k.upper(): k for k in PEPTIDE_ION_TYPES if k}.get(
                     str(spectrum['precursorMz'][0].get('activationMethod')).upper()))
                 raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
-                ms1_scans.append(len(ms1_rts) - 1)
-                refine.append(raw_charge is None)
-                # As in process_mzML_stack, a charge 1 is only kept from Thermo files (filter line)
+                # As in process_mzML_stack, a charge 1 is only kept from Thermo files (filter line), and precursors without one are refined
                 if raw_charge is not None and abs(int(raw_charge)) == 1 and 'filterLine' not in spectrum:
                     raw_charge = None
+                ms1_scans.append(len(ms1_rts) - 1)
+                refine.append(raw_charge is None)
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                 if intensity:
                     inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
+                    # As in process_mzML_stack, missing precursor intensities come from the preceding survey scan
+                    if not inty > 0 and ms1_mzs:
+                        inty = float(ms1_ints[-1][(ms1_mzs[-1] >= mzs[-1] - 1.5) & (ms1_mzs[-1] < mzs[-1] + 1.5)].sum())
                     intensities.append(inty)
     # Sort the highest_i_dict by values
     for key in highest_i_dict.keys():
@@ -456,22 +466,8 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
                     prof_mzs.append(first_value + np.arange(first_bin, first_bin + n) * step + fudge_mz)
                     pos += 8 + 4 * fudge + 4 * int(n)
                 prof_mzs = np.concatenate(prof_mzs)
-            prof_ints = np.where(prof_ints < 1, 0, prof_ints)
-            apex = np.where((prof_ints[1:-1] > prof_ints[:-2]) & (prof_ints[1:-1] >= prof_ints[2:]) & (prof_ints[1:-1] > 0))[0] + 1
-            edges = np.array([0] + [a + 1 + np.argmin(prof_ints[a + 1:b]) for a, b in zip(apex[:-1], apex[1:])], dtype = np.int64)
-            while len(apex):
-                peak_ints = np.add.reduceat(prof_ints, edges)
-                peak_mzs = np.add.reduceat(prof_ints * prof_mzs, edges) / peak_ints
-                gaps = np.diff(peak_mzs)
-                if not len(gaps) or gaps.min() >= 0.5:
-                    break
-                # Merges every pair closer than 0.5 m/z whose gap is the smallest among its neighbouring gaps, until none is left
-                left, right = np.concatenate([[np.inf], gaps[:-1]]), np.concatenate([gaps[1:], [np.inf]])
-                edges = np.delete(edges, np.where((gaps < 0.5) & (gaps <= left) & (gaps < right))[0] + 1)
-            if len(apex):
-                # Thermo's centroids of up to 8 profile points sit one bin above their weighted mean on this axis, those of wider peaks on it
-                peak_mzs = peak_mzs + (prof_mzs[1] - prof_mzs[0]) * (
-                            np.add.reduceat((prof_ints > 0).astype(int), edges) < 9)
+            # opentfraw's profile axis sits one bin below Thermo's, which centroid_ion_trap expects
+            peak_mzs, peak_ints = centroid_ion_trap(prof_mzs + (np.median(np.diff(prof_mzs)) if len(prof_mzs) > 1 else 0), prof_ints).T
         if not len(peak_mzs):
             continue
         if table['ms_level'][i] == 1:
@@ -2172,7 +2168,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
    | sample_prep (string): underivatized/permethylated/peracetylated
-   | taxonomy_class (string): which taxonomy class to pull glycans for populating the mass_dic for experimental=True; default:'Mammalia'
+   | taxonomy_level (string): taxonomy level of taxonomy_filter; default:'Class'
+   | taxonomy_filter (string): only glycans of this taxon in df_use supply candidate compositions and database structures; default:'Mammalia'
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
    | plot_glycans (bool): whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False\n
    | Returns:
@@ -2207,14 +2204,14 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         print(
             f"WARNING: File was acquired on {detected_trap} but trap='{trap}' was specified. Overriding to '{detected_trap}'.")
         trap = detected_trap
-        # An orbitrap survey scan pins a precursor's composition to a few ppm, so fewer annotated fragments need to back it up (GlycoGauntlet 2_O/7_N/8_O,
-        # the files with orbitrap MS1, seeds 0-2: F1 0.721 -> 0.865, 0.664 -> 0.670, 0.393 -> 0.455; a lower threshold loses on ion-trap MS1 files)
+    # An orbitrap survey scan pins a precursor's composition to a few ppm, so fewer annotated fragments need to back it up; a lower threshold loses on ion-trap MS1 files
     if getattr(loaded_file, 'attrs', {}).get('detected_ms1_trap') == 'orbitrap':
         crumbs_thresh = max(crumbs_thresh - 2, 0)
     loaded_file = filter_rts(loaded_file, rt_min, rt_max)
     if loaded_file.empty:
         # Without MS2 spectra there are no glycan peaks, so this is the empty result of any other file without them
-        print(f"WARNING: {os.path.basename(spectra_filepath)} has no MS2 spectra left after RT filtering, so it has no glycan peaks.")
+        print(f"WARNING: {os.path.basename(spectra_filepath)} has no MS2 spectra with a precursor m/z in its RT range, so it has no glycan peaks "
+              f"(data-independent acquisition such as Waters MSE has none).")
         df_out = pd.DataFrame(columns = ['predictions', 'composition', 'num_spectra', 'charge', 'RT', 'peak_d', 'annotation_score', 'rel_abundance',
                                          'top_fragments'], index = pd.Index([], name = 'm/z'))
         if _return_intermediate:

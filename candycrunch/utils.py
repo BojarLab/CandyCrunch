@@ -10,12 +10,44 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 
+def centroid_ion_trap(mzs, ints):
+    """centroids a Thermo ion-trap profile spectrum as Thermo's centroider does (it made the centroids of the mzML files CandyCrunch was validated on)\n
+   | Arguments:
+   | :-
+   | mzs (array): profile m/z values, on Thermo's profile axis (as in mzML files from msconvert)
+   | ints (array): profile intensities\n
+   | Returns:
+   | :-
+   | Returns an (n, 2) array of centroid m/z and intensity: profile points below 1 are dropped, the profile is split at the lowest point between
+   | maxima and neighboring centroids closer than 0.5 m/z are merged, each carrying the summed signal of its share of the profile
+   """
+    ints = np.where(ints < 1, 0, ints)
+    apex = np.where((ints[1:-1] > ints[:-2]) & (ints[1:-1] >= ints[2:]) & (ints[1:-1] > 0))[0] + 1
+    if not len(apex):
+        return np.zeros((0, 2))
+    edges = np.array([0] + [a + 1 + np.argmin(ints[a + 1:b]) for a, b in zip(apex[:-1], apex[1:])], dtype = np.int64)
+    while True:
+        peak_ints = np.add.reduceat(ints, edges)
+        peak_mzs = np.add.reduceat(ints * mzs, edges) / peak_ints
+        gaps = np.diff(peak_mzs)
+        if not len(gaps) or gaps.min() >= 0.5:
+            break
+        # Merges every pair closer than 0.5 m/z whose gap is the smallest among its neighbouring gaps, until none is left
+        left, right = np.concatenate([[np.inf], gaps[:-1]]), np.concatenate([gaps[1:], [np.inf]])
+        edges = np.delete(edges, np.where((gaps < 0.5) & (gaps <= left) & (gaps < right))[0] + 1)
+    # Thermo's centroids of peaks spanning 9 or more profile points sit one bin below their intensity-weighted mean (the bin is the median spacing,
+    # as converters drop runs of zero points)
+    peak_mzs = peak_mzs - np.median(np.diff(mzs)) * (np.add.reduceat((ints > 0).astype(int), edges) >= 9)
+    return np.stack([peak_mzs, peak_ints], axis = 1)
+
+
 def read_mzml(filepath, centroid_levels = ()):
     """iterates over the spectra of an .mzML file\n
    | Arguments:
    | :-
    | filepath (string): absolute filepath to the .mzML file
-   | centroid_levels (tuple): MS levels whose profile spectra are centroided (3-point Gaussian fit at each local maximum); default:()\n
+   | centroid_levels (tuple): MS levels whose profile spectra are centroided (Thermo ion-trap scans as by Thermo's centroider, others by a 3-point
+   |                          Gaussian fit at each local maximum); default:()\n
    | Returns:
    | :-
    | Yields a dict per spectrum: element (its XML element, with the params of a referenced param group appended), ms_level (int or None),
@@ -83,7 +115,11 @@ def read_mzml(filepath, centroid_levels = ()):
                                                                         ('MS:1000522', '<i8')) if acc in terms), '<f8'))
         peaks = np.stack((arrays.get('mz', np.zeros(0)), arrays.get('i', np.zeros(0))), axis = -1)
         ms_level = int(first['MS:1000511'].get('value')) if 'MS:1000511' in first else None
-        if ms_level in centroid_levels and 'MS:1000128' in first:
+        if ms_level in centroid_levels and 'MS:1000128' in first and (first['MS:1000512'].get('value', '') if 'MS:1000512' in first else '').startswith('ITMS'):
+            # msconvert writes ion-trap scans as profiles unless asked to peak-pick; Thermo's centroids of them gave GPST000017 F1 0.735 (as from the
+            # .raw file) against 0.695 with the Gaussian fit below
+            peaks = centroid_ion_trap(peaks[:, 0], peaks[:, 1])
+        elif ms_level in centroid_levels and 'MS:1000128' in first:
             mz, inty, centroids = peaks[:, 0].tolist(), peaks[:, 1].tolist(), []
             for pos in range(2, len(inty) - 1):
                 x1, x2, x3, y1, y2, y3 = mz[pos - 1], mz[pos], mz[pos + 1], inty[pos - 1], inty[pos], inty[pos + 1]

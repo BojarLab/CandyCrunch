@@ -3,7 +3,7 @@ import unittest
 import re
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS
+    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
@@ -124,7 +124,8 @@ DERIVATIZATION_GLYCANS = ['Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]
                           'Neu5Gc(a2-3)Gal(b1-3)[Neu5Ac(a2-6)]GalNAc', 'Kdn(a2-3)Gal(b1-4)Glc',
                           'Man6P(a1-2)Man(a1-2)Man',
                           'GalOS(b1-3)GalNAc', 'Neu5Ac9Ac(a2-3)Gal(b1-4)Glc', 'GlcNS6S(a1-4)IdoA2S(a1-4)GlcNS',
-                          'Gal(b1-4)GlcN(a1-6)Glc', 'Xyl(b1-2)Man(b1-4)GlcNAc', 'Fuc(a1-2)Gal4S(b1-3)GalNAc']
+                          'Gal(b1-4)GlcN(a1-6)Glc', 'Xyl(b1-2)Man(b1-4)GlcNAc', 'Fuc(a1-2)Gal4S(b1-3)GalNAc',
+                          'LDManHep(a1-3)LDManHep(a1-5)Kdo', 'Araf(a1-5)Araf(a1-5)Araf', 'QuiNAc(b1-3)GalNAc', 'Kdo4P(a2-4)Kdo']
 
 
 @pytest.mark.parametrize("glycan", DERIVATIZATION_GLYCANS)
@@ -144,6 +145,29 @@ def test_derivatization_sites_match_glycowork():
             n = (composition_to_mass({mono: 1}, sample_prep = prep) - composition_to_mass({}, sample_prep = prep) -
                  composition_to_mass({mono: 1}) + composition_to_mass({})) / DERIVATIZATION_MASSES[prep]
             assert len(positions) == round(n) + 1, (prep, mono)
+
+
+def test_smiles_mono_attributes_reproduce_hand_tables():
+    # The atom-level tables behind every residue without a hand table rebuild each hand table entry they name: masses (to the tables'
+    # rounding), retained carbons and derivatized groups; 0,1A and 2,5X have no cut_type_dict name and 1,2X breaks adjacent ring bonds
+    bases = {'Hex': ['Glc', 'Gal', 'Man'], 'HexNAc': ['GlcNAc', 'GalNAc', 'ManNAc'], 'HexN': ['GlcN', 'GalN', 'ManN'], 'dHex': ['Fuc', 'Rha', 'Qui'],
+             'Pen': ['Xyl', 'Ara', 'Rib', 'Lyx'], 'HexA': ['GlcA', 'GalA', 'IdoA', 'ManA'], 'Neu5Ac': ['Neu5Ac'], 'Neu5Gc': ['Neu5Gc'], 'Kdn': ['Kdn']}
+    for base, residues in bases.items():
+        hand = mono_attributes[base]
+        for residue in residues:
+            generated = smiles_mono_attributes(residue)
+            for fragment in set(hand['mass']) - {'01A', '12X', '25X'}:
+                assert abs(generated['mass'][fragment] - hand['mass'][fragment]) < 1e-4, (residue, fragment)
+                assert [generated[prop][fragment] for prop in ('atoms', 'permethylated', 'peracetylated')] == [
+                    sorted(hand['atoms'][fragment]), hand['permethylated'][fragment], hand['peracetylated'][fragment]], (residue, fragment)
+
+
+def test_candycrumbs_smiles_residues():
+    # A residue without a hand table or a composition (Kdo, heptoses, furanoses) gets one from its atoms instead of leaving the glycan unannotated
+    result = CandyCrumbs('LDManHep(a1-3)LDManHep(a1-5)Kdo', [191.06, 209.07, 429.13], 0.02, charge = -1, mass_tag = 0)
+    assert [result[m]['Domon-Costello nomenclatures'][0] for m in (191.06, 209.07, 429.13)] == [['B_1_Alpha'], ['C_1_Alpha'], ['Y_2_Alpha']]
+    # an anhydro bridge keeps the ring in one piece across it, so 3,6-anhydrogalactose has no cleavage separating C3 from C6
+    assert set(smiles_mono_attributes('3,6-Anhydro-L-Gal')['mass']) == {'3,6-Anhydro-L-Gal', '02X', '02A', '15X', '15A', '25A'}
 
 
 def test_candycrumbs_floating_parts():

@@ -17,8 +17,9 @@ import numpy as np
 import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
 from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, calculate_adduct_mass, \
-    composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures
+    composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS
 from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
+from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
 from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
 from scipy.stats import ttest_ind
 
@@ -91,13 +92,12 @@ cut_type_dict = {'bond': 'Y', 'no_bond': 'Z', 'red_bond': 'C', 'red_no_bond': 'B
 A_cross_rings = {c for c in cut_type_dict if c[-1] == 'A'}
 X_cross_rings = {c for c in cut_type_dict if c[-1] == 'X'}
 ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu']
-AA_masses = {'A': 71.0371, 'R': 156.1011, 'N': 114.0429, 'D': 115.0269,
-             'C': 103.0091, 'E': 129.0425, 'Q': 128.0585, 'G': 57.0214, 'H': 137.0589,
-             'I': 113.0840, 'L': 113.0840, 'K': 128.0949, 'k': 357.25783, 'M': 131.0404, 'F': 147.0684,
-             'P': 97.0527, 'S': 87.0320, 'T': 101.0476, 'W': 186.0793, 'Y': 163.0633, 'V': 99.0684}
-AA_masses['c'] = 103.0091 + 57.02146  # Carbamidomethyl Cys
-AA_masses['j'] = 128.0949 + 42.02180  # Guanidinyl Lys
-AA_masses['m'] = 131.0404 + 15.99491  # Met sulfoxide, the variable modification of nearly every glycoproteomics search
+# Residue masses from glycowork's formulas (the old 4-decimal table was up to 0.1 mDa off), plus the modified residues CandyCrumbs encodes
+AA_masses = {aa: calculate_adduct_mass(f) for aa, f in AMINO_ACID_FORMULAS.items()}
+AA_masses['k'] = AA_masses['K'] + 229.162932  # TMT-labelled Lys
+AA_masses['c'] = AA_masses['C'] + calculate_adduct_mass('C2H3NO')  # Carbamidomethyl Cys
+AA_masses['j'] = AA_masses['K'] + calculate_adduct_mass('CH2N2')  # Guanidinyl Lys
+AA_masses['m'] = AA_masses['M'] + calculate_adduct_mass('O')  # Met sulfoxide, the variable modification of nearly every glycoproteomics search
 MODIFICATION_TOKENS = {
     'Carbamidomethyl': {'C': 'c'},
     'Guanidinyl': {'K': 'j'},
@@ -210,6 +210,100 @@ def global_mod_mass(global_mod, mode_mass = 0.0):
                for x in parse_global_mod(global_mod))
 
 
+# The hand tables split a nonulosonic acid's ring with a hydrogen moving across the 0,4 and 2,4 cleavages (0,4A and 2,4X keep one more)
+ULOSONIC_HYDROGEN_SHIFT = {'02': 0, '04': 1, '24': -1}
+ELEMENT_VALENCES = {'C': (4,), 'N': (3, 5), 'O': (2,), 'P': (3, 5), 'S': (2, 4, 6), 'F': (1,), 'Cl': (1,), 'Br': (1,), 'I': (1,)}
+
+
+def smiles_mono_attributes(label):
+    """Fragment tables of any monosaccharide glycowork can write as SMILES (Kdo, heptoses, furanoses, QuiNAc, ...), read off its atoms\n
+    | Arguments:
+    | :-
+    | label (string): monosaccharide, e.g. 'Kdo4P', 'LDManHepOPEtN' or 'Araf'\n
+    | Returns:
+    | :-
+    | Returns its mono_attributes entry: mass, retained carbons and derivatized groups of every cross-ring fragment cut_type_dict names
+    | (only the 0,2/0,4/2,4 pairs of the hand tables for ulosonic acids) and of the whole residue, keyed by its map_to_basic label
+    """
+    key, tables = map_to_basic(label, obfuscate_ptm = False), []
+    # a substituent at an unknown position (KdoOP, LDManHepOPEtN) counts on every fragment keeping a hydroxyl, as for the residues
+    # derived from compositions, so the ring is read without it and the substituent added afterwards
+    stripped = label
+    for _, mod in [m for m in _split_token(label)[1] if m[0] is None and m[1][0] != 'N' and m[1] != 'A']:
+        cut = stripped.rfind(mod)
+        stripped = stripped[:cut] + stripped[cut + len(mod):]
+    for token in dict.fromkeys((stripped, label)):
+        smiles = glycan_to_smiles(token)
+        atoms, bonds, rings, _ = parse_smiles(smiles)
+        elements = [a[0] for a in atoms]
+        adjacency, valence, double = {i: set() for i in range(len(atoms))}, [0] * len(atoms), set()
+        for a, b, o in bonds:
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+            valence[a] += o
+            valence[b] += o
+            if o == 2:
+                double |= {(a, b), (b, a)}
+        if any(e not in ELEMENT_VALENCES or valence[i] > ELEMENT_VALENCES[e][-1] for i, e in enumerate(elements)):
+            raise ValueError(f"'{token}' has no SMILES with standard valences")
+        hydrogens = [tok.count('H') if tok[0] == '[' else next(v for v in ELEMENT_VALENCES[elements[i]] if v >= valence[i]) - valence[i]
+                     for i, tok in enumerate(re.findall(r'\[[^\]]*\]|Br|Cl|[BCNOPSFI]', smiles))]
+        numbering = None
+        for cycle in _rings_of_atoms(bonds, rings):
+            try:
+                numbering = (cycle, *_number_residue(cycle, elements, adjacency))
+                break
+            except ValueError:
+                continue
+        # atom 0 is the anomeric oxygen, or the group taking its place (Glc1Me, GlcNAc1P), and has to hang off the anomeric carbon alone
+        if numbering is None or len(adjacency[0]) != 1:
+            raise ValueError(f"'{token}' has no sugar ring with a free anomeric position")
+        cycle, number, ring_oxygen, anomeric = numbering
+        ring = [ring_oxygen, anomeric]
+        while step := [a for a in adjacency[ring[-1]] if a in cycle and a not in ring]:
+            ring.append(step[0])
+        # every O-H and N-H is methylated but a sulfate's (a phosphate's charged oxygen counts as its OH); acetylation caps alcohols and free
+        # amines once, never an O or N next to a carbonyl, sulfonyl or phosphoryl group
+        capped = {i for i in range(len(atoms)) if any(elements[o] in 'CSP' and any(elements[q] == 'O' and q != i and (o, q) in double
+                                                                                     for q in adjacency[o]) for o in adjacency[i])}
+        methyls = [hydrogens[i] + (atoms[i][1] < 0) if elements[i] in 'ON' and not (elements[i] == 'O' and any(elements[o] == 'S' for o in adjacency[i]))
+                   else 0 for i in range(len(atoms))]
+        acetyls = [min(hydrogens[i], 1) if elements[i] in 'ON' and i not in capped and not atoms[i][1] else 0 for i in range(len(atoms))]
+        acid = number[anomeric] == 2 and any(number.get(o) == 1 and any((o, q) in double for q in adjacency[o]) for o in adjacency[anomeric])
+        cuts = [(i, j) for i in range(len(ring)) for j in range(i + 2, len(ring)) if (i, j) != (0, len(ring) - 1) and (not acid or f'{i}{j}' in ULOSONIC_HYDROGEN_SHIFT)]
+        table = {'mass': {}, 'atoms': {}, 'permethylated': {}, 'peracetylated': {}}
+        for i, j in [(None, None)] + cuts:
+            # the two parts of the residue once ring bonds i and j are broken; the part with the anomeric carbon is a residue (minus water, and
+            # minus the reducing-end group that the reducing-end bonus adds back), the other part keeps its atoms as they are
+            broken = set() if i is None else {(ring[i], ring[i + 1]), (ring[i + 1], ring[i]), (ring[j], ring[(j + 1) % len(ring)]), (ring[(j + 1) % len(ring)], ring[j])}
+            side, stack = {anomeric}, [anomeric]
+            while stack:
+                atom = stack.pop()
+                for o in adjacency[atom]:
+                    if o not in side and (atom, o) not in broken:
+                        side.add(o)
+                        stack.append(o)
+            if i is not None and ring[i + 1] in side and ring[(j + 1) % len(ring)] in side:
+                continue  # an anhydro bridge or a cyclic acetal keeps the residue in one piece
+            for part, members in [('', side)] if i is None else [('X', side), ('A', set(range(len(atoms))) - side)]:
+                name = key if i is None else f'{i}{j}{part}'
+                if part and name not in cut_type_dict:
+                    continue
+                shift = ULOSONIC_HYDROGEN_SHIFT[f'{i}{j}'] * (1 if part == 'A' else -1) if acid and part else 0
+                reducing = part != 'A'
+                table['mass'][name] = sum(calculate_adduct_mass(elements[a]) + hydrogens[a] * HYDROGEN_MASS for a in members) + (shift - 2 * reducing) * HYDROGEN_MASS - reducing * calculate_adduct_mass('O')
+                table['atoms'][name] = sorted(number[a] for a in members if a in number)
+                table['permethylated'][name] = sum(methyls[a] for a in members) - reducing
+                table['peracetylated'][name] = sum(acetyls[a] for a in members) - reducing
+        tables.append(table)
+    if len(tables) == 1:
+        return tables[0]
+    table, full = tables
+    delta = {prop: full[prop][key] - table[prop][key] for prop in ['mass', *DERIVATIZATION_MASSES]}
+    return {prop: {f: v + delta[prop] if prop != 'atoms' and (table['peracetylated'][f] > 0 or f == key) else v for f, v in values.items()}
+            for prop, values in table.items()}
+
+
 def glycan_to_graph_monos(glycan):
     """Monosaccharide-only view of glycowork's glycan graph; every floating part ({...}) is placed at its first possible position\n
     | Arguments:
@@ -237,15 +331,22 @@ def glycan_to_graph_monos(glycan):
         try:
             comp = glycan_to_composition(label)
         except ValueError:
-            continue
+            comp = {}
         base = [k for k in comp if k not in SUBSTITUENTS]
         modification = get_modification(label)
         positions = re.findall(r'(\d|O)?(PCho|PEtN|Ac|Me|S|P)', modification)
         # glycowork's composition drops what it does not know (Qui3NAc becomes dHex, ManNAcA HexNAc), so a residue is
-        # only derived if its substituents, an alditol, a stereo prefix, a lactone or an aglycone fully explain it
+        # only derived if its substituents, an alditol, a stereo prefix, a lactone or an aglycone fully explain it; a substituent
+        # written straight after another one belongs to it (GlcNAc1PP, Man3PMe, GlcN4PPEtN) and does not sit at an unknown position
         if (len(base) != 1 or comp[base[0]] != 1 or base[0] not in derivatization_sites['permethylated'] or
                 Counter(s for _, s in positions) != {k: v for k, v in comp.items() if k in SUBSTITUENTS and k != '-H2O'} or
-                re.sub(r'(\d|O)?(PCho|PEtN|Ac|Me|S|P)|\d,\dlactone|^[DL]-|-ol$|^1(Ser|Thr|Asn|Cer)$', '', modification)):
+                re.sub(r'(\d|O)?(PCho|PEtN|Ac|Me|S|P)|\d,\dlactone|^[DL]-|-ol$|^1(Ser|Thr|Asn|Cer)$', '', modification) or
+                re.search(r'(?<=[A-NP-Za-z])(PCho|PEtN|Ac|Me|S|P)', modification)):
+            # everything else (Kdo, heptoses, furanoses, QuiNAc, diphosphates, ...) is read off its atoms, if glycowork can write it as SMILES
+            try:
+                mono_attributes[key] = smiles_mono_attributes(label)
+            except ValueError:
+                pass
             continue
         base = base[0]
         # a substituent without a number sits on the amine of a hexosamine (GlcNS), one on O at an unknown hydroxyl
