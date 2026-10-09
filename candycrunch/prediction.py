@@ -45,6 +45,10 @@ candycrunch = candycrunch.eval()
 _trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 
 NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'HCO3-']
+# Trap setting for the PSI-MS instrument model (Bruker amaZon) and mass analyzer terms of an mzML instrument configuration, checked in this order
+ANALYZER_TRAPS = {'MS:1001542': 'amazon', 'MS:1001546': 'amazon', 'MS:1002300': 'amazon', 'MS:1002301': 'amazon', 'MS:1003466': 'amazon',
+                  'MS:1000484': 'orbitrap', 'MS:1000079': 'orbitrap', 'MS:1000078': 'linear', 'MS:1000083': 'linear', 'MS:1000264': 'linear',
+                  'MS:1000084': 'other'}
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
@@ -151,11 +155,11 @@ def process_mzML_stack(filepath, num_peaks = 1000,
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan (the scan= number of the native
    | spectrum ID, else the whole ID), and activation ('CID', 'HCD', 'ETD', 'ECD', 'EThcD', 'ETciD', the fragmentation_method values of CandyCrumbs,
    | with EAD as 'ECD' for its c/z ions; None if not stated), and, if the file has MS3 spectra, ms3 (a list of (MS3 precursor m/z, peak dictionary)
-   | tuples per MS2 spectrum)
+   | tuples per MS2 spectrum); attrs detected_mode, detected_trap (MS2 analyzer), and detected_ms1_trap (survey scan analyzer)
    """
     highest_i_dict = {}
     rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
-    detected_mode, detected_trap = None, None
+    detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     ms3s, row_of = [], {}
     for spectrum in read_mzml(filepath, centroid_levels = (ms_level, ms_level + 1)):
@@ -169,6 +173,11 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 ms3s[row].append((spectrum['precursor']['mz'], dict(sorted(((float(m), float(i)) for m, i in peaks[peaks[:, 1].argsort()][-num_peaks:]),
                                                                            key = lambda x: x[1], reverse = True))))
         if spectrum['ms_level'] == 1:
+            # The survey scan analyzer sets how far the precursor m/z can be trusted (an orbitrap MS1 pins the composition by accurate mass); the
+            # Thermo filter string names it, else the analyzer of the scan's instrument configuration
+            if detected_ms1_trap is None:
+                filt = next((cv.get('value', '') for cv in spectrum['element'].iter('{http://psi.hupo.org/ms/mzml}cvParam') if cv.get('accession') == 'MS:1000512'), '')
+                detected_ms1_trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(filt[:4]) or next((t for a, t in ANALYZER_TRAPS.items() if a in spectrum['instrument']), None)
             peaks_raw = spectrum['peaks']
             if len(peaks_raw) > 0:
                 ms1_rts.append(spectrum['rt'])
@@ -190,9 +199,11 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                             detected_trap = 'linear'
                         elif filt.startswith('FTMS'):
                             detected_trap = 'orbitrap'
-                    elif acc in ('MS:1000484', 'MS:1000079'):
-                        # orbitrap / FT-ICR analyzer terms; vendor-neutral fallback when no Thermo filter string is present
-                        detected_trap = 'orbitrap'
+                # Without a Thermo filter string, the analyzer (or Bruker amaZon model) of the scan's instrument configuration; analyzer terms are
+                # never params of the spectrum itself
+                if detected_trap is None:
+                    detected_trap = next(
+                        (t for a, t in ANALYZER_TRAPS.items() if a in spectrum['instrument']), None)
             peaks = spectrum['peaks']
             mz_i_dict = dict(peaks[peaks[:, 1].argsort()][-num_peaks:])
             if mz_i_dict:
@@ -220,9 +231,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 # Without a charge state the instrument never determined the monoisotopic peak, so its trigger m/z gets refined from MS1
                 ms1_scans.append(len(ms1_rts) - 1)
                 refine.append(raw_charge is None)
-                # Vendor software can default to charge=1 when undetermined;
-                # only trust explicit multiply-charged assignments
-                if raw_charge is not None and abs(int(raw_charge)) == 1:
+                # Some vendor software defaults to charge=1 when undetermined, but Thermo files (filter string) only carry a charge state the
+                # instrument determined from resolved isotopes (orbitrap survey or zoom scans), so their charge 1 is kept
+                if raw_charge is not None and abs(int(raw_charge)) == 1 and 'MS:1000512' not in terms:
                     raw_charge = None
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                 if intensity:
@@ -251,6 +262,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
+    df_out.attrs['detected_ms1_trap'] = detected_ms1_trap
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
     return df_out
@@ -272,7 +284,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     """
     highest_i_dict = {}
     rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
-    detected_mode, detected_trap = None, None
+    detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     ms3s, row_of = [], {}
     for spectrum in read_mzxml(filepath):
@@ -285,6 +297,8 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                 ms3s[row].append((float(prec['precursorMz']), {float(m): float(i) for m, i in zip(spectrum['m/z array'][top_idx],
                                                                                                 spectrum['intensity array'][top_idx])}))
         if spectrum['msLevel'] == 1 and len(spectrum['m/z array']):
+            if detected_ms1_trap is None and str(spectrum.get('filterLine', '')).startswith(('ITMS', 'FTMS')):
+                detected_ms1_trap = 'linear' if spectrum['filterLine'].startswith('ITMS') else 'orbitrap'
             order = np.argsort(spectrum['m/z array'], kind = 'stable')
             ms1_rts.append(float(spectrum['retentionTime']))
             ms1_mzs.append(spectrum['m/z array'][order].astype(np.float32))
@@ -315,7 +329,8 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                 raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
                 ms1_scans.append(len(ms1_rts) - 1)
                 refine.append(raw_charge is None)
-                if raw_charge is not None and abs(int(raw_charge)) == 1:
+                # As in process_mzML_stack, a charge 1 is only kept from Thermo files (filter line)
+                if raw_charge is not None and abs(int(raw_charge)) == 1 and 'filterLine' not in spectrum:
                     raw_charge = None
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                 if intensity:
@@ -343,6 +358,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
+    df_out.attrs['detected_ms1_trap'] = detected_ms1_trap
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
     return df_out
@@ -412,7 +428,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
                     table['charge'][i] = charge if charge > 0 else None
                     table['isolation_width'][i] = params.get('MS2 Isolation Width:') or params.get('MSn Isolation Width:')
     peak_ds, rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], [], []
-    detected_mode, detected_trap = None, None
+    detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
     ms3s, isolations = [], []
     for i, scan in enumerate(range(raw.first_scan, raw.last_scan + 1)):
@@ -459,6 +475,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         if not len(peak_mzs):
             continue
         if table['ms_level'][i] == 1:
+            detected_ms1_trap = detected_ms1_trap or {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(table['analyzer'][i])
             order = np.argsort(peak_mzs, kind = 'stable')
             ms1_index[scan] = len(ms1_rts)
             ms1_rts.append(table['retention_time'][i])
@@ -501,7 +518,8 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         raw_charge = table['charge'][i]
         ms1_scans.append(len(ms1_rts) - 1)
         refine.append(raw_charge is None)
-        charges.append(raw_charge if raw_charge is not None and raw_charge > 1 else None)
+        # The trailer only carries a charge state the instrument determined (else 0, read as None), so a charge 1 is kept as in process_mzML_stack
+        charges.append(raw_charge)
         if intensity:
             # ThermoRawFileParser's precursor intensity: summed centroids within 1.5 m/z of the isolation m/z in the trailer's master scan (tribrids
             # acquire MS2 in parallel with the next survey scan), else in the preceding survey scan; LTQ trailers only carry a 'Master Index:', no scan
@@ -527,6 +545,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
+    df_out.attrs['detected_ms1_trap'] = detected_ms1_trap
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
     return df_out
@@ -1668,8 +1687,8 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         # MS3 spectra written by extract_spectra, as a list of (MS3 precursor m/z, peak dictionary) per MS2 spectrum
         if 'ms3' in loaded_file.columns:
             loaded_file['ms3'] = [ast.literal_eval(x) if isinstance(x, str) else [] for x in loaded_file['ms3']]
-        # Files written by extract_spectra carry the ion mode and analyzer detected from their raw file
-        for k in ('mode', 'trap'):
+        # Files written by extract_spectra carry the ion mode and the MS2 and survey scan analyzers detected from their raw file
+        for k in ('mode', 'trap', 'ms1_trap'):
             if k in loaded_file.columns:
                 detected = loaded_file.pop(k).dropna()
                 loaded_file.attrs[f'detected_{k}'] = detected.iloc[0] if len(detected) else None
@@ -1699,9 +1718,9 @@ def extract_spectra(spectra_filepath, output_filepath = None):
     df['peak_d'] = [str({round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()}) for d in df['peak_d']]
     if 'ms3' in df.columns:
         df['ms3'] = [str([(round(p, 4), {round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()}) for p, d in x]) for x in df['ms3']]
-    # Ion mode and analyzer detected from the raw file would not survive the export, so they travel as columns that load_spectra_filepath
+    # Ion mode and analyzers detected from the raw file would not survive the export, so they travel as columns that load_spectra_filepath
     # turns back into the attrs wrap_inference checks
-    for k in ('mode', 'trap'):
+    for k in ('mode', 'trap', 'ms1_trap'):
         df[k] = df.attrs.get(f'detected_{k}')
     output_filepath = output_filepath or os.path.splitext(spectra_filepath)[0] + '.xlsx'
     df.to_excel(output_filepath, index = False)
@@ -2146,7 +2165,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | spectra (bool): whether to also output the actual spectra used for prediction; default:False
    | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); below it, they are only allowed if more likely than every in-class structure of that composition; default:0.2
-   | crumbs_thresh (float): threshold for annotation score to keep predictions; default:3
+   | crumbs_thresh (float): threshold for annotation score to keep predictions; 2 lower for files with orbitrap survey scans, whose accurate precursor mass already confirms the composition; default:3
    | ppm_thresh (float): ppm error threshold for filtering; default:300
    | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
@@ -2188,6 +2207,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         print(
             f"WARNING: File was acquired on {detected_trap} but trap='{trap}' was specified. Overriding to '{detected_trap}'.")
         trap = detected_trap
+        # An orbitrap survey scan pins a precursor's composition to a few ppm, so fewer annotated fragments need to back it up (GlycoGauntlet 2_O/7_N/8_O,
+        # the files with orbitrap MS1, seeds 0-2: F1 0.721 -> 0.865, 0.664 -> 0.670, 0.393 -> 0.455; a lower threshold loses on ion-trap MS1 files)
+    if getattr(loaded_file, 'attrs', {}).get('detected_ms1_trap') == 'orbitrap':
+        crumbs_thresh = max(crumbs_thresh - 2, 0)
     loaded_file = filter_rts(loaded_file, rt_min, rt_max)
     if loaded_file.empty:
         # Without MS2 spectra there are no glycan peaks, so this is the empty result of any other file without them
@@ -2452,7 +2475,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | spectra (bool): whether to also output the actual spectra used for prediction; default:False
    | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition; default:False
    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); below it, they are only allowed if more likely than every in-class structure of that composition; default:0.2
-   | crumbs_thresh (float): threshold for annotation score to keep predictions; default:3
+   | crumbs_thresh (float): threshold for annotation score to keep predictions; 2 lower for files with orbitrap survey scans, whose accurate precursor mass already confirms the composition; default:3
    | ppm_thresh (float): ppm error threshold for filtering; default:300
    | filter_out (set): set of monosaccharide or modification types to filter out; default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True

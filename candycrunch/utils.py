@@ -20,13 +20,18 @@ def read_mzml(filepath, centroid_levels = ()):
    | :-
    | Yields a dict per spectrum: element (its XML element, with the params of a referenced param group appended), ms_level (int or None),
    | rt (scan start time in minutes; None if absent), peaks ((n, 2) array of m/z and intensity), and precursor (mz, and if given charge and
-   | intensity i, of the first selected ion in the spectrum; None if there is none)
+   | intensity i, of the first selected ion in the spectrum; None if there is none), and instrument (CV accessions of the spectrum's instrument
+   | configuration, i.e., its analyzers and instrument model; those of the first configuration if the scan names none)
    """
-    groups = {}
+    groups, configs = {}, {}
     for _, el in ET.iterparse(filepath):
         tag = el.tag.rsplit('}', 1)[-1]
         if tag == 'referenceableParamGroup':
             groups[el.get('id')] = el
+        elif tag == 'instrumentConfiguration':
+            # Param groups precede the instrument configurations, which hold the instrument model in a referenced group (Thermo) or directly
+            configs[el.get('id')] = {e.get('accession') for p in [el] + [groups[r.get('ref')] for r in el.iter() if r.tag.endswith('referenceableParamGroupRef') and r.get('ref') in groups]
+                                     for e in p.iter() if e.get('accession')}
         elif tag == 'chromatogram':
             el.clear()
         if tag != 'spectrum':
@@ -101,8 +106,13 @@ def read_mzml(filepath, centroid_levels = ()):
             rt = float(rt.get('value'))
             rt = rt * 60.0 if unit == 'hour' else rt / {'minute': 1, 'second': 60.0, 'millisecond': 60000.0}[unit]
         precursor = {key: conv(first[acc].get('value')) for key, acc, conv in (('mz', 'MS:1000744', float), ('charge', 'MS:1000041', int),
-                                                                               ('i', 'MS:1000042', float)) if acc in first} if 'MS:1000744' in first else None
-        yield {'element': el, 'ms_level': ms_level, 'rt': rt, 'peaks': peaks, 'precursor': precursor}
+                                                                               ('i', 'MS:1000042', float)) if
+                     acc in first} if 'MS:1000744' in first else None
+        scan = el.find(f'{ns}scanList/{ns}scan')
+        instrument = configs.get(scan.get('instrumentConfigurationRef') if scan is not None else None,
+                                 next(iter(configs.values()), set()))
+        yield {'element': el, 'ms_level': ms_level, 'rt': rt, 'peaks': peaks, 'precursor': precursor,
+               'instrument': instrument}
         el.clear()
 
 
