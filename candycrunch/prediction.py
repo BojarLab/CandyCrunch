@@ -959,6 +959,36 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 'apex_rt': rt
             })
             active.append(clusters[-1])
+    # A cluster at most a tenth as intense as one at the same m/z whose spectra it continues (within 0.25 min), with a similar MS2 spectrum (cosine
+    # >= 0.75 of square-root intensities in 1 Da bins), is that peak's PGC tail, which can outlast rt_diff from the apex: it joins the peak instead of
+    # becoming a glycan peak of its own (co-eluting isomers fragment differently)
+    by_apex = sorted(clusters, key = lambda c: -c['apex_int'])
+    tail_of = {}
+    for w in by_apex[::-1]:
+        if w['apex_int'] <= 0:
+            continue
+        for c in by_apex:
+            if c['apex_int'] * 0.1 < w['apex_int']:
+                break
+            if abs(c['apex_mz'] - w['apex_mz']) <= mz_diff and np.min(
+                    np.abs(np.subtract.outer(c['RT'], w['RT']))) <= 0.25:
+                vecs = [np.zeros(int(max_mz) + 1), np.zeros(int(max_mz) + 1)]
+                for v, cl in zip(vecs, (c, w)):
+                    for spec in cl['peak_d']:
+                        for m, i in spec.items():
+                            v[int(round(min(max(m, 0), max_mz)))] += i
+                vecs = [np.sqrt(v) / (np.linalg.norm(np.sqrt(v)) + 1e-12) for v in vecs]
+                if vecs[0] @ vecs[1] >= 0.75:
+                    tail_of[id(w)] = c
+                    break
+    for w in by_apex[::-1]:
+        if id(w) in tail_of:
+            c = tail_of[id(w)]
+            while id(c) in tail_of:
+                c = tail_of[id(c)]
+            for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3'):
+                c[key].extend(w[key])
+    clusters = [c for c in clusters if id(c) not in tail_of]
     # Create a condensed dataframe
     condensed_data = []
     for cluster in clusters:
@@ -1271,6 +1301,16 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0):
             window = np.arange(lo[k], hi[k])
             sel = window[(np.abs(rt_vals[window] - rt_vals[k]) < rt_diff) & (first_preds[window] == first_preds[k])]
             reps[k] = sel[np.argmax(conf_first[sel])]
+    # A row without a prediction one or two isotope spacings above a co-eluting predicted row of the same charge is the 13C peak of that glycan,
+    # fragmented on its own (e.g., a header charge kept its precursor from being refined), so it joins that row instead of claiming the peak
+    charges = df['charge'].values
+    for k in np.flatnonzero([p is None for p in first_preds]):
+        iso = [j for n in (1, 2) for j in
+               np.flatnonzero(np.abs(idx_vals[k] - n * ISOTOPE_SPACING / abs(charges[k]) - idx_vals) <= 0.25)
+               if
+               first_preds[j] is not None and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff]
+        if iso:
+            reps[k] = reps[max(iso, key = lambda j: conf_first[j])]
     dedup_df = df.iloc[pd.unique(reps)].copy()
     if abund is not None:
         # A representative carries the abundance of the rows it represents, so a row linking two representatives is not counted twice
@@ -1322,6 +1362,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 np.abs(computed_masses + adduct_mass + multiplier * proton_offset - raw_masses) < mass_tolerance), 'adduct'] = adduct
     new_preds = []
     top_fragments_col = df_out['top_fragments'].tolist()
+    peak_col = df_out['peak_d'].tolist()
     predictions_col = df_out['predictions'].tolist()
     adduct_col = df_out['adduct'].tolist()
     charge_col = df_out['charge'].tolist()
@@ -1345,24 +1386,24 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
         for i, m in enumerate(current_preds):
             m = m[0]
             truth = [True]
-            # Diagnostic ions: a sialic acid in the structure must leave its diagnostic fragment
+            # Diagnostic ions: a sialic acid in the structure must leave its diagnostic fragment (its ion, or the precursor without one or more of its sialic acids)
             for sia in ('Neu5Ac', 'Neu5Gc', 'Kdn'):
                 if sia in m:
                     truth.append(any(abs(mass_dict[sia] + PROTON_MASS * multiplier - j) < double_mass_tolerance or
-                                     abs(assumed_mass - mass_dict[sia] - j) < double_mass_tolerance or
+                                     any(abs(assumed_mass - n * mass_dict[sia] - j) < double_mass_tolerance for n in range(1, m.count(sia) + 1)) or
                                      abs(precursor_mz - ((mass_dict[sia] - addy) / c) - j) < double_mass_tolerance for j
                                      in float_frags))
-                if 'Neu5Gc' not in m:
-                    truth.append(not any(abs(mass_dict['Neu5Gc'] + PROTON_MASS * multiplier - j) < mass_tolerance
-                                         for j in top_frags[:5] if isinstance(j, float)))
-                if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
-                    truth.append(not any(abs(mass_dict['Neu5Ac'] + PROTON_MASS * multiplier - j) < mass_tolerance
-                                         for j in top_frags[:5] if isinstance(j, float)))
-                if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
-                    truth.append(
-                        not any(abs(mass_dict['Neu5Ac'] + PROTON_MASS * multiplier - j) < double_mass_tolerance or
-                                     abs(precursor_mz - mass_dict['Neu5Ac'] - j) < double_mass_tolerance
-                                     for j in top_frags[:10] if isinstance(j, float)))
+            if 'Neu5Gc' not in m:
+                truth.append(not any(abs(mass_dict['Neu5Gc'] + PROTON_MASS * multiplier - j) < mass_tolerance
+                                     for j in top_frags[:5] if isinstance(j, float)))
+            if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
+                truth.append(not any(abs(mass_dict['Neu5Ac'] + PROTON_MASS * multiplier - j) < mass_tolerance
+                                     for j in top_frags[:5] if isinstance(j, float)))
+            if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
+                truth.append(
+                    not any(abs(mass_dict['Neu5Ac'] + PROTON_MASS * multiplier - j) < double_mass_tolerance or
+                            abs(precursor_mz - mass_dict['Neu5Ac'] - j) < double_mass_tolerance
+                            for j in top_frags[:10] if isinstance(j, float)))
             if 'S' in m and len(current_preds) == 1:
                 # Rows exploded from one spectrum share top_frags, so each fragment's composition lookup is cached
                 for t in top_frags[:20]:
@@ -1378,7 +1419,9 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             if c > 1:
                 truth.append(any(j > precursor_mz * 1.2 for j in top_frags[:15]))
             if c == 1:
-                truth.append(all(j < precursor_mz * 1.1 for j in top_frags[:5]))
+                # A singly charged precursor cannot have fragments above its m/z; a weak one (below 20% of the base peak) is a co-isolated ion, not a wrong charge
+                top_peaks = sorted(peak_col[k].items(), key = lambda x: x[1], reverse = True)[:5]
+                truth.append(all(j < precursor_mz * 1.1 or y < 0.2 * top_peaks[0][1] for j, y in top_peaks))
             if len(top_frags) < 2:
                 truth.append(False)
             # Check neutral loss of adduct for adducts
@@ -1744,11 +1787,17 @@ def combine_charge_states(df_out):
     for pred in filtered_top_pred:
         pred_rows = df_filtered[df_filtered['top_pred'] == pred]
         lowest = pred_rows['charge'].abs().min()
-        # Every lowest-charge row absorbs the higher charge states of this glycan that co-elute with it
+        # Every lowest-charge row and the higher charge states of this glycan that co-elute with it are one species, reported by its best-supported
+        # ion (a reported structure, then the most abundant), as the lowest charge alone let a weak row (e.g. imputed with this structure, without a
+        # top1_pred) stand for a reported one, and a z = 1 row cannot match a peak curated at its z = 2 m/z while a z = 2 row matches both
+        absorbed = set()
         for idx, row in pred_rows[pred_rows['charge'].abs() == lowest].iterrows():
-            partners = pred_rows[(pred_rows['charge'].abs() > lowest) & ((pred_rows['RT'] - row['RT']).abs() < 1) & pred_rows.index.isin(df_filtered.index)]
-            df_filtered.at[idx, 'rel_abundance'] += partners['rel_abundance'].sum()
-            df_filtered = df_filtered.drop(partners.index)
+            partners = pred_rows[(pred_rows['charge'].abs() > lowest) & ((pred_rows['RT'] - row['RT']).abs() < 1) & ~pred_rows.index.isin(absorbed)]
+            absorbed.update(partners.index)
+            group = pd.concat([pred_rows.loc[[idx]], partners])
+            rep = group.assign(_weak = group['top1_pred'].isna()).sort_values(['_weak', 'rel_abundance'], ascending = [True, False], kind = 'stable').index[0]
+            df_filtered.at[rep, 'rel_abundance'] = group['rel_abundance'].sum()
+            df_filtered = df_filtered.drop(group.index.drop(rep))
     df_out = pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index()
     df_out.drop(['top_pred'], axis = 1, inplace = True)
     return df_out

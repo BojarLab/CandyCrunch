@@ -32,7 +32,7 @@ def centroid_ion_trap(mzs, ints):
         gaps = np.diff(peak_mzs)
         if not len(gaps) or gaps.min() >= 0.5:
             break
-        # Merges every pair closer than 0.5 m/z whose gap is the smallest among its neighbouring gaps, until none is left
+        # Merges every pair closer than 0.5 m/z whose gap is the smallest among its neighboring gaps, until none is left
         left, right = np.concatenate([[np.inf], gaps[:-1]]), np.concatenate([gaps[1:], [np.inf]])
         edges = np.delete(edges, np.where((gaps < 0.5) & (gaps <= left) & (gaps < right))[0] + 1)
     # Thermo's centroids of peaks spanning 9 or more profile points sit one bin below their intensity-weighted mean (the bin is the median spacing,
