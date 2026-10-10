@@ -1767,15 +1767,16 @@ def extract_spectra(spectra_filepath, output_filepath = None):
 
 
 def combine_charge_states(df_out):
-    """looks for several charges at the same RT with the same top prediction and combines their relative abundances\n
+    """looks for several charges at the same RT with the same top prediction composition and combines their relative abundances\n
     | Arguments:
     | :-
     | df_out (dataframe): prediction dataframe generated within wrap_inference\n
     | Returns:
     | :-
-    | Returns prediction dataframe where the singly-charged state now carries the sum of abundances
+    | Returns prediction dataframe where one row per co-eluting charge-state group (a reported structure, then the most abundant) carries the sum of abundances
     """
-    df_out['top_pred'] = [k[0][0] if len(k) > 0 else np.nan for k in df_out.predictions]
+    # Charge states are grouped by the composition of their top prediction, as the isomer chosen from a z = 1 and a z = 2 spectrum of one glycan can differ
+    df_out['top_pred'] = [stringify_dict(get_comp(k[0][0])) if len(k) > 0 else np.nan for k in df_out.predictions]
     repeated_top_pred = df_out['top_pred'].value_counts()
     repeated_top_pred = repeated_top_pred[repeated_top_pred > 1].index.tolist()
     filtered_top_pred = []
@@ -2335,15 +2336,15 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out['predictions'] = [[(pred, conf) for pred, conf in zip(preds[i], pred_conf[i])] for i in df_out['input_id']]
     _raw_predictions = df_out['predictions'].tolist()
     # Check correctness of glycan class & mass
-    df_out['predictions'] = [[g for g in preds if g[1] > pred_thresh and get_comp(g[0]) == comp] for preds, comp in
-                             zip(df_out.predictions, df_out.composition)]
+    df_out['isomers'] = [[g for g in preds if g[1] > pred_thresh / 10 and get_comp(g[0]) == comp] for preds, comp in
+                         zip(df_out.predictions, df_out.composition)]
     # A cross-class structure needs extra_thresh, unless it is more likely than every in-class isomer of that composition:
     # the class prior may veto a composition's cross-class structures, but should not make the row pick a less likely isomer
-    best_in_class = [max([g[1] for g in preds if enforce_class(g[0], glycan_class)], default = 0) for preds in df_out.predictions]
+    best_in_class = [max([g[1] for g in preds if g[1] > pred_thresh and enforce_class(g[0], glycan_class)], default = 0) for preds in df_out.isomers]
     df_out['predictions'] = [
         [(g[0], round(g[1], 4)) for g in preds if
-         enforce_class(g[0], glycan_class, g[1], extra_thresh = extra_thresh) or 0 < best_in <= g[1]][:5]
-        for preds, best_in in zip(df_out.predictions, best_in_class)
+         g[1] > pred_thresh and (enforce_class(g[0], glycan_class, g[1], extra_thresh = extra_thresh) or 0 < best_in <= g[1])][:5]
+        for preds, best_in in zip(df_out.isomers, best_in_class)
     ]
     # Cross-validate: for spectra where exact composition equality eliminated all model
     # predictions, run CandyCrumbs on the model's top mass-compatible prediction.
@@ -2413,6 +2414,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 if _score > crumbs_thresh:
                     _gn, _gc = _model_tops[_idx]
                     df_out.iat[_idx, df_out.columns.get_loc('predictions')] = [(_gn, round(_gc, 4))]
+                    df_out.iat[_idx, df_out.columns.get_loc('isomers')] = [(_gn, round(_gc, 4))]
                     df_out.iat[_idx, df_out.columns.get_loc('composition')] = get_comp(_gn)
                     df_out.iat[_idx, df_out.columns.get_loc('annotation_score')] = float(_score)
     df_out['charge'] = [c * multiplier for c in df_out['charge']]
@@ -2422,6 +2424,23 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         [round(float(frag[0]), 4) for frag in sorted(peak_d.items(), key = lambda x: x[1], reverse = True)[:frag_num]]
         for peak_d in df_out['peak_d']
     ]
+    # Fragment evidence overrules the model's top isomer only when it is decisive: an isomer (down to a tenth of pred_thresh, of any class) that explains at
+    # least two of the 20 most intense peaks by a single glycosidic cleavage which the top isomer cannot explain at all, beyond any such peaks of the top
+    # isomer; before domain_filter, which vets the new order (supporting_ions without reference glycans only compares the candidates, not every
+    # placement of each residue), and only for rows that can pass crumbs_thresh
+    reordered = []
+    for preds, isomers, peaks, charge, score in zip(df_out['predictions'], df_out['isomers'], df_out['peak_d'],
+                                                    df_out['charge'], df_out['annotation_score']):
+        others = [g for g in isomers if preds and g[0] != preds[0][0] and score > crumbs_thresh]
+        compared = {c['structure']: len(c['against']) - len(c['support']) for c in supporting_ions(
+            preds[0][0], peaks, charge = int(charge), candidates = [g[0] for g in others],
+            mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0),
+            sample_prep = sample_prep, reference_glycans = [])['candidates']} if others and isinstance(peaks,
+                                                                                                       dict) else {}
+        best = next((g for g in others if compared.get(g[0], 0) >= 2 and compared[g[0]] == max(compared.values())),
+                    None)
+        reordered.append([(best[0], round(best[1], 4))] + [g for g in preds if g[0] != best[0]][:4] if best else preds)
+    df_out['predictions'] = reordered
     # Filter out wrong predictions via diagnostic ions etc.
     if experimental:
         df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep,
