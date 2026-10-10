@@ -29,6 +29,7 @@
 936.47266,22.84,Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[GlcNAc(b1-3)]GalNAc,1,
 936.505013,20.46,Fuc(a1-2)Gal(b1-3/4)GlcNAc(b1-3/6)[GlcNAc(b1-3/6)]GalNAc,1,
 966.35,18.52,Neu5Ac(a2-3)Gal(b1-3)[Neu5Ac(a2-6)]GalNAc,1,
+941.48,20.71,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1
 975.5,28.35,Fuc(a1-2)Gal(b1-3)[Gal(b1-4)GlcNAc6S(b1-6)]GalNAc,1,
 975.5,19.13,Fuc(a1-2)Gal(b1-3/4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,2.120423391,
 1032.477541,20.03,GlcNAc(a1-4)Gal(b1-4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,1,
