@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](https://github.com/bojarlab/candycrunch/blob/main/LICENSE)
 
 ## What is CandyCrunch?
-**CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and and downstream spectrum processing tools. These are further described in our manuscript [Urban et al. (2024)](https://www.nature.com/articles/s41592-024-02314-6) &ndash; ***Predicting glycan structure from tandem mass spectrometry via deep learning*** published in Nature Methods.
+**CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and downstream spectrum processing tools. These are further described in our manuscript [Urban et al. (2024)](https://www.nature.com/articles/s41592-024-02314-6) &ndash; ***Predicting glycan structure from tandem mass spectrometry via deep learning*** published in Nature Methods.
 
 ## Install CandyCrunch
 #### Development version:
@@ -67,7 +67,7 @@ If you would like to run our main inference function from the command line, you 
 --filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
 --ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
 --pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
---crumbs_thresh, type=float: minimum CandyCrumbs annotation score to keep a prediction; default:3 <br />
+--crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap survey scans); default:3 <br />
 --extra_thresh, type=float: prediction confidence threshold at which to allow cross-class predictions; default:0.2 <br />
 --frag_num, type=int: number of top fragments to show per spectrum; default:100 <br />
 --supplement, type=bool: whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True <br />
@@ -95,7 +95,7 @@ Several files, or a folder of Thermo .raw, mzML, mzXML, or mgf files, are harmon
 ```
 
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
-### `wrap_inference` (in `CandyCrunch.prediction`) <br>
+### `wrap_inference` (in `candycrunch.prediction`) <br>
 Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `CandyCrunch`  
   
 #### Requires at a minimum:  
@@ -103,17 +103,17 @@ Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `C
 - spectra_filepath, type = string: a filepath to a Thermo .raw, mzML, mzXML, or mgf file or a .xlsx file <br />
 - glycan_class,type = string: the glycan class measured ("N", "O", "lipid"/"free")
 </pre>
-Thermo .raw, mzML, mzXML, and mgf files are internally processed into extracted spectra; .raw files are read directly (via [opentfraw](https://github.com/Sigilweaver/OpenTFRaw)), without any conversion or Thermo software. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `CandyCrunch.prediction`) writes such an xlsx from a .raw, mzML, mzXML or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept).
+Thermo .raw, mzML, mzXML, and mgf files are internally processed into extracted spectra; .raw files are read directly (via [opentfraw](https://github.com/Sigilweaver/OpenTFRaw)), without any conversion or Thermo software. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `candycrunch.prediction`) writes such an xlsx from a .raw, mzML, mzXML or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept).
 <details>
 <summary>
 
 #### Optional arguments:
 </summary>
 <pre>
-model, type=Pytorch object: loaded from a checkpoint of a trained CandyCrunch model  <br />
+model, type=Pytorch object or callable: the trained CandyCrunch model (default), or any structure predictor as a callable that takes a dataframe with one row per (pooled spectrum, candidate composition) and returns a list of (IUPAC structure, probability) tuples per row <br />
 glycans, type=list: ordered list of glycans used to train CandyCrunch which can be predicted by the model <br />
-bin_num, type=list: number of bins to separate the ms2 spectrum into <br />
-frag_num, type=list: number of top fragments to show in df_out per spectrum; default:100 <br />
+bin_num, type=int: number of bins to separate the ms2 spectrum into; default:2048 <br />
+frag_num, type=int: number of top fragments to show in df_out per spectrum; default:100 <br />
 max_charge, type=int: maximum signed charge to consider; the sign sets the mass spectrometry mode (negative or positive); default:-3 <br />
 modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
 | 
@@ -129,7 +129,7 @@ spectra, type=bool: whether to also output the actual spectra used for predictio
 get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
 filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
 ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
-crumbs_thresh, type=float: minimum CandyCrumbs annotation score to keep a prediction; default:3 <br />
+crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap survey scans); default:3 <br />
 sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
 extra_thresh, type=float: prediction confidence threshold at which to allow cross-class predictions (e.g., predicting N-glycans in O-glycan samples); default:0.2 <br />
 supplement, type=bool: whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True <br />
@@ -166,20 +166,20 @@ annotated_spectra_df = wrap_inference("C:/myfiles/my_spectra.mzML", glycan_class
 
 </details>
 
-### `wrap_inference_batch` (in `CandyCrunch.prediction`) <br>
+### `wrap_inference_batch` (in `candycrunch.prediction`) <br>
 Wrapper function to predict glycan structures from multiple LC-MS/MS files using CandyCrunch. <br />
 This function works similarly to `wrap_inference` except a list of filenames is provided and a tuple is returned: a feature table and a dictionary of output DataFrames, one for each input file, keyed by their filenames. <br />
 The feature table has one row per isomer group with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID and the number of files with MS2 evidence, followed by its relative abundance in each file and an `evidence_<file>` column per file ('strong'/'weak' from MS2, 'ms1_only' if it was gap-filled from MS1). The first column holds the glycans, so the table can go straight into glycowork's `get_differential_expression` with the file columns as groups. <br />
 Precursors are clustered by m/z across files within the mass tolerance, and glycan predictions are assigned to groups based on the most common prediction in the group across files. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
 
-The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_threshold.  
-At each composition, the top_n_isomers isomer groups are kept, preferring groups seen in more files and then more abundant ones. For files with MS1 scans (.raw, mzML, mzXML), an isomer group without MS2 in a file is filled in from MS1 if the file shows a genuine chromatographic peak for it within intra_cat_threshold that is at least as intense as the weakest precursor that got MS2 in that file <br />
+The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_thresh.
+At each composition, the top_n_isomers isomer groups are kept, preferring groups seen in more files and then more abundant ones. For files with MS1 scans (.raw, mzML, mzXML), an isomer group without MS2 in a file is filled in from MS1 if the file shows a genuine chromatographic peak for it within intra_cat_thresh that is at least as intense as the weakest precursor that got MS2 in that file <br />
 
 #### Requires at a minimum:  
 <pre>
 - spectra_filepath_list, type = list: list of filepaths to Thermo .raw, mzML, mzXML, or mgf files and/or .xlsx files <br />
 - glycan_class, type = string: the glycan class measured ("N", "O", "lipid"/"free") <br />
-- intra_cat_threshold, type = float: minutes the RT of a structure can differ from the mean of a group. <br />
+- intra_cat_thresh, type = float: minutes the RT of a structure can differ from the mean of a group. <br />
 </pre>
 
 #### Optional arguments:
@@ -197,22 +197,22 @@ combined_batch, results_dict = wrap_inference_batch(spectra_filepath_list, 'O', 
   
 #### This is what `results_dict` would look like
 </summary>
-<pre>{'my_spectra_exp1: pd.DataFrame(...),
- 'my_spectra_exp2: pd.DataFrame(...),
- 'my_spectra_exp3: pd.DataFrame(...),
- 'my_spectra_exp4: pd.DataFrame(...)}
+<pre>{'my_spectra_exp1': pd.DataFrame(...),
+ 'my_spectra_exp2': pd.DataFrame(...),
+ 'my_spectra_exp3': pd.DataFrame(...),
+ 'my_spectra_exp4': pd.DataFrame(...)}</pre>
 </details>
 
 
 ## Using CandyCrumbs &ndash; MS2 fragment annotation
-### `CandyCrumbs` (in `CandyCrunch.analysis`) <br>
+### `CandyCrumbs` (in `candycrunch.analysis`) <br>
 Wrapper function to annotate MS2 fragments using `CandyCrumbs`  
   
 #### Requires at a minimum:
 <pre>
-- glycan_string, type=string: a glycan in IUPAC-condensed format <br />
-- fragment_masses, type=list: all observed masses which are to be annotated with a possible fragment names <br />
-- mass_threshold, type=float: the maximum tolerated mass difference betweem observed masses and possible fragments 
+- input_string, type=string or dict: a glycan in IUPAC-condensed format, a composition, or a glycopeptide <br />
+- fragment_masses, type=list: all observed masses which are to be annotated with possible fragment names <br />
+- mass_threshold, type=float: the maximum tolerated mass difference between observed masses and possible fragments; default:None (0.5 Da, or 10 ppm for glycopeptides)
 </pre>
 ```python
 condensed_iupac_glycan = 'Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3)]Gal(b1-4)Glc'
@@ -241,23 +241,23 @@ sample_prep, type=string: options are 'underivatized', 'permethylated', and 'per
   
 #### This is what `annotated_fragments_dict` would look like
 </summary>
-<pre>{425.07: {'Theoretical fragment masses': [425.12955],
+<pre>{425.07: {'Theoretical fragment masses': [425.13007],
   'Domon-Costello nomenclatures': [['02A_3_Alpha', 'M_H2O']],
   'Fragment charges': [-1]},
- 443.07: {'Theoretical fragment masses': [443.1401],
+ 443.07: {'Theoretical fragment masses': [443.14062],
   'Domon-Costello nomenclatures': [['02A_3_Alpha']],
   'Fragment charges': [-1]},
- 546.19: {'Theoretical fragment masses': [546.18775],
-  'Domon-Costello nomenclatures': [['Y_3_Beta', 'Y_2_Alpha']],
+ 546.19: {'Theoretical fragment masses': [546.20393],
+  'Domon-Costello nomenclatures': [['Y_2_Alpha', 'Y_3_Beta']],
   'Fragment charges': [-1]},
- 1216.32: {'Theoretical fragment masses': [1216.43105],
+ 1216.32: {'Theoretical fragment masses': [1216.44723],
   'Domon-Costello nomenclatures': [['M_C2H4O2']],
   'Fragment charges': [-1]}}</pre>
 </details>
 
 It isn't always easy to quickly visualise the Domon-Costello nomenclature. Here is an example of how we can use GlycoDraw to visualise one of the outputs:
 ```python
-#This will calculate where on the glycan the fragments occured and return a valid GlycoDraw input
+#This will calculate where on the glycan the fragments occurred and return a valid GlycoDraw input
 fragment_iupac = domon_costello_to_fragIUPAC('Gal(a1-3)Gal(b1-4)GlcNAc(b1-6)[GalNAc(b1-4)GlcNAc(b1-3)]Gal(b1-4)Glc', ['Y_3_Beta', 'Y_2_Alpha'])
 
 #Then we can simply draw the result with GlycoDraw

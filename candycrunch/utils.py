@@ -142,13 +142,10 @@ def read_mzml(filepath, centroid_levels = ()):
             rt = float(rt.get('value'))
             rt = rt * 60.0 if unit == 'hour' else rt / {'minute': 1, 'second': 60.0, 'millisecond': 60000.0}[unit]
         precursor = {key: conv(first[acc].get('value')) for key, acc, conv in (('mz', 'MS:1000744', float), ('charge', 'MS:1000041', int),
-                                                                               ('i', 'MS:1000042', float)) if
-                     acc in first} if 'MS:1000744' in first else None
+                                                                               ('i', 'MS:1000042', float)) if acc in first} if 'MS:1000744' in first else None
         scan = el.find(f'{ns}scanList/{ns}scan')
-        instrument = configs.get(scan.get('instrumentConfigurationRef') if scan is not None else None,
-                                 next(iter(configs.values()), set()))
-        yield {'element': el, 'ms_level': ms_level, 'rt': rt, 'peaks': peaks, 'precursor': precursor,
-               'instrument': instrument}
+        instrument = configs.get(scan.get('instrumentConfigurationRef') if scan is not None else None, next(iter(configs.values()), set()))
+        yield {'element': el, 'ms_level': ms_level, 'rt': rt, 'peaks': peaks, 'precursor': precursor, 'instrument': instrument}
         el.clear()
 
 

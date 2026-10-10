@@ -13,7 +13,6 @@ def str_to_bool(value):
 
 def main():
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
-    #parser.add_argument('-c', '--config', help='Path to the config file', required=True)
     parser.add_argument('--spectra_filepath', help='Path(s) to spectra files and/or folders of Thermo .raw/.mzML/.mzXML/.mgf files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
@@ -30,7 +29,7 @@ def main():
     parser.add_argument('--get_missing', help='Whether to output peaks without prediction', type=str_to_bool, required=False)
     parser.add_argument('--ppm_thresh', help='Mass tolerance in ppm for peak grouping, composition matching and ppm error filtering', type=float, required=False)
     parser.add_argument('--pred_thresh', help='Prediction confidence threshold', type=float, required=False)
-    parser.add_argument('--crumbs_thresh', help='Minimum CandyCrumbs annotation score to keep a prediction', type=float, required=False)
+    parser.add_argument('--crumbs_thresh', help='CandyCrumbs annotation score a prediction has to exceed to be kept', type=float, required=False)
     parser.add_argument('--extra_thresh', help='Confidence threshold to allow cross-class predictions', type=float, required=False)
     parser.add_argument('--frag_num', help='Number of top fragments to report per spectrum', type=int, required=False)
     parser.add_argument('--filter_out', help='Composition elements to filter out/ignore, space-separated', type=str, nargs='*', required=False)
@@ -68,6 +67,8 @@ def main():
             df_out, spectra_out = df_out
             # Rounded as in extract_spectra, which keeps every peak dictionary below Excel's 32,767-character cell limit
             df_out['peak_d'] = [{round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()} if isinstance(d, dict) else d for d in spectra_out]
+            if 'ms3' in df_out.columns:
+                df_out['ms3'] = [[(round(p, 4), {round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()}) for p, d in x] if isinstance(x, list) else x for x in df_out['ms3']]
         # Per-file tables are indexed by m/z; the combined feature table has a plain row index that is not worth writing
         df_flat = df_out.reset_index() if df_out.index.name else df_out
         if path.endswith('.csv'):

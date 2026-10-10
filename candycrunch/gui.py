@@ -392,8 +392,7 @@ class Annotator(QObject):
                 self.done.emit(request_id, figure, hit_dict, '')
                 # The peaks supporting each residue of a structure (not of a composition, glycopeptide, or MS3 spectrum) follow the spectrum, as they take
                 # up to a second for large glycans
-                if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get(
-                        'ms3_precursor') is None and self.request[0] == request_id:
+                if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get('ms3_precursor') is None and self.request[0] == request_id:
                     try:
                         support = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])), charge = request['charge'],
                                                   candidates = request['candidates'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'])
@@ -837,7 +836,7 @@ class SettingsPanel(QScrollArea):
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.inputs['glycan_class'] = _combo(GLYCAN_CLASSES)
         self.mode = _combo([('Negative', 'negative'), ('Positive', 'positive')])
-        self.mode.setToolTip('Overridden by the polarity stored in .raw/mzML/mzXML files')
+        self.mode.setToolTip('Overridden by the polarity stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
         self.charge = _spin(1, 8, 1)
         self.charge.setToolTip('Highest absolute precursor charge considered for composition matching')
         self.inputs['modification'] = _combo(REDUCING_ENDS)
@@ -846,7 +845,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['sample_prep'] = _combo(SAMPLE_PREPS)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
-        self.inputs['trap'].setToolTip('Overridden by the instrument stored in .raw/mzML/mzXML files')
+        self.inputs['trap'].setToolTip('Overridden by the instrument stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
         form.addRow('Glycans', self.inputs['glycan_class'])
         form.addRow('Ion mode', self.mode)
         form.addRow('Max. charge', self.charge)
@@ -866,7 +865,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['top_n_isomers'] = _spin(1, 50, 1)
         self.inputs['top_n_isomers'].setToolTip('Isomer groups kept per composition across runs')
         self.inputs['n_jobs'] = _spin(1, max(1, os.cpu_count() or 1), 1)
-        self.inputs['n_jobs'].setToolTip('Runs processed in parallel; each needs its own memory, and step-by-step progress is not shown for them')
+        self.inputs['n_jobs'].setToolTip('Runs processed in parallel; each needs its own memory')
         form.addRow('RT tolerance', self.inputs['intra_cat_thresh'])
         form.addRow('Isomers per composition', self.inputs['top_n_isomers'])
         form.addRow('Parallel runs', self.inputs['n_jobs'])
@@ -892,7 +891,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['pred_thresh'] = _spin(0, 1, 0.005, 3)
         self.inputs['pred_thresh'].setToolTip('Minimum prediction confidence')
         self.inputs['crumbs_thresh'] = _spin(0, 100, 1, 1)
-        self.inputs['crumbs_thresh'].setToolTip('Minimum CandyCrumbs fragment annotation score to keep a prediction')
+        self.inputs['crumbs_thresh'].setToolTip('CandyCrumbs fragment annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap survey scans)')
         self.inputs['extra_thresh'] = _spin(0, 1, 0.05, 2)
         self.inputs['extra_thresh'].setToolTip('Confidence from which structures of another glycan class are allowed')
         self.inputs['frag_num'] = _spin(1, 1000, 10)
@@ -913,7 +912,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('Peak width', self.inputs['rt_diff'])
         form.addRow('Mass tolerance', self.inputs['ppm_thresh'])
         form.addRow('Min. confidence', self.inputs['pred_thresh'])
-        form.addRow('Min. fragment score', self.inputs['crumbs_thresh'])
+        form.addRow('Fragment score above', self.inputs['crumbs_thresh'])
         form.addRow('Cross-class confidence', self.inputs['extra_thresh'])
         form.addRow('Top fragments', self.inputs['frag_num'])
         form.addRow(self.inputs['supplement'])
@@ -939,9 +938,8 @@ class SettingsPanel(QScrollArea):
         self.inputs['experimental'].toggled.connect(lambda on: (self.inputs['taxonomy_level'].setEnabled(on), self.inputs['taxonomy_filter'].setEnabled(on)))
         self.reset.clicked.connect(lambda: self.set_values(DEFAULTS))
         self.remove.clicked.connect(self.remove_selected)
-        self.experiment_button.clicked.connect(
-            lambda: self.move_runs([item for item in self.files.selectedItems() if item.parent() is not None],
-                                   self.add_experiment(self.values()), rename = True))
+        self.experiment_button.clicked.connect(lambda: self.move_runs([item for item in self.files.selectedItems() if item.parent() is not None],
+                                                                      self.add_experiment(self.values()), rename = True))
         # Only while the run list has focus, else Delete in any other widget would remove the selected runs
         QShortcut(QKeySequence.Delete, self.files, self.remove_selected).setContext(Qt.WidgetShortcut)
         self.files.currentItemChanged.connect(lambda: self.show_experiment(self.current_experiment()))
@@ -958,8 +956,7 @@ class SettingsPanel(QScrollArea):
 
     def add_experiment(self, settings, name = None):
         names = {self.files.topLevelItem(i).text(0) for i in range(self.files.topLevelItemCount())}
-        item = QTreeWidgetItem(
-            [name or next(f'Experiment {n}' for n in itertools.count(1) if f'Experiment {n}' not in names)])
+        item = QTreeWidgetItem([name or next(f'Experiment {n}' for n in itertools.count(1) if f'Experiment {n}' not in names)])
         item.setFlags(item.flags() | Qt.ItemIsEditable)
         font = item.font(0)
         font.setBold(True)
@@ -982,8 +979,7 @@ class SettingsPanel(QScrollArea):
     def rename_experiment(self, item):
         if item.parent() is not None:
             return
-        others = {self.files.topLevelItem(i).text(0) for i in range(self.files.topLevelItemCount()) if
-                  self.files.topLevelItem(i) is not item}
+        others = {self.files.topLevelItem(i).text(0) for i in range(self.files.topLevelItemCount()) if self.files.topLevelItem(i) is not item}
         name = item.text(0).strip() or 'Experiment'
         name = next(x for x in itertools.chain([name], (f'{name} {n}' for n in itertools.count(2))) if x not in others)
         if name != item.text(0):
@@ -1037,8 +1033,7 @@ class SettingsPanel(QScrollArea):
         """Adds runs to the current experiment, or to a new one with the settings shown"""
         existing, target = set(self.paths()), self.current_experiment()
         for path in paths:
-            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if
-                     x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) else [path]
+            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) else [path]
             for file in found:
                 if file.lower().endswith(SPECTRA_SUFFIXES + ('.xlsx',)) and os.path.abspath(file) not in existing:
                     existing.add(os.path.abspath(file))
@@ -1065,8 +1060,7 @@ class SettingsPanel(QScrollArea):
         if self.shown is not None and self.files.indexOfTopLevelItem(self.shown) >= 0:
             self.shown.settings = self.values()
         items = [self.files.topLevelItem(i) for i in range(self.files.topLevelItemCount())]
-        return [(e.text(0), [e.child(j).data(0, Qt.UserRole) for j in range(e.childCount())], e.settings) for e in items
-                if e.childCount()]
+        return [(e.text(0), [e.child(j).data(0, Qt.UserRole) for j in range(e.childCount())], e.settings) for e in items if e.childCount()]
 
     def paths(self):
         return [path for _, paths, _ in self.experiments() for path in paths]
@@ -1390,9 +1384,13 @@ class ResultsView(QWidget):
     def select_row(self, row):
         if row is None:
             # An empty table (a run without glycan peaks) leaves nothing of the previous table's peak in the detail pane
-            self.row, self.source, self.alternative = None, None, None
-            for widget in (self.structure, self.composition, self.facts, self.drawing, self.alternatives):
+            self.row, self.source, self.alternative, self.ms3_groups = None, None, None, []
+            for widget in (self.structure, self.composition, self.facts, self.drawing, self.alternatives, self.ms3_fragment):
                 widget.clear()
+            self.spectrum_file.setVisible(False)
+            if self.tabs.currentWidget() is self.ms3_tab:
+                self.tabs.setCurrentIndex(0)
+            self.tabs.setTabVisible(self.tabs.indexOf(self.ms3_tab), False)
             self.spectrum.show_message('No glycan peaks to show')
             return
         index = self.proxy.mapFromSource(self.model.index(row, 0))
@@ -1540,8 +1538,7 @@ class ResultsView(QWidget):
             for m, i in pairs + [(np.inf, 0)]:
                 if group and m - group[0][0] > settings['ppm_thresh'] * MZ_REF / 2e6:
                     ms, ints = zip(*group)
-                    pooled[float(np.average(ms, weights = ints)) if sum(ints) else float(np.mean(ms))] = float(
-                        sum(ints))
+                    pooled[float(np.average(ms, weights = ints)) if sum(ints) else float(np.mean(ms))] = float(sum(ints))
                     group = []
                 group.append((m, i))
             if pooled:
@@ -1581,9 +1578,8 @@ class ResultsView(QWidget):
         if 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups):
             p, peaks, _ = self.ms3_groups[self.ms3_fragment.currentIndex()]
             settings = self.payload['settings']
-            self.ms3_panel.annotate(self.ms3_args[0], list(peaks.keys()), list(peaks.values()), self.ms3_args[1],
-                                    _mass_tag(settings), settings['sample_prep'],
-                                    ms3_precursor = p)
+            self.ms3_panel.annotate(self.ms3_args[0], list(peaks.keys()), list(peaks.values()), self.ms3_args[1], _mass_tag(settings),
+                                    settings['sample_prep'], ms3_precursor = p)
 
     def pick_alternative(self, item):
         self.alternative, self.support_highlight = item.data(Qt.UserRole), None
@@ -1778,10 +1774,10 @@ class ResultsView(QWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             self.write(self.export_frame(self.payload['features']), stem + suffix, suffix)
-            for run, (table, _) in self.payload['tables'].items():
-                if not table.empty:
-                    self.write(self.export_frame(table), f'{stem}_{run}{suffix}', suffix)
-            self.status.emit(f'Exported {len(self.payload["tables"]) + 1} tables next to {os.path.basename(path)}')
+            runs = [(run, table) for run, (table, _) in self.payload['tables'].items() if not table.empty]
+            for run, table in runs:
+                self.write(self.export_frame(table), f'{stem}_{run}{suffix}', suffix)
+            self.status.emit(f'Exported {len(runs) + 1} tables next to {os.path.basename(path)}')
         except Exception as error:
             QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
         finally:

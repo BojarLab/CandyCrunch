@@ -31,11 +31,8 @@ def transform_mz(x):
                                                    augment_intensity = 0.25), n_noise_peaks = 10, max_noise_intensity = 0.005)
 
 
-def rt_jitter(RT):
+def transform_rt(RT):
     return max(0, RT + random.uniform(-0.1, 0.1))
-
-
-transform_rt = rt_jitter
 
 
 class SimpleDataset(torch.utils.data.Dataset):
