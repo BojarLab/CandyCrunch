@@ -12,6 +12,8 @@ from candycrunch.prediction import *
 from glycowork.motif.graph import compare_glycans, get_possible_topologies, graph_to_string
 from glycowork.motif.annotate import get_glycan_similarity
 from itertools import product
+from scipy.optimize import linear_sum_assignment
+from glycowork.motif.processing import canonicalize_iupac
 import time
 
 BASE_DIR = pathlib.Path(__file__).parent.parent  # Go up one level from the test file
@@ -34,34 +36,17 @@ RT_TOLERANCE = 1.0
 BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.65}
 
 
-def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array2_alt = None):
-    matches = []
-    used_predictions = set()
-    for i, (mass1, rt1) in enumerate(array1):
-        # Find all potential matches based on mass
-        mass_diffs = np.abs(array2[:, 0] - mass1)
-        potential_matches = np.where(mass_diffs <= mass_threshold)[0]
-        if array2_alt is not None:
-            mass_diffs_alt = np.abs(array2_alt[:, 0] - mass1)
-            potential_alt = np.where(mass_diffs_alt <= mass_threshold)[0]
-            potential_matches = list(set(list(potential_matches) + list(potential_alt)))
-        potential_matches = [j for j in potential_matches if j not in used_predictions]
-        if len(potential_matches) == 0:
-            continue
-        # If only one match, check retention time
-        if len(potential_matches) == 1:
-            j = potential_matches[0]
-            if abs(rt1 - array2[j, 1]) <= rt_threshold:
-                matches.append((i, j))
-                used_predictions.add(j)
-        else:
-            # Multiple matches, find the closest retention time
-            rt_diffs = np.abs(array2[potential_matches, 1] - rt1)
-            best_match = potential_matches[np.argmin(rt_diffs)]
-            if rt_diffs[np.argmin(rt_diffs)] <= rt_threshold:
-                matches.append((i, best_match))
-                used_predictions.add(best_match)
-    return matches
+def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array1_alt = None, array2_alt = None):
+    # One-to-one assignment minimizing the summed normalized m/z and RT distances (as GlycoGauntlet's evaluator): a greedy pass in ground-truth
+    # order let a peak take the row of its neighbouring isomer, and the result depended on how the ground truth was sorted
+    array1_alt = array1 if array1_alt is None else array1_alt
+    array2_alt = array2 if array2_alt is None else array2_alt
+    # fmin, so a row without a charge (NaN singly charged equivalent) still matches on its m/z
+    mass_diffs = np.fmin(np.abs(array1[:, None, 0] - array2[None, :, 0]), np.abs(array1_alt[:, None, 0] - array2_alt[None, :, 0]))
+    rt_diffs = np.abs(array1[:, None, 1] - array2[None, :, 1])
+    feasible = (mass_diffs <= mass_threshold) & (rt_diffs <= rt_threshold)
+    rows, cols = linear_sum_assignment(np.where(feasible, mass_diffs / mass_threshold + rt_diffs / rt_threshold, 1e6))
+    return [(i, j) for i, j in zip(rows, cols) if feasible[i, j]]
 
 
 def add_pred_column(df_in, col_name, matches, pred_df, rt_col):
@@ -78,16 +63,22 @@ def add_pred_column(df_in, col_name, matches, pred_df, rt_col):
 
 
 def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbose = False):
+  # Same rules as GlycoGauntlet's evaluator: rows without a structure are no predictions, structures are canonicalized, and both sides are also
+  # compared as singly charged equivalents (a ground truth without a charge column counts as singly charged)
+  predictions = predictions.reset_index()
+  predictions = predictions[predictions['top1_pred'].notna()].reset_index(drop = True)
   if len(predictions)==0:
     print('empty preds')
     return 0, 0, 0, 0, 0, 0, 0, 0, 0
-  predictions['converted_masses'] = [m_z * abs(charge) - (charge - np.sign(charge)) * PROTON_MASS for m_z, charge in zip(predictions.reset_index()['m/z'], predictions['charge'])]
-  pairs = predictions.reset_index()[['m/z', 'RT']].round(2).values
-  pairs_converted = predictions[['converted_masses', 'RT']].round(2).values
-  gt_pairs = gt.reset_index()[['Mass', rt_col]].round(2).values
-  matched_pairs = match_spectra(gt_pairs, pairs, mass_threshold = mass_thresh, rt_threshold = RT_thresh, array2_alt = pairs_converted)
+  predictions['top1_pred'] = predictions['top1_pred'].map({g: canonicalize_iupac(g) for g in predictions['top1_pred'].unique()})
+  gt_charges = gt['charge'].values if 'charge' in gt.columns else np.full(len(gt), -1)
+  pairs = predictions[['m/z', 'RT']].round(2).values
+  pairs_converted = np.column_stack([predictions['m/z'] * predictions['charge'].abs() - (predictions['charge'] - np.sign(predictions['charge'])) * PROTON_MASS, predictions['RT']]).round(2)
+  gt_pairs = gt[['Mass', rt_col]].round(2).values
+  gt_pairs_converted = np.column_stack([gt['Mass'].values * np.abs(gt_charges) - (gt_charges - np.sign(gt_charges)) * PROTON_MASS, gt[rt_col].values]).round(2)
+  matched_pairs = match_spectra(gt_pairs, pairs, mass_threshold = mass_thresh, rt_threshold = RT_thresh, array1_alt = gt_pairs_converted, array2_alt = pairs_converted)
   merge_df = gt[['Mass', rt_col, 'glycan']].reset_index(drop = True)
-  new_md = add_pred_column(merge_df,'batch_pred', matched_pairs, predictions.reset_index(), rt_col)
+  new_md = add_pred_column(merge_df,'batch_pred', matched_pairs, predictions, rt_col)
   similarity_scores = []
   for gt_glycan, pred_glycan in zip(new_md['glycan'],new_md['batch_pred']):
     if not (isinstance(gt_glycan, str) and isinstance(pred_glycan, str)):
@@ -106,7 +97,8 @@ def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbos
   fp = len(np.where((~new_md['in_ground_truth'])&(new_md['batch_pred'].notnull()))[0])
   tp = new_md[new_md['glycan'].notnull()]['similarity_score'].sum() + 0.5 * unevaluable
   empty_glycan_not_predicted = len(np.where((new_md['in_ground_truth'])&(new_md['glycan'].isnull())&(new_md['batch_pred'].isnull()))[0])
-  fn = (new_md[new_md['glycan'].notnull()]['similarity_score'].apply(lambda x: 1-x)).sum() + empty_glycan_not_predicted
+  # A ground-truth peak without a structure weighs half either way: a hit is 0.5 TP, a miss 0.5 FN (a miss used to be a full FN against 0.5 TP for a hit)
+  fn = (new_md[new_md['glycan'].notnull()]['similarity_score'].apply(lambda x: 1-x)).sum() + 0.5 * empty_glycan_not_predicted
   peaks_not_picked = len(np.where((new_md['in_ground_truth'])&(new_md['batch_pred'].isnull()))[0])
   incorrect_predictions = len(
       np.where((new_md['glycan'].notnull()) & (new_md['batch_pred'].notnull()) & (new_md['similarity_score'] < 1.0))[0])

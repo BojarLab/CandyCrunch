@@ -76,7 +76,7 @@ If you would like to run our main inference function from the command line, you 
 |--taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class' <br />
 |--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
 --intra_cat_thresh, type=float: required for several files, minutes the RT of a structure can differ from the mean of its group across files <br />
---top_n_isomers, type=int: several files only, number of different isomer groups at each composition to retain; default:5 <br />
+--top_n_isomers, type=int: several files only, number of isomer groups at each composition to retain in each file; default:5 <br />
 --n_jobs, type=int: several files only, number of files to process in parallel; default:1 <br />
 --plot_glycans, type=bool: whether to write the output as an .xlsx file that contains SNFG images of all top1 predictions (a `.csv` output additionally gets an `.xlsx` of the same name); default:False
 </pre>
@@ -169,11 +169,11 @@ annotated_spectra_df = wrap_inference("C:/myfiles/my_spectra.mzML", glycan_class
 ### `wrap_inference_batch` (in `candycrunch.prediction`) <br>
 Wrapper function to predict glycan structures from multiple LC-MS/MS files using CandyCrunch. <br />
 This function works similarly to `wrap_inference` except a list of filenames is provided and a tuple is returned: a feature table and a dictionary of output DataFrames, one for each input file, keyed by their filenames. <br />
-The feature table has one row per isomer group with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID and the number of files with MS2 evidence, followed by its relative abundance in each file and an `evidence_<file>` column per file ('strong'/'weak' from MS2, 'ms1_only' if it was gap-filled from MS1). The first column holds the glycans, so the table can go straight into glycowork's `get_differential_expression` with the file columns as groups. <br />
-Precursors are clustered by m/z across files within the mass tolerance, and glycan predictions are assigned to groups based on the most common prediction in the group across files. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
+The feature table has one row per isomer group with a structure (also those without one with get_missing; a glycan that files report at different charge states is one row) with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID and the number of files with MS2 evidence, followed by its relative abundance in each file and an `evidence_<file>` column per file ('strong'/'weak' from MS2, 'ms1_only' if it was gap-filled from MS1). The first column holds the glycans, so the table can go straight into glycowork's `get_differential_expression` with the file columns as groups. <br />
+Precursors are clustered by m/z across files within the mass tolerance, and glycan predictions are assigned to groups based on the prediction most often ranked first in the group across files (ties go to the highest probability summed over the group), which rows of the group's composition without a prediction also take. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
 
 The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_thresh.
-At each composition, the top_n_isomers isomer groups are kept, preferring groups seen in more files and then more abundant ones. For files with MS1 scans (.raw, mzML, mzXML), an isomer group without MS2 in a file is filled in from MS1 if the file shows a genuine chromatographic peak for it within intra_cat_thresh that is at least as intense as the weakest precursor that got MS2 in that file <br />
+At each composition, an isomer group is kept if it is among the top_n_isomers groups of any file, preferring groups with a prediction, then groups seen in more files, then groups more abundant in that file. For files with MS1 scans (.raw, mzML, mzXML), an isomer group without MS2 in a file is filled in from MS1 if the file shows a genuine chromatographic peak for it within intra_cat_thresh that is at least as intense as the weakest precursor that got MS2 in that file <br />
 
 #### Requires at a minimum:  
 <pre>
@@ -183,7 +183,7 @@ At each composition, the top_n_isomers isomer groups are kept, preferring groups
 </pre>
 
 #### Optional arguments:
-- top_n_isomers, type = int: number of different isomer groups at each composition to retain; default:5 <br />
+- top_n_isomers, type = int: number of isomer groups at each composition to retain in each file; default:5 <br />
 - n_jobs, type = int: number of files to process in parallel (in separate processes); default:1 <br />
 See `wrap_inference`  <br />
 <br />  

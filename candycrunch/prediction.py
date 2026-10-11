@@ -2213,6 +2213,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | Returns dataframe of predictions for spectra in file; if spectra=True, a tuple of (dataframe, list of its MS2 spectra), and files with MS3 spectra
    | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row)
    """
+    # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
+    run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate')}
     # ppm_thresh is the only tolerance the user sets; derive the flat-Da window everything downstream needs from it here
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
     # 'custom' labels are described by mass_tag alone; glycowork's mass functions only know the named modifications
@@ -2503,8 +2505,24 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         # Deduplicate identical predictions for different spectra
         df_out = deduplicate_predictions(df_out, mz_diff = mass_tolerance, rt_diff = rt_diff)
         df_out['evidence'] = ['strong' if preds else np.nan for preds in df_out['predictions']]
+    if not _return_intermediate:
+        # A wrong glycan_class shows in the run itself: about as many of its glycans get the top structure of another class (above extra_thresh, or the
+        # likelier isomer) as of glycan_class. The file is then also processed as that class, which takes over if it finds at least 1.5x as many glycans of
+        # its own class.
+        tops = [p[0][0] for p in df_out['predictions'] if p]
+        counts = {c: sum(enforce_class(g, c) for g in tops) for c in ['N', 'O', 'free', glycan_class]}
+        other = max([c for c in ['N', 'O', 'free'] if c != glycan_class], key = counts.get)
+        if counts[other] >= max(5, counts[glycan_class]):
+            df_other = wrap_inference(spectra_filepath, other, **run_args, _return_intermediate = True)
+            found = sum(bool(p) and enforce_class(p[0][0], other) for p in df_other['predictions'])
+            print(f"WARNING: As {glycan_class} glycans, {os.path.basename(spectra_filepath)} gave {counts[other]} {other} and {counts[glycan_class]} "
+                  f"{glycan_class} structures; as {other} glycans, it gives {found} {other} structures. " + (
+                      f"Overriding the glycan class to '{other}'." if found >= 1.5 * counts[glycan_class] else f"Keeping '{glycan_class}', but check the glycan class."))
+            if found >= 1.5 * counts[glycan_class]:
+                glycan_class, df_out, df_use, mass_dic = other, df_other, df_other.attrs['df_use'], None
+            df_other.attrs.clear()
     if _return_intermediate:
-        df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1)
+        df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1, df_use = df_use)
         return df_out
     if df_out.empty:
         df_out.insert(0, 'top1_pred', [])
@@ -2546,7 +2564,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to files containing spectra
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group
-   | top_n_isomers (int): number of different isomer groups at each composition to retain; default:5
+   | top_n_isomers (int): number of isomer groups at each composition to retain per file (a group stays if it is among the top_n_isomers of any file); default:5
    | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable (see wrap_inference); with n_jobs > 1 it has to be picklable (a module-level function or class instance)
    | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
    | bin_num (int): number of bins for binning; don't change; default: 2048
@@ -2579,7 +2597,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | n_jobs (int): number of files to process in parallel (separate processes); default:1\n
    | Returns:
    | :-
-   | Returns a tuple of (feature table with one row per isomer group: top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column ms3 for files with MS3 spectra, as in wrap_inference)
+   | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column ms3 for files with MS3 spectra, as in wrap_inference)
    """
     mode = "negative" if max_charge < 0 else "positive"
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
@@ -2591,33 +2609,53 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         if df_use.empty:
             raise ValueError(
                 f"No {glycan_class} glycans of {taxonomy_level} '{taxonomy_filter}' in df_glycan; check taxonomy_level and taxonomy_filter")
-    # Built once here instead of once per file inside augment_predictions
-    if experimental and not mass_dic:
-        mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_filter,
-                                 sample_prep = sample_prep)
     # Files with the same name in different folders still get distinct labels
     file_labels = [os.path.splitext(os.path.basename(fp))[0] for fp in spectra_filepath_list]
     file_labels = [label if file_labels.count(label) == 1 else f"{label}_{i}" for i, label in enumerate(file_labels)]
     # Core inference per file via wrap_inference intermediate return; MS1 data is parked on disk so only one file's MS1 is in memory at a time
     ms1_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors = True)
-    inference_kwargs = dict(glycan_class = glycan_class, glycans = glycans, bin_num = bin_num, max_charge = max_charge,
+    inference_kwargs = dict(glycans = glycans, bin_num = bin_num, max_charge = max_charge,
                             frag_num = frag_num, modification = modification, mass_tag = mass_tag, lc = lc, trap = trap,
                             rt_min = rt_min, rt_max = rt_max, rt_diff = rt_diff, rt_max_default = rt_max_default,
                             pred_thresh = pred_thresh, temperature = temperature, extra_thresh = extra_thresh,
                             crumbs_thresh = crumbs_thresh, ppm_thresh = ppm_thresh, filter_out = filter_out,
                             experimental = experimental, sample_prep = sample_prep, taxonomy_level = taxonomy_level,
-                            taxonomy_filter = taxonomy_filter, df_use = df_use, _return_intermediate = True)
+                            taxonomy_filter = taxonomy_filter, _return_intermediate = True)
     # Worker processes load the default model themselves, so only a custom model has to be sent to them
     if model is not candycrunch:
         inference_kwargs['model'] = model
-    tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), inference_kwargs) for i, fp in
-             enumerate(spectra_filepath_list)]
-    if n_jobs > 1:
-        with ProcessPoolExecutor(max_workers = n_jobs, initializer = torch.set_num_threads,
-                                 initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
-            results = list(pool.map(_batch_inference_file, *zip(*tasks)))
-    else:
-        results = [_batch_inference_file(*task) for task in tasks]
+    # The glycan class check of wrap_inference, over the predictions of all files: if they say that the files hold another class rather than
+    # glycan_class, all files are also processed as that class, which takes over if it finds at least 1.5x as many glycans of its own class
+    runs = {}
+    for c in [glycan_class, None]:
+        use_c = df_use
+        if c is None:
+            tops = [p[0][0] for r in runs[glycan_class][0] for p in r[0]['predictions'] if p]
+            counts = {c: sum(enforce_class(g, c) for g in tops) for c in ['N', 'O', 'free', glycan_class]}
+            c = max([c for c in ['N', 'O', 'free'] if c != glycan_class], key = counts.get)
+            if counts[c] < max(5, counts[glycan_class]):
+                break
+            use_c = copy.deepcopy(df_glycan[df_glycan.glycan_type == c])
+            use_c = use_c[use_c[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
+        tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), {**inference_kwargs, 'glycan_class': c, 'df_use': use_c}) for i, fp in
+                 enumerate(spectra_filepath_list)]
+        if n_jobs > 1:
+            with ProcessPoolExecutor(max_workers = n_jobs, initializer = torch.set_num_threads,
+                                     initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
+                runs[c] = (list(pool.map(_batch_inference_file, *zip(*tasks))), use_c)
+        else:
+            runs[c] = ([_batch_inference_file(*task) for task in tasks], use_c)
+    if len(runs) > 1:
+        found = sum(bool(p) and enforce_class(p[0][0], c) for r in runs[c][0] for p in r[0]['predictions'])
+        print(f"WARNING: As {glycan_class} glycans, these files gave {counts[c]} {c} and {counts[glycan_class]} {glycan_class} structures; as {c} glycans, "
+              f"they give {found} {c} structures. " + (f"Overriding the glycan class to '{c}'." if found >= 1.5 * counts[glycan_class] else f"Keeping '{glycan_class}', but check the glycan class."))
+        if found >= 1.5 * counts[glycan_class]:
+            glycan_class, mass_dic = c, None
+    results, df_use = runs[glycan_class]
+    # Built once here instead of once per file inside augment_predictions
+    if experimental and not mass_dic:
+        mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, taxonomy_class = taxonomy_filter,
+                                 sample_prep = sample_prep)
     inference_dfs, file_modes, ms1_paths, accurate_ms1s = {}, {}, {}, {}
     for file_label, (df_out, file_mode, ms1_path, accurate_ms1) in zip(file_labels, results):
         # wrap_inference overrides the ion mode if the file says otherwise, so downstream steps have to follow it
@@ -2645,8 +2683,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Cross-file harmonization: align RT drift, resolve variant predictions, link DDA gaps
     assigned_cats = assign_categories(all_ms2, intra_cat_thresh = intra_cat_thresh)
     smoothed_category_predictions = assign_modal_category_prediction(assigned_cats)
-    prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n = top_n_isomers,
-                                                           keep_unpredicted = get_missing)
+    prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n = top_n_isomers)
     # Per-file augment, finalize, and quantify
     harmonized_labels = set(prevailing_category_predictions.condition_label.unique())
     for file_label in file_labels:
@@ -2743,14 +2780,34 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         # MS3 spectra are output like the MS2 spectra, only with spectra=True
         inference_dfs[file_label] = (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'], errors = 'ignore')
     all_outputs = [d for d in (v[0] if spectra else v for v in inference_dfs.values()) if not d.empty]
-    if not all_outputs:
+    group_keys = ['mass_label', 'category_label']
+    all_outputs = pd.concat(all_outputs).reset_index().sort_values('top1_pred', key = lambda s: s.isna(), kind = 'stable') if all_outputs else pd.DataFrame()
+    # Isomer groups without a structure in any file (kept in the per-file tables, as wrap_inference keeps them) are features only with get_missing
+    if not get_missing and not all_outputs.empty:
+        all_outputs = all_outputs[all_outputs.groupby(group_keys)['top1_pred'].transform('count') > 0]
+    if all_outputs.empty:
         return pd.DataFrame(), inference_dfs
-    all_outputs = pd.concat(all_outputs).reset_index().sort_values('top1_pred', key = lambda s: s.isna(), kind = 'stable')
     # Feature table: one row per isomer group with its consensus annotation, then abundance and evidence per file
     # Without any intensities (e.g., only .mgf files), spectrum counts stand in for abundances
     value_col = 'rel_abundance' if 'rel_abundance' in all_outputs.columns else 'num_spectra'
-    group_keys = ['mass_label', 'category_label']
-    combined_batch = all_outputs.groupby(group_keys).agg(top1_pred = ('top1_pred', 'first'), mz = ('m/z', 'median'),
+    # One glycan stays one feature when files report it at different charge states or in neighbouring m/z clusters: groups with the same structure, RTs
+    # within intra_cat_thresh and no file in common join the group seen in the most files, which supplies m/z, RT and charge
+    groups = all_outputs.groupby(group_keys).agg(top1 = ('top1_pred', 'first'), rt = ('RT', 'median'), files = ('condition_label', set)).reset_index()
+    groups = groups.assign(n = groups['files'].map(len)).sort_values('n', ascending = False, kind = 'stable')
+    target = {}
+    for _, grp in groups[groups['top1'].notna()].groupby('top1'):
+        kept = []
+        for key, rt, files in zip(zip(grp.mass_label, grp.category_label), grp.rt, grp.files):
+            hit = next((k for k in kept if abs(k[1] - rt) <= intra_cat_thresh and not (k[2] & files)), None)
+            if hit:
+                hit[2].update(files)
+                target[key] = hit[0]
+            else:
+                kept.append([key, rt, set(files)])
+    rep = np.array([k not in target for k in zip(all_outputs.mass_label, all_outputs.category_label)], dtype = bool)
+    merged = [target.get(k, k) for k in zip(all_outputs.mass_label, all_outputs.category_label)]
+    all_outputs = all_outputs.assign(mass_label = [k[0] for k in merged], category_label = [k[1] for k in merged])
+    combined_batch = all_outputs[rep].groupby(group_keys).agg(top1_pred = ('top1_pred', 'first'), mz = ('m/z', 'median'),
                                                          RT = ('RT', 'median'), charge = ('charge', 'first'),
                                                          composition = ('composition', 'first'),
                                                          GlyTouCan_ID = ('GlyTouCan_ID', 'first'))
@@ -2782,35 +2839,44 @@ def _batch_inference_file(spectra_filepath, ms1_path, inference_kwargs):
     return df_out, file_mode, ms1_path, accurate_ms1
 
 
-def filter_top_n_isomers(df_in, top_n = 5, keep_unpredicted = False):
+def filter_top_n_isomers(df_in, top_n = 5):
     df_out = df_in.copy(deep = True)
-    # Rank the isomer groups (categories) at each mass: carrying a prediction first, then by the number of files they were seen in, then by abundance
-    cats = df_out.groupby(['mass_label', 'category_label']).agg(has_pred = ('top1_pred', lambda x: x.notna().any()),
-                                                                file_presences = ('condition_label', 'nunique'),
-                                                                abundance = ('rel_abundance', 'sum')).reset_index()
-    if not keep_unpredicted:
-        cats = cats[cats['has_pred']]
-    cats = cats.sort_values(['has_pred', 'file_presences', 'abundance'], ascending = False, kind = 'stable').groupby('mass_label').head(top_n)
+    # Rank the isomer groups (categories) at each mass within each file: carrying a prediction first, then by the number of files they were seen in, then by
+    # abundance in that file; a group stays if it is among the top_n of any file. One cap over all files dropped real isomers once more files brought more
+    # groups, and compared intensities across files. Groups without a prediction stay, so finalise_predictions sees the rows it sees in wrap_inference
+    keys = ['mass_label', 'category_label']
+    cats = df_out.groupby(keys).agg(has_pred = ('top1_pred', lambda x: x.notna().any()), file_presences = ('condition_label', 'nunique')).reset_index()
+    cats = df_out.groupby(keys + ['condition_label'])['rel_abundance'].sum().reset_index().merge(cats, on = keys)
+    cats = cats.sort_values(['has_pred', 'file_presences', 'rel_abundance'], ascending = False, kind = 'stable').groupby(['mass_label', 'condition_label']).head(top_n)
     permitted = dict(zip(zip(cats.mass_label, cats.category_label), cats.file_presences))
     df_out['file_presences'] = [permitted.get(k, 0) for k in zip(df_out.mass_label, df_out.category_label)]
     return df_out[df_out['file_presences'] > 0]
 
 
 def assign_modal_category_prediction(assigned_cats):
-    assigned_cats['top1_pred'] = [x[0][0] if x else None for x in assigned_cats['predictions']]
-    most_common_group_preds = dict(assigned_cats[['mass_label', 'category_label', 'top1_pred']].groupby(
-        ['mass_label', 'category_label']).value_counts())
-    most_common_mapping = {}
-    unq_groups = set([(x[0], x[1]) for x in most_common_group_preds])
-    for unq in unq_groups:
-        prevalence_sort = sorted([(k, v) for k, v in most_common_group_preds.items() if (k[0], k[1]) == unq],
-                                 key = lambda x: x[1])
-        mode_pred = prevalence_sort[-1]
-        most_common_mapping[(mode_pred[0][0], mode_pred[0][1])] = mode_pred[0][2]
-    assigned_cats['top1_pred'] = [most_common_mapping[(ml, cl)] if pd.notna(tp) else None for ml, cl, tp in
-                                  zip(assigned_cats.mass_label, assigned_cats.category_label, assigned_cats.top1_pred)]
-    assigned_cats['predictions'] = [[(top1_p, 0.888)] + [p for p in preds[1:] if p[0] != top1_p] if preds else [] for top1_p, preds in
-                                    zip(assigned_cats.top1_pred, assigned_cats.predictions)]
+    # Each isomer group takes the structure most of its rows rank first, ties going to the highest probability summed over all rows' candidates
+    # (a 1:1 tie between two files went to the later file); every row keeps its own candidates and its own probability of that structure
+    keys = list(zip(assigned_cats.mass_label, assigned_cats.category_label))
+    votes, probs = defaultdict(lambda: defaultdict(int)), defaultdict(lambda: defaultdict(list))
+    for key, preds in zip(keys, assigned_cats['predictions']):
+        if preds:
+            votes[key][preds[0][0]] += 1
+        for p in preds:
+            if len(p) > 1:
+                probs[key][p[0]].append(p[1])
+    modal = {key: max(v, key = lambda g: (v[g], sum(probs[key][g]))) for key, v in votes.items()}
+    top1, predictions = [], []
+    for key, preds, comp in zip(keys, assigned_cats['predictions'], assigned_cats['composition']):
+        g = modal.get(key)
+        # A row without a prediction (e.g., one that failed the class or confidence filters in its file) takes the group's structure if it has its composition
+        if g is None or not (preds or get_comp(g) == comp):
+            top1.append(None)
+            predictions.append(preds)
+            continue
+        own = next((p[1] for p in preds if len(p) > 1 and p[0] == g), None)
+        top1.append(g)
+        predictions.append([(g, own if own is not None else round(float(np.mean(probs[key][g] or [0])), 4))] + [p for p in preds if p[0] != g])
+    assigned_cats['top1_pred'], assigned_cats['predictions'] = top1, predictions
     return assigned_cats
 
 

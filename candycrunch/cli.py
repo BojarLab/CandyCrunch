@@ -38,7 +38,7 @@ def main():
     parser.add_argument('--taxonomy_level', help='Taxonomic level to restrict database searches to', type=str, required=False)
     parser.add_argument('--taxonomy_filter', help='Taxon at taxonomy_level to restrict database searches to', type=str, required=False)
     parser.add_argument('--intra_cat_thresh', help='Several files only: minutes the RT of a structure can differ from the mean of its group', type=float, required=False)
-    parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition; default: 5', type=int, default=5)
+    parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition in each file; default: 5', type=int, default=5)
     parser.add_argument('--n_jobs', help='Several files only: number of files to process in parallel; default: 1', type=int, default=1)
     parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions', type=str_to_bool, required=False)
     parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)

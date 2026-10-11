@@ -102,7 +102,7 @@ def test_gui_supporting_ions(app):
         time.sleep(0.05)
     # The supporting peaks sit above the fragment table, which is kept, and their count goes into the summary line
     text = panel.fragments.toPlainText()
-    assert 'Fuc(a1-2) on Gal(b1-4)GlcNAc' in text and '510.19' in text and 'vs Fuc(a1-2)Gal(b1-3)' in text and 'Observed m/z' in text
+    assert 'Fuc(a1-2) on Gal(b1-4)GlcNAc' in text and '510.19' in text and 'vs Fuc(a1-2)Gal(b1-3)' in text and 'Observed m/z' in text, panel.message.text() or panel.summary.text()
     assert 'residues placed by diagnostic fragments' in panel.summary.text()
 
 
@@ -130,3 +130,47 @@ def test_gui_support_hover(app):
     while images.get(g, compact = False, highlight = ((0, 1, 2), 2)) is None and time.time() < end:
         time.sleep(0.05)
     assert not images.get(g, compact = False, highlight = ((0, 1, 2), 2)).isNull()
+
+
+def test_gui_ms3_hover_and_menu(app, monkeypatch):
+    import time
+    from matplotlib.backend_bases import MouseEvent
+    from candycrunch import gui
+    df = pd.DataFrame({'top1_pred': ['Fuc(a1-2)Gal(b1-3)GalNAc', 'Gal(b1-3)GalNAc'], 'predictions': [[('Fuc(a1-2)Gal(b1-3)GalNAc', 0.8)], [('Gal(b1-3)GalNAc', 0.9)]],
+                       'composition': [{'Hex': 1, 'HexNAc': 1, 'dHex': 1}, {'Hex': 1, 'HexNAc': 1}], 'num_spectra': [5, 3], 'charge': [-1, -1], 'RT': [26.8, 14.0],
+                       'rel_abundance': [60.0, 40.0], 'evidence': ['strong', 'strong'], 'notes': ['', ''], 'ppm_error': [20.0, 5.0], 'GlyTouCan_ID': ['', ''],
+                       'ms3': [[(384.15, {204.09: 10.0, 222.1: 50.0}), (384.2, {222.0: 30.0})], []]}, index = pd.Index([530.2, 384.15], name = 'm/z'))
+    view = gui.ResultsView(gui.GlycanImages())
+    view.resize(1400, 900)
+    view.show()
+    view.set_results({'files': ['a.mzML'], 'settings': dict(gui.DEFAULTS), 'tables': {'a': (df, [{384.15: 100.0, 325.1: 40.0}, {204.09: 100.0}])}, 'features': None})
+    view.select_row(0)
+    panel, shown, end = view.spectrum, [], time.time() + 120
+    while not panel.hover_targets and time.time() < end:
+        app.processEvents()
+        time.sleep(0.05)
+    # Hovering the MS3 marker names the isolated fragment and what clicking does, with a hand cursor that goes away off the marker
+    monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: shown.append(text))
+    artist = panel.canvas.figure.ms3_artists[0]
+    x, y = artist.axes.transData.transform(artist.get_offsets()[0])
+    panel.hover(MouseEvent('motion_notify_event', panel.canvas, x, y))
+    assert 'isolated for MS3: 2 spectra' in shown[-1] and panel.canvas.cursor().shape() == gui.Qt.PointingHandCursor
+    panel.hover(MouseEvent('motion_notify_event', panel.canvas, x + 300, y + 300))
+    assert panel.canvas.cursor().shape() == gui.Qt.ArrowCursor
+    # Open in CandyCrumbs from the MS3 tab sends the MS3 spectrum shown with its precursor, from the MS2 tab the MS2 spectrum
+    sent, tab = [], gui.CrumbsTab(gui.GlycanImages())
+    view.open_in_crumbs.connect(sent.append)
+    view.open_ms3(0)
+    view.send_to_crumbs()
+    assert sent[-1]['ms3_precursor'] == view.ms3_groups[0][0] and sent[-1]['peaks'] == view.ms3_groups[0][1]
+    tab.load(sent[-1])
+    assert abs(tab.spectrum.request['kwargs']['ms3_precursor'] - view.ms3_groups[0][0]) < 1e-4
+    view.tabs.setCurrentIndex(0)
+    view.send_to_crumbs()
+    tab.load(sent[-1])
+    assert sent[-1]['ms3_precursor'] is None and 'ms3_precursor' not in tab.spectrum.request['kwargs']
+    # Right-clicking a row that is not selected selects it, so the menu acts on it
+    monkeypatch.setattr(gui, 'QMenu', type('Menu', (), {'__init__': lambda self, *args: None, 'addAction': lambda self, *args: None, 'exec': lambda self, *args: None}))
+    proxy_row = next(i for i in range(view.proxy.rowCount()) if view.proxy.mapToSource(view.proxy.index(i, 0)).row() == 1)
+    view.context_menu(view.table.visualRect(view.proxy.index(proxy_row, 2)).center())
+    assert view.row == 1

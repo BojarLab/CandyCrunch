@@ -1364,7 +1364,7 @@ def score_fragment_prior(dc_name, charge):
 def compute_fragment_lability(edge_lability, subg):
     """Scores how labile the broken glycosidic bonds are (edge_lability: bond lability by edge of the parent glycan); higher means more expected cleavage"""
     broken = [lability for (u, v), lability in edge_lability.items() if (u in subg) != (v in subg)]
-    return sum(broken) / max(len(broken), 1)
+    return sum(broken) / len(broken) if broken else DEFAULT_LABILITY
 
 
 def merge_gp_global_mods(gp_names):
@@ -1440,8 +1440,8 @@ def priority_filter(dc_names, diffs, peptide = False, charge = -1, lability = No
     | lability (list): lability score of each fragment; default:None (DEFAULT_LABILITY for all)\n
     | Returns:
     | :-
-    | Returns the fragment names sorted by number of cleavages, prior score, and the observed mass difference, and their mass differences and
-    | lability scores in the same order
+    | Returns the fragment names sorted by number of cleavages (none for the intact precursor), prior score, observed mass difference and lability,
+    | and their mass differences and lability scores in the same order
     """
     lability = [DEFAULT_LABILITY] * len(dc_names) if lability is None else list(lability)
     if peptide:
@@ -1449,7 +1449,7 @@ def priority_filter(dc_names, diffs, peptide = False, charge = -1, lability = No
                               key = lambda x: (count_gp_cleavages(x[0]), -score_gp_prior(x[0], charge), x[1]))
     else:
         sorted_frags = sorted(list(zip(dc_names, diffs, lability)),
-                              key = lambda x: (len(x[0]), -score_fragment_prior(x[0], charge), x[1]))
+                              key = lambda x: (len(x[0]) - (x[0] == ['M']), -score_fragment_prior(x[0], charge), x[1], -x[2]))
     return [f[0] for f in sorted_frags], [f[1] for f in sorted_frags], [f[2] for f in sorted_frags]
 
 
@@ -1554,7 +1554,7 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
         else:
             frag_options = [x for x in possible_frags if len(x) == len(possible_frags[0])]
             # a shared global modification is not evidence of a shared cleavage
-            max_overlaps_seen = [sum(seen_cuts[c] for c in set(f)) - any(c[0] == 'M' for c in f) for f in frag_options]
+            max_overlaps_seen = [sum(seen_cuts[c] for c in set(f) if c[0] != 'M') for f in frag_options]
             prior_scores = [score_fragment_prior(f, charge) for f in frag_options]
             min_cleavages = len(possible_frags[0])
             if lability_scores and lability_scores[i]:
@@ -2106,7 +2106,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     |                        default:None (2 for glycopeptides, 1 for free glycans)
     | ms3_precursor (float): m/z of the MS2 fragment that was isolated for an MS3 spectrum whose peaks are fragment_masses; these are then only
     |                        annotated as fragments of what that MS2 fragment can be in this glycan (within max_cleavages), with up to
-    |                        max_cleavages further cleavages, and all are None if it cannot be any fragment of it; glycan structures only; default:None\n
+    |                        max_cleavages cleavages that fragment does not have (at most one X cross-ring), and all are None if it cannot be any
+    |                        fragment of it; glycan structures only; default:None\n
     | Returns:
     | :-
     | Returns a dict keyed by observed mass, each pointing to None or a dict of 'Theoretical fragment masses', 'Domon-Costello nomenclatures' and
@@ -2242,7 +2243,17 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         parents = [p for p, c in zip(parents, cuts) if c == min(cuts)]
         subgraphs = [s for s in enumerate_subgraphs(nx_mono) + [set(nx_mono)] if any(s <= set(p[3]) for p in parents)]
         node_basic = {k: map_to_basic(v, obfuscate_ptm = False) for k, v in node_labels.items()}
-        max_cleavages = 2 * max_cleavages
+
+        def fragment_cuts(g):
+            # a fragment's cleavages as (node, atom, bond type), (node, cross-ring) and (None, global modification), so the cleavages an MS3 fragment
+            # shares with the isolated fragment can be told apart from the ones that happened in MS3
+            return {(n, a, v) for n, d in g.nodes(data = 'atomic_mod_dict') if d for a, v in d.items() if isinstance(v, str)} | {
+                (n, v) for n, v in g.nodes(data = 'mod_labels') if v in A_cross_rings or v in X_cross_rings} | {
+                (None, v[0]) for _, v in g.nodes(data = 'global_mod') if v}
+
+        parent_cuts = [fragment_cuts(p[3]) for p in parents]
+        # cleavages are counted from the isolated fragment, so an MS3 fragment keeping all of its cleavages may have max_cleavages more
+        ms3_cleavages, max_cleavages = max_cleavages, max(map(len, parent_cuts)) + max_cleavages
     subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,
                                        max_cleavages = max_cleavages, fragment_masses = fragment_masses,
                                        subgraphs = subgraphs, threshold = mass_threshold, mass_tag = mass_tag,
@@ -2289,10 +2300,12 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
             fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge,
                                                             sorted_frag_keys, mass_threshold_ppm = mass_threshold_ppm)
             if parents is not None:
+                # at most ms3_cleavages cleavages the isolated fragment does not have, of which at most one X cross-ring
                 keep = [i for i, (mass, z, g) in enumerate(zip(fragment_properties[1], fragment_properties[3], fragment_properties[4])) if any(
                     mass < p_mass and abs(z) <= abs(p_z) and set(g) <= set(p_g) and all(
-                        p_g.nodes[n].get('mod_labels') in (None, node_basic[n], g.nodes[n].get('mod_labels')) for n in g)
-                    for p_mass, _, p_z, p_g in parents)]
+                        p_g.nodes[n].get('mod_labels') in (None, node_basic[n], g.nodes[n].get('mod_labels')) for n in g) and len(
+                        new := fragment_cuts(g) - p_cuts) <= ms3_cleavages and sum(len(c) == 2 and c[1] in X_cross_rings for c in new) <= 1
+                    for (p_mass, _, p_z, p_g), p_cuts in zip(parents, parent_cuts))]
                 fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
             dc_names = subgraphs_to_domon_costello(nx_mono, fragment_properties[-1], chain_rank)
             lability = [compute_fragment_lability(edge_lability, sg) for sg in fragment_properties[-1]]
@@ -3057,7 +3070,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                             disable_global_mods = False, prior_weight = 1.0, charge = None, ax = None,
                             annotate_top_n = None, annotation_threshold = 0.05, figsize = None,
                             draw_glycans = True, glycan_zoom = 0.25, max_glycan_cartoons = 8,
-                            label_fontsize = 6, max_label_levels = 6, filepath = '', **kwargs):
+                            label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, **kwargs):
     """Plots an MS2 spectrum annotated with CandyCrumbs fragment assignments\n
     | Arguments:
     | :-
@@ -3081,6 +3094,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | label_fontsize (int): font size of the peak labels; default:6
     | max_label_levels (int): how many times to push a label clear of its neighbors before dropping it; default:6
     | filepath (string): where to save the figure; default:'' (not saved)
+    | hit_dict (dict): CandyCrumbs output for these peaks and settings if already computed (e.g., outside a drawing lock); default:None (computed here)
     | **kwargs: passed straight to CandyCrumbs, e.g., mass_threshold_ppm, fragmentation_method, max_global_mods\n
     | Returns:
     | :-
@@ -3105,8 +3119,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         if charge is None:
             raise ValueError("charge must be given when passing raw m/z values")
     rel_intensities = peak_intensities / peak_intensities.max() * 100 if peak_intensities.max() > 0 else peak_intensities
-    hit_dict = CandyCrumbs(input_string, mz_values.tolist(), mass_threshold, max_cleavages = max_cleavages,
-                           simplify = True, charge = charge, mass_tag = mass_tag, sample_prep = sample_prep,
+    hit_dict = hit_dict if hit_dict is not None else CandyCrumbs(input_string, mz_values.tolist(), mass_threshold, max_cleavages = max_cleavages,
+                           simplify = True, charge = charge, mass_tag = mass_tag, sample_prep = sample_prep, intensities = peak_intensities.tolist(),
                            disable_global_mods = disable_global_mods, prior_weight = prior_weight, **kwargs)
     peptide, glycans, glycosites = resolve_spectrum_input(input_string)
     glycan_string = glycans[0] if glycans and isinstance(glycans[0], str) and not is_composition(glycans[0]) else None

@@ -34,6 +34,7 @@ from matplotlib.figure import Figure
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.backend_tools import Cursors
 
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch
 _tree = ast.parse(open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8').read())
@@ -370,7 +371,15 @@ class Annotator(QObject):
             width, height = request['figsize']
             try:
                 with IMPORT_LOCK:
-                    from candycrunch.analysis import plot_annotated_spectrum, supporting_ions
+                    from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions
+                # CandyCrumbs needs no matplotlib and can take long, so it runs before MPL_LOCK is taken: inside it, a slow MS3 annotation stalled the
+                # other panel's spectrum and every redraw in the window
+                hit_dict = CandyCrumbs(request['structure'], request['mzs'], request['tolerance'], max_cleavages = request['kwargs'].get('max_cleavages', 3),
+                                       simplify = True, charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
+                                       intensities = request['intensities'], **{k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'})
+                # Drawing a spectrum nobody waits for any more only delays the newer one
+                if self.request[0] != request_id:
+                    continue
                 figure = Figure(figsize = request['figsize'], dpi = 100)
                 FigureCanvasAgg(figure)
                 # Margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it
@@ -379,7 +388,7 @@ class Annotator(QObject):
                 with MPL_LOCK:
                     hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
                                                            charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                           ax = figure.add_subplot(), draw_glycans = request['cartoons'], **request['kwargs'])
+                                                           ax = figure.add_subplot(), draw_glycans = request['cartoons'], hit_dict = hit_dict, **request['kwargs'])
                     if request['ms3']:
                         # A triangle under every peak that was isolated for MS3 and an invisible stick over that peak, both clickable
                         mzs, ints = np.array(request['mzs']), np.array(request['intensities'])
@@ -400,7 +409,11 @@ class Annotator(QObject):
                         support = None
                     self.support.emit(request_id, support)
             except Exception as error:
-                self.done.emit(request_id, None, None, f'{type(error).__name__}: {error}')
+                try:
+                    self.done.emit(request_id, None, None, f'{type(error).__name__}: {error}')
+                except RuntimeError:
+                    # The panel was deleted while this ran (an emit raised 'Signal source has been deleted'), so nobody waits for the result
+                    return
 
 
 def _combo(items):
@@ -666,10 +679,11 @@ class SpectrumPanel(QWidget):
         self.relayout.timeout.connect(self.resubmit)
 
     def annotate(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), **kwargs):
-        """ms3: m/z of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index; candidates: competing structures
-        whose distinguishing peaks are listed"""
+        """ms3: (m/z, number of MS3 spectra) of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index;
+        candidates: competing structures whose distinguishing peaks are listed"""
         self.request = {'structure': structure, 'mzs': [float(x) for x in mzs], 'intensities': [float(x) for x in intensities], 'charge': int(charge),
-                        'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(x) for x in ms3], 'candidates': list(candidates), 'kwargs': kwargs}
+                        'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
+                        'candidates': list(candidates), 'kwargs': kwargs}
         self.resubmit()
 
     def resubmit(self):
@@ -715,6 +729,7 @@ class SpectrumPanel(QWidget):
             self.support_hovered.emit(None)
         # Pan and zoom hold the canvas' widgetlock, so clicks while using them never count as picks
         self.canvas.mpl_connect('pick_event', lambda event: event.artist in getattr(figure, 'ms3_artists', ()) and len(event.ind) and self.ms3_clicked.emit(int(event.ind[0])))
+        self.canvas.mpl_connect('motion_notify_event', self.hover)
         self.toolbar = NavigationToolbar2QT(self.canvas, self, coordinates = False)
         self.toolbar.setIconSize(QSize(16, 16))
         self.controls.insertWidget(0, self.toolbar)
@@ -728,6 +743,15 @@ class SpectrumPanel(QWidget):
         if self.request['kwargs'].get('ms3_precursor') is not None and not hits:
             self.summary.setText(f'm/z {self.request["kwargs"]["ms3_precursor"]:.2f} is no fragment of {self.request["structure"]}, so none of its MS3 peaks can be annotated')
         from candycrunch.analysis import domon_costello_to_html, PROTON_MASS
+        if getattr(figure, 'ms3_artists', None):
+            # Hovering a peak isolated for MS3 (its marker or the peak itself) names its fragment and says what clicking does
+            tips = []
+            for x, p, n in zip(np.asarray(figure.ms3_artists[0].get_offsets())[:, 0], self.request['ms3'], self.request['ms3_spectra']):
+                names = hits[x]['Domon-Costello nomenclatures'][0] if x in hits else []
+                flat = [y for sub in names for y in sub] if names and isinstance(names[0], list) else list(names)
+                tips.append((None, f'<b>m/z {p:.2f}</b>' + (f' ({domon_costello_to_html(flat)})' if flat else '') + f' was isolated for MS3: {n} spectr{"um" if n == 1 else "a"}'
+                             f'<br>Click to show {"it" if n == 1 else "them"}, pooled and annotated as fragments of this fragment, in the MS3 tab'))
+            self.hover_targets += [(artist, tips) for artist in figure.ms3_artists]
         rows = []
         for mz in sorted(hits):
             hit = hits[mz]
@@ -764,7 +788,6 @@ class SpectrumPanel(QWidget):
                 artist = ax.scatter(list(points[side]), [v[0] * 100 + 3 for v in points[side].values()], marker = 'v', s = 45, c = color, edgecolors = 'white',
                                     linewidths = 0.6, zorder = 7, clip_on = False)
                 self.hover_targets.append((artist, [v[1:] for v in points[side].values()]))
-        self.canvas.mpl_connect('motion_notify_event', self.hover)
         self.canvas.draw_idle()
         rows = [f'<tr><td>{e["name"]}</td><td>{"<br>".join(f"{s[0]:.2f} {domon_costello_to_html(list(s[2]))} = {s[3]}" for s in e["support"][:3]) or "none"}</td>'
                 f'<td>{", ".join(e["open"][:3]) + (", ..." if len(e["open"]) > 3 else "")}</td>'
@@ -779,13 +802,19 @@ class SpectrumPanel(QWidget):
 
 
     def hover(self, event):
-        """Shows the fragment of the supporting (or contradicting) peak under the mouse as a tooltip, and its supported part in the SNFG drawing"""
-        highlight, tip = None, ''
-        for artist, meta in self.hover_targets:
+        """Shows the fragment of the supporting (or contradicting) peak under the mouse as a tooltip, and its supported part in the SNFG drawing; over a
+        peak isolated for MS3, what clicking it does, with a hand cursor"""
+        highlight, tip, clickable = None, '', False
+        # Newest first, so support markers win over the invisible MS3 sticks under them
+        for artist, meta in reversed(self.hover_targets):
             hit, info = artist.contains(event)
             if hit:
                 highlight, tip = meta[info['ind'][0]]
+                clickable = artist in getattr(self.canvas.figure, 'ms3_artists', ())
                 break
+        # While panning or zooming, the toolbar sets its own cursor
+        if not self.toolbar.mode:
+            self.canvas.set_cursor(Cursors.HAND if clickable else Cursors.POINTER)
         if tip:
             QToolTip.showText(QCursor.pos(), tip, self.canvas)
         elif self.hovered is not None or QToolTip.isVisible():
@@ -863,7 +892,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['intra_cat_thresh'] = _spin(0.05, 10, 0.25, 2, ' min')
         self.inputs['intra_cat_thresh'].setToolTip('How far (in minutes) the retention time of a structure may drift between runs and still count as the same peak')
         self.inputs['top_n_isomers'] = _spin(1, 50, 1)
-        self.inputs['top_n_isomers'].setToolTip('Isomer groups kept per composition across runs')
+        self.inputs['top_n_isomers'].setToolTip('Isomer groups kept per composition in each run')
         self.inputs['n_jobs'] = _spin(1, max(1, os.cpu_count() or 1), 1)
         self.inputs['n_jobs'].setToolTip('Runs processed in parallel; each needs its own memory')
         form.addRow('RT tolerance', self.inputs['intra_cat_thresh'])
@@ -1179,6 +1208,7 @@ class ResultsView(QWidget):
         self.assign.setToolTip('Make the selected candidate this peak\'s structure (top1_pred) in the table and its exports')
         self.custom.setToolTip('Assign a structure that is not among the candidates')
         self.exclude.setToolTip('Leave this peak out of exports')
+        self.crumbs.setToolTip('Annotate this spectrum with any structure or setting in the CandyCrumbs tab (from the MS3 tab: the MS3 spectrum shown)')
         actions.addWidget(self.assign, 0, 0)
         actions.addWidget(self.custom, 0, 1)
         actions.addWidget(self.exclude, 1, 0)
@@ -1560,12 +1590,15 @@ class ResultsView(QWidget):
             preds = table['predictions'].iat[r]
             self.spectrum.annotate(structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]),
                                    _mass_tag(settings), settings['sample_prep'],
-                                   ms3 = [p for p, _, _ in self.ms3_groups],
+                                   ms3 = [(p, n) for p, _, n in self.ms3_groups],
                                    candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [])
             if self.tabs.currentWidget() is self.ms3_tab:
                 self.annotate_ms3()
 
     def open_ms3(self, index):
+        # One click picks both the marker and the invisible stick over the peak; the second pick would annotate the same MS3 spectra again
+        if self.tabs.currentWidget() is self.ms3_tab and self.ms3_fragment.currentIndex() == index:
+            return
         self.ms3_fragment.blockSignals(True)
         self.ms3_fragment.setCurrentIndex(index)
         self.ms3_fragment.blockSignals(False)
@@ -1578,8 +1611,9 @@ class ResultsView(QWidget):
         if 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups):
             p, peaks, _ = self.ms3_groups[self.ms3_fragment.currentIndex()]
             settings = self.payload['settings']
+            # As the pipeline scores MS3: without X cross-rings, which explain random MS3 peaks as often as real ones (MS3 cleavage counting)
             self.ms3_panel.annotate(self.ms3_args[0], list(peaks.keys()), list(peaks.values()), self.ms3_args[1], _mass_tag(settings),
-                                    settings['sample_prep'], ms3_precursor = p)
+                                    settings['sample_prep'], ms3_precursor = p, disable_X_cross_rings = True)
 
     def pick_alternative(self, item):
         self.alternative, self.support_highlight = item.data(Qt.UserRole), None
@@ -1711,6 +1745,8 @@ class ResultsView(QWidget):
         index = self.table.indexAt(position)
         if not index.isValid():
             return
+        # The actions work on self.row, so the right-clicked row is selected first (they used to act on the previously selected row)
+        self.select_row(self.proxy.mapToSource(index).row())
         menu = QMenu(self)
         menu.addAction('Copy row', self.copy_rows)
         menu.addAction('Include again' if self.frame['excluded'].iat[self.row] else 'Exclude from export', self.toggle_excluded)
@@ -1730,8 +1766,11 @@ class ResultsView(QWidget):
         table, spectra = self.payload['tables'][self.source[0]]
         r = self.source[1]
         structure = self.alternative or table['top1_pred'].iat[r]
+        # From the MS3 tab, the MS3 spectra shown go, with the MS2 fragment they were isolated from
+        ms3 = self.ms3_groups[self.ms3_fragment.currentIndex()] if self.tabs.currentWidget() is self.ms3_tab and 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups) else None
         self.open_in_crumbs.emit({'structure': structure if isinstance(structure, str) else _composition(table['composition'].iat[r]),
-                                  'peaks': spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': self.payload['settings']})
+                                  'peaks': ms3[1] if ms3 else spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': self.payload['settings'],
+                                  'ms3_precursor': ms3[0] if ms3 else None})
 
     def export_frame(self, df):
         """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
@@ -1820,12 +1859,17 @@ class CrumbsTab(QWidget):
         self.cleavages.setToolTip('Maximum number of concurrent cleavages per fragment')
         self.fragmentation = _combo(FRAGMENTATIONS)
         self.fragmentation.setToolTip('Restricts peptide backbone ion types for glycopeptides')
+        self.ms3_precursor = _spin(0, 5000, 1, 4, ' m/z')
+        self.ms3_precursor.setSpecialValueText('None (MS2 spectrum)')
+        self.ms3_precursor.setToolTip('For an MS3 spectrum: m/z of the MS2 fragment that was isolated, so its peaks are only annotated as fragments of that '
+                                      'fragment (glycan structures only)')
         form.addRow('Precursor charge', self.charge)
         form.addRow('Reducing end', self.modification)
         form.addRow('Tag mass', self.mass_tag)
         form.addRow('Derivatization', self.sample_prep)
         form.addRow('Max. cleavages', self.cleavages)
         form.addRow('Fragmentation', self.fragmentation)
+        form.addRow('MS3 precursor', self.ms3_precursor)
         layout.addLayout(form)
         self.go = QPushButton('Annotate spectrum')
         self.go.setObjectName('run')
@@ -1882,6 +1926,7 @@ class CrumbsTab(QWidget):
         _set_combo(self.modification, settings.get('modification'))
         self.mass_tag.setValue(settings.get('mass_tag') or 0)
         _set_combo(self.sample_prep, settings.get('sample_prep'))
+        self.ms3_precursor.setValue(request.get('ms3_precursor') or 0)
         self.annotate()
 
     def annotate(self):
@@ -1896,6 +1941,9 @@ class CrumbsTab(QWidget):
         kwargs = {'max_cleavages': self.cleavages.value()}
         if self.fragmentation.currentData():
             kwargs['fragmentation_method'] = self.fragmentation.currentData()
+        if self.ms3_precursor.value():
+            # X cross-rings within the isolated fragment explain random MS3 peaks as often as real ones
+            kwargs.update(ms3_precursor = self.ms3_precursor.value(), disable_X_cross_rings = True)
         self.spectrum.annotate(self.structure.text().strip(), [p[0] for p in peaks], [p[1] if len(p) > 1 else 100.0 for p in peaks],
                                self.charge.currentData(), _mass_tag(settings), self.sample_prep.currentData(), **kwargs)
 
@@ -2230,6 +2278,10 @@ class MainWindow(QMainWindow):
         self.results.set_results(payload)
         self.pages.setCurrentWidget(self.results)
         self.save_action.setEnabled(True)
+        # wrap_inference(_batch) processes files as another glycan class if their predictions say they hold that class, which the user has to know
+        notes = [line.removeprefix('WARNING: ') for line in self.log.toPlainText().splitlines() if 'the glycan class' in line]
+        if notes:
+            QMessageBox.warning(self, 'CandyCrunch', '\n\n'.join(notes))
         QApplication.alert(self)
 
     def failed(self, text):

@@ -8,6 +8,9 @@ import os
 import pandas as pd
 from datetime import datetime
 
+# Version of evaluate_predictions in test_CandyCrunch.py; changing the metric moves scores like a ground-truth edit, so it is part of each dataset's key
+METRIC_VERSION = '-hungarian-halfopen'
+
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -70,7 +73,7 @@ class ResultCollector:
     def check_performance(self, test_dict_name, param_key, current_score, gt):
         """Check that the current score has not dropped below the previous run's on the same ground truth"""
         # Editing the ground truth (e.g., adding newly found glycans) moves scores without any code change, so baselines are tied to its content
-        self.gt_hashes[test_dict_name] = str(pd.util.hash_pandas_object(gt, index = False).sum())
+        self.gt_hashes[test_dict_name] = str(pd.util.hash_pandas_object(gt, index = False).sum()) + METRIC_VERSION
         if test_dict_name in self.previous_results and self.previous_results[test_dict_name].get('gt_hash') in (None, self.gt_hashes[test_dict_name]):
             prev_scores = self.previous_results[test_dict_name]['scores']
             # The log stores scores without the dataset name, so the key must drop it to ever match
