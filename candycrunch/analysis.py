@@ -938,6 +938,10 @@ def annotate_subgraph(subg, node_mod, global_mod, terminals):
     return mod_subg
 
 
+# Fragment options of single terminals and global modifications of label sets (see generate_atomic_frags), kept across calls
+_TERMINAL_OPTIONS = {}
+
+
 def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = 3,
                           fragment_masses = [], subgraphs = None,
                           threshold = 0.5, mass_tag = None, charge = -1, sample_prep = 'underivatized',
@@ -986,13 +990,76 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     # a derivatized glycosidic cleavage loses one more group, which the lower bound has to allow for
     min_bond_mass = min(bond_masses.values()) - deriv_mass - max(W_SIDE_CHAIN_LOSSES.values())
     peptide_graph = isinstance(true_root_node, str)
+    # The options of a terminal (cross-ring and bond permutations, their masses and cleavage counts) depend only on its label, its bonds and which of them are
+    # cut, whether it is the root of the node set or the reducing end, and the settings, and the global modifications of a node set only on its labels, so
+    # they are kept across calls. With them, a node set's fragment masses are checked before it becomes a subgraph: most node sets have no fragment near any
+    # wanted mass (~80% in supporting_ions). Glycans only, as a glycopeptide picks its root and reducing end by node order. The check sums in another order
+    # than the full calculation, so it allows 1e-6 more
+    precheck = not unfiltered and not peptide_graph
+    if precheck:
+        mode_mass = -PROTON_MASS if charge < 0 else PROTON_MASS
+        # a mass m has a wanted mass within threshold if the first one above m - threshold is below m + threshold (inf closes the list)
+        targets = np.append(np.sort(charge_masses), np.inf)
+        succ_sets = {v: set(nx_mono.successors(v)) for v in nx_mono.nodes}
+        red_ends = {v: not any(nx_edge_dict[x]['bond_label'] == 'glycosite' for x in nx_mono.in_edges(v)) for v, d in nx_mono.nodes(data = True) if 'reducing_end' in d}
+        incident = {v: [] for v in nx_mono.nodes}
+        for (u, v), d in nx_edge_dict.items():
+            incident[u].append((v, d['bond_label'], True))
+            incident[v].append((u, d['bond_label'], False))
+        settings, global_settings = (tuple(allowed_X_cleavages), disable_A_cross_rings, sample_prep, mass_tag), (tuple(global_mods), tuple(special_residues), charge < 0)
+        if len(_TERMINAL_OPTIONS) > 50000:
+            _TERMINAL_OPTIONS.clear()
+    m_thresh = 1 if charge < 0 else 2
     for subg in subgraphs:
+        opts = None
         # most node sets from enumerate_subgraphs have too many cleavages, which their nodes alone tell, so only the rest get a subgraph view
         # (slow to create; built from the same node set as before, so it iterates its nodes in the same order)
         if isinstance(subg, set):
             if sum(not neighbor_dict[x] <= subg and x not in all_other_terminals for x in subg) > max_cleavages:
                 continue
-            subg = nx_mono.subgraph(subg)
+            view, reds = None, [v for v in red_ends if v in subg] if precheck else []
+            if precheck and len(reds) < 2:
+                terms = [x for x in subg if not neighbor_dict[x] <= subg]
+                terms += [x for x in subg if x in all_other_terminals and x not in terms]
+                root = next(v for v in subg if not succ_sets[v] & subg)
+                # read once with get, as another thread (the app's annotation) may clear the store in between
+                key = (frozenset(node_dict[v] for v in subg), global_settings)
+                opt = _TERMINAL_OPTIONS.get(key)
+                if opt is None:
+                    view = nx_mono.subgraph(subg)
+                    gm = update_global_mods(view, global_mods, special_residues)
+                    g_masses = [global_mod_mass(x, mode_mass) for x in gm[1:]]
+                    opt = _TERMINAL_OPTIONS[key] = (gm, g_masses, np.array([0.0] + g_masses), np.array([mod_count([[], []], x) for x in gm], dtype = int),
+                                                    np.array([bool(ADDUCT_GLOBAL_MODS & set(parse_global_mod(x))) for x in gm]))
+                opts, (gm, g_masses, g_offsets, g_counts, g_adduct) = {}, opt
+                cap, masses, counts = max_cleavages - g_counts.min(), np.zeros(1), np.zeros(1, dtype = int)
+                for t in terms:
+                    key = (node_dict[t], t == root, red_ends.get(t, False), tuple((label, child, other in subg) for other, label, child in incident[t]), settings)
+                    opts[t] = _TERMINAL_OPTIONS.get(key)
+                    if opts[t] is None:
+                        view = nx_mono.subgraph(subg) if view is None else view
+                        breaks = {b: l for b, l in get_broken_bonds(view, nx_edge_dict).items() if (b[0] if b[0] in subg else b[1]) == t}
+                        mods = get_mono_mods_list(root, view, [t], [node_dict_basic[t]], nx_edge_dict, allowed_X_cleavages, disable_A_cross_rings)
+                        mono_perms, atom_perms = generate_mod_permutations([t], [node_dict_basic[t]], mods, atom_mods_init(view, breaks, [t], [node_dict_basic[t]]))
+                        mono_m, atom_m, _ = precalculate_mod_masses(mono_perms, atom_perms, [node_dict_basic[t]], [None], sample_prep = sample_prep, charge = charge)
+                        bonus = red_ends.get(t, False)
+                        opts[t] = _TERMINAL_OPTIONS[key] = (np.array(preliminary_calculate_mass(mono_m, atom_m, [], [t], 0.0, bonus, t if bonus else None, mass_tag, charge,
+                                                                                                mono_perms, np.arange(len(mono_perms[0]))[:, np.newaxis], sample_prep = sample_prep,
+                                                                                                root_label = node_dict[t] if bonus else None)) - mode_mass,
+                                                            np.array([mod_count([[m], [a]], None) for m, a in zip(mono_perms[0], atom_perms[0])], dtype = int),
+                                                            mono_perms[0], atom_perms[0], mono_m[0], atom_m[0])
+                    # cleavage counts only add up, so partial combinations over the cap are dropped as they appear
+                    masses, counts = (masses[:, np.newaxis] + opts[t][0]).ravel(), (counts[:, np.newaxis] + opts[t][1]).ravel()
+                    masses, counts = masses[counts <= cap], counts[counts <= cap]
+                if not counts.size:
+                    continue
+                counts = counts[:, np.newaxis] + g_counts
+                masses = (masses[:, np.newaxis] + (sum(full_masses[m] for m in subg if m not in terms) + mode_mass + g_offsets -
+                                                   (sum(len(succ_sets[v] & subg) for v in subg) * deriv_mass if deriv_mass else 0)))[
+                    (counts <= max_cleavages) & ~((counts > m_thresh) & g_adduct)]
+                if not (targets[np.searchsorted(targets, masses - threshold - 1e-6, 'right')] < masses + threshold + 1e-6).any():
+                    continue
+            subg = nx_mono.subgraph(subg) if view is None else view
         # a view of few nodes iterates them in set order, which for the string nodes of a glycopeptide follows PYTHONHASHSEED and decided
         # between equally good fragments (02X_5_Alpha or 02X_5_Beta), so those are walked in the order of the parent graph
         nodes = [v for v in nx_mono if v in subg] if peptide_graph else subg
@@ -1030,27 +1097,36 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             subg_copy.add_edges_from(
                 (u, v, d.copy()) for u in subg_copy for v, d in nx_mono.succ[u].items() if v in subg_copy)
             subg = subg_copy
-        bonus_root_mass, bonus_root_node = temporary_root_calc_func(subg, nx_mono)
         terminal_labels = [node_dict_basic[x] for x in terminals]
-        subg_global_mods = update_global_mods(subg, global_mods, special_residues)
-        present_breakages = get_broken_bonds(subg, nx_edge_dict)
-        # glycopeptide subgraphs have two sinks (C-terminal residue, glycan reducing end); pick in parent graph order
-        # like true_root_node, as the subgraph view iterates string node labels in hash-randomized set order
-        root_node = next(v for v in nx_mono if v in subg and subg.out_degree(v) == 0)
-        atomic_mod_dict_subg = atom_mods_init(subg, present_breakages, terminals, terminal_labels)
-        mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict,
-                                            allowed_X_cleavages, disable_A_cross_rings)
-        mono_mod_perms, atom_dict_perms = generate_mod_permutations(terminals, terminal_labels, mono_mods_list,
-                                                                    atomic_mod_dict_subg)
-        mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms,
-                                                                          terminal_labels, subg_global_mods,
-                                                                          sample_prep = sample_prep, charge = charge)
-        # nearly all permutations exceed max_cleavages, so cleavages are counted before any mass is calculated
-        inner_counts = np.zeros(1, dtype = int)
-        for mods, atom_dicts in zip(mono_mod_perms, atom_dict_perms):
-            inner_counts = (inner_counts[:, np.newaxis] + [mod_count([[mod], [atom_dict]], None) for mod, atom_dict in
-                                                           zip(mods, atom_dicts)]).ravel()
-        global_counts = np.array([mod_count([[], []], x) for x in subg_global_mods], dtype = int)
+        if opts:
+            # the options the precheck took, in this subgraph's terminal order
+            bonus_root_mass, root_node, subg_global_mods, global_masses, global_counts = bool(reds) and red_ends[reds[0]], root, gm, g_masses, g_counts
+            bonus_root_node = reds[0] if bonus_root_mass else None
+            mono_mod_perms, atom_dict_perms, mono_masses, atom_masses = ([opts[t][i] for t in terminals] for i in range(2, 6))
+            inner_counts = np.zeros(1, dtype = int)
+            for t in terminals:
+                inner_counts = (inner_counts[:, np.newaxis] + opts[t][1]).ravel()
+        else:
+            bonus_root_mass, bonus_root_node = temporary_root_calc_func(subg, nx_mono)
+            subg_global_mods = update_global_mods(subg, global_mods, special_residues)
+            present_breakages = get_broken_bonds(subg, nx_edge_dict)
+            # glycopeptide subgraphs have two sinks (C-terminal residue, glycan reducing end); pick in parent graph order
+            # like true_root_node, as the subgraph view iterates string node labels in hash-randomized set order
+            root_node = next(v for v in nx_mono if v in subg and subg.out_degree(v) == 0)
+            atomic_mod_dict_subg = atom_mods_init(subg, present_breakages, terminals, terminal_labels)
+            mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict,
+                                                allowed_X_cleavages, disable_A_cross_rings)
+            mono_mod_perms, atom_dict_perms = generate_mod_permutations(terminals, terminal_labels, mono_mods_list,
+                                                                        atomic_mod_dict_subg)
+            mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms,
+                                                                              terminal_labels, subg_global_mods,
+                                                                              sample_prep = sample_prep, charge = charge)
+            # nearly all permutations exceed max_cleavages, so cleavages are counted before any mass is calculated
+            inner_counts = np.zeros(1, dtype = int)
+            for mods, atom_dicts in zip(mono_mod_perms, atom_dict_perms):
+                inner_counts = (inner_counts[:, np.newaxis] + [mod_count([[mod], [atom_dict]], None) for mod, atom_dict in
+                                                               zip(mods, atom_dicts)]).ravel()
+            global_counts = np.array([mod_count([[], []], x) for x in subg_global_mods], dtype = int)
         inner_idx = np.flatnonzero(inner_counts + global_counts.min() <= max_cleavages)
         if inner_idx.size == 0:
             continue
@@ -1060,7 +1136,6 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
                                        bonus_root_node, mass_tag, charge, mono_mod_perms,
                                        vectorized_lazy_product_indices(mono_mod_perms, inner_idx)[:, ::-1],
                                        sample_prep = sample_prep, root_label = root_label))
-        m_thresh = 1 if charge < 0 else 2
         counts = (inner_counts[inner_idx, np.newaxis] + global_counts).ravel()
         has_adduct = np.tile([bool(ADDUCT_GLOBAL_MODS & set(parse_global_mod(x))) for x in subg_global_mods], inner_idx.size)
         keep = (counts <= max_cleavages) & ~((counts > m_thresh) & has_adduct)

@@ -1,5 +1,6 @@
 """CandyCrunch desktop app: run CandyCrunch on LC-MS/MS files, inspect and curate its predictions, and annotate spectra with CandyCrumbs"""
 import ast
+import contextlib
 import importlib.util
 import io
 import itertools
@@ -62,6 +63,8 @@ TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZo
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD')]
 SPECTRA_SUFFIXES = ('.raw', '.mzml', '.mzxml', '.mgf')
+# extract_spectra xlsx of 4.5 min (25-29.5) of a pig gastric mucin O-glycan run (GPST000029, as packaging/self_test.mzML): 275 MS2 spectra, ~20 glycan peaks
+EXAMPLE_RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'example_PGM_O-glycans.xlsx')
 # What the worker reports while wrap_inference(_batch) runs, keyed by the prediction.py function that starts each step
 STAGES = {'load_spectra_filepath': 'Reading {}', 'condense_dataframe': 'Grouping spectra into chromatographic peaks',
           'assign_candidate_structures': 'Matching precursor compositions', 'assign_annotation_scores_pooled': 'Scoring fragment evidence',
@@ -100,8 +103,8 @@ QTabWidget::pane {{ border-top: 1px solid #ddd0e8; }}
 """
 
 
-def _worker_main(jobs, messages):
-    """Runs CandyCrunch in its own process: the window stays responsive, a run is cancelled by ending the process, and the model loads once for all runs"""
+def _worker_main(jobs, messages, warm_up = False):
+    """Runs CandyCrunch in its own process: the window stays responsive, a run is canceled by ending the process, and the model loads once for all runs"""
     class Pipe(io.TextIOBase):
         def write(self, text):
             messages.put(('log', text))
@@ -112,6 +115,13 @@ def _worker_main(jobs, messages):
     except Exception:
         messages.put(('fatal', traceback.format_exc()))
         return
+    if warm_up and jobs.empty() and os.path.exists(EXAMPLE_RUN):
+        # A silent run on the example does the lazy imports, cache filling and first model passes that would otherwise slow down the first real run
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cp.wrap_inference(EXAMPLE_RUN, 'O')
+        except Exception:
+            pass
     messages.put(('ready', None))
     parent = mp.parent_process()
     while True:
@@ -238,7 +248,7 @@ class InferenceRunner(QObject):
 
     def __init__(self):
         super().__init__()
-        self.context, self.busy, self.dead = mp.get_context('spawn'), False, False
+        self.context, self.busy, self.dead, self.warm_up = mp.get_context('spawn'), False, False, True
         self.timer = QTimer(self)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.poll)
@@ -247,8 +257,10 @@ class InferenceRunner(QObject):
     def start(self):
         # Not a daemon: wrap_inference_batch(n_jobs > 1) starts processes of its own, which daemons may not
         self.jobs, self.messages = self.context.Queue(), self.context.Queue()
-        self.process = self.context.Process(target = _worker_main, args = (self.jobs, self.messages), name = 'CandyCrunch worker')
+        self.process = self.context.Process(target = _worker_main, args = (self.jobs, self.messages, self.warm_up), name = 'CandyCrunch worker')
         self.process.start()
+        # Only the first worker warms up: after Cancel or a crash, the user is waiting to run again
+        self.warm_up = False
         self.timer.start()
 
     def submit(self, experiments, weights):
@@ -1086,6 +1098,12 @@ class SettingsPanel(QScrollArea):
         if target is not None and target is not self.current_experiment():
             self.files.setCurrentItem(target)
         self.files_changed.emit()
+
+    def add_example(self):
+        """Adds the bundled example run once, as an experiment of its own with the default settings for its O-glycans"""
+        if EXAMPLE_RUN not in self.paths():
+            self.files.setCurrentItem(self.add_experiment({'glycan_class': 'O'}, 'Example'))
+            self.add_paths([EXAMPLE_RUN])
 
     def remove_selected(self):
         for item in self.files.selectedItems():
@@ -2007,7 +2025,8 @@ class MainWindow(QMainWindow):
         title.setObjectName('title')
         title.setAlignment(Qt.AlignCenter)
         self.welcome_text = _label('Glycan structures from LC-MS/MS runs. Add runs on the left (or drop them anywhere here), check the sample settings, '
-                                   'and press Run CandyCrunch.', 'hint')
+                                   'and press Run CandyCrunch. No data at hand? <a href="example">Add the example run</a>.', 'hint')
+        self.welcome_text.linkActivated.connect(lambda _: self.settings.add_example())
         self.welcome_text.setAlignment(Qt.AlignCenter)
         self.welcome_text.setFixedWidth(460)
         self.welcome_text.setMinimumHeight(self.welcome_text.heightForWidth(460))
@@ -2065,6 +2084,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu('&File')
         file_menu.addAction('Add runs…', self.choose_files, QKeySequence.Open)
         file_menu.addAction('Add folder…', self.choose_folder)
+        file_menu.addAction('Add example run', lambda: (self.settings.add_example(), self.tabs.setCurrentWidget(self.split)))
         file_menu.addSeparator()
         file_menu.addAction('Open results…', self.open_session)
         self.save_action = file_menu.addAction('Save results…', self.save_session, QKeySequence.Save)
@@ -2434,8 +2454,9 @@ def main():
         app.exec()
         runner.shutdown()
         with open('candycrunch_self_test.log', 'w', encoding = 'utf-8') as file:
-            file.write(''.join(log) + f'\nGlycan peaks found: {outcome[0] if outcome else 0}\n')
-        sys.exit(0 if outcome and outcome[0] > 0 else 1)
+            file.write(''.join(
+                log) + f'\nGlycan peaks found: {outcome[0] if outcome else 0}\nExample run bundled: {os.path.exists(EXAMPLE_RUN)}\n')
+        sys.exit(0 if outcome and outcome[0] > 0 and os.path.exists(EXAMPLE_RUN) else 1)
     window = MainWindow([os.path.abspath(p) for p in sys.argv[1:]])
     window.show()
     sys.exit(app.exec())

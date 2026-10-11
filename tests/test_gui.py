@@ -179,3 +179,17 @@ def test_gui_ms3_hover_and_menu(app, monkeypatch):
     proxy_row = next(i for i in range(view.proxy.rowCount()) if view.proxy.mapToSource(view.proxy.index(i, 0)).row() == 1)
     view.context_menu(view.table.visualRect(view.proxy.index(proxy_row, 2)).center())
     assert view.row == 1
+
+
+def test_gui_example_run(app):
+    from candycrunch import gui
+    panel = gui.SettingsPanel()
+    gui._set_combo(panel.inputs['glycan_class'], 'N')
+    panel.add_example()
+    panel.add_example()
+    # The bundled example is added once, as an experiment of its own with O-glycan defaults
+    assert [(name, files, settings['glycan_class']) for name, files, settings in panel.experiments()] == [
+        ('Example', [gui.EXAMPLE_RUN], 'O')]
+    assert panel.experiments()[0][2] == {**panel.values(), 'glycan_class': 'O'}
+    assert {'m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity', 'mode', 'trap'} <= set(
+        pd.read_excel(gui.EXAMPLE_RUN).columns)
