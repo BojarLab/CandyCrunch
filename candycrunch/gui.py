@@ -53,6 +53,10 @@ FEATURES = '\x00features'
 GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharides (e.g., milk)', 'free'), ('Glycolipid glycans', 'lipid')]
 REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'), ('Custom tag mass', 'custom')]
 SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethylated'), ('Peracetylated', 'peracetylated')]
+# Linkage-specific sialic acid derivatizations of underivatized samples, as wrap_inference's sialic_derivatization
+SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
+                          ('Dimethylamidation (DMA)', 'DMA'), ('SALSA', 'SALSA')]
+SIALIC_TIP = 'Linkage-specific sialic acid derivatization: precursor masses then tell a2-6 from a2-3/8 sialic acids, and fragments carry the derivatized sialic acids'
 LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
@@ -404,7 +408,8 @@ class Annotator(QObject):
                 if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get('ms3_precursor') is None and self.request[0] == request_id:
                     try:
                         support = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])), charge = request['charge'],
-                                                  candidates = request['candidates'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'])
+                                                  candidates = request['candidates'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
+                                                  sialic_derivatization = request['kwargs'].get('sialic_derivatization'))
                     except Exception:
                         support = None
                     self.support.emit(request_id, support)
@@ -468,7 +473,10 @@ def _mass_tag(settings):
 def _composition(composition):
     with IMPORT_LOCK:
         from glycowork.glycan_data.loader import stringify_dict
-    return stringify_dict(composition) if isinstance(composition, dict) and composition else ''
+        from glycowork.motif.processing import canonicalize_composition
+    # sialic acids of known linkage (Neu5Ac_a2-6, from a linkage-specific derivatization) are written as the E and L of shorthand compositions (H5N4E1L1)
+    return (canonicalize_composition(composition, as_string = True) if any('_a2-' in k for k in composition) else stringify_dict(composition)) if isinstance(
+        composition, dict) and composition else ''
 
 
 class TableModel(QAbstractTableModel):
@@ -872,6 +880,8 @@ class SettingsPanel(QScrollArea):
         self.inputs['mass_tag'] = _spin(-1000, 3000, 1, 4, ' Da')
         self.inputs['mass_tag'].setToolTip('Mass a custom reducing-end label adds; 0 for a free reducing end')
         self.inputs['sample_prep'] = _combo(SAMPLE_PREPS)
+        self.sialic = _combo(SIALIC_DERIVATIZATIONS)
+        self.sialic.setToolTip(SIALIC_TIP)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
         self.inputs['trap'].setToolTip('Overridden by the instrument stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
@@ -881,6 +891,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('Reducing end', self.inputs['modification'])
         form.addRow('Tag mass', self.inputs['mass_tag'])
         form.addRow('Derivatization', self.inputs['sample_prep'])
+        form.addRow('Sialic acid linkage', self.sialic)
         form.addRow('Chromatography', self.inputs['lc'])
         form.addRow('Mass analyzer', self.inputs['trap'])
         layout.addLayout(form)
@@ -1108,6 +1119,7 @@ class SettingsPanel(QScrollArea):
         values['max_charge'] = self.charge.value() * (-1 if self.mode.currentData() == 'negative' else 1)
         values['filter_out'] = {name for name, box in self.filter_boxes.items() if box.isChecked()}
         values['mass_tag'] = values['mass_tag'] if values['modification'] == 'custom' else None
+        values['sialic_derivatization'] = self.sialic.currentData()
         return values
 
     def set_values(self, values):
@@ -1129,6 +1141,7 @@ class SettingsPanel(QScrollArea):
         for name, box in self.filter_boxes.items():
             box.setChecked(name in set(values.get('filter_out', DEFAULTS['filter_out'])))
         self.inputs['mass_tag'].setEnabled(self.inputs['modification'].currentData() == 'custom')
+        self.sialic.setCurrentIndex(max(self.sialic.findData(values.get('sialic_derivatization')), 0) if values.get('sialic_derivatization') else 0)
 
 
 class ResultsView(QWidget):
@@ -1591,7 +1604,8 @@ class ResultsView(QWidget):
             self.spectrum.annotate(structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]),
                                    _mass_tag(settings), settings['sample_prep'],
                                    ms3 = [(p, n) for p, _, n in self.ms3_groups],
-                                   candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [])
+                                   candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [],
+                                   sialic_derivatization = settings.get('sialic_derivatization'))
             if self.tabs.currentWidget() is self.ms3_tab:
                 self.annotate_ms3()
 
@@ -1613,7 +1627,8 @@ class ResultsView(QWidget):
             settings = self.payload['settings']
             # As the pipeline scores MS3: without X cross-rings, which explain random MS3 peaks as often as real ones (MS3 cleavage counting)
             self.ms3_panel.annotate(self.ms3_args[0], list(peaks.keys()), list(peaks.values()), self.ms3_args[1], _mass_tag(settings),
-                                    settings['sample_prep'], ms3_precursor = p, disable_X_cross_rings = True)
+                                    settings['sample_prep'], ms3_precursor = p, disable_X_cross_rings = True,
+                                    sialic_derivatization = settings.get('sialic_derivatization'))
 
     def pick_alternative(self, item):
         self.alternative, self.support_highlight = item.data(Qt.UserRole), None
@@ -1854,6 +1869,8 @@ class CrumbsTab(QWidget):
         self.modification = _combo(REDUCING_ENDS)
         self.mass_tag = _spin(-1000, 3000, 1, 4, ' Da')
         self.sample_prep = _combo(SAMPLE_PREPS)
+        self.sialic = _combo(SIALIC_DERIVATIZATIONS)
+        self.sialic.setToolTip(SIALIC_TIP)
         self.cleavages = _spin(1, 4, 1)
         self.cleavages.setValue(3)
         self.cleavages.setToolTip('Maximum number of concurrent cleavages per fragment')
@@ -1867,6 +1884,7 @@ class CrumbsTab(QWidget):
         form.addRow('Reducing end', self.modification)
         form.addRow('Tag mass', self.mass_tag)
         form.addRow('Derivatization', self.sample_prep)
+        form.addRow('Sialic acid linkage', self.sialic)
         form.addRow('Max. cleavages', self.cleavages)
         form.addRow('Fragmentation', self.fragmentation)
         form.addRow('MS3 precursor', self.ms3_precursor)
@@ -1926,6 +1944,7 @@ class CrumbsTab(QWidget):
         _set_combo(self.modification, settings.get('modification'))
         self.mass_tag.setValue(settings.get('mass_tag') or 0)
         _set_combo(self.sample_prep, settings.get('sample_prep'))
+        self.sialic.setCurrentIndex(max(self.sialic.findData(settings.get('sialic_derivatization')), 0) if settings.get('sialic_derivatization') else 0)
         self.ms3_precursor.setValue(request.get('ms3_precursor') or 0)
         self.annotate()
 
@@ -1941,6 +1960,8 @@ class CrumbsTab(QWidget):
         kwargs = {'max_cleavages': self.cleavages.value()}
         if self.fragmentation.currentData():
             kwargs['fragmentation_method'] = self.fragmentation.currentData()
+        if self.sialic.currentData():
+            kwargs['sialic_derivatization'] = self.sialic.currentData()
         if self.ms3_precursor.value():
             # X cross-rings within the isolated fragment explain random MS3 peaks as often as real ones
             kwargs.update(ms3_precursor = self.ms3_precursor.value(), disable_X_cross_rings = True)

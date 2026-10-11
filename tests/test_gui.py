@@ -24,6 +24,11 @@ def test_gui_settings_match_wrap_inference(app):
         k: params[k].default for k in values if k in params and params[k].default is not inspect.Parameter.empty}
     panel.set_values({**values, 'max_charge': 2, 'modification': 'custom', 'mass_tag': 100.5})
     assert panel.values()['max_charge'] == 2 and panel.values()['mass_tag'] == 100.5
+    # the sialic acid derivatization is no combo text: None stays None, as wrap_inference's default
+    panel.set_values({**values, 'sialic_derivatization': 'EEA'})
+    assert panel.values()['sialic_derivatization'] == 'EEA'
+    panel.set_values(values)
+    assert panel.values()['sialic_derivatization'] is None
 
 
 def test_gui_results_curation(app):

@@ -17,7 +17,8 @@ import numpy as np
 import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
 from glycowork.motif.tokenization import map_to_basic, HYDROGEN_MASS, PROTON_MASS, calculate_adduct_mass, \
-    composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS
+    composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS, \
+    SIALIC_DERIVATIZATIONS, SIALIC_PRODUCTS, SIALIC_KEYS, _carboxyl_sites
 from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
 from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
 from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
@@ -178,6 +179,11 @@ fragmentation_priors = {
     # token, so protonated and negative-mode fragments (where internal 02A/24A are diagnostic) are untouched.
     'reducing_end_cross_ring': {'boost': 1.6, 'non_reducing_penalty': 0.2, 'adducts': {'+Na', '+K'}},
 }
+# What a linkage-specific sialic acid derivatization makes of a carboxyl, written into the residue: at C1 of a sialic acid (Neu1Et5Ac is the ethyl ester of
+# Neu5Ac, as glycowork writes its methyl ester Neu1Me5Ac), at C6 of a uronic acid (GlcA6Et)
+CARBOXYL_TOKENS = {'ethyl ester': 'Et', 'methyl ester': 'Me', 'lactone': 'lactone', 'amide': 'N', 'methylamide': 'NMe', 'dimethylamide': 'NMe2',
+                   'isopropylamide': 'NiPr'}
+CARBOXYL_LABELS = set()  # the residues derivatize_carboxyls made, which a composition counts like base residues
 linkage_lability = {
     ('Neu5Ac', '2-3'): 1.0, ('Neu5Ac', '2-6'): 0.3, ('Neu5Ac', '2-8'): 0.5,
     ('Neu5Gc', '2-3'): 1.0, ('Neu5Gc', '2-6'): 0.3, ('Neu5Gc', '2-8'): 0.5,
@@ -302,6 +308,58 @@ def smiles_mono_attributes(label):
     delta = {prop: full[prop][key] - table[prop][key] for prop in ['mass', *DERIVATIZATION_MASSES]}
     return {prop: {f: v + delta[prop] if prop != 'atoms' and (table['peracetylated'][f] > 0 or f == key) else v for f, v in values.items()}
             for prop, values in table.items()}
+
+
+def derivatize_carboxyls(glycan, sialic_derivatization):
+    """Writes a linkage-specific sialic acid derivatization into a glycan or composition, as residues with fragment tables of their own\n
+    | Arguments:
+    | :-
+    | glycan (string or dict): glycan in IUPAC-condensed format, or a composition with linkage-resolved sialic acids (e.g., 'H5N4E1L1')
+    | sialic_derivatization (string or tuple): 'EE', 'EEA', 'ME', 'DMA', 'SALSA' (glycowork's SIALIC_DERIVATIZATIONS), or a pair of its SIALIC_PRODUCTS
+    |                                          for a2-6 and a2-3/8/9 sialic acids\n
+    | Returns:
+    | :-
+    | Returns the glycan with every sialic acid written as its product at C1 (Neu5Ac(a2-6) of ethyl esterification as Neu1Et5Ac(a2-6), a lactone as
+    | Neu1lactone5Ac) and every uronic acid as the a2-6 product at C6 (GlcA6Et), or the composition with such residues as keys; the product's mass counts
+    | on every fragment that keeps that carbon, the lactone's water loss included (it bridges to the neighbouring residue, which is not modelled)
+    """
+    products = SIALIC_DERIVATIZATIONS.get(sialic_derivatization) if isinstance(sialic_derivatization, str) else tuple(sialic_derivatization)
+    if products is None or len(products) != 2 or not set(products) <= SIALIC_PRODUCTS.keys():
+        raise ValueError(f"Unknown sialic_derivatization {sialic_derivatization!r}; use one of {list(SIALIC_DERIVATIZATIONS)} or a pair of products for a2-6 and a2-3/8/9 sialic acids from {list(SIALIC_PRODUCTS)}.")
+    deltas = [sum(calculate_adduct_mass(f) for f in SIALIC_PRODUCTS[p]) for p in products]
+    linked = {k: (base, i) for base, keys in SIALIC_KEYS.items() for i, k in enumerate(keys)} | {'HexA': ('HexA', 0)}
+    composition = glycan if isinstance(glycan, dict) else canonicalize_composition(glycan) if is_composition(glycan) else None
+    if composition is not None:
+        if unknown := [k for k in SIALIC_KEYS if composition.get(k)]:
+            raise ValueError(f"A linkage-specific derivatization makes something else of each sialic acid by its linkage, which {unknown} of {glycan} do not give; write them as a2-6 or a2-3 (e.g., 'H5N4E1L1').")
+        sites = [(*linked[k], linked[k][0]) for k in composition if k in linked]
+    else:
+        sites = _carboxyl_sites(glycan)
+        if unknown := [glycan[span[0]:span[1]] for _, i, span, _ in sites if i is None]:
+            raise ValueError(f"A linkage-specific derivatization makes something else of each sialic acid by its linkage, which is unknown for {unknown} in '{glycan}' "
+                             f"(a2-3/6, a2-?, or the reducing end); glycowork's resolve_sialic_linkages fills it in from a linkage-resolved composition.")
+        glycan_to_graph_monos(glycan)  # the tables of the residues as written, which the derivatized ones build on
+        sites = [(base, i, glycan[start:end], start, end) for base, i, (start, end), _ in sites]
+    labels = {}
+    for base, i, label, *_ in sites:
+        new = label[:3] + '1' + CARBOXYL_TOKENS[products[i]] + label[3:] if base in SIALIC_KEYS else label + '6' + CARBOXYL_TOKENS[products[i]]
+        old_key, new_key = map_to_basic(label, obfuscate_ptm = False), map_to_basic(new, obfuscate_ptm = False)
+        if new_key not in mono_attributes and old_key in mono_attributes:
+            carbon, table = 1 if base in SIALIC_KEYS else 6, mono_attributes[old_key]
+            mono_attributes[new_key] = {'atoms': {new_key if f == old_key else f: a for f, a in table['atoms'].items()}} | {
+                prop: {new_key if f == old_key else f: v + deltas[i] * (prop == 'mass' and carbon in table['atoms'][f]) for f, v in table[prop].items()}
+                for prop in ['mass', *DERIVATIZATION_MASSES] if prop in table}
+        CARBOXYL_LABELS.add(new_key)
+        labels[(label, i)] = new
+    if composition is not None:
+        out = {}
+        for k, v in composition.items():
+            new = labels[(linked[k][0], linked[k][1])] if k in linked else k
+            out[new] = out.get(new, 0) + v
+        return out
+    for base, i, label, start, end in sorted(sites, key = lambda x: -x[3]):
+        glycan = glycan[:start] + labels[(label, i)] + glycan[end:]
+    return glycan
 
 
 def glycan_to_graph_monos(glycan):
@@ -810,9 +868,9 @@ def update_global_mods(subg, global_mods, special_residues):
         excluded |= PEPTIDE_ONLY_GLOBAL_MODS
     subg_global_mods = [x for x in global_mods if not (excluded & set(parse_global_mod(x)))]
     # residue by residue (the joined labels of Glc(a1-4)Ara contain GlcA), with every uronic acid (IdoA, GalA) as HexA and only phosphate
-    # substituents (Man6P, GlcNAcOP) as P, not the P of Pen, Pse, Pyr or Prop
+    # substituents (Man6P, GlcNAcOP) as P, not the P of Pen, Pse, Pyr or Prop; a derivatized carboxyl (derivatize_carboxyls) loses no CO2
     present_specials = [x for x in special_residues if any(re.search(r'(\d|O)P(?![a-z])', v) if x == 'P' else x in v or (
-        x == 'HexA' and map_to_basic(v, obfuscate_ptm = False).startswith(x)) for v in all_labels if len(v) > 1)]
+        x == 'HexA' and map_to_basic(v, obfuscate_ptm = False).startswith(x)) for v in all_labels if len(v) > 1 and v not in CARBOXYL_LABELS)]
     if not present_specials:
         return subg_global_mods
     if any(k in present_specials for k in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn']):
@@ -1585,9 +1643,9 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False, max_gl
     labels = [v for v in nx.get_node_attributes(nx_mono, 'string_labels').values() if len(v) > 1]
     special_mod_residues = ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn', 'S', 'P']
     # residue by residue (the joined labels of Glc(a1-4)Ara contain GlcA), with every uronic acid (IdoA, GalA) as HexA and only phosphate
-    # substituents (Man6P, GlcNAcOP) as P, not the P of Pen, Pse, Pyr or Prop
+    # substituents (Man6P, GlcNAcOP) as P, not the P of Pen, Pse, Pyr or Prop; a derivatized carboxyl (derivatize_carboxyls) loses no CO2
     present_special_residues = [x for x in special_mod_residues if any(re.search(r'(\d|O)P(?![a-z])', v) if x == 'P' else x in v or (
-        x == 'HexA' and map_to_basic(v, obfuscate_ptm = False).startswith(x)) for v in labels)]
+        x == 'HexA' and map_to_basic(v, obfuscate_ptm = False).startswith(x)) for v in labels if v not in CARBOXYL_LABELS)]
     combos = sorted(global_mods)
     if max_global_mods > 1:
         repeatable = [x for x in combos if x in REPEATABLE_GLOBAL_MODS]
@@ -1838,7 +1896,14 @@ def _build_composition_fragments(composition, re_bonus, sample_prep = 'underivat
     | Returns a list of (mass_without_mode, label_string, n_cleavages) tuples
     """
     deriv_mass = DERIVATIZATION_MASSES.get(sample_prep, 0)
-    mono_types = sorted(m for m in composition if m in derivatization_sites['permethylated'] and composition[m] > 0)
+    # a sialic acid of known linkage (Neu5Ac_a2-6) is its residue, unless derivatize_carboxyls made it a residue of its own
+    linked = {k: base for base, keys in SIALIC_KEYS.items() for k in keys}
+    if not linked.keys().isdisjoint(composition):
+        folded = {}
+        for k, v in composition.items():
+            folded[linked.get(k, k)] = folded.get(linked.get(k, k), 0) + v
+        composition = folded
+    mono_types = sorted(m for m in composition if (m in derivatization_sites['permethylated'] or m in CARBOXYL_LABELS) and composition[m] > 0)
     if not mono_types:
         return []
     # a substituent (S, P, Ac, ...) of a composition can sit on any residue, so a fragment can carry any number of them
@@ -2079,7 +2144,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = None,
                 disable_A_cross_rings = None, sample_prep = 'underivatized', prior_weight = 1.0, glycan_class = None,
                 fragmentation_method = None, allow_internal_peptide_fragments = False, mass_threshold_ppm = None,
-                max_global_mods = None, ms3_precursor = None):
+                max_global_mods = None, ms3_precursor = None, sialic_derivatization = None):
     """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
     | Arguments:
     | :-
@@ -2107,7 +2172,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | ms3_precursor (float): m/z of the MS2 fragment that was isolated for an MS3 spectrum whose peaks are fragment_masses; these are then only
     |                        annotated as fragments of what that MS2 fragment can be in this glycan (within max_cleavages), with up to
     |                        max_cleavages cleavages that fragment does not have (at most one X cross-ring), and all are None if it cannot be any
-    |                        fragment of it; glycan structures only; default:None\n
+    |                        fragment of it; glycan structures only; default:None
+    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of an underivatized sample, 'EE', 'EEA', 'ME', 'DMA', 'SALSA', or a
+    |                        pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; every sialic acid then needs its linkage (a2-6 or a2-3/8/9 in a
+    |                        structure, E/L in a composition), and fragments keeping its C1 carry the product; default:None\n
     | Returns:
     | :-
     | Returns a dict keyed by observed mass, each pointing to None or a dict of 'Theoretical fragment masses', 'Domon-Costello nomenclatures' and
@@ -2115,6 +2183,15 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     """
     if not len(fragment_masses):
         return {}
+    if sialic_derivatization is not None:
+        if sample_prep != 'underivatized':
+            raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans, not of {sample_prep} ones.")
+        if isinstance(input_string, dict) and 'peptide' in input_string:
+            input_string = input_string | {'glycans': [derivatize_carboxyls(g, sialic_derivatization) for g in input_string.get('glycans', [])]}
+        elif isinstance(input_string, str) and '*' in input_string:
+            input_string = re.sub(r'\*([^*]+)\*', lambda m: f'*{derivatize_carboxyls(m[1], sialic_derivatization)}*', input_string)
+        else:
+            input_string = derivatize_carboxyls(input_string, sialic_derivatization)
     if isinstance(input_string, dict) and 'peptide' in input_string and not input_string['peptide'] and len(input_string.get('glycans', [])) == 1:
         input_string = input_string['glycans'][0]
     glycopeptide_input = (isinstance(input_string, dict) and bool(input_string.get('peptide'))) or (
@@ -2339,7 +2416,7 @@ _PLACEMENTS = {}
 
 
 def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance = 0.3, top_n_peaks = 20, mass_tag = None, sample_prep = 'underivatized',
-                    reference_glycans = None):
+                    reference_glycans = None, sialic_derivatization = None):
     """Ties a glycan structure to the MS2 peaks that support it, so a prediction can be checked instead of taken at face value: for each residue, the
     intense peaks that a single glycosidic cleavage of the structure explains and that no other placement of that residue could explain with up to
     two cleavages (other placements: the residue with everything attached to it on any other residue of the structure that it is linked to in known
@@ -2355,7 +2432,9 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
     | top_n_peaks (int): how many of the most intense peaks can support a residue; default:20
     | mass_tag (float): mass of the glycan label or reducing end modification, as in CandyCrumbs; default:None (alditol)
     | sample_prep (string): underivatized/permethylated/peracetylated
-    | reference_glycans (list): known structures that define where a donor can attach; default:None (the CandyCrunch vocabulary)\n
+    | reference_glycans (list): known structures that define where a donor can attach; default:None (the CandyCrunch vocabulary)
+    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization, as in CandyCrumbs; the precursor mass then fixes how many sialic
+    |                                          acids are a2-6 and how many a2-3/8/9, so placements and candidates with other counts are left out; default:None\n
     | Returns:
     | :-
     | Returns a dict with 'residues', one dict per residue with a fully specified linkage: 'residue' (index among the monosaccharides of the glycan
@@ -2428,9 +2507,13 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
     top = sorted(peaks.items(), key = lambda x: -x[1])[:top_n_peaks]
     observed, explained, alternatives = [(float(mz), intensity / (top[0][1] or 1)) for mz, intensity in top], {}, {v for _, _, p in residues for v in p}
     for g in [glycan] + sorted(alternatives | {c for c in candidates if isinstance(c, str) and '{' not in c and c != glycan}):
+        if glycan not in explained and g != glycan:
+            break
         relevant = range(len(observed)) if g == glycan else [i for i, (single, any_fragment) in explained[glycan].items() if single or not any_fragment]
         try:
-            nx_mono, _ = input_to_graph(glycopeptide_string_to_input(g))
+            if sialic_derivatization is not None and g != glycan and glycan_to_composition(g, sialic_linkage = True) != glycan_to_composition(glycan, sialic_linkage = True):
+                continue
+            nx_mono, _ = input_to_graph(glycopeptide_string_to_input(g if sialic_derivatization is None else derivatize_carboxyls(g, sialic_derivatization)))
             global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = True)
             subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, [], max_cleavages = 2, fragment_masses = [observed[i][0] for i in relevant],
                                                threshold = mass_tolerance, mass_tag = mass_tag, charge = charge, sample_prep = sample_prep,
@@ -2572,7 +2655,7 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
     return df_out
 
 
-def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_prep = 'underivatized', max_cleavages = 3):
+def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_prep = 'underivatized', max_cleavages = 3, sialic_derivatization = None):
     """Calculates the theoretical m/z of a named fragment; the inverse of CandyCrumbs\n
     | Arguments:
     | :-
@@ -2581,11 +2664,14 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
     | charge (int): charge state of the fragment ion, sign sets the ion mode; default:-1
     | mass_tag (float): mass of the glycan label or reducing end modification; default:None (alditol, 2 H)
     | sample_prep (string): underivatized/permethylated/peracetylated
-    | max_cleavages (int): maximum number of allowed concurrent fragmentations; default:3\n
+    | max_cleavages (int): maximum number of allowed concurrent fragmentations; default:3
+    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization, as in CandyCrumbs; default:None\n
     | Returns:
     | :-
     | Returns the m/z of the fragment, or None if it cannot exist on this glycan
     """
+    if sialic_derivatization is not None:
+        glycan = derivatize_carboxyls(glycan, sialic_derivatization)
     if isinstance(fragment, str):
         cuts = []
         # a + separates fragment names, except in front of an adduct (M+Na, or M_+Na as CandyCrumbs writes it)

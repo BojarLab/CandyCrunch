@@ -10,16 +10,18 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 
-def centroid_ion_trap(mzs, ints):
+def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
     """centroids a Thermo ion-trap profile spectrum as Thermo's centroider does (it made the centroids of the mzML files CandyCrunch was validated on)\n
    | Arguments:
    | :-
    | mzs (array): profile m/z values, on Thermo's profile axis (as in mzML files from msconvert)
-   | ints (array): profile intensities\n
+   | ints (array): profile intensities
+   | min_gap (float): neighboring centroids closer than this are merged; default:0.5 (Thermo's centroids are always >= 0.5 m/z apart)
+   | bin_shift (bool): whether centroids of wide peaks move one profile bin down, as Thermo's do; default:True\n
    | Returns:
    | :-
    | Returns an (n, 2) array of centroid m/z and intensity: profile points below 1 are dropped, the profile is split at the lowest point between
-   | maxima and neighboring centroids closer than 0.5 m/z are merged, each carrying the summed signal of its share of the profile
+   | maxima and neighboring centroids closer than min_gap are merged, each carrying the summed signal of its share of the profile
    """
     ints = np.where(ints < 1, 0, ints)
     apex = np.where((ints[1:-1] > ints[:-2]) & (ints[1:-1] >= ints[2:]) & (ints[1:-1] > 0))[0] + 1
@@ -30,14 +32,15 @@ def centroid_ion_trap(mzs, ints):
         peak_ints = np.add.reduceat(ints, edges)
         peak_mzs = np.add.reduceat(ints * mzs, edges) / peak_ints
         gaps = np.diff(peak_mzs)
-        if not len(gaps) or gaps.min() >= 0.5:
+        if not len(gaps) or gaps.min() >= min_gap:
             break
-        # Merges every pair closer than 0.5 m/z whose gap is the smallest among its neighboring gaps, until none is left
+        # Merges every pair closer than min_gap whose gap is the smallest among its neighboring gaps, until none is left
         left, right = np.concatenate([[np.inf], gaps[:-1]]), np.concatenate([gaps[1:], [np.inf]])
-        edges = np.delete(edges, np.where((gaps < 0.5) & (gaps <= left) & (gaps < right))[0] + 1)
+        edges = np.delete(edges, np.where((gaps < min_gap) & (gaps <= left) & (gaps < right))[0] + 1)
     # Thermo's centroids of peaks spanning 9 or more profile points sit one bin below their intensity-weighted mean (the bin is the median spacing,
     # as converters drop runs of zero points)
-    peak_mzs = peak_mzs - np.median(np.diff(mzs)) * (np.add.reduceat((ints > 0).astype(int), edges) >= 9)
+    if bin_shift:
+        peak_mzs = peak_mzs - np.median(np.diff(mzs)) * (np.add.reduceat((ints > 0).astype(int), edges) >= 9)
     return np.stack([peak_mzs, peak_ints], axis = 1)
 
 
@@ -206,7 +209,14 @@ def read_mzxml(filepath, centroid_levels = ()):
         scan['instrument'] = instruments.get(scan.get('msInstrumentID'), next(iter(instruments.values()), ''))
         # Profile scans (e.g., Bruker ion-trap files converted by msconvert) are centroided like those of mzML files
         if scan['msLevel'] in centroid_levels and scan.get('centroided') == '0' and len(values):
-            cents = (centroid_ion_trap if str(scan.get('filterLine', '')).startswith('ITMS') else centroid_gaussian)(values[0::2], values[1::2])
+            if str(scan.get('filterLine', '')).startswith('ITMS'):
+                cents = centroid_ion_trap(values[0::2], values[1::2])
+            # Other ion traps (Bruker HCT, amaZon) resolve the isotopes of doubly charged ions, and the Gaussian fit split their noisy peak tops into
+            # centroids 0.1-0.2 m/z apart (1040.39 and 1040.58 for one peak), so peaks are split at valleys as for Thermo, but only merged below 0.3 m/z
+            elif 'filterLine' not in scan and 'ion trap' in scan['instrument']:
+                cents = centroid_ion_trap(values[0::2], values[1::2], min_gap = 0.3, bin_shift = False)
+            else:
+                cents = centroid_gaussian(values[0::2], values[1::2])
             scan['m/z array'], scan['intensity array'] = cents[:, 0], cents[:, 1]
         el.clear()
         heapq.heappush(queue, (int(scan['num']), next(order), scan))

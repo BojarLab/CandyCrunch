@@ -43,3 +43,4 @@ htmlcov/
 
 # Test files
 tests/data/*/*.mzML
+tests/data/*/*.mzXML

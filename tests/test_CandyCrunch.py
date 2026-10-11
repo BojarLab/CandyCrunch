@@ -27,13 +27,21 @@ TEST_DICTS = [
     {'name':'PMC8950484_CHO','args': {'glycan_class':'O'}},
     {'name':'GPST000307','args': {'glycan_class':'O'}},
     {'name':'GPST000487','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")]},
+    # Four O-glycan and four N-glycan replicate runs (Bruker HCT) share one folder; 'folder' names it, 'name' the ground truth (df_mz_<name>.csv)
+    {'name':'GPST000169_O','folder':'GPST000169','args': {'glycan_class':'O'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'OGlycan' in x]},
+    {'name':'GPST000169_N','folder':'GPST000169','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'NGlycan' in x]},
    # {'name':'GPST000134','args': {'glycan_class':'N', 'mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1]}
 ]
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
-# Batch F1 on rows with MS2 evidence was 0.701-0.720 (GPST000029) and 0.705-0.713 (GPST000017) over seeds 0-2
-BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.65}
+# Each batch set: glycan class and its runs as (ground truth name, folder, file); runs sharing a ground truth are replicates, scored together by their mean
+BATCH_SETS = {'pgm': ('O', [('GPST000029', 'GPST000029', 'CA_PGMLAD_OG_051017.mzML'), ('GPST000017', 'GPST000017', 'JC_141128PGMa.mzML')]),
+              'GPST000169_O': ('O', [('GPST000169_O', 'GPST000169', x) for x in sorted(os.listdir(f"{TEST_DATA_DIR}/GPST000169/")) if 'OGlycan' in x and x.endswith('.mzXML')]),
+              'GPST000169_N': ('N', [('GPST000169_N', 'GPST000169', x) for x in sorted(os.listdir(f"{TEST_DATA_DIR}/GPST000169/")) if 'NGlycan' in x and x.endswith('.mzXML')])}
+# Batch F1 on rows with MS2 evidence was 0.701-0.720 (GPST000029) and 0.705-0.713 (GPST000017) over seeds 0-2; the mean over the four replicates
+# 0.646 (GPST000169_O) and 0.741 (GPST000169_N) at seed 0
+BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.65, 'GPST000169_O': 0.59, 'GPST000169_N': 0.69}
 
 
 def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array1_alt = None, array2_alt = None):
@@ -153,9 +161,10 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
     start_time = time.time()  # Start timing
     test_outputs = []
     test_dict = test_params['test_dict']
+    folder = test_dict.get('folder', test_dict['name'])
     test_files = test_params['test_dict'].get('test_files',None)
     if test_files is None:
-        test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{test_dict['name']}")]
+        test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{folder}")]
     test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
     # mzXML files count as mzML (raw spectra with MS1), so they never enter an xlsx run
     if input_format == "xlsx":
@@ -165,19 +174,20 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
         test_files = mzml if mzml else test_files  # fall back to xlsx if no mzML present
     if not test_files:
         pytest.skip(f"no test file for {test_dict['name']} {test_dict['args']}")
+    scores_by_key = defaultdict(list)
     for filename in test_files:
         inference_params = {k: v for k,v in test_params.items() if 'posthoc' not in k if k not in ('test_dict', 'format')}
         posthoc_params = {k: v for k,v in test_params.items() if 'posthoc' in k}
         print(filename)
         print(inference_params|posthoc_params)
         start_time = time.time()
-        preds_out = wrap_inference(f"{TEST_DATA_DIR}/{test_dict['name']}/{filename}",**test_dict['args'],
+        preds_out = wrap_inference(f"{TEST_DATA_DIR}/{folder}/{filename}",**test_dict['args'],
                                 **inference_params)
         end_time = time.time()  # End timing
         execution_time = end_time - start_time
         print(f"\nTest execution time: {execution_time:.2f} seconds")  # Print execution time
         preds_out = posthoc_process_df(preds_out,posthoc_params)
-        loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{test_dict['name']}/df_mz_{test_dict['name']}.csv")
+        loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{folder}/df_mz_{test_dict['name']}.csv")
         col_name  =  filename.split(".")[0]
         rt_col_name = 'RT' if 'RT' in loaded_gt.columns else col_name+'_RT'
         eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name] > 0], rt_col_name, MASS_TOLERANCE, RT_TOLERANCE, verbose = verbose)
@@ -196,21 +206,29 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
             test_params[key] if key != 'test_dict' else test_params['test_dict']['name']
             for key in test_params
         )
-        result_collector.check_performance(test_dict['name'], param_key, eval_scores[0], loaded_gt)
+        scores_by_key[param_key].append(eval_scores[0])
+    # The baseline is a dataset's mean F1 over its files, so the regression check takes that mean (replicates differ by more than its 0.04 tolerance)
+    for param_key, scores in scores_by_key.items():
+        result_collector.check_performance(test_dict['name'], param_key, np.mean(scores), loaded_gt)
     print("Adding results to collector")  # Debug print
     if test_outputs:
         print(f'avg_score:{np.mean([x[0] for x in test_outputs])}')
         assert np.mean([x[0] for x in test_outputs]) > AVG_THRESHOLD
 
 
-def test_candycrunch_batch(result_collector, verbose):
+@pytest.mark.parametrize("batch_set", list(BATCH_SETS))
+def test_candycrunch_batch(batch_set, result_collector, verbose):
     if result_collector.param_names is None:
         result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
-    files = {'GPST000029': 'CA_PGMLAD_OG_051017', 'GPST000017': 'JC_141128PGMa'}
-    combined, outputs = wrap_inference_batch([f"{TEST_DATA_DIR}/{name}/{label}.mzML" for name, label in files.items()],
-                                             'O', intra_cat_thresh = 1.0, spectra = True)
-    assert list(outputs) == list(files.values())
-    for name, label in files.items():
+    glycan_class, runs = BATCH_SETS[batch_set]
+    if not runs or not all(os.path.exists(f"{TEST_DATA_DIR}/{folder}/{file}") for _, folder, file in runs):
+        pytest.skip(f"{batch_set}: not every run has its mzML/mzXML")
+    labels = [os.path.splitext(file)[0] for _, _, file in runs]
+    combined, outputs = wrap_inference_batch([f"{TEST_DATA_DIR}/{folder}/{file}" for _, folder, file in runs], glycan_class, intra_cat_thresh = 1.0,
+                                             spectra = True)
+    assert list(outputs) == labels
+    scores, gts = defaultdict(list), {}
+    for (name, folder, _), label in zip(runs, labels):
         df_out, spectra_out = outputs[label]
         gaps = (df_out['evidence'] == 'ms1_only').values
         # Spectra stay aligned with the rows, MS1-only gap rows included
@@ -219,19 +237,21 @@ def test_candycrunch_batch(result_collector, verbose):
         # Gap rows share the MS2 rows' abundance scale, so they cannot dominate a file
         assert abs(df_out['rel_abundance'].sum() - 100) < 1e-6
         assert df_out.loc[gaps, 'rel_abundance'].sum() < 50
-        gt = pd.read_csv(f"{TEST_DATA_DIR}/{name}/df_mz_{name}.csv")
+        gts[name] = gt = pd.read_csv(f"{TEST_DATA_DIR}/{folder}/df_mz_{name}.csv")
         eval_scores = evaluate_predictions(df_out[~gaps].copy(), gt[gt[label] > 0],
                                            'RT' if 'RT' in gt.columns else label + '_RT', MASS_TOLERANCE, RT_TOLERANCE,
                                            verbose = verbose)
-        print(f'{name} batch F1 (rows with MS2 evidence): {eval_scores[0]:.3f}, MS1-only gap rows: {gaps.sum()}')
+        print(f'{label} batch F1 (rows with MS2 evidence): {eval_scores[0]:.3f}, MS1-only gap rows: {gaps.sum()}')
         # Report like the per-file tests, so batch scores reach the summary tables, the results log and the regression check
         result_collector.add_result({'test_dict': {'name': f'{name}_batch'}, 'supplement': True, 'experimental': True,
                                      'format': 'mzML'}, eval_scores[0], eval_scores)
-        result_collector.check_performance(f'{name}_batch', (f'{name}_batch', True, True, 'mzML'), eval_scores[0], gt)
-        assert eval_scores[0] > BATCH_F1_THRESHOLDS[name]
+        scores[name].append(eval_scores[0])
+    for name, name_scores in scores.items():
+        result_collector.check_performance(f'{name}_batch', (f'{name}_batch', True, True, 'mzML'), np.mean(name_scores), gts[name])
+        assert np.mean(name_scores) > BATCH_F1_THRESHOLDS.get(name, AVG_THRESHOLD)
     # Feature table: one row per isomer group with per-file abundances and evidence
     assert {'top1_pred', 'm/z', 'RT', 'n_files_ms2'}.issubset(combined.columns)
-    assert all(label in combined.columns and f'evidence_{label}' in combined.columns for label in files.values())
+    assert all(label in combined.columns and f'evidence_{label}' in combined.columns for label in labels)
     assert (combined['n_files_ms2'] > 0).all()
 
 
@@ -259,6 +279,39 @@ def test_precursor_refinement():
     # fragmented itself, a header charge state is trusted, and an unrelated lighter peak is not mistaken for the monoisotopic one
     assert np.allclose(out[:2], mono, atol = 1e-3) and out[2] == 601.25 and abs(out[3] - 700.2) < 1e-3
     assert list(drop) == [False, True, False, False]
+
+def test_bruker_mzxml(tmp_path):
+    # Bruker HCT profile scans (msconvert mzXML): a doubly charged envelope at 965.844 whose monoisotopic top dips in the middle, and a singly charged
+    # peak at 675.36 with a noise shoulder 0.6 m/z above it; MS2 headers give the isolation window centre (966.20 at charge 2, 675.81 and 675.42 at
+    # charge 1)
+    grid = np.arange(600, 1000, 0.03125)
+    def profile(peaks):
+        ints = sum(h * np.exp(-0.5 * ((grid - mz) / 0.05) ** 2) for mz, h in peaks)
+        return np.where(ints < 1, 0, ints)
+    survey = [(965.79, 6e5), (965.9, 6e5), (965.844 + 1.003355 / 2, 9e5), (965.844 + 1.003355, 5.4e5), (675.36, 2e6), (675.97, 5e3)]
+    def scan(num, level, rt, ints, precursor = ''):
+        data = base64.b64encode(np.stack([grid, ints], axis = 1).astype('>f8').tobytes()).decode()
+        return (f'<scan num="{num}" msLevel="{level}" centroided="0" polarity="-" retentionTime="PT{rt}S" msInstrumentID="1">{precursor}'
+                f'<peaks precision="64" byteOrder="network" compressionType="none" contentType="m/z-int">{data}</peaks></scan>')
+    fragments = profile([(675.3, 1e4), (800.3, 3e4), (900.4, 2e4)])
+    path = tmp_path / 'hct.mzXML'
+    path.write_text('<?xml version="1.0"?><mzXML xmlns="http://sashimi.sourceforge.net/schema_revision/mzXML_3.2"><msRun><msInstrument msInstrumentID="1">'
+                    '<msManufacturer category="msManufacturer" value="Bruker Daltonics"/><msModel category="msModel" value="Bruker Daltonics HCT Series"/>'
+                    '<msMassAnalyzer category="msMassAnalyzer" value="radial ejection linear ion trap"/></msInstrument>' +
+                    scan(1, 1, 3000, profile(survey)) +
+                    scan(2, 2, 3002, fragments, '<precursorMz precursorIntensity="0" precursorCharge="2" activationMethod="CID">966.204528808594</precursorMz>') +
+                    scan(3, 2, 3004, fragments, '<precursorMz precursorIntensity="0" precursorCharge="1" activationMethod="CID">675.813842773438</precursorMz>') +
+                    scan(4, 2, 3006, fragments, '<precursorMz precursorIntensity="0" precursorCharge="1" activationMethod="CID">675.418823242188</precursorMz>') +
+                    '</msRun></mzXML>')
+    df = process_mzXML_stack(str(path), intensity = True, extract_ms1 = True)
+    _, ms1_mzs, _, _ = df.attrs['ms1']
+    # One centroid per isotope (the Gaussian fit made two of the dipping top), and the noise shoulder stays apart
+    assert np.sum(np.abs(ms1_mzs - 965.85) < 0.3) == 1 and np.sum(np.abs(ms1_mzs - 966.35) < 0.2) == 1 and np.sum(np.abs(ms1_mzs - 675.97) < 0.1) == 1
+    # Every precursor moves onto its monoisotopic centroid (the nearest centroid to 675.81 is the shoulder), keeps its header charge, and none is
+    # dropped as isotope-triggered, as a Bruker isolation window always holds the whole envelope
+    assert np.allclose(df['m/z'], [965.844, 675.36, 675.36], atol = 0.02) and df['precursor_charge'].tolist()[0] == 2
+    assert df.attrs['detected_trap'] == 'linear' and df.attrs['detected_mode'] == 'negative'
+
 
 def test_spectra_scan_activation(tmp_path):
     # A glycoproteomics run alternates HCD and EThcD (ETD + supplemental beam-type CID) scans of one precursor; both are kept apart by scan

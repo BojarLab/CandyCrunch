@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--modification', help='Reducing-end modification; custom: a label of --mass_tag Da', type=str, choices=['reduced', '2AA', '2AB', 'procainamide', 'custom'], required=False)
     parser.add_argument('--mass_tag', help='custom tag mass', type=float, required=False)
     parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'peracetylated'], required=False)
+    parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples: EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA'], required=False)
     parser.add_argument('--lc', help='LC type', type=str, choices=['PGC', 'C18', 'other'], required=False)
     parser.add_argument('--trap', help='Detector type', type=str, choices=['linear', 'orbitrap', 'amazon', 'other'], required=False)
     parser.add_argument('--rt_min', help='Minimum relevant retention time', type=float, required=False)
