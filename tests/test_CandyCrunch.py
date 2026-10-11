@@ -157,10 +157,11 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
     if test_files is None:
         test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{test_dict['name']}")]
     test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
+    # mzXML files count as mzML (raw spectra with MS1), so they never enter an xlsx run
     if input_format == "xlsx":
-        test_files = [x for x in test_files if not x.endswith(".mzML")]
+        test_files = [x for x in test_files if not x.endswith((".mzML", ".mzXML"))]
     elif input_format == "mzml":
-        mzml = [x for x in test_files if x.endswith(".mzML")]
+        mzml = [x for x in test_files if x.endswith((".mzML", ".mzXML"))]
         test_files = mzml if mzml else test_files  # fall back to xlsx if no mzML present
     if not test_files:
         pytest.skip(f"no test file for {test_dict['name']} {test_dict['args']}")
@@ -187,7 +188,7 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
         print('incorrect_preds',eval_scores[4])
         print('peaks_not_picked',eval_scores[-6])
         test_outputs.append(eval_scores)
-        file_format = 'mzML' if filename.endswith('.mzML') else 'xlsx'
+        file_format = 'mzML' if filename.endswith(('.mzML', '.mzXML')) else 'xlsx'
         print(f'file_score:{eval_scores[0]} ({file_format})')
         test_params['format'] = file_format
         result_collector.add_result(test_params, eval_scores[0], eval_scores)

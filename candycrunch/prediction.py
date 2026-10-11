@@ -48,6 +48,10 @@ NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'HCO3-']
 ANALYZER_TRAPS = {'MS:1001542': 'amazon', 'MS:1001546': 'amazon', 'MS:1002300': 'amazon', 'MS:1002301': 'amazon', 'MS:1003466': 'amazon',
                   'MS:1000484': 'orbitrap', 'MS:1000079': 'orbitrap', 'MS:1000078': 'linear', 'MS:1000083': 'linear', 'MS:1000264': 'linear',
                   'MS:1000084': 'other'}
+# The same for the msModel and msMassAnalyzer names of an mzXML msInstrument (lower-case), checked in this order
+MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'orbitrap': 'orbitrap', 'fourier transform': 'orbitrap',
+                        'ft-icr': 'orbitrap', 'ion trap': 'linear',
+                        'time-of-flight': 'other', 'tof': 'other'}
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 temperature = torch.Tensor([1.15]).to(device)
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
@@ -292,7 +296,8 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     ms3s, row_of = [], {}
-    for spectrum in read_mzxml(filepath):
+    # Survey and fragment scans are centroided as in process_mzML_stack (Bruker mzXML from msconvert are profiles)
+    for spectrum in read_mzxml(filepath, centroid_levels = (1, ms_level, ms_level + 1)):
         if spectrum['msLevel'] == ms_level + 1 and spectrum.get('precursorMz') and len(spectrum['m/z array']) and mzs:
             # As in process_mzML_stack; mzXML names the parent scan as precursorScanNum (nested scans are yielded one by one)
             prec = next((p for p in spectrum['precursorMz'] if int(p.get('precursorScanNum', -1)) in row_of), spectrum['precursorMz'][0])
@@ -302,8 +307,10 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                 ms3s[row].append((float(prec['precursorMz']), {float(m): float(i) for m, i in zip(spectrum['m/z array'][top_idx],
                                                                                                 spectrum['intensity array'][top_idx])}))
         if spectrum['msLevel'] == 1 and len(spectrum['m/z array']):
-            if detected_ms1_trap is None and str(spectrum.get('filterLine', '')).startswith(('ITMS', 'FTMS')):
-                detected_ms1_trap = 'linear' if spectrum['filterLine'].startswith('ITMS') else 'orbitrap'
+            # The Thermo filter line names the analyzer, else the scan's msInstrument
+            if detected_ms1_trap is None:
+                filt = str(spectrum.get('filterLine', ''))
+                detected_ms1_trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(filt[:4]) or next((t for a, t in MZXML_ANALYZER_TRAPS.items() if a in spectrum['instrument']), None)
             order = np.argsort(spectrum['m/z array'], kind = 'stable')
             ms1_rts.append(float(spectrum['retentionTime']))
             ms1_mzs.append(spectrum['m/z array'][order].astype(np.float32))
@@ -312,8 +319,9 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
             # mzXML scans carry their polarity and, if converted from Thermo files, the filter line naming the analyzer
             if detected_mode is None and spectrum.get('polarity') in ('+', '-'):
                 detected_mode = 'negative' if spectrum['polarity'] == '-' else 'positive'
-            if detected_trap is None and str(spectrum.get('filterLine', '')).startswith(('ITMS', 'FTMS')):
-                detected_trap = 'linear' if spectrum['filterLine'].startswith('ITMS') else 'orbitrap'
+            if detected_trap is None:
+                filt = str(spectrum.get('filterLine', ''))
+                detected_trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(filt[:4]) or next((t for a, t in MZXML_ANALYZER_TRAPS.items() if a in spectrum['instrument']), None)
             mz_array = spectrum['m/z array']
             intensity_array = spectrum['intensity array']
             num_peaks_to_extract = min(num_peaks, len(mz_array))
@@ -1730,6 +1738,10 @@ def extract_spectra(spectra_filepath, output_filepath = None):
    | MS3 spectra are kept (column ms3), but MS1 itself is not, so predictions from the .xlsx are quantified by precursor intensity instead of XIC areas
    """
     df = load_spectra_filepath(spectra_filepath)
+    if df.empty:
+        # An empty .xlsx would only fail later as a run without glycan peaks
+        raise ValueError(f"{os.path.basename(spectra_filepath)} has no MS2 spectra with a precursor m/z, so there is nothing to extract (some conversions "
+                         f"keep only the MS1 scans; data-independent acquisition such as Waters MSE has no precursors)")
     # Rounding keeps the file small and every peak dictionary below Excel's 32,767-character cell limit; 4 decimals and 4 significant
     # digits sit far below the binning and fragment-annotation tolerances
     df['peak_d'] = [str({round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()}) for d in df['peak_d']]

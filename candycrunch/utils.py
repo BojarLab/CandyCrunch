@@ -41,6 +41,33 @@ def centroid_ion_trap(mzs, ints):
     return np.stack([peak_mzs, peak_ints], axis = 1)
 
 
+def centroid_gaussian(mzs, ints):
+    """centroids a profile spectrum by a 3-point Gaussian fit at each local maximum, as pymzml's highest_peaks did (positions 0 and 1 skipped)\n
+   | Arguments:
+   | :-
+   | mzs (array): profile m/z values
+   | ints (array): profile intensities\n
+   | Returns:
+   | :-
+   | Returns an (n, 2) array of centroid m/z and the fitted apex intensity
+   """
+    mz, inty, centroids = np.asarray(mzs).tolist(), np.asarray(ints).tolist(), []
+    for pos in range(2, len(inty) - 1):
+        x1, x2, x3, y1, y2, y3 = mz[pos - 1], mz[pos], mz[pos + 1], inty[pos - 1], inty[pos], inty[pos + 1]
+        if not 0 < y1 < y2 > y3 > 0 or x2 - x1 > (x3 - x2) * 10 or (x2 - x1) * 10 < x3 - x2:
+            continue
+        if y3 == y1:
+            y3 += 0.01 * y1
+        try:
+            double_log = math.log(y2 / y1) / math.log(y3 / y1)
+            mu = (double_log * (x1 * x1 - x3 * x3) - x1 * x1 + x2 * x2) / (2 * (x2 - x1) - 2 * double_log * (x3 - x1))
+            c_squared = (x2 * x2 - x1 * x1 - 2 * x2 * mu + 2 * x1 * mu) / (2 * math.log(y1 / y2))
+            centroids.append((mu, y1 * math.exp((x1 - mu) * (x1 - mu) / (2 * c_squared))))
+        except (ZeroDivisionError, OverflowError):
+            continue
+    return np.array(centroids).reshape(-1, 2)
+
+
 def read_mzml(filepath, centroid_levels = ()):
     """iterates over the spectra of an .mzML file\n
    | Arguments:
@@ -120,21 +147,7 @@ def read_mzml(filepath, centroid_levels = ()):
             # .raw file) against 0.695 with the Gaussian fit below
             peaks = centroid_ion_trap(peaks[:, 0], peaks[:, 1])
         elif ms_level in centroid_levels and 'MS:1000128' in first:
-            mz, inty, centroids = peaks[:, 0].tolist(), peaks[:, 1].tolist(), []
-            for pos in range(2, len(inty) - 1):
-                x1, x2, x3, y1, y2, y3 = mz[pos - 1], mz[pos], mz[pos + 1], inty[pos - 1], inty[pos], inty[pos + 1]
-                if not 0 < y1 < y2 > y3 > 0 or x2 - x1 > (x3 - x2) * 10 or (x2 - x1) * 10 < x3 - x2:
-                    continue
-                if y3 == y1:
-                    y3 += 0.01 * y1
-                try:
-                    double_log = math.log(y2 / y1) / math.log(y3 / y1)
-                    mu = (double_log * (x1 * x1 - x3 * x3) - x1 * x1 + x2 * x2) / (2 * (x2 - x1) - 2 * double_log * (x3 - x1))
-                    c_squared = (x2 * x2 - x1 * x1 - 2 * x2 * mu + 2 * x1 * mu) / (2 * math.log(y1 / y2))
-                    centroids.append((mu, y1 * math.exp((x1 - mu) * (x1 - mu) / (2 * c_squared))))
-                except (ZeroDivisionError, OverflowError):
-                    continue
-            peaks = np.array(centroids).reshape(-1, 2)
+            peaks = centroid_gaussian(peaks[:, 0], peaks[:, 1])
         rt = first.get('MS:1000016')
         if rt is not None:
             # The unit by name, else by its unit ontology accession (unitName is optional)
@@ -149,19 +162,22 @@ def read_mzml(filepath, centroid_levels = ()):
         el.clear()
 
 
-def read_mzxml(filepath):
+def read_mzxml(filepath, centroid_levels = ()):
     """iterates over the scans of an .mzXML file, by scan number up to each MS1 scan (nested scans end before the MS1 scan enclosing them)\n
    | Arguments:
    | :-
-   | filepath (string): absolute filepath to the .mzXML file\n
+   | filepath (string): absolute filepath to the .mzXML file
+   | centroid_levels (tuple): MS levels whose profile scans (centroided="0") are centroided as in read_mzml; default:()\n
    | Returns:
    | :-
    | Yields a dict per scan: its attributes as strings (msLevel as int, retentionTime in minutes, id as num), precursorMz (a list of the
-   | precursorMz elements' attributes, their value as precursorMz, precursorCharge as int, precursorIntensity as float), m/z array and
-   | intensity array
+   | precursorMz elements' attributes, their value as precursorMz, precursorCharge as int, precursorIntensity as float), m/z array,
+   | intensity array, and instrument (msModel and msMassAnalyzer of the scan's msInstrument, lower-case; of the first one if the scan names none)
    """
-    queue, order = [], itertools.count()
+    queue, order, instruments = [], itertools.count(), {}
     for _, el in ET.iterparse(filepath):
+        if el.tag.rsplit('}', 1)[-1] == 'msInstrument':
+            instruments[el.get('msInstrumentID', el.get('id'))] = ' '.join(c.get('value', '') for c in el if c.tag.rsplit('}', 1)[-1] in ('msModel', 'msMassAnalyzer')).lower()
         if el.tag.rsplit('}', 1)[-1] != 'scan':
             continue
         ns = el.tag[:-4]
@@ -187,6 +203,11 @@ def read_mzxml(filepath):
         precision = 'f4' if peaks.get('precision', '32') == '32' else 'f8'
         values = np.frombuffer(data, ('>' if peaks.get('byteOrder', 'network') in ('network', 'big') else '<') + precision).astype(precision)
         scan['m/z array'], scan['intensity array'] = values[0::2], values[1::2]
+        scan['instrument'] = instruments.get(scan.get('msInstrumentID'), next(iter(instruments.values()), ''))
+        # Profile scans (e.g., Bruker ion-trap files converted by msconvert) are centroided like those of mzML files
+        if scan['msLevel'] in centroid_levels and scan.get('centroided') == '0' and len(values):
+            cents = (centroid_ion_trap if str(scan.get('filterLine', '')).startswith('ITMS') else centroid_gaussian)(values[0::2], values[1::2])
+            scan['m/z array'], scan['intensity array'] = cents[:, 0], cents[:, 1]
         el.clear()
         heapq.heappush(queue, (int(scan['num']), next(order), scan))
         if scan['msLevel'] == 1:
