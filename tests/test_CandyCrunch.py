@@ -377,6 +377,17 @@ def test_tims_scans(tmp_path):
     assert np.isfinite(area).all() and area[0] > 0
 
 
+def test_tof_precursors():
+    # One timsTOF survey frame: a z = 2 isotope envelope at 1111.392 and an unrelated z = 1 peak at 1000.0. Bruker's monoisotopic pick on the 13C peak walks
+    # down, the other picks keep their m/z, no spectrum is dropped (the PASEF isolation window holds the whole envelope), and the intensity is the isotope
+    # envelope M..M+3 within 20 ppm, not the window around it
+    peaks = [(1000.0, 500), (1111.392, 100), (1111.892, 98), (1112.393, 50), (1112.895, 18)]
+    ms1 = (np.array([10.0]), np.array([m for m, _ in peaks], dtype = np.float32), np.array([i for _, i in peaks], dtype = np.float32), np.array([0, 5]))
+    out, drop, intensities = refine_tof_precursors(ms1, [1111.392, 1111.892, 1000.0], [10.0, 10.0, 10.0], [0, 0, 0], [2, 2, 1])
+    assert out[0] == 1111.392 and abs(out[1] - 1111.392) < 1e-3 and out[2] == 1000.0 and not drop.any()
+    assert np.allclose(intensities, [266, 266, 500])
+
+
 def test_spectra_scan_activation(tmp_path):
     # A glycoproteomics run alternates HCD and EThcD (ETD + supplemental beam-type CID) scans of one precursor; both are kept apart by scan
     # number and activation, which a search engine's identification and CandyCrumbs' fragmentation_method need

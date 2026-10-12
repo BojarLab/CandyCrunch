@@ -1006,7 +1006,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['pred_thresh'] = _spin(0, 1, 0.005, 3)
         self.inputs['pred_thresh'].setToolTip('Minimum prediction confidence')
         self.inputs['crumbs_thresh'] = _spin(0, 100, 1, 1)
-        self.inputs['crumbs_thresh'].setToolTip('A peak is only kept if its fragment score exceeds this (2 lower for files with orbitrap survey scans). The fragment score sums, over the '
+        self.inputs['crumbs_thresh'].setToolTip('A peak is only kept if its fragment score exceeds this (2 lower for files with orbitrap or timsTOF survey scans). The fragment score sums, over the '
                                                 '15 most intense deisotoped fragment peaks, how many fragments of a structure of the precursor\'s composition each one matches '
                                                 '(up to two cleavages): fragment evidence that the peak is that glycan, independent of the model')
         self.inputs['extra_thresh'] = _spin(0, 1, 0.05, 2)

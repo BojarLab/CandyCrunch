@@ -10,6 +10,9 @@ import numpy as np
 # A timsTOF survey frame summed over its ion mobility scans holds ~40k centroids, mostly single-ion noise; the 5000 most intense reach down to ~0.04%
 # of the base peak and keep the MS1 data of an hour-long run near 150 MB
 TIMS_MS1_PEAKS = 5000
+# A PASEF MS2 spectrum (a precursor's mobility scans summed) holds a median of ~190 centroids, most of them single ions, against the 10-50 peaks of the ion
+# trap spectra the model was trained on; its 100 most intense peaks gave more glycans, with fewer false ones, than all of them or than intensity cut-offs
+TIMS_MS2_PEAKS = 100
 
 
 def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
@@ -81,9 +84,14 @@ def centroid_tof(mzs, ints, max_peaks = None):
     smooth[1:] += 0.5 * ints[:-1] * (gaps <= 1.5 * gaps.min())
     smooth[:-1] += 0.5 * ints[1:] * (gaps <= 1.5 * gaps.min())
     minima = np.where(~starts[1:-1] & ~starts[2:] & (smooth[1:-1] < smooth[:-2]) & (smooth[1:-1] <= smooth[2:]))[0] + 1
-    bounds = np.union1d(np.flatnonzero(starts), minima)
+    # Boundaries as a mask over the points (np.union1d of the index arrays gives the same, but slowly: half of loading a timsTOF run)
+    is_bound = starts.copy()
+    is_bound[minima] = True
+    bounds = np.flatnonzero(is_bound)
     tops, pos = np.maximum.reduceat(smooth, bounds), np.searchsorted(bounds, minima)
-    bounds = np.union1d(np.flatnonzero(starts), minima[smooth[minima] < 0.7 * np.minimum(tops[pos - 1], tops[pos])])
+    is_bound = starts.copy()
+    is_bound[minima[smooth[minima] < 0.7 * np.minimum(tops[pos - 1], tops[pos])]] = True
+    bounds = np.flatnonzero(is_bound)
     peak_ints = np.add.reduceat(ints, bounds)
     peak_mzs = np.add.reduceat(ints * mzs, bounds) / peak_ints
     if max_peaks is not None and len(peak_ints) > max_peaks:
