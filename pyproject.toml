@@ -24,7 +24,8 @@ dependencies = [
     "torch~=2.1",
     "numpy",
     "pandas>=2.2.2",
-    "opentfraw>=2.0,<3", 
+    "opentfraw>=2.0,<3",
+    "timsrust_pyo3>=0.4.1,<0.5",
     "openpyxl",
     "matplotlib",
 ]

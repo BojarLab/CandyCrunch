@@ -8,6 +8,9 @@ import struct
 import zlib
 import xml.etree.ElementTree as ET
 import numpy as np
+# A timsTOF survey frame summed over its ion mobility scans holds ~40k centroids, mostly single-ion noise; the 5000 most intense reach down to ~0.04%
+# of the base peak and keep the MS1 data of an hour-long run near 150 MB
+TIMS_MS1_PEAKS = 5000
 
 
 def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
@@ -41,6 +44,47 @@ def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
     # as converters drop runs of zero points)
     if bin_shift:
         peak_mzs = peak_mzs - np.median(np.diff(mzs)) * (np.add.reduceat((ints > 0).astype(int), edges) >= 9)
+    return np.stack([peak_mzs, peak_ints], axis = 1)
+
+
+def centroid_tof(mzs, ints, max_peaks = None):
+    """centroids the summed TOF points of a timsTOF frame (or of one precursor's PASEF scans), which sit on the TOF digitizer grid, evenly spaced in sqrt(m/z)\n
+   | Arguments:
+   | :-
+   | mzs (array): m/z values of the points, repeated where several ion mobility scans hit the same TOF bin
+   | ints (array): their intensities
+   | max_peaks (int): keep only this many of the most intense centroids; default:None (all)\n
+   | Returns:
+   | :-
+   | Returns an (n, 2) array of centroid m/z and intensity: points of one TOF bin are summed, runs of neighboring bins are split where the signal
+   | (smoothed over neighboring bins) dips below 70% of the smaller of the two maxima around it, and each centroid carries the summed signal of its
+   | run at its intensity-weighted m/z
+   """
+    order = np.argsort(mzs, kind = 'stable')
+    mzs, ints = np.asarray(mzs, dtype = np.float64)[order], np.asarray(ints, dtype = np.float64)[order]
+    if not len(mzs):
+        return np.zeros((0, 2))
+    # A TOF bin is 6e-5 to 1.3e-4 wide in sqrt(m/z), so points closer than 2e-5 are one bin (hit in several ion mobility scans, or written twice
+    # as 32-bit m/z in combined spectra); one bin is then the smallest step left, and a run of bins may skip one empty bin
+    same = np.concatenate([[0], np.cumsum(np.diff(np.sqrt(mzs)) >= 2e-5)])
+    sums = np.bincount(same, weights = ints)
+    mzs, ints = np.bincount(same, weights = mzs * ints)[sums > 0] / sums[sums > 0], sums[sums > 0]
+    if len(mzs) < 3:
+        return np.stack([mzs, ints], axis = 1)
+    gaps = np.diff(np.sqrt(mzs))
+    starts = np.concatenate([[True], gaps > 2.5 * gaps.min()])
+    smooth = ints.copy()
+    smooth[1:] += 0.5 * ints[:-1] * (gaps <= 1.5 * gaps.min())
+    smooth[:-1] += 0.5 * ints[1:] * (gaps <= 1.5 * gaps.min())
+    minima = np.where(~starts[1:-1] & ~starts[2:] & (smooth[1:-1] < smooth[:-2]) & (smooth[1:-1] <= smooth[2:]))[0] + 1
+    bounds = np.union1d(np.flatnonzero(starts), minima)
+    tops, pos = np.maximum.reduceat(smooth, bounds), np.searchsorted(bounds, minima)
+    bounds = np.union1d(np.flatnonzero(starts), minima[smooth[minima] < 0.7 * np.minimum(tops[pos - 1], tops[pos])])
+    peak_ints = np.add.reduceat(ints, bounds)
+    peak_mzs = np.add.reduceat(ints * mzs, bounds) / peak_ints
+    if max_peaks is not None and len(peak_ints) > max_peaks:
+        top = np.sort(np.argpartition(peak_ints, -max_peaks)[-max_peaks:])
+        peak_mzs, peak_ints = peak_mzs[top], peak_ints[top]
     return np.stack([peak_mzs, peak_ints], axis = 1)
 
 
@@ -82,10 +126,17 @@ def read_mzml(filepath, centroid_levels = ()):
    | :-
    | Yields a dict per spectrum: element (its XML element, with the params of a referenced param group appended), ms_level (int or None),
    | rt (scan start time in minutes; None if absent), peaks ((n, 2) array of m/z and intensity), and precursor (mz, and if given charge and
-   | intensity i, of the first selected ion in the spectrum; None if there is none), and instrument (CV accessions of the spectrum's instrument
-   | configuration, i.e., its analyzers and instrument model; those of the first configuration if the scan names none)
+   | intensity i, of the first selected ion in the spectrum; None if there is none), instrument (CV accessions of the spectrum's instrument
+   | configuration, i.e., its analyzers and instrument model; those of the first configuration if the scan names none), and ion_mobility (whether
+   | it is timsTOF data, whose spectra of centroid_levels are then centroided with centroid_tof; files converted without combining ion mobility
+   | scans hold one spectrum per scan, so the scans of one frame, and in MS2 of one precursor, are summed into one spectrum)
    """
-    groups, configs = {}, {}
+    def merged(scans):
+        peaks = np.concatenate([x['peaks'] for x in scans])
+        if scans[0]['ms_level'] in centroid_levels:
+            peaks = centroid_tof(peaks[:, 0], peaks[:, 1], max_peaks = TIMS_MS1_PEAKS if scans[0]['ms_level'] == 1 else None)
+        return dict(scans[0], peaks = peaks[np.argsort(peaks[:, 0], kind = 'stable')], ion_mobility = True)
+    groups, configs, pending, pending_key = {}, {}, [], None
     for _, el in ET.iterparse(filepath):
         tag = el.tag.rsplit('}', 1)[-1]
         if tag == 'referenceableParamGroup':
@@ -106,9 +157,11 @@ def read_mzml(filepath, centroid_levels = ()):
         first = {}
         for e in el.iter():
             first.setdefault(e.get('accession'), e)
-        arrays = {}
+        arrays, mobility = {}, False
         for bda in el.iter(f'{ns}binaryDataArray'):
             terms = {c.get('accession') for c in bda.findall(f'{ns}cvParam')}
+            # An ion mobility array marks a timsTOF spectrum combined over its mobility scans, whose points sit on the TOF grid, many per peak
+            mobility = mobility or bool(terms & {'MS:1002816', 'MS:1003006', 'MS:1003007', 'MS:1003008'})
             kind = 'mz' if 'MS:1000514' in terms else 'i' if 'MS:1000515' in terms else None
             if kind is None or kind in arrays:
                 continue
@@ -149,6 +202,8 @@ def read_mzml(filepath, centroid_levels = ()):
             # msconvert writes ion-trap scans as profiles unless asked to peak-pick; Thermo's centroids of them gave GPST000017 F1 0.735 (as from the
             # .raw file) against 0.695 with the Gaussian fit below
             peaks = centroid_ion_trap(peaks[:, 0], peaks[:, 1])
+        elif ms_level in centroid_levels and mobility:
+            peaks = centroid_tof(peaks[:, 0], peaks[:, 1], max_peaks = TIMS_MS1_PEAKS if ms_level == 1 else None)
         elif ms_level in centroid_levels and 'MS:1000128' in first:
             peaks = centroid_gaussian(peaks[:, 0], peaks[:, 1])
         rt = first.get('MS:1000016')
@@ -161,8 +216,26 @@ def read_mzml(filepath, centroid_levels = ()):
                                                                                ('i', 'MS:1000042', float)) if acc in first} if 'MS:1000744' in first else None
         scan = el.find(f'{ns}scanList/{ns}scan')
         instrument = configs.get(scan.get('instrumentConfigurationRef') if scan is not None else None, next(iter(configs.values()), set()))
-        yield {'element': el, 'ms_level': ms_level, 'rt': rt, 'peaks': peaks, 'precursor': precursor, 'instrument': instrument}
-        el.clear()
+        spectrum = {'element': el, 'ms_level': ms_level, 'rt': rt, 'peaks': peaks, 'precursor': precursor,
+                    'instrument': instrument, 'ion_mobility': mobility}
+        # One spectrum per ion mobility scan (native ID frame=f scan=s, from msconvert without combining them): its scans of one frame, MS level, and
+        # precursor are summed once that group ends. Taken one by one, every scan of a frame was a survey scan of its own at the same retention time,
+        # whose zero time step crashed the XIC smoothing (OverflowError: cannot convert float infinity to integer)
+        tims = re.match(r'frame=(\d+) scan=\d+$', el.get('id', ''))
+        key = (tims.group(1), ms_level, precursor and precursor.get('mz')) if tims else None
+        if pending and key != pending_key:
+            yield merged(pending)
+            for x in pending:
+                x['element'].clear()
+            pending = []
+        if key is None:
+            yield spectrum
+            el.clear()
+        else:
+            pending.append(spectrum)
+            pending_key = key
+    if pending:
+        yield merged(pending)
 
 
 def read_mzxml(filepath, centroid_levels = ()):

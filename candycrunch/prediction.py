@@ -4,6 +4,8 @@ import copy
 import os
 import re
 import pickle
+import pathlib
+import sqlite3
 import tempfile
 from collections import Counter, defaultdict
 from itertools import combinations_with_replacement
@@ -27,7 +29,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions
-from candycrunch.utils import read_mzml, read_mzxml, read_mgf, centroid_ion_trap
+from candycrunch.utils import read_mzml, read_mzxml, read_mgf, centroid_ion_trap, centroid_tof, TIMS_MS1_PEAKS
 
 this_dir, this_filename = os.path.split(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
@@ -241,8 +243,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                                    'ECD' if terms & {'MS:1000250', 'MS:1003294'} else 'HCD' if terms & hcd else 'CID' if terms & cid else None)
                 raw_charge = spectrum['precursor'].get('charge', None)
                 # Some vendor software defaults to charge=1 when undetermined, but Thermo files (filter string) only carry a charge state the
-                # instrument determined from resolved isotopes (orbitrap survey or zoom scans), so their charge 1 is kept
-                if raw_charge is not None and abs(int(raw_charge)) == 1 and 'MS:1000512' not in terms:
+                # instrument determined from resolved isotopes (orbitrap survey or zoom scans), so their charge 1 is kept, as is the one of timsTOF
+                # files (Bruker only writes a charge with a monoisotopic m/z it determined from the TOF survey frame)
+                if raw_charge is not None and abs(int(raw_charge)) == 1 and 'MS:1000512' not in terms and not spectrum['ion_mobility']:
                     raw_charge = None
                 # Without a determined charge state the instrument never determined the monoisotopic peak (Bruker's charge 1 precursors are the
                 # isolation m/z, e.g., 384.39 for the T antigen at 384.16), so its trigger m/z gets refined from MS1
@@ -566,6 +569,98 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     return df_out
 
 
+def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
+    """function extracting all MS/MS spectra from a Bruker timsTOF .d folder (DDA-PASEF, with an analysis.tdf)\n
+   | Arguments:
+   | :-
+   | filepath (string): absolute path to the .d folder
+   | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
+   | Returns:
+   | :-
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan (the precursor's Id), and
+   | activation as in process_mzML_stack, one spectrum per precursor (its PASEF scans summed by timsrust); survey frames are summed over their ion
+   | mobility scans and centroided with centroid_tof. m/z values come from the TOF index without Bruker's calibration (within ~5 ppm of it)
+   """
+    import timsrust_pyo3
+    tdf = os.path.join(filepath, 'analysis.tdf')
+    if not os.path.exists(tdf):
+        raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no analysis.tdf. CandyCrunch reads timsTOF .d folders directly; other Bruker "
+                         f"data (.tsf without ion mobility, .baf of amaZon, maXis, compact) has to be converted to mzML or mzXML with msconvert first.")
+    # Read-only, so nothing is written next to the data (journal files) and a file the acquisition software still holds open can be read
+    db = sqlite3.connect(pathlib.Path(tdf).resolve().as_uri() + '?mode=ro', uri = True)
+    try:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if 'Precursors' not in tables or not db.execute('SELECT COUNT(*) FROM Precursors').fetchone()[0]:
+            raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no DDA-PASEF precursors; CandyCrunch needs data-dependent MS2 spectra "
+                             f"(data-independent acquisition such as diaPASEF has none).")
+        compression = dict(db.execute('SELECT Key, Value FROM GlobalMetadata').fetchall()).get('TimsCompressionType')
+        if compression != '2':
+            raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} stores its frames in the format of early timsTOF software (compression type "
+                             f"{compression}), which CandyCrunch cannot read; convert it to mzML with msconvert first.")
+        frames = {i: (t, p, k) for i, t, p, k in db.execute('SELECT Id, Time, Polarity, MsMsType FROM Frames')}
+        # The same query (and so the same order) as timsrust's, whose spectrum i belongs to row i
+        precursors = db.execute('SELECT Id, LargestPeakMz, MonoisotopicMz, Charge, Intensity, Parent FROM Precursors').fetchall()
+        first_frame = dict(db.execute('SELECT Precursor, MIN(Frame) FROM PasefFrameMsMsInfo GROUP BY Precursor').fetchall())
+    finally:
+        db.close()
+    polarity = next((p for _, p, _ in frames.values() if p), None)
+    detected_mode = {'+': 'positive', '-': 'negative'}.get(polarity)
+    # Survey frames summed over their ion mobility scans: the TOF index is sqrt(m/z) on a linear scale, so two resolved indices give every m/z
+    sqrt_mz = np.sqrt(timsrust_pyo3.Metadata(tdf).resolve_mzs([0, 100000]))
+    reader = timsrust_pyo3.FrameReader(filepath)
+    ms1_ids = sorted(i for i, (_, _, k) in frames.items() if k == 0)
+    ms1_rts, ms1_mzs, ms1_ints = [], [], []
+    for i in ms1_ids:
+        frame = reader.read_frame(i - 1)
+        summed = np.bincount(np.asarray(frame.tof_indices, dtype = np.int64), weights = np.asarray(frame.intensities, dtype = np.float64))
+        tof = np.flatnonzero(summed)
+        peaks = centroid_tof((sqrt_mz[0] + (sqrt_mz[1] - sqrt_mz[0]) / 100000 * tof) ** 2, summed[tof], max_peaks = TIMS_MS1_PEAKS)
+        ms1_rts.append(frames[i][0] / 60)
+        ms1_mzs.append(peaks[:, 0].astype(np.float32))
+        ms1_ints.append(peaks[:, 1].astype(np.float32))
+    ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
+           np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
+           np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    peak_ds, rts, intensities, mzs, charges, scans, ms1_scans, refine = [], [], [], [], [], [], [], []
+    spectra = timsrust_pyo3.SpectrumReader(filepath)
+    for n in range(len(spectra)):
+        spectrum = spectra.get(n)
+        peak_mzs, peak_ints = np.asarray(spectrum.mz_values, dtype = np.float64), np.asarray(spectrum.intensities, dtype = np.float64)
+        if not len(peak_mzs):
+            continue
+        pid, largest, mono, charge, inty, parent = precursors[spectrum.precursor.index - 1]
+        # Bruker only writes a monoisotopic m/z and charge it determined; without them the precursor is its largest isotope peak, which gets refined
+        # from the survey frame like other undetermined precursors
+        frame_id = parent or first_frame.get(pid)
+        if frame_id not in frames:
+            continue
+        order = np.argsort(peak_ints, kind = 'stable')[::-1][:num_peaks]
+        peak_ds.append(dict(zip(peak_mzs[order].tolist(), peak_ints[order].tolist())))
+        mzs.append(float(mono) if mono else float(largest))
+        charges.append(int(charge) if charge else None)
+        refine.append(not (mono and charge))
+        rts.append(frames[frame_id][0] / 60)
+        scans.append(pid)
+        ms1_scans.append(bisect.bisect_right(ms1_ids, frame_id) - 1)
+        intensities.append(float(inty) if inty else np.nan)
+    df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges})
+    if intensity:
+        # Bruker's precursor intensity, else the summed centroids within 1.5 m/z of the precursor in its survey frame, as for other files
+        df_out['intensity'] = [x if x > 0 or s < 0 else float(ms1[2][ms1[3][s]:ms1[3][s + 1]][np.abs(ms1[1][ms1[3][s]:ms1[3][s + 1]] - m) < 1.5].sum())
+                               for x, s, m in zip(intensities, ms1_scans, mzs)]
+    df_out['scan'], df_out['activation'] = scans, ['CID'] * len(df_out)
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine)
+    df_out = df_out[~drop].reset_index(drop = True)
+    df_out.attrs['detected_mode'] = detected_mode
+    df_out.attrs['detected_trap'] = 'other'
+    df_out.attrs['detected_ms1_trap'] = 'other'
+    if extract_ms1:
+        df_out.attrs['ms1'] = ms1
+    return df_out
+
+
 def average_dicts(dicts, mode = 'mean', round_dp = False):
     """averages a list of dictionaries containing spectra\n
    | Arguments:
@@ -695,8 +790,10 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             mzs = ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]]
             cum = np.concatenate([[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)])
             ints_arr[j] = np.sum(cum[np.searchsorted(mzs, centers + widths[t])] - cum[np.searchsorted(mzs, centers - widths[t])])
-        # Smoothing (sigma of 0.05 min, at least 0.7 scans) only steers apex and boundary finding; the area comes from the raw trace
-        sigma = max(0.7, 0.05 / np.median(np.diff(rts)))
+        # Smoothing (sigma of 0.05 min, at least 0.7 scans) only steers apex and boundary finding; the area comes from the raw trace. Survey scans
+        # sharing a retention time (one per ion mobility scan) gave a zero median step and an infinite sigma, so only real steps count
+        steps = np.diff(rts)
+        sigma = max(0.7, 0.05 / np.median(steps[steps > 0])) if (steps > 0).any() else 0.7
         kernel = np.exp(-0.5 * (np.arange(-int(3 * sigma), int(3 * sigma) + 1) / sigma) ** 2)
         smooth = np.convolve(np.pad(ints_arr, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
         if search_window:
@@ -1566,10 +1663,12 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 truth.append(not any(abs(sm + PROTON_MASS * multiplier - j) < mass_tolerance
                                      for j in top_frags[:5] if isinstance(j, float) for sm in sia_masses['Neu5Ac']))
             if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
-                truth.append(
-                    not any(abs(sm + PROTON_MASS * multiplier - j) < double_mass_tolerance or
-                            abs(precursor_mz - sm - j) < double_mass_tolerance
-                            for j in top_frags[:10] if isinstance(j, float) for sm in sia_masses['Neu5Ac']))
+                # Neu5Ac (291.095) and two dHex (292.116) differ by 1.02 Da, inside 2x mass_tolerance, and the 13C peak of a loss of two dHex sits 0.02 Da from a
+                # loss of Neu5Ac: a Neu5Ac ion or loss only counts within half the mass tolerance and if it is not the 13C peak of a more intense peak below it
+                pk = peak_col[k]
+                truth.append(not any((abs(sm + PROTON_MASS * multiplier - j) < mass_tolerance / 2 or abs(precursor_mz - sm - j) < mass_tolerance / 2) and not any(
+                    abs(j - ISOTOPE_SPACING - q) < 0.15 and y > max([v for p, v in pk.items() if abs(p - j) < 0.01], default = 0) for q, y in pk.items())
+                                     for j in top_frags[:10] if isinstance(j, float) for sm in sia_masses['Neu5Ac']))
             if 'S' in m and len(current_preds) == 1:
                 # Rows exploded from one spectrum share top_frags, so each fragment's composition lookup is cached
                 for t in top_frags[:20]:
@@ -1802,7 +1901,10 @@ class DictStorage:
 
 
 def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
-    ext = os.path.splitext(spectra_filepath)[1].lower()
+    # A timsTOF .d is a folder, which may come with a trailing separator
+    ext = os.path.splitext(os.path.normpath(spectra_filepath))[1].lower()
+    if ext == ".d":
+        return process_tdf_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mzml":
         return process_mzML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mzxml":
@@ -1886,10 +1988,10 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
 
 
 def extract_spectra(spectra_filepath, output_filepath = None):
-    """extracts the MS/MS spectra of a .raw/.mzML/.mzXML/.mgf file into a lightweight .xlsx that wrap_inference reads directly\n
+    """extracts the MS/MS spectra of a .raw/.d/.mzML/.mzXML/.mgf file into a lightweight .xlsx that wrap_inference reads directly\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw", ".mzML", ".mzXML", or ".mgf"
+   | spectra_filepath (string): absolute filepath ending in ".raw", ".d" (Bruker timsTOF folder), ".mzML", ".mzXML", or ".mgf"
    | output_filepath (string): .xlsx filepath to write; default:None (spectra_filepath with an .xlsx extension)\n
    | Returns:
    | :-
@@ -1910,7 +2012,7 @@ def extract_spectra(spectra_filepath, output_filepath = None):
     # turns back into the attrs wrap_inference checks
     for k in ('mode', 'trap', 'ms1_trap'):
         df[k] = df.attrs.get(f'detected_{k}')
-    output_filepath = output_filepath or os.path.splitext(spectra_filepath)[0] + '.xlsx'
+    output_filepath = output_filepath or os.path.splitext(os.path.normpath(spectra_filepath))[0] + '.xlsx'
     df.to_excel(output_filepath, index = False)
     return output_filepath
 
@@ -2357,8 +2459,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to a file containing spectra or preprocessed spectra;
-   |                            MS3 spectra in it (.raw/.mzML/.mzXML, or .xlsx from extract_spectra) are used automatically, as fragment evidence and to rank isomers
+   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo), ".d" (Bruker timsTOF folder), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to a file containing
+   |                            spectra or preprocessed spectra; MS3 spectra in it (.raw/.mzML/.mzXML, or .xlsx from extract_spectra) are used automatically, as fragment
+   |                            evidence and to rank isomers
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable that takes a dataframe with one row per
    |                              (pooled spectrum, candidate composition) input, in input order (index m/z; columns spec_id, RT, intensity, peak_d,
@@ -2406,6 +2509,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    """
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
     run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate')}
+    # A timsTOF .d is a folder, which a shell completes with a trailing separator
+    spectra_filepath = os.path.normpath(spectra_filepath)
     # ppm_thresh is the only tolerance the user sets; derive the flat-Da window everything downstream needs from it here
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
     # 'custom' labels are described by mass_tag alone; glycowork's mass functions only know the named modifications
@@ -2421,7 +2526,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         if df_use.empty:
             raise ValueError(f"No {glycan_class} glycans of {taxonomy_level} '{taxonomy_filter}' in df_glycan; check taxonomy_level and taxonomy_filter")
     multiplier = -1 if mode == 'negative' else 1
-    loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.raw')))
+    loaded_file = load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.raw', '.d')))
     ms1 = loaded_file.attrs.pop('ms1', None)
     detected_mode = loaded_file.attrs.get('detected_mode')
     detected_trap = loaded_file.attrs.get('detected_trap')
@@ -2802,11 +2907,11 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                          filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True,
                          experimental = True, mass_dic = None, sample_prep = 'underivatized',
                          taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
-                         n_jobs = 1, sialic_derivatization = None):
+                         n_jobs = 1, sialic_derivatization = None, library_thresh = 0.9):
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
-   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to files containing spectra
+   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".d" (Bruker timsTOF folder), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to files containing spectra
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group
    | top_n_isomers (int): number of isomer groups at each composition to retain per file (a group stays if it is among the top_n_isomers of any file); default:5
@@ -2840,7 +2945,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
    | plot_glycans (bool): whether to save a <file>_output.xlsx file per input file with SNFG images of all top1 predictions; default:False
    | n_jobs (int): number of files to process in parallel (separate processes); default:1
-   | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of the samples, as in wrap_inference; default:None\n
+   | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of the samples, as in wrap_inference; default:None
+   | library_thresh (float): MS2 cosine at which a peak without a structure takes the structure of a matching peak of another file (see below); None turns this off; default:0.9\n
    | Returns:
    | :-
    | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column ms3 for files with MS3 spectra, as in wrap_inference)
@@ -2855,7 +2961,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         if df_use.empty:
             raise ValueError(
                 f"No {glycan_class} glycans of {taxonomy_level} '{taxonomy_filter}' in df_glycan; check taxonomy_level and taxonomy_filter")
-    # Files with the same name in different folders still get distinct labels
+    # Files with the same name in different folders still get distinct labels; a timsTOF .d folder may come with a trailing separator
+    spectra_filepath_list = [os.path.normpath(fp) for fp in spectra_filepath_list]
     file_labels = [os.path.splitext(os.path.basename(fp))[0] for fp in spectra_filepath_list]
     file_labels = [label if file_labels.count(label) == 1 else f"{label}_{i}" for i, label in enumerate(file_labels)]
     # Core inference per file via wrap_inference intermediate return; MS1 data is parked on disk so only one file's MS1 is in memory at a time
@@ -2929,6 +3036,27 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Cross-file harmonization: align RT drift, resolve variant predictions, link DDA gaps
     assigned_cats = assign_categories(all_ms2, intra_cat_thresh = intra_cat_thresh)
     smoothed_category_predictions = assign_modal_category_prediction(assigned_cats)
+    # Cross-run library: a row still without a structure takes the one of the most similar row of another file with a structure of glycan_class, at the
+    # same m/z (within mass_tolerance) and charge, if their pooled MS2 spectra (square-root intensities in 1 Da bins, as in condense_dataframe) have a
+    # cosine of at least library_thresh. It also takes that row's composition: its own is often an isobaric alternative (Hex4HexNAc4S1 for Man7)
+    if library_thresh is not None:
+        cats = smoothed_category_predictions
+        vecs = np.zeros((len(cats), 3001), dtype = np.float32)
+        for k, peaks in enumerate(cats['peak_d']):
+            for m, x in peaks.items() if isinstance(peaks, dict) else []:
+                vecs[k, int(round(min(max(m, 0), 3000)))] += x
+        vecs = np.sqrt(vecs)
+        vecs /= np.linalg.norm(vecs, axis = 1, keepdims = True) + 1e-12
+        named = np.array([bool(p) and isinstance(t, str) for p, t in zip(cats['predictions'], cats['top1_pred'])], dtype = bool)
+        in_library = named & np.array([isinstance(t, str) and enforce_class(t, glycan_class) for t in cats['top1_pred']], dtype = bool)
+        mzs, charges, files = cats.index.values.astype(float), cats['charge'].abs().values, cats['condition_label'].values
+        top1, predictions, compositions = list(cats['top1_pred']), list(cats['predictions']), list(cats['composition'])
+        for k in np.flatnonzero(~named & np.array([isinstance(p, dict) for p in cats['peak_d']], dtype = bool)):
+            hits = np.flatnonzero(in_library & (np.abs(mzs - mzs[k]) <= mass_tolerance) & (charges == charges[k]) & (files != files[k]))
+            if len(hits) and (vecs[hits] @ vecs[k]).max() >= library_thresh:
+                j = hits[np.argmax(vecs[hits] @ vecs[k])]
+                top1[k], predictions[k], compositions[k] = top1[j], [cats['predictions'].iloc[j][0]], compositions[j]
+        cats['top1_pred'], cats['predictions'], cats['composition'] = top1, predictions, compositions
     prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n = top_n_isomers)
     # Per-file augment, finalize, and quantify
     harmonized_labels = set(prevailing_category_predictions.condition_label.unique())

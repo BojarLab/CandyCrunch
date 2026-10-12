@@ -6,4 +6,5 @@ openpyxl==3.1.5
 opentfraw==2.0.0
 pandas==2.2.3
 scipy==1.16.3
+timsrust_pyo3==0.4.1
 torch==2.5.1

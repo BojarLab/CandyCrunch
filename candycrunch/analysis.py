@@ -3258,7 +3258,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                             disable_global_mods = False, prior_weight = 1.0, charge = None, ax = None,
                             annotate_top_n = None, annotation_threshold = 0.05, figsize = None,
                             draw_glycans = True, glycan_zoom = 0.25, max_glycan_cartoons = 8,
-                            label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, **kwargs):
+                            label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, mz_labels = False, **kwargs):
     """Plots an MS2 spectrum annotated with CandyCrumbs fragment assignments\n
     | Arguments:
     | :-
@@ -3283,6 +3283,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | max_label_levels (int): how many times to push a label clear of its neighbors before dropping it; default:6
     | filepath (string): where to save the figure; default:'' (not saved)
     | hit_dict (dict): CandyCrumbs output for these peaks and settings if already computed (e.g., outside a drawing lock); default:None (computed here)
+    | mz_labels (bool): whether each label also gives the peak's observed m/z, and unannotated peaks above annotation_threshold get their m/z in grey where
+    |                   there is room; default:False
     | **kwargs: passed straight to CandyCrumbs, e.g., mass_threshold_ppm, fragmentation_method, max_global_mods\n
     | Returns:
     | :-
@@ -3352,12 +3354,22 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     renderer = figure.canvas.get_renderer()
     axes_box = ax.get_window_extent(renderer)
     placed = []
-    for mz, rel_int, label, kind, _ in sorted(peaks, key = lambda x: -x[1]):
+    # Annotated peaks are labeled first, most intense first; with mz_labels, unannotated peaks then get their m/z in grey wherever room is left
+    labels = [(mz, rel_int, f'{mz:.2f}  {label}' if mz_labels else label, PEAK_COLORS.get(kind, 'tab:red')) for mz, rel_int, label, kind, _ in sorted(peaks, key = lambda x: -x[1])]
+    if mz_labels:
+        labels += [(mz, rel_int, f'{mz:.2f}', 'grey') for mz, rel_int in sorted(zip(mz_values, rel_intensities), key = lambda x: -x[1]) if not hit_dict.get(mz)]
+    for mz, rel_int, label, color in labels:
         if rel_int < annotation_threshold * 100:
             continue
-        color = PEAK_COLORS.get(kind, 'tab:red')
         text = place_peak_label(ax, renderer, mz, rel_int, label, color, placed,
                                 (axes_box.y0, axes_box.y1), label_fontsize, max_label_levels)
+        if text is not None and color == 'grey':
+            # A bare m/z is only worth it where no taller peak runs through it
+            (x0, y0), (x1, _) = ax.transData.inverted().transform(text.get_window_extent(renderer).get_points())
+            if np.any((mz_values >= x0) & (mz_values <= x1) & (rel_intensities > y0) & (mz_values != mz)):
+                text.remove()
+                placed.pop()
+                continue
         if text is not None and abs(text.xyann[1]) > 8:
             ax.annotate('', xy = (mz, rel_int),
                         xytext = (text.xyann[0], text.xyann[1] - np.sign(text.xyann[1])),

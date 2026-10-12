@@ -193,3 +193,24 @@ def test_gui_example_run(app):
     assert panel.experiments()[0][2] == {**panel.values(), 'glycan_class': 'O'}
     assert {'m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity', 'mode', 'trap'} <= set(
         pd.read_excel(gui.EXAMPLE_RUN).columns)
+
+
+def test_gui_save_image(app, tmp_path, monkeypatch):
+    import time
+    from candycrunch import gui
+    from candycrunch.analysis import plot_annotated_spectrum
+    g, mzs, ints = 'Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc', [510.19, 715.27, 990.0], [30.0, 100.0, 20.0]
+    panel = gui.SpectrumPanel()
+    panel.annotate(g, mzs, ints, -1, 2.0156, 'underivatized')
+    end = time.time() + 120
+    while not panel.save.isEnabled() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.05)
+    # Drawn again at print size (12 inches at 300 dpi), with the file type of the chosen filter when the name has none
+    monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'spectrum'), 'PNG image, 300 dpi (*.png)'))
+    panel.save_image()
+    assert gui.QImage(str(tmp_path / 'spectrum.png')).width() > 3000
+    # Its labels give the observed m/z of annotated peaks, and an unannotated peak gets its m/z in grey
+    _, ax = plot_annotated_spectrum(g, mzs, ints, charge = -1, mass_tag = 2.0156, mz_labels = True)
+    texts = [t.get_text() for t in ax.texts]
+    assert any(t.startswith('510.19 ') for t in texts) and '990.00' in texts

@@ -316,6 +316,45 @@ def test_bruker_mzxml(tmp_path):
     assert df.attrs['detected_trap'] == 'linear' and df.attrs['detected_mode'] == 'negative'
 
 
+def test_tims_scans(tmp_path):
+    # msconvert writes a timsTOF run, unless asked to combine ion mobility scans, as one spectrum per scan (native ID frame=f scan=s), each at its
+    # frame's retention time. Each frame becomes one survey scan and each precursor's scans one MS2 spectrum, centroided on the TOF grid; taken one
+    # by one, the scans of a frame were survey scans at one retention time, which crashed the XIC smoothing (OverflowError: cannot convert float
+    # infinity to integer), and Bruker's charge 1 counted as undetermined
+    def cv(acc, value = ''):
+        return f'<cvParam cvRef="MS" accession="{acc}" name="" value="{value}"/>'
+    def spectrum(i, frame, scan, level, rt, peaks, precursor = None):
+        arrays = ''.join(f'<binaryDataArray encodedLength="0">{cv("MS:1000523")}{cv("MS:1000576")}{cv(acc)}<binary>'
+                         f'{base64.b64encode(np.array(values, dtype = "<f8").tobytes()).decode()}</binary></binaryDataArray>'
+                         for acc, values in (('MS:1000514', [m for m, _ in peaks]), ('MS:1000515', [x for _, x in peaks])))
+        prec = (f'<precursorList count="1"><precursor><selectedIonList count="1"><selectedIon>{cv("MS:1000744", precursor)}{cv("MS:1000041", 1)}'
+                f'</selectedIon></selectedIonList><activation>{cv("MS:1000133")}</activation></precursor></precursorList>') if precursor else ''
+        return (f'<spectrum index="{i}" id="frame={frame} scan={scan}" defaultArrayLength="{len(peaks)}">{cv("MS:1000511", level)}{cv("MS:1000130")}'
+                f'{cv("MS:1000127")}<scanList count="1"><scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" '
+                f'unitName="second"/></scan></scanList>{prec}<binaryDataArrayList count="2">{arrays}</binaryDataArrayList></spectrum>')
+    # Peaks on the TOF grid (equal steps in sqrt(m/z)), five bins each, spread over three ion mobility scans
+    def tof_peaks(mzs, height):
+        bins = [round((np.sqrt(mz) - 10) / 7.8e-5) for mz in mzs]
+        return [[((10 + 7.8e-5 * (b + d)) ** 2, height * w / 3) for b in bins for d, w in zip(range(-2, 3), (1, 3, 5, 3, 1))] for _ in range(3)]
+    spectra, frame = [], 0
+    for rt, height in zip(np.arange(600, 615, 1.1), np.exp(-0.5 * ((np.arange(600, 615, 1.1) - 607) / 3) ** 2) * 1e4):
+        frame += 1
+        spectra += [(frame, s + 1, 1, rt, peaks) for s, peaks in enumerate(tof_peaks([384.1529, 385.1562], height))]
+        frame += 1
+        spectra += [(frame, s + 10, 2, rt + 0.1, peaks, 384.1529) for s, peaks in enumerate(tof_peaks([204.0867, 366.1395], 100))]
+    path = tmp_path / 'tims.mzML'
+    path.write_text(f'<?xml version="1.0" encoding="utf-8"?><mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1.0"><run id="r"><spectrumList count="{len(spectra)}">' +
+                    ''.join(spectrum(i, *x) for i, x in enumerate(spectra)) + '</spectrumList></run></mzML>')
+    df = process_mzML_stack(str(path), intensity = True, extract_ms1 = True)
+    rts, mzs, ints, offsets = df.attrs['ms1']
+    assert len(df) == len(rts) == 14 and len(set(rts)) == 14 and df['precursor_charge'].tolist() == [1] * 14
+    # One centroid per peak, carrying the signal of all its bins and scans
+    assert np.allclose(mzs[offsets[6]:offsets[7]], [384.1529, 385.1562], atol = 2e-4) and np.isclose(ints[offsets[6]:offsets[7]].sum(), 2 * 13 * 1e4 * np.exp(-0.5 * (606.6 - 607) ** 2 / 9), rtol = 1e-3)
+    assert np.allclose(sorted(df['peak_d'][0]), [204.0867, 366.1395], atol = 2e-4) and np.allclose(df['m/z'], 384.1529)
+    area = extract_xic_areas(df.attrs['ms1'], [384.1529], [10.1], [1])
+    assert np.isfinite(area).all() and area[0] > 0
+
+
 def test_spectra_scan_activation(tmp_path):
     # A glycoproteomics run alternates HCD and EThcD (ETD + supplemental beam-type CID) scans of one precursor; both are kept apart by scan
     # number and activation, which a search engine's identification and CandyCrumbs' fragmentation_method need

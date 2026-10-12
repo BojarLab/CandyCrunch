@@ -62,7 +62,7 @@ LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD')]
-SPECTRA_SUFFIXES = ('.raw', '.mzml', '.mzxml', '.mgf')
+SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mgf')
 # extract_spectra xlsx of 4.5 min (25-29.5) of a pig gastric mucin O-glycan run (GPST000029, as packaging/self_test.mzML): 275 MS2 spectra, ~20 glycan peaks
 EXAMPLE_RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'example_PGM_O-glycans.xlsx')
 # What the worker reports while wrap_inference(_batch) runs, keyed by the prediction.py function that starts each step
@@ -652,7 +652,7 @@ class SpectrumPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.annotator, self.request, self.latest, self.canvas, self.toolbar = Annotator(), None, 0, None, None
+        self.annotator, self.request, self.latest, self.canvas, self.toolbar, self.drawn = Annotator(), None, 0, None, None, None
         self.annotator.done.connect(self.show_figure)
         self.annotator.support.connect(self.show_support)
         self.fragment_html, self.hover_targets, self.hovered = '', [], None
@@ -667,10 +667,16 @@ class SpectrumPanel(QWidget):
         self.tolerance.setToolTip('Maximum difference between an observed peak and a theoretical fragment mass')
         self.cartoons = QCheckBox('Fragment cartoons')
         self.cartoons.setChecked(True)
+        # The figure on screen is laid out for the panel, so saving it gave a small picture with cramped labels; this draws it again at print size
+        self.save = QPushButton('Save image…')
+        self.save.setToolTip('Saves this annotated spectrum at print size (12 inches wide) as PNG (300 dpi), SVG, or PDF, with the m/z of every labeled peak')
+        self.save.setEnabled(False)
+        self.save.clicked.connect(self.save_image)
         self.controls.addStretch(1)
         self.controls.addWidget(QLabel('Tolerance'))
         self.controls.addWidget(self.tolerance)
         self.controls.addWidget(self.cartoons)
+        self.controls.addWidget(self.save)
         self.message = QLabel()
         self.message.setAlignment(Qt.AlignCenter)
         self.message.setWordWrap(True)
@@ -721,7 +727,8 @@ class SpectrumPanel(QWidget):
             self.relayout.start()
 
     def show_message(self, text):
-        self.request, self.hover_targets = None, []
+        self.request, self.hover_targets, self.drawn = None, [], None
+        self.save.setEnabled(False)
         if self.hovered is not None:
             self.hovered = None
             self.support_hovered.emit(None)
@@ -752,6 +759,12 @@ class SpectrumPanel(QWidget):
         self.canvas.mpl_connect('motion_notify_event', self.hover)
         self.toolbar = NavigationToolbar2QT(self.canvas, self, coordinates = False)
         self.toolbar.setIconSize(QSize(16, 16))
+        # Its save button would save the small on-screen figure; Save image… draws it at print size instead
+        for action in self.toolbar.actions():
+            if action.text() == 'Save':
+                self.toolbar.removeAction(action)
+        self.drawn = (dict(self.request), hit_dict)
+        self.save.setEnabled(True)
         self.controls.insertWidget(0, self.toolbar)
         self.holder_layout.addWidget(self.canvas)
         self.stack.setCurrentWidget(self.holder)
@@ -785,6 +798,37 @@ class SpectrumPanel(QWidget):
                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
                               f'<th align="right">z</th></tr>{"".join(rows)}</table>')
         self.fragments.setHtml(self.fragment_html)
+
+
+    def save_image(self):
+        """Draws the spectrum shown again at print size, with the m/z of every labeled peak, as PNG (300 dpi), SVG, or PDF"""
+        if self.drawn is None:
+            return
+        path, chosen = QFileDialog.getSaveFileName(self, 'Save annotated spectrum', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'annotated_spectrum.png'),
+                                                   'PNG image, 300 dpi (*.png);;SVG vector graphic (*.svg);;PDF (*.pdf)')
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += re.search(r'\*(\.\w+)', chosen).group(1)
+        request, hit_dict = self.drawn
+        width, height = 12.0, 6.0 if request['cartoons'] else 4.6
+        figure = Figure(figsize = (width, height), dpi = 100)
+        FigureCanvasAgg(figure)
+        bottom = 0.55 / height
+        figure.subplots_adjust(left = 0.65 / width, right = 1 - 0.2 / width, bottom = bottom, top = bottom + (1 - 0.4 / height - bottom) / 1.4 if request['cartoons'] else 1 - 0.4 / height)
+        with IMPORT_LOCK:
+            from candycrunch.analysis import plot_annotated_spectrum
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            with MPL_LOCK:
+                plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
+                                        mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = figure.add_subplot(), draw_glycans = request['cartoons'],
+                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, **request['kwargs'])
+                figure.savefig(path, dpi = 300, bbox_inches = 'tight')
+        except Exception as error:
+            QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}')
+        finally:
+            QApplication.restoreOverrideCursor()
 
 
     def show_support(self, request_id, support):
@@ -876,7 +920,7 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, mzML, mzXML, mgf, or an .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, Bruker timsTOF .d (DDA-PASEF), mzML, mzXML, mgf, or an .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -939,11 +983,16 @@ class SettingsPanel(QScrollArea):
         self.inputs['rt_diff'] = _spin(0.05, 10, 0.25, 2, ' min')
         self.inputs['rt_diff'].setToolTip('Maximum retention time difference to a peak apex that is still grouped with that peak')
         self.inputs['ppm_thresh'] = _spin(1, 5000, 10, 0, ' ppm')
-        self.inputs['ppm_thresh'].setToolTip('Mass tolerance for grouping spectra, matching compositions, and the ppm error filter')
+        # One tolerance for precursors and fragments: as a flat window of its value at m/z 1600, as the pipeline turns it into Da (MZ_REF)
+        self.inputs['ppm_thresh'].valueChanged.connect(lambda v: self.inputs['ppm_thresh'].setToolTip(
+            f'One mass tolerance for precursors and fragments. Precursors: the ppm error filter, and a flat {v * MZ_REF / 1e6:.2f} Da window (its value at m/z '
+            f'{MZ_REF}) for grouping spectra and matching compositions. Fragments: the same {v * MZ_REF / 1e6:.2f} Da window for CandyCrumbs annotation'))
         self.inputs['pred_thresh'] = _spin(0, 1, 0.005, 3)
         self.inputs['pred_thresh'].setToolTip('Minimum prediction confidence')
         self.inputs['crumbs_thresh'] = _spin(0, 100, 1, 1)
-        self.inputs['crumbs_thresh'].setToolTip('CandyCrumbs fragment annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap survey scans)')
+        self.inputs['crumbs_thresh'].setToolTip('A peak is only kept if its fragment score exceeds this (2 lower for files with orbitrap survey scans). The fragment score sums, over the '
+                                                '15 most intense deisotoped fragment peaks, how many fragments of a structure of the precursor\'s composition each one matches '
+                                                '(up to two cleavages): fragment evidence that the peak is that glycan, independent of the model')
         self.inputs['extra_thresh'] = _spin(0, 1, 0.05, 2)
         self.inputs['extra_thresh'].setToolTip('Confidence from which structures of another glycan class are allowed')
         self.inputs['frag_num'] = _spin(1, 1000, 10)
@@ -1084,8 +1133,9 @@ class SettingsPanel(QScrollArea):
     def add_paths(self, paths):
         """Adds runs to the current experiment, or to a new one with the settings shown"""
         existing, target = set(self.paths()), self.current_experiment()
-        for path in paths:
-            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) else [path]
+        for path in map(os.path.normpath, paths):
+            # A timsTOF .d folder is one run; any other folder adds its runs
+            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith('.d') else [path]
             for file in found:
                 if file.lower().endswith(SPECTRA_SUFFIXES + ('.xlsx',)) and os.path.abspath(file) not in existing:
                     existing.add(os.path.abspath(file))
@@ -2173,9 +2223,9 @@ class MainWindow(QMainWindow):
             self.settings.add_paths(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add every .raw, mzML, mzXML, and mgf file of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add a timsTOF .d folder, or every .raw, .d, mzML, mzXML, and mgf run of a folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
-            self.store.setValue('folder', path)
+            self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith('.d') else path)
             self.settings.add_paths([path])
 
     def dragEnterEvent(self, event):
@@ -2217,7 +2267,9 @@ class MainWindow(QMainWindow):
         self.file_progress, self.fraction, self.first_report, self.stage_times = dict.fromkeys(map(os.path.normcase, files), 0.0), 0.0, None, []
         # Experiments run one after the other, so a batch's harmonization belongs to the experiment of the latest file that reported
         self.groups, self.tail_progress, self.active = [[os.path.normcase(f) for f in paths] for _, paths, _ in experiments], [0.0] * len(experiments), 0
-        self.file_sizes = {os.path.normcase(f): max(os.path.getsize(f), 1) if os.path.exists(f) else 1 for f in files}
+        # A timsTOF .d folder counts with the size of its files
+        self.file_sizes = {os.path.normcase(f): max(sum(os.path.getsize(os.path.join(f, x)) for x in os.listdir(f)) if os.path.isdir(f) else os.path.getsize(f), 1)
+                           if os.path.exists(f) else 1 for f in files}
         self.history = {}
         self.run_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
