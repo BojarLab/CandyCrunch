@@ -1,0 +1,14 @@
+Mass,RT,glycan,charge,20230622_SD_GSL_SSSMuG_5,RT_source,source,audit
+505.1774,13.46,Glc(a1-?)Glc(a1-?)Glc,-1,1,,added,"Hex3 peak (also at 13.41 in the N-glycan run), MS2 at 13.50; structure open"
+634.22,17.03,Neu5Ac(a2-3)Gal(b1-4)Glc,-1,7.266877014,16.29,given,
+644.7202,14.59,Neu5Ac(a2-8)Neu5Ac(a2-3)[Gal(b1-3)GalNAc(b1-4)]Gal(b1-4)Glc,-2,2.405818288,14.04,given,
+644.7202,15.08,Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,33.03142468,14.52,given,
+781.2626,15.91,"{Neu1,7lactone5Ac(a2-8)}Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc",-2,8.263643765,15.17,given,
+790.2679,17.52,{Neu5Ac(a2-8)}Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,17.8882175,15.81,given,
+790.2679,18.34,{Neu5Ac(a2-8)}Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,3.836719618,16.13,given,
+803.2757,21.71,{Neu5Ac(a2-8)}Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,2.416743184,18.54,given,ethyl glycoside as the 1025.4 row
+837.2994,21.71,,-1,1,,added,Hex2HexNAc1Neu5Ac1 peak with MS2 at 21.75 (GM2 glycan by the model); structure open
+935.8156,22.7,Neu5Ac(a2-8)Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-8)Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,2.291106874,17.9,given,
+999.3522,13.62,Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-1,9.401653821,13.56,given,
+1025.3679,17.19,Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-1,2.57775535,16.45,given,"mass is the given structure plus C2H4 relative to the free glycan (an ethyl glycoside, no glycowork notation); given structure kept"
+1316.4633,20.91,{Neu5Ac(a2-3/8)}Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-1,0.785031851,16.13,given,ethyl glycoside as the 1025.4 row; the given 657.75 [M-2H]2- row is the same peak (20.91) and was dropped as a charge-state copy

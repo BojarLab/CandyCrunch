@@ -85,8 +85,10 @@ def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotop
    | mz_tolerance (float): maximum distance between the trigger m/z and a survey-scan centroid; default:0.3
    | isotope_tolerance (float): tolerance for locating lighter isotope peaks; default:0.25
    | min_explained (float): share of a peak's intensity that the isotope envelope of a lighter peak has to explain for the peak to count as its isotope; default:0.7
-   | charges (list): header charge state of each spectrum (None if undetermined), whose isotope spacing alone is walked; default:None (z = 1, then z = 2 spacing)
-   | isolation_mz (bool): whether the header m/z is the isolation window centre (Bruker) instead of a peak; the strongest centroid within mz_tolerance is then
+   | charges (list): header charge state of each spectrum (None if undetermined); with isolation_mz its isotope spacing alone is walked, else the header m/z is the
+   |                 instrument's own monoisotopic pick, which only moves one isotope spacing down if the survey scan shows it was the 13C peak; default:None (z = 1,
+   |                 then z = 2 spacing)
+   | isolation_mz (bool): whether the header m/z is the isolation window center (Bruker) instead of a peak; the strongest centroid within mz_tolerance is then
    |                      the trigger, and no spectrum is dropped, as every isolation window holds the whole envelope; default:False\n
    | Returns:
    | :-
@@ -114,6 +116,14 @@ def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotop
         scan_mzs, scan_ints = ms1_mzs[ms1_offsets[s]:ms1_offsets[s + 1]], ms1_ints[ms1_offsets[s]:ms1_offsets[s + 1]]
         near = np.where(np.abs(scan_mzs - mz) <= mz_tolerance)[0]
         if not len(near):
+            continue
+        if charges is not None and charges[i] and not isolation_mz:
+            # A Thermo ion trap's own monoisotopic pick of a multiply charged precursor is often its 13C peak: the survey scan then merges the
+            # monoisotopic and 13C peaks into one centroid below the header m/z, or resolves the monoisotopic peak one isotope spacing below it
+            c = near[np.argmax(scan_ints[near])]
+            lighter = np.where((np.abs(scan_mzs - (mz - ISOTOPE_SPACING / charges[i])) <= 0.2) & (np.arange(len(scan_mzs)) != c))[0]
+            if scan_mzs[c] - mz <= -0.15 or (len(lighter) and scan_ints[lighter].max() >= 0.25 * scan_ints[c]):
+                out[i], walked[i] = mz - ISOTOPE_SPACING / charges[i], True
             continue
         # Bruker isolation window centers sit up to 0.5 m/z above the monoisotopic peak, so the nearest centroid there was often a noise shoulder
         k = near[np.argmax(scan_ints[near])] if isolation_mz else np.argmin(np.abs(scan_mzs - mz))
@@ -173,7 +183,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     highest_i_dict = {}
     rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
-    ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
+    ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, thermo = [], [], [], [], [], []
     ms3s, row_of = [], {}
     # Survey scans are centroided too: precursor refinement and XIC quantification work on centroids, and profile points of msconvert files (zero
     # intensities included) crashed the refinement or walked it along a peak's flank
@@ -252,6 +262,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 ms1_scans.append(len(ms1_rts) - 1)
                 refine.append(raw_charge is None)
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
+                thermo.append('MS:1000512' in terms)
                 if intensity:
                     inty = spectrum['precursor'].get('i', np.nan)
                     # Files without precursor intensities (Bruker) get the summed centroids within 1.5 m/z of the precursor in the preceding survey
@@ -278,7 +289,10 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
-    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine)
+    # The header charge of a multiply charged precursor comes with a Thermo ion trap's own monoisotopic pick, which is checked against the survey scan
+    walk = [c in (2, 3) and t and detected_ms1_trap == 'linear' for c, t in zip(charges, thermo)]
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [r or w for r, w in zip(refine, walk)],
+                                              charges = [c if w else None for c, w in zip(charges, walk)])
     df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
@@ -358,7 +372,8 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                 # every precursor of a file without filter lines is refined, walking the isotopes at its header charge
                 isolation_mz = isolation_mz or 'filterLine' not in spectrum
                 ms1_scans.append(len(ms1_rts) - 1)
-                refine.append(raw_charge is None or 'filterLine' not in spectrum)
+                # Thermo headers of multiply charged precursors are checked against an ion-trap survey scan as in process_raw_stack
+                refine.append(raw_charge is None or 'filterLine' not in spectrum or (abs(int(raw_charge)) in (2, 3) and detected_ms1_trap == 'linear'))
                 charges.append(abs(int(raw_charge)) if raw_charge is not None else None)
                 if intensity:
                     inty = spectrum['precursorMz'][0].get('precursorIntensity', np.nan)
@@ -463,7 +478,8 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     peak_ds, rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], [], []
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
-    ms3s, isolations = [], []
+    # One handle for the packets of every profile scan (opening the file per scan took a quarter of the reading time)
+    ms3s, isolations, packets = [], [], open(filepath, 'rb') if index_addr else None
     for i, scan in enumerate(range(raw.first_scan, raw.last_scan + 1)):
         if table['ms_level'][i] not in (1, ms_level, ms_level + 1):
             continue
@@ -472,23 +488,25 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         # points below 1 are dropped, the profile is split at the lowest point between maxima and neighboring centroids closer than 0.5 m/z are
         # merged, each carrying the summed signal of its share of the profile at its intensity-weighted m/z
         if not len(peak_mzs) and table['scan_mode'][i] == 'profile' and table['analyzer'][i] != 'FTMS':
-            prof_mzs, prof_ints = raw.profile(scan)
             if index_addr:
                 # opentfraw 2.0.0 also converts these profiles with coefficients of the misread events, but ion-trap profile bins are m/z already,
-                # so each chunk's m/z are rebuilt from the scan's packet: 40-byte header, 8 bytes per further segment, then the profile
-                with open(filepath, 'rb') as f:
-                    f.seek(index_addr + 88 * i + 72)
-                    f.seek(data_addr + int.from_bytes(f.read(8), 'little'))
-                    head = f.read(40)
-                    f.seek(8 * max(int.from_bytes(head[:4], 'little') - 1, 0), 1)
-                    prof = f.read(4 * int.from_bytes(head[4:8], 'little'))
-                (first_value, step), fudge, pos, prof_mzs = np.frombuffer(prof, '<f8', 2), head[12] > 0, 24, [np.zeros(0)]
+                # so each chunk's m/z (and its intensities, as opentfraw gives them) are read from the scan's packet: 40-byte header, 8 bytes per
+                # further segment, then the profile
+                packets.seek(index_addr + 88 * i + 72)
+                packets.seek(data_addr + int.from_bytes(packets.read(8), 'little'))
+                head = packets.read(40)
+                packets.seek(8 * max(int.from_bytes(head[:4], 'little') - 1, 0), 1)
+                prof = packets.read(4 * int.from_bytes(head[4:8], 'little'))
+                (first_value, step), fudge, pos, prof_mzs, prof_ints = np.frombuffer(prof, '<f8', 2), head[12] > 0, 24, [np.zeros(0)], [np.zeros(0)]
                 for _ in range(int.from_bytes(prof[16:20], 'little')):
                     first_bin, n = np.frombuffer(prof, '<u4', 2, pos)
                     fudge_mz = np.frombuffer(prof, '<f4', 1, pos + 8)[0] if fudge else 0
                     prof_mzs.append(first_value + np.arange(first_bin, first_bin + n) * step + fudge_mz)
+                    prof_ints.append(np.frombuffer(prof, '<f4', int(n), pos + 8 + 4 * fudge))
                     pos += 8 + 4 * fudge + 4 * int(n)
-                prof_mzs = np.concatenate(prof_mzs)
+                prof_mzs, prof_ints = np.concatenate(prof_mzs), np.concatenate(prof_ints)
+            else:
+                prof_mzs, prof_ints = raw.profile(scan)
             # opentfraw's profile axis sits one bin below Thermo's, which centroid_ion_trap expects
             peak_mzs, peak_ints = centroid_ion_trap(prof_mzs + (np.median(np.diff(prof_mzs)) if len(prof_mzs) > 1 else 0), prof_ints).T
         if not len(peak_mzs):
@@ -543,7 +561,10 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
             # ThermoRawFileParser's precursor intensity: summed centroids within 1.5 m/z of the isolation m/z in the trailer's master scan (tribrids
             # acquire MS2 in parallel with the next survey scan), else in the preceding survey scan; LTQ trailers only carry a 'Master Index:', no scan
             s = ms1_index.get((raw.scan_parameters(scan) or {}).get('Master Scan Number:'), len(ms1_rts) - 1)
-            intensities.append(float(ms1_ints[s][(ms1_mzs[s] >= iso - 1.5) & (ms1_mzs[s] < iso + 1.5)].sum()) if s >= 0 else np.nan)
+            intensities.append(
+                float(ms1_ints[s][(ms1_mzs[s] >= iso - 1.5) & (ms1_mzs[s] < iso + 1.5)].sum()) if s >= 0 else np.nan)
+    if packets is not None:
+        packets.close()
     df_out = pd.DataFrame({
         'm/z': mzs,
         'peak_d': peak_ds,
@@ -559,7 +580,10 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
-    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine)
+    # The header charge of a multiply charged precursor comes with an ion trap's own monoisotopic pick, which is checked against the survey scan
+    walk = [c in (2, 3) and detected_ms1_trap == 'linear' for c in charges]
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [r or w for r, w in zip(refine, walk)],
+                                              charges = [c if w else None for c, w in zip(charges, walk)])
     df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
@@ -1475,7 +1499,7 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
     comp_map = dict(zip(unq_structs.candidate_structure, unq_structs.composition))
     charge_vals = np.asarray(df_in['charge'].values, dtype = float)
     mz_vals, peak_vals, spec_ids = df_in[idx_col].values, df_in['peak_d'].values, df_in['spec_id'].values
-    scores_out = np.zeros(len(df_in))
+    scores_out, annotated_out, fragments_out = np.zeros(len(df_in)), np.zeros(len(df_in)), np.zeros(len(df_in))
     # A spectrum is a row of every candidate structure it matched, so its deisotoped fragments are computed once per charge state
     rounded_masses = {}
     for struct, rows in groups.items():
@@ -1522,12 +1546,16 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
                 else:
                     tester_mass_scores[(key, _k)] = 0
         row_scores = [sum([tester_mass_scores[(None, x)] for x in y]) for y in rounded_mass_rows]
+        # A sparse spectrum (a few fragments above the noise) cannot reach crumbs_thresh, so how many of its fragments are annotated counts too
+        annotated_out[rows] = [sum(tester_mass_scores[(None, x)] > 0 for x in set(y)) for y in rounded_mass_rows]
+        fragments_out[rows] = [len(set(y)) for y in rounded_mass_rows]
         # A row's MS3 evidence is the mean score of its MS3 spectra, so it does not grow with how often the instrument repeated them
         if ms3_rows:
             row_scores = [score + (np.mean([sum(tester_mass_scores[(key, x)] for x in masses) for key, _, masses in ms3]) if ms3 else 0)
                           for score, ms3 in zip(row_scores, ms3_rows)]
         scores_out[rows] = row_scores
     df_in['annotation_score'] = scores_out
+    df_in['annotated'], df_in['fragments'] = annotated_out, fragments_out
     return df_in
 
 
@@ -1568,6 +1596,24 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0):
                if first_preds[j] is not None and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff]
         if iso:
             reps[k] = reps[max(iso, key = lambda j: conf_first[j])]
+    # A predicted row one or two isotope spacings above a co-eluting, more abundant predicted row of the same charge, whose MS2 spectrum is the same (cosine
+    # >= 0.8 of square-root intensities in 1 Da bins), is that glycan's 13C peak fragmented on its own: an ion trap isolates both, so its fragments are the
+    # lighter glycan's, which other rules cannot tell from a glycan 1 Da heavier (Neu5Ac vs dHex2, Neu5Gc vs Hex + dHex); it joins that row
+    vectors = []
+    for d in df['peak_d'].values if 'peak_d' in df.columns else []:
+        v = defaultdict(float)
+        for m, i in (d.items() if isinstance(d, dict) else []):
+            v[int(round(m))] += i
+        vectors.append({b: np.sqrt(i / (sum(v.values()) or 1)) for b, i in v.items()})
+    for k in np.flatnonzero([p is not None for p in first_preds]) if vectors else []:
+        iso = [j for n in (1, 2) for j in
+               np.flatnonzero(np.abs(idx_vals[k] - n * ISOTOPE_SPACING / abs(charges[k]) - idx_vals) <= 0.25)
+               if
+               first_preds[j] is not None and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff and (
+                           abund is None or abund[j] > abund[k])]
+        cos = {j: sum(y * vectors[k].get(b, 0) for b, y in vectors[j].items()) for j in iso}
+        if cos and max(cos.values()) >= 0.8:
+            reps[k] = reps[max(cos, key = cos.get)]
     dedup_df = df.iloc[pd.unique(reps)].copy()
     if abund is not None:
         # A representative carries the abundance of the rows it represents, so a row linking two representatives is not counted twice
@@ -1651,8 +1697,16 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             for sia in ('Neu5Ac', 'Neu5Gc', 'Kdn'):
                 if sia in m:
                     losses = [n * sia_masses[sia][0] for n in range(1, m.count(sia) + 1)] if sialic_derivatization is None else [
-                        sum(x) for n in range(1, m.count(sia) + 1) for x in combinations_with_replacement(sia_masses[sia], n)]
-                    truth.append(any(any(abs(sm + PROTON_MASS * multiplier - j) < double_mass_tolerance for sm in sia_masses[sia]) or
+                        sum(x) for n in range(1, m.count(sia) + 1) for x in
+                        combinations_with_replacement(sia_masses[sia], n)]
+                    # A sialylated LacNAc antenna also shows as its B and C ions (Neu5Ac-Hex-HexNAc 655.2 / 673.2), e.g., in ion traps whose low-mass cutoff
+                    # hides the sialic acid ion of a large precursor
+                    lacnac = re.search(sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)GlcNAc', m) is not None
+                    truth.append(any(
+                        any(abs(sm + PROTON_MASS * multiplier - j) < double_mass_tolerance for sm in sia_masses[sia]) or
+                        (lacnac and j in float_frags[:5] and any(
+                            abs(sm + mass_dict['Hex'] + mass_dict['HexNAc'] + PROTON_MASS * multiplier + w - j) <
+                            mass_tolerance / 2 for sm in sia_masses[sia] for w in (0, mass_dict['H2O']))) or
                                      any(abs(assumed_mass - loss - j) < double_mass_tolerance for loss in losses) or
                                      any(abs(precursor_mz - ((sm - addy) / c) - j) < double_mass_tolerance for sm in sia_masses[sia]) for j
                                      in float_frags))
@@ -1681,11 +1735,14 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                         break
                 truth.append(any(has_sulfate[t] for t in top_frags[:20]))
             # Check fragment size distribution: a multiply charged precursor shows singly charged fragments above its m/z, or loses one of its
-            # residues at its own charge, which a singly charged ion cannot (large N-glycans in ion traps, e.g. Man9 [M-2H]2- 941.3 -> 860.3, -Hex/2)
+            # residues at its own charge, which a singly charged ion cannot (large N-glycans in ion traps, e.g. Man9 [M-2H]2- 941.3 -> 860.3, -Hex/2),
+            # or shows one of its 5 most intense fragments with a 13C peak half a mass unit above it among the 10 most intense
             if c > 1:
+                top10 = sorted(peak_col[k].items(), key = lambda x: x[1], reverse = True)[:10]
                 truth.append(any(j > precursor_mz * 1.2 for j in top_frags[:15]) or any(
                     abs(precursor_mz - rm / c - j) < mass_tolerance / 2 for j in float_frags[:3] for r in
-                    get_comp(m) if r in mass_dict for rm in sia_masses.get(r, [mass_dict[r]])))
+                    get_comp(m) if r in mass_dict for rm in sia_masses.get(r, [mass_dict[r]])) or any(
+                    0.4 <= q - j <= 0.62 and 0.3 * y <= w <= 1.5 * y for j, y in top10[:5] for q, w in top10))
             if c == 1:
                 # A singly charged precursor cannot have fragments above its m/z; a weak one (below 20% of the base peak) is a co-isolated ion, not a wrong charge
                 top_peaks = sorted(peak_col[k].items(), key = lambda x: x[1], reverse = True)[:5]
@@ -2777,7 +2834,11 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     else:
         df_out = df_out.reset_index()
     df_out = df_out.sort_values(['spec_id', 'annotation_score'], ascending = False).groupby('spec_id').first()
-    passes = df_out['annotation_score'] > np.where(df_out['cross_class'], cross_crumbs_thresh, crumbs_thresh)
+    # A sparse spectrum (at most 6 fragments, as an ion trap near its detection limit gives) can never pass crumbs_thresh, so it passes if at least two and 60%
+    # of its fragments are annotated and the model is confident in its in-class top structure
+    sparse = (df_out['fragments'] <= 6) & (df_out['annotated'] >= np.maximum(2, 0.6 * df_out['fragments'])) & ~df_out['cross_class']
+    passes = (df_out['annotation_score'] > np.where(df_out['cross_class'], cross_crumbs_thresh, crumbs_thresh)) | (
+        sparse & [bool(p) and p[0][1] >= 0.5 for p in df_out['predictions']])
     # One chromatographic peak is one glycan: when a cluster's fragments fail crumbs_thresh while a cluster at least ten times weaker at the same m/z,
     # whose spectra continue it (within 0.25 min), passes with the same top prediction, the tail's evidence counts for the peak, reported at its apex
     tails = []

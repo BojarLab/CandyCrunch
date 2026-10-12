@@ -655,7 +655,7 @@ class SpectrumPanel(QWidget):
         self.annotator, self.request, self.latest, self.canvas, self.toolbar, self.drawn = Annotator(), None, 0, None, None, None
         self.annotator.done.connect(self.show_figure)
         self.annotator.support.connect(self.show_support)
-        self.fragment_html, self.hover_targets, self.hovered = '', [], None
+        self.fragment_html, self.hover_targets, self.label_targets, self.hovered = '', [], [], None
         self.controls = QHBoxLayout()
         self.controls.setContentsMargins(6, 4, 6, 0)
         self.summary = _label('', 'hint')
@@ -727,7 +727,7 @@ class SpectrumPanel(QWidget):
             self.relayout.start()
 
     def show_message(self, text):
-        self.request, self.hover_targets, self.drawn = None, [], None
+        self.request, self.hover_targets, self.label_targets, self.drawn = None, [], [], None
         self.save.setEnabled(False)
         if self.hovered is not None:
             self.hovered = None
@@ -785,7 +785,7 @@ class SpectrumPanel(QWidget):
                 tips.append((None, f'<b>m/z {p:.2f}</b>' + (f' ({domon_costello_to_html(flat)})' if flat else '') + f' was isolated for MS3: {n} spectr{"um" if n == 1 else "a"}'
                              f'<br>Click to show {"it" if n == 1 else "them"}, pooled and annotated as fragments of this fragment, in the MS3 tab'))
             self.hover_targets += [(artist, tips) for artist in figure.ms3_artists]
-        rows = []
+        rows, tips = [], {}
         for mz in sorted(hits):
             hit = hits[mz]
             for n, (names, theo, z) in enumerate(zip(hit['Domon-Costello nomenclatures'], hit['Theoretical fragment masses'], hit['Fragment charges'])):
@@ -794,10 +794,13 @@ class SpectrumPanel(QWidget):
                 flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
                 first = f'<td>{mz:.4f}</td><td align="right">{peaks.get(mz, 0) / top * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
                 rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{theo - mz:+.3f}</td><td align="right">{z}</td></tr>')
+                tips[mz] = tips.get(mz, f'Observed m/z <b>{mz:.4f}</b>') + f'<br>{domon_costello_to_html(flat)}: theoretical m/z <b>{theo:.4f}</b> (error {theo - mz:+.4f} Da' + (f', z = {z}' if abs(z) > 1 else '') + ')'
         self.fragment_html = (f'<table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Observed m/z</th>'
                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
                               f'<th align="right">z</th></tr>{"".join(rows)}</table>')
         self.fragments.setHtml(self.fragment_html)
+        # Hovering a fragment label shows the observed and theoretical m/z of its peak
+        self.label_targets = [(text, [(None, tips[text.xy[0]])]) for text in figure.axes[0].texts if text.get_text() and text.xy[0] in tips]
 
 
     def save_image(self):
@@ -869,13 +872,19 @@ class SpectrumPanel(QWidget):
         """Shows the fragment of the supporting (or contradicting) peak under the mouse as a tooltip, and its supported part in the SNFG drawing; over a
         peak isolated for MS3, what clicking it does, with a hand cursor"""
         highlight, tip, clickable = None, '', False
-        # Newest first, so support markers win over the invisible MS3 sticks under them
-        for artist, meta in reversed(self.hover_targets):
-            hit, info = artist.contains(event)
-            if hit:
-                highlight, tip = meta[info['ind'][0]]
-                clickable = artist in getattr(self.canvas.figure, 'ms3_artists', ())
-                break
+        # Hit-testing a label lays out its text, which must wait while an annotation thread draws (matplotlib's mathtext parser is not thread-safe)
+        if not MPL_LOCK.acquire(blocking = False):
+            return
+        try:
+            # Newest first, so support markers win over the invisible MS3 sticks under them, and fragment labels (text, no 'ind') last
+            for artist, meta in list(reversed(self.hover_targets)) + self.label_targets:
+                hit, info = artist.contains(event)
+                if hit:
+                    highlight, tip = meta[info.get('ind', [0])[0]]
+                    clickable = artist in getattr(self.canvas.figure, 'ms3_artists', ())
+                    break
+        finally:
+            MPL_LOCK.release()
         # While panning or zooming, the toolbar sets its own cursor
         if not self.toolbar.mode:
             self.canvas.set_cursor(Cursors.HAND if clickable else Cursors.POINTER)
@@ -973,7 +982,14 @@ class SettingsPanel(QScrollArea):
         self.advanced_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.advanced_toggle.setArrowType(Qt.RightArrow)
         self.advanced_toggle.setAutoRaise(True)
-        layout.addWidget(self.advanced_toggle)
+        # Outside the advanced settings, so it is in view whatever is expanded; enabled whenever a setting differs from its default
+        self.reset = QPushButton('Restore defaults')
+        self.reset.setToolTip('Sets every setting of this experiment back to the CandyCrunch default, except the glycan class')
+        toggle_row = QHBoxLayout()
+        toggle_row.addWidget(self.advanced_toggle)
+        toggle_row.addStretch(1)
+        toggle_row.addWidget(self.reset)
+        layout.addLayout(toggle_row)
         self.advanced = QWidget()
         form = QFormLayout(self.advanced)
         form.setContentsMargins(0, 0, 0, 0)
@@ -1028,8 +1044,6 @@ class SettingsPanel(QScrollArea):
             grid.addWidget(self.filter_boxes[name], n // 3, n % 3)
         form.addRow(_label('Ignore compositions containing', 'hint'))
         form.addRow(grid)
-        self.reset = QPushButton('Restore defaults')
-        form.addRow(self.reset)
         self.advanced.setVisible(False)
         layout.addWidget(self.advanced)
         layout.addStretch(1)
@@ -1047,6 +1061,9 @@ class SettingsPanel(QScrollArea):
         self.files.itemChanged.connect(self.rename_experiment)
         self.files.customContextMenuRequested.connect(self.files_menu)
         self.files_changed.connect(lambda: self.show_experiment(self.current_experiment()))
+        for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic]:
+            getattr(widget, {QComboBox: 'currentIndexChanged', QCheckBox: 'toggled', QLineEdit: 'textChanged'}.get(type(widget), 'valueChanged')).connect(
+                lambda *_: self.reset.setEnabled(any(v != DEFAULTS.get(k, v) for k, v in self.values().items())))
         self.set_values(DEFAULTS)
         self.batch.setVisible(False)
 

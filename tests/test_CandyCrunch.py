@@ -29,7 +29,16 @@ TEST_DICTS = [
     {'name':'GPST000487','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")]},
     # Four O-glycan and four N-glycan replicate runs (Bruker HCT) share one folder; 'folder' names it, 'name' the ground truth (df_mz_<name>.csv)
     {'name':'GPST000169_O','folder':'GPST000169','args': {'glycan_class':'O'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'OGlycan' in x]},
-    {'name':'GPST000169_N','folder':'GPST000169','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'NGlycan' in x]},
+    {'name': 'GPST000169_N', 'folder': 'GPST000169', 'args': {'glycan_class': 'N'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'NGlycan' in x]},
+    # Brain glycosphingolipid, N-glycan, and O-glycan runs (Thermo LTQ .raw, and their extract_spectra .xlsx) share one folder, one ground truth per glycan class
+    {'name': 'GPST000374_GSL', 'folder': 'GPST000374', 'args': {'glycan_class': 'lipid'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000374/") if '_GSL_' in x]},
+    {'name': 'GPST000374_N', 'folder': 'GPST000374', 'args': {'glycan_class': 'N'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000374/") if '_NG_' in x]},
+    {'name': 'GPST000374_O', 'folder': 'GPST000374', 'args': {'glycan_class': 'O'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000374/") if '_OG_' in x]},
+    # {'name':'GPST000134'
    # {'name':'GPST000134','args': {'glycan_class':'N', 'mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1]}
 ]
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too), run by --input-format mzml
@@ -282,6 +291,18 @@ def test_precursor_refinement():
     # fragmented itself, a header charge state is trusted, and an unrelated lighter peak is not mistaken for the monoisotopic one
     assert np.allclose(out[:2], mono, atol = 1e-3) and out[2] == 601.25 and abs(out[3] - 700.2) < 1e-3
     assert list(drop) == [False, True, False, False]
+
+
+def test_ion_trap_header_charge():
+    # One LTQ survey scan and four doubly charged precursors whose MS2 headers carry the instrument's charge and "monoisotopic" m/z (GPST000374): the survey
+    # merges M and M+1 of 1160.93 into one centroid 0.28 below the header's 13C pick, resolves 864.30 0.5 below the header 864.79, and shows 1111.90 and
+    # 1059.39, whose headers are right, with their merged or resolved 13C peaks above them
+    scan = [(864.23, 194), (864.80, 354), (1059.38, 3209), (1060.06, 4720), (1111.90, 923), (1112.43, 948), (1161.19, 5161), (1161.95, 1499)]
+    ms1 = (np.array([20.0]), np.array([m for m, _ in scan], dtype = np.float32), np.array([i for _, i in scan], dtype = np.float32),
+           np.array([0, len(scan)], dtype = np.int64))
+    out, drop = refine_precursor_mz(ms1, [1161.47, 864.79, 1111.94, 1059.40], [20.05] * 4, [0] * 4, [True] * 4, charges = [2, 2, 2, 2])
+    assert np.allclose(out, [1161.47 - 1.003355 / 2, 864.79 - 1.003355 / 2, 1111.94, 1059.40]) and not drop.any()
+
 
 def test_bruker_mzxml(tmp_path):
     # Bruker HCT profile scans (msconvert mzXML): a doubly charged envelope at 965.844 whose monoisotopic top dips in the middle, and a singly charged

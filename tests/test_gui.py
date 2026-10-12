@@ -137,6 +137,31 @@ def test_gui_support_hover(app):
     assert not images.get(g, compact = False, highlight = ((0, 1, 2), 2)).isNull()
 
 
+def test_gui_label_tooltip_and_reset(app, monkeypatch):
+    import time
+    from matplotlib.backend_bases import MouseEvent
+    from candycrunch import gui
+    # Restore defaults is only enabled while a setting differs from its default, and keeps the glycan class
+    settings = gui.SettingsPanel()
+    assert not settings.reset.isEnabled()
+    settings.inputs['glycan_class'].setCurrentIndex(1)
+    settings.inputs['ppm_thresh'].setValue(100)
+    assert settings.reset.isEnabled()
+    settings.reset.click()
+    assert not settings.reset.isEnabled() and settings.values()['glycan_class'] == 'N' and settings.values()['ppm_thresh'] == gui.DEFAULTS['ppm_thresh']
+    # Hovering a fragment label shows the observed and theoretical m/z of its peak
+    panel, shown, end = gui.SpectrumPanel(), [], time.time() + 120
+    panel.annotate('Fuc(a1-2)Gal(b1-3)GalNAc', [384.15, 325.1, 222.1, 530.2], [100.0, 40.0, 30.0, 80.0], -1, None, 'underivatized')
+    while not panel.label_targets and time.time() < end:
+        app.processEvents()
+        time.sleep(0.05)
+    monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: shown.append(text))
+    text = next(t for t, _ in panel.label_targets if t.xy[0] == 384.15)
+    box = text.get_window_extent()
+    panel.hover(MouseEvent('motion_notify_event', panel.canvas, (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2))
+    assert 'Observed m/z <b>384.1500</b>' in shown[-1] and 'theoretical m/z <b>384.1511</b>' in shown[-1]
+
+
 def test_gui_ms3_hover_and_menu(app, monkeypatch):
     import time
     from matplotlib.backend_bases import MouseEvent

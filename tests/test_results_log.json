@@ -5,69 +5,69 @@
             "(True, True, 'xlsx')": 0.7580974851898095
         },
         "gt_hash": "18207195472153515264-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000350": {
         "scores": {
-            "(True, True, 'mzML')": 0.8109067726820838,
+            "(True, True, 'mzML')": 0.8130648020887754,
             "(True, True, 'xlsx')": 0.8109067726820838
         },
         "gt_hash": "8974627088648322374-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000017": {
         "scores": {
             "(True, True, 'mzML')": 0.8522581587782463,
-            "(True, True, 'xlsx')": 0.8468041605151001
+            "(True, True, 'xlsx')": 0.8522581587782463
         },
         "gt_hash": "6989303403701479652-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000029": {
         "scores": {
-            "(True, True, 'mzML')": 0.7482896590608221,
-            "(True, True, 'xlsx')": 0.7485375995957694
+            "(True, True, 'mzML')": 0.7501845325996477,
+            "(True, True, 'xlsx')": 0.7651243891753872
         },
         "gt_hash": "16945319985575801331-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "PMC8950484_CHO": {
         "scores": {
-            "(True, True, 'mzML')": 0.9309964496541842,
-            "(True, True, 'xlsx')": 0.9309964496541842
+            "(True, True, 'mzML')": 0.9432938209222065,
+            "(True, True, 'xlsx')": 0.9291491370199164
         },
         "gt_hash": "10926790978904648008-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000307": {
         "scores": {
-            "(True, True, 'mzML')": 0.811714530720482,
-            "(True, True, 'xlsx')": 0.8113302874081073
+            "(True, True, 'mzML')": 0.813861467747845,
+            "(True, True, 'xlsx')": 0.8156313455143185
         },
         "gt_hash": "4569966042868254508-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000487": {
         "scores": {
-            "(True, True, 'mzML')": 0.7961433319400225,
+            "(True, True, 'mzML')": 0.7866839351488383,
             "(True, True, 'xlsx')": 0.785995090830498
         },
         "gt_hash": "10338202327038719931-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000029_batch": {
         "scores": {
-            "(True, True, 'mzML')": 0.7710842260156475
+            "(True, True, 'mzML')": 0.7615444890641794
         },
         "gt_hash": "16945319985575801331-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000017_batch": {
         "scores": {
-            "(True, True, 'mzML')": 0.8424621690378156
+            "(True, True, 'mzML')": 0.8466207895417478
         },
         "gt_hash": "6989303403701479652-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000169_O": {
         "scores": {
@@ -75,28 +75,52 @@
             "(True, True, 'xlsx')": 0.7754195372540889
         },
         "gt_hash": "18282863671313821490-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000169_N": {
         "scores": {
-            "(True, True, 'mzML')": 0.762548341402878,
-            "(True, True, 'xlsx')": 0.7678200515416167
+            "(True, True, 'mzML')": 0.7620638241851836,
+            "(True, True, 'xlsx')": 0.7660266173168131
         },
         "gt_hash": "3288668576285830043-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000169_O_batch": {
         "scores": {
             "(True, True, 'mzML')": 0.799081224687664
         },
         "gt_hash": "18282863671313821490-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
     },
     "GPST000169_N_batch": {
         "scores": {
-            "(True, True, 'mzML')": 0.7737680871338698
+            "(True, True, 'mzML')": 0.7634024114835605
         },
         "gt_hash": "3288668576285830043-hungarian-halfopen",
-        "timestamp": "2026-10-12 10:32:17"
+        "timestamp": "2026-10-12 17:03:36"
+    },
+    "GPST000374_GSL": {
+        "scores": {
+            "(True, True, 'raw')": 0.4651071172666646,
+            "(True, True, 'xlsx')": 0.4651071172666646
+        },
+        "gt_hash": "14372159782494145472-hungarian-halfopen",
+        "timestamp": "2026-10-12 17:03:36"
+    },
+    "GPST000374_N": {
+        "scores": {
+            "(True, True, 'raw')": 0.567480685098464,
+            "(True, True, 'xlsx')": 0.567480685098464
+        },
+        "gt_hash": "10691703716618688226-hungarian-halfopen",
+        "timestamp": "2026-10-12 17:03:36"
+    },
+    "GPST000374_O": {
+        "scores": {
+            "(True, True, 'raw')": 0.6190476141836735,
+            "(True, True, 'xlsx')": 0.6190476141836735
+        },
+        "gt_hash": "14257491862426676932-hungarian-halfopen",
+        "timestamp": "2026-10-12 17:03:36"
     }
 }

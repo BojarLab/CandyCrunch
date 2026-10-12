@@ -2,7 +2,6 @@
 import base64
 import heapq
 import itertools
-import math
 import re
 import struct
 import zlib
@@ -30,7 +29,12 @@ def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
     apex = np.where((ints[1:-1] > ints[:-2]) & (ints[1:-1] >= ints[2:]) & (ints[1:-1] > 0))[0] + 1
     if not len(apex):
         return np.zeros((0, 2))
-    edges = np.array([0] + [a + 1 + np.argmin(ints[a + 1:b]) for a, b in zip(apex[:-1], apex[1:])], dtype = np.int64)
+    # The lowest point between neighboring maxima (its first occurrence): the minimum of each stretch, then the first point of the stretch at it; a stretch
+    # may run on to the next maximum, which is never its minimum (it rises from the point before it)
+    lows = np.minimum.reduceat(ints[:apex[-1]], apex[:-1] + 1) if len(apex) > 1 else np.zeros(0)
+    stretch = np.repeat(np.arange(len(lows)), np.diff(apex))
+    at_low = np.flatnonzero(ints[apex[0] + 1:apex[-1] + 1] == lows[stretch])
+    edges = np.concatenate([[0], apex[0] + 1 + at_low[np.diff(stretch[at_low], prepend = -1) > 0]])
     while True:
         peak_ints = np.add.reduceat(ints, edges)
         peak_mzs = np.add.reduceat(ints * mzs, edges) / peak_ints
@@ -98,21 +102,20 @@ def centroid_gaussian(mzs, ints):
    | :-
    | Returns an (n, 2) array of centroid m/z and the fitted apex intensity
    """
-    mz, inty, centroids = np.asarray(mzs).tolist(), np.asarray(ints).tolist(), []
-    for pos in range(2, len(inty) - 1):
-        x1, x2, x3, y1, y2, y3 = mz[pos - 1], mz[pos], mz[pos + 1], inty[pos - 1], inty[pos], inty[pos + 1]
-        if not 0 < y1 < y2 > y3 > 0 or x2 - x1 > (x3 - x2) * 10 or (x2 - x1) * 10 < x3 - x2:
-            continue
-        if y3 == y1:
-            y3 += 0.01 * y1
-        try:
-            double_log = math.log(y2 / y1) / math.log(y3 / y1)
-            mu = (double_log * (x1 * x1 - x3 * x3) - x1 * x1 + x2 * x2) / (2 * (x2 - x1) - 2 * double_log * (x3 - x1))
-            c_squared = (x2 * x2 - x1 * x1 - 2 * x2 * mu + 2 * x1 * mu) / (2 * math.log(y1 / y2))
-            centroids.append((mu, y1 * math.exp((x1 - mu) * (x1 - mu) / (2 * c_squared))))
-        except (ZeroDivisionError, OverflowError):
-            continue
-    return np.array(centroids).reshape(-1, 2)
+    x, y = np.asarray(mzs, dtype = np.float64), np.asarray(ints, dtype = np.float64)
+    pos = np.arange(2, len(y) - 1)
+    x1, x2, x3, y1, y2, y3 = x[pos - 1], x[pos], x[pos + 1], y[pos - 1], y[pos], y[pos + 1]
+    keep = (0 < y1) & (y1 < y2) & (y2 > y3) & (y3 > 0) & ~(x2 - x1 > (x3 - x2) * 10) & ~((x2 - x1) * 10 < x3 - x2)
+    x1, x2, x3, y1, y2, y3 = x1[keep], x2[keep], x3[keep], y1[keep], y2[keep], y3[keep]
+    y3 = np.where(y3 == y1, y3 + 0.01 * y1, y3)
+    # Fits the scalar version skipped (ZeroDivisionError, OverflowError) come out as inf or nan and are dropped
+    with np.errstate(divide = 'ignore', over = 'ignore', invalid = 'ignore'):
+        double_log = np.log(y2 / y1) / np.log(y3 / y1)
+        mu = (double_log * (x1 * x1 - x3 * x3) - x1 * x1 + x2 * x2) / (2 * (x2 - x1) - 2 * double_log * (x3 - x1))
+        c_squared = (x2 * x2 - x1 * x1 - 2 * x2 * mu + 2 * x1 * mu) / (2 * np.log(y1 / y2))
+        apex = y1 * np.exp((x1 - mu) * (x1 - mu) / (2 * c_squared))
+    fine = np.isfinite(mu) & np.isfinite(apex)
+    return np.stack([mu[fine], apex[fine]], axis = 1)
 
 
 def read_mzml(filepath, centroid_levels = ()):

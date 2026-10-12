@@ -27,11 +27,22 @@ jobs:
       with:
         python-version: '3.12'
 
-    - name: Install CandyCrunch and PyInstaller
+    - name: Install CandyCrunch
       run: |
         python -m pip install --upgrade pip
         pip install "glycowork @ git+https://github.com/BojarLab/glycowork.git@dev"
-        pip install ".[gui]" pyinstaller
+        pip install ".[gui]"
+
+    # Antivirus heuristics flag PyInstaller's precompiled bootloader, which malware ships too, so the Windows app gets one compiled here (the runner's MSVC)
+    - name: Install PyInstaller with a bootloader built from source
+      if: runner.os == 'Windows'
+      env:
+        PYINSTALLER_COMPILE_BOOTLOADER: 1
+      run: pip install --no-binary pyinstaller --no-cache-dir --verbose pyinstaller
+
+    - name: Install PyInstaller
+      if: runner.os == 'macOS'
+      run: pip install pyinstaller
 
     - name: Build the app
       run: pyinstaller --noconfirm packaging/candycrunch.spec
@@ -60,6 +71,20 @@ jobs:
         if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
         & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\candycrunch.iss
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    # No installer that Microsoft Defender flags reaches a release; the log names the file and the threat
+    - name: Scan the app and installer with Microsoft Defender
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $defender = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+        if (-not (Test-Path $defender)) { Write-Host 'Microsoft Defender is not installed on this runner'; exit 0 }
+        & $defender -SignatureUpdate | Out-Host
+        foreach ($target in @((Resolve-Path dist\CandyCrunch).Path) + @(Get-ChildItem dist\CandyCrunch-*-Windows-Setup.exe | ForEach-Object FullName)) {
+          & $defender -Scan -ScanType 3 -File $target -DisableRemediation | Out-Host
+          if ($LASTEXITCODE -eq 2) { Write-Host "::error::Microsoft Defender flags $target (file and threat listed above)"; exit 1 }
+        }
+        exit 0
 
     - name: Build the macOS disk image
       if: runner.os == 'macOS'
