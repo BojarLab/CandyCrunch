@@ -1,36 +1,103 @@
-Mass,RT,glycan,20190917_RNaseB_glycans_1,added_db,removed_db
-618.2239,19.32,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-699.2499,15.19,Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-699.25,20.19,Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-699.2504,11.81,Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-699.2505,16.62,Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-732.22,16.44,GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,1,
-780.2766,11.99,Man(a1-2)Man(a1-6)[Man(a1-3)]Man(a1-6)[Man(a1-2)Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-780.2766,15.56,{Man(a1-2)}Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-792.79,17.63,{Fuc(a1-3/6)}GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-800.79,12.16,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-813.31,12.42,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-813.31,18.62,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-821.3,12.35,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-821.3,15.99,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-821.3,17.46,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-861.3027,12.02,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)[Man(a1-3)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-861.3028,14.57,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)[Man(a1-3)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-861.303,15.56,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-894.33,13.21,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-894.33,17.62,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-894.33,19.17,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-942.329,15.56,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-942.3292,14.42,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-942.3298,11.67,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,,
-946.34,29.76,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-975.35,18.86,{Fuc(a1-3/6)}{GlcNAc(b1-3/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-975.35,20.18,{Fuc(a1-3/6)}{GlcNAc(b1-3/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-975.35,25.45,{Fuc(a1-3/6)}{GlcNAc(b1-3/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,1,
-1003.87,17.74,,1,1,
-1040.39,17.93,Fuc(a1-3)[Gal(b1-4)]GlcNAc(b1-2)Man(a1-3)[Fuc(a1-3)[Gal(b1-4)]GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,1,
-1056.38,19.88,Gal(b1-4)GlcNAc(b1-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,1,
-1056.38,21.44,Gal(b1-4)GlcNAc(b1-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,1,
-1235.4403,12.02,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,0,,1
-1235.4406,17.23,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,0,,1
-1235.4408,19.32,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,0,,1
+Mass,RT,glycan,20190917_RNaseB_glycans_1,charge,composition,ion,height,n_ms2,source,ms1_audit
+618.224,12.02,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc2,[M+Na+H]2+,10000000.0,27,added,only Man5 structure
+618.224,17.23,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc2,[M+K+H]2+,163000000.0,26,added,only Man5 structure
+618.224,19.29,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc2,[M+K+H]2+,272000000.0,32,given,only Man5 structure
+638.7373,14.01,,1,2,Hex4HexNAc3,[M+K+H]2+,40300.0,2,added,structure open
+638.7373,15.4,,1,2,Hex4HexNAc3,[M+K+H]2+,1130000.0,7,added,structure open
+638.7373,16.71,,1,2,Hex4HexNAc3,[M+K+H]2+,115000.0,4,added,structure open
+638.7373,17.41,,1,2,Hex4HexNAc3,[M+K+H]2+,1220000.0,8,added,structure open
+699.2504,11.83,,1,2,Hex6HexNAc2,[M+Na+H]2+,7030000.0,29,given,"early peak, isomer undetermined"
+699.2504,15.19,Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc2,[M+K+H]2+,69000000.0,26,given,main Man6 anomer pair (K+H MS2 cos 0.99)
+699.2504,16.62,Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc2,[M+K+H]2+,153000000.0,35,given,main Man6 anomer pair (K+H MS2 cos 0.99)
+699.2504,17.98,,1,2,Hex6HexNAc2,[M+K+H]2+,6290000.0,31,added,"minor Man6 isomer pair 17.98/20.18 (K+H MS2 cos 0.98 to each other, 0.94-0.97 to the main pair); given structure (main isomer) not kept"
+699.2504,20.18,,1,2,Hex6HexNAc2,[M+K+H]2+,8560000.0,50,given,"minor Man6 isomer pair 17.98/20.18 (K+H MS2 cos 0.98 to each other, 0.94-0.97 to the main pair); given structure (main isomer) not kept"
+719.7637,11.56,,1,2,Hex5HexNAc3,[M+2H]2+,118000.0,34,added,structure open
+719.7637,14.72,,1,2,Hex5HexNAc3,[M+K+H]2+,961000.0,7,added,structure open
+719.7637,15.09,,1,2,Hex5HexNAc3,[M+K+H]2+,1510000.0,8,added,structure open
+719.7637,15.94,,1,2,Hex5HexNAc3,[M+K+H]2+,2180000.0,15,added,structure open
+719.7637,16.42,,1,2,Hex5HexNAc3,[M+K+H]2+,1370000.0,8,added,structure open
+780.2768,11.96,,1,2,Hex7HexNAc2,[M+Na+H]2+,1660000.0,58,given,"Man7 isomer without the K+H spectrum of the D1 group (15.10/16.50 pair, cos 0.98) or early peak"
+780.2768,14.6,{Man(a1-2)}Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex7HexNAc2,[M+K+H]2+,13900000.0,19,added,Man7 group with D1 (K+H MS2 cos 0.98-0.99 to the given 15.56 row)
+780.2768,15.1,,1,2,Hex7HexNAc2,[M+K+H]2+,7440000.0,22,added,"Man7 isomer without the K+H spectrum of the D1 group (15.10/16.50 pair, cos 0.98) or early peak"
+780.2768,15.56,{Man(a1-2)}Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex7HexNAc2,[M+K+H]2+,28600000.0,24,given,Man7 group with D1 (K+H MS2 cos 0.98-0.99 to the given 15.56 row)
+780.2768,16.5,,1,2,Hex7HexNAc2,[M+K+H]2+,20300000.0,24,added,"Man7 isomer without the K+H spectrum of the D1 group (15.10/16.50 pair, cos 0.98) or early peak"
+780.2768,17.02,{Man(a1-2)}Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex7HexNAc2,[M+K+H]2+,13900000.0,30,added,Man7 group with D1 (K+H MS2 cos 0.98-0.99 to the given 15.56 row)
+792.7926,12.07,,1,2,Hex5HexNAc3dHex1,[M+2H]2+,128000.0,2,added,structure open
+792.7926,14.11,,1,2,Hex5HexNAc3dHex1,[M+K+H]2+,98100.0,5,added,structure open
+792.7926,16.14,,1,2,Hex5HexNAc3dHex1,[M+K+H]2+,833000.0,9,added,structure open
+792.7926,17.59,{Fuc(a1-3/6)}GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc3dHex1,[M+K+H]2+,2850000.0,16,given,given structure
+792.7926,18.16,,1,2,Hex5HexNAc3dHex1,[M+K+H]2+,158000.0,8,added,structure open
+800.7901,12.17,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc3,[M+2H]2+,355000.0,10,given,given structure
+800.7901,15.23,,1,2,Hex6HexNAc3,[M+K+H]2+,189000.0,4,added,structure open
+800.7901,15.64,,1,2,Hex6HexNAc3,[M+K+H]2+,3020000.0,8,added,structure open
+800.7901,17.04,,1,2,Hex6HexNAc3,[M+K+H]2+,8710000.0,15,added,structure open
+813.3059,12.37,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex4HexNAc4dHex1,[M+2H]2+,40900.0,4,given,given structure
+813.3059,17.03,,1,2,Hex4HexNAc4dHex1,[M+K+H]2+,573000.0,7,added,structure open
+813.3059,18.59,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex4HexNAc4dHex1,[M+K+H]2+,1610000.0,31,given,given structure
+821.3034,12.27,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4,[M+2H]2+,108000.0,10,given,given structure
+821.3034,14.18,,1,2,Hex5HexNAc4,[M+K+H]2+,54300.0,3,added,structure open
+821.3034,15.97,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4,[M+K+H]2+,1140000.0,12,given,given structure
+821.3034,17.39,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4,[M+K+H]2+,2090000.0,16,given,given structure
+821.3034,17.77,,1,2,Hex5HexNAc4,[M+K+H]2+,225000.0,10,added,structure open
+861.3032,11.98,,1,2,Hex8HexNAc2,[M+Na+H]2+,5080000.0,22,given,Man8 isomer undetermined
+861.3032,14.59,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)[Man(a1-3)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex8HexNAc2,[M+K+H]2+,60600000.0,27,given,Man8 anomer pair (K+H MS2 cos 0.99); given 15.56 structure (lacking D3) replaced by that of its partner 14.57
+861.3032,15.58,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)[Man(a1-3)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex8HexNAc2,[M+K+H]2+,120000000.0,25,given,Man8 anomer pair (K+H MS2 cos 0.99); given 15.56 structure (lacking D3) replaced by that of its partner 14.57
+861.3032,16.83,,1,2,Hex8HexNAc2,[M+K+H]2+,5590000.0,28,added,Man8 isomer undetermined
+865.3114,28.98,,1,2,Hex5HexNAc3Neu5Ac1,[M+K+H]2+,55600.0,34,added,structure open
+873.3088,26.04,,1,2,Hex5HexNAc3Neu5Gc1,[M+K+H]2+,54200.0,30,added,structure open
+873.3088,28.25,,1,2,Hex5HexNAc3Neu5Gc1,[M+K+H]2+,94300.0,51,added,structure open
+873.819,15.14,,1,2,Hex6HexNAc3dHex1,[M+K+H]2+,131000.0,2,added,structure open
+873.819,16.48,,1,2,Hex6HexNAc3dHex1,[M+K+H]2+,832000.0,7,added,structure open
+873.819,18.04,,1,2,Hex6HexNAc3dHex1,[M+K+H]2+,186000.0,6,added,structure open
+873.819,18.74,,1,2,Hex6HexNAc3dHex1,[M+K+H]2+,1090000.0,13,added,structure open
+881.8165,15.25,,1,2,Hex7HexNAc3,[M+K+H]2+,1250000.0,6,added,structure open
+886.3349,16.34,,1,2,Hex4HexNAc4dHex2,[M+K+H]2+,138000.0,4,added,structure open
+886.3349,17.84,,1,2,Hex4HexNAc4dHex2,[M+K+H]2+,451000.0,13,added,structure open
+894.3323,13.14,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4dHex1,[M+2H]2+,195000.0,16,given,given structure
+894.3323,16.82,,1,2,Hex5HexNAc4dHex1,[M+K+H]2+,134000.0,2,added,structure open
+894.3323,17.59,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4dHex1,[M+K+H]2+,2600000.0,17,given,given structure
+894.3323,19.12,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4dHex1,[M+K+H]2+,5770000.0,29,given,given structure
+938.3403,28.05,,1,2,Hex5HexNAc3Neu5Ac1dHex1,[M+K+H]2+,37400.0,19,added,structure open
+938.3403,30.45,,1,2,Hex5HexNAc3Neu5Ac1dHex1,[M+K+H]2+,248000.0,37,added,structure open
+942.3296,11.68,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex9HexNAc2,[M+2H]2+,5360000.0,41,given,Man9
+942.3296,14.45,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex9HexNAc2,[M+K+H]2+,27100000.0,28,given,Man9
+942.3296,15.01,,1,2,Hex9HexNAc2,[M+K+H]2+,1940000.0,20,added,Hex9HexNAc2 isomer (Glc1Man8?) undetermined; K+H MS2 cos 0.89-0.97 to Man9
+942.3296,15.6,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex9HexNAc2,[M+K+H]2+,39900000.0,24,given,Man9
+942.3296,16.16,,1,2,Hex9HexNAc2,[M+K+H]2+,2440000.0,31,added,Hex9HexNAc2 isomer (Glc1Man8?) undetermined; K+H MS2 cos 0.89-0.97 to Man9
+946.3378,27.34,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc3Neu5Ac1,[M+K+H]2+,235000.0,41,added,"NeuAc B3 ion 657 > NeuGc 673; linkage hedged a2-3/6 as given, 27.34 and 29.71 2H MS2 cos 0.94"
+946.3378,29.71,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc3Neu5Ac1,[M+K+H]2+,412000.0,64,given,"NeuAc B3 ion 657 > NeuGc 673; linkage hedged a2-3/6 as given, 27.34 and 29.71 2H MS2 cos 0.94"
+954.3353,26.68,,1,2,Hex6HexNAc3Neu5Gc1,[M+K+H]2+,151000.0,48,added,structure open
+954.3353,28.98,,1,2,Hex6HexNAc3Neu5Gc1,[M+K+H]2+,242000.0,49,added,structure open
+966.8511,22.23,,1,2,Hex5HexNAc4Neu5Ac1,[M+K+H]2+,50200.0,8,added,structure open
+966.8511,22.71,,1,2,Hex5HexNAc4Neu5Ac1,[M+K+H]2+,66000.0,13,added,structure open
+966.8511,24.46,,1,2,Hex5HexNAc4Neu5Ac1,[M+K+H]2+,76400.0,25,added,structure open
+966.8511,25.0,,1,2,Hex5HexNAc4Neu5Ac1,[M+K+H]2+,102000.0,32,added,structure open
+966.8511,27.01,,1,2,Hex5HexNAc4Neu5Ac1,[M+K+H]2+,46400.0,20,added,structure open
+966.8511,29.2,,1,2,Hex5HexNAc4Neu5Ac1,[M+K+H]2+,36700.0,24,added,structure open
+966.8511,30.48,,1,2,Hex4HexNAc4Neu5Gc1dHex1,[M+K+H]2+,55600.0,13,added,structure open
+967.3613,17.09,,1,2,Hex5HexNAc4dHex2,[M+K+H]2+,144000.0,4,added,structure open
+967.3613,18.62,,1,2,Hex5HexNAc4dHex2,[M+K+H]2+,598000.0,40,added,structure open
+974.8485,21.94,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,73600.0,19,added,structure open
+974.8485,22.48,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,87200.0,17,added,structure open
+974.8485,24.11,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,125000.0,32,added,structure open
+974.8485,24.77,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,151000.0,31,added,structure open
+974.8485,26.48,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,38400.0,38,added,structure open
+974.8485,28.87,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,30200.0,26,added,structure open
+974.8485,29.44,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,39500.0,16,added,structure open
+975.3587,18.82,{Fuc(a1-3/6)}{GlcNAc(b1-3/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc4dHex1,[M+K+H]2+,56600.0,2,given,given structure
+975.3587,20.16,{Fuc(a1-3/6)}{GlcNAc(b1-3/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc4dHex1,[M+K+H]2+,143000.0,18,given,given structure
+1003.8695,17.64,,1,2,Hex6HexNAc5,[M+2H]2+,41500.0,2,given,structure open
+1019.3668,30.94,,1,2,Hex6HexNAc3Neu5Ac1dHex1,[M+2H]2+,72000.0,12,added,structure open
+1023.3561,11.93,,1,2,Hex10HexNAc2,[M+2H]2+,65100.0,4,added,Hex10HexNAc2 isomer undetermined
+1023.3561,15.03,Glc(a1-3)Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex10HexNAc2,[M+K+H]2+,467000.0,7,added,"Glc1Man9, only common Hex10HexNAc2"
+1023.3561,16.37,Glc(a1-3)Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex10HexNAc2,[M+K+H]2+,1040000.0,17,added,"Glc1Man9, only common Hex10HexNAc2"
+1023.3561,17.04,,1,2,Hex10HexNAc2,[M+K+H]2+,211000.0,7,added,Hex10HexNAc2 isomer undetermined
+1027.3642,30.45,,1,2,Hex6HexNAc3Neu5Gc1dHex1,[M+K+H]2+,55000.0,8,added,structure open
+1039.88,29.05,,1,2,Hex5HexNAc4Neu5Ac1dHex1,[M+K+H]2+,59400.0,30,added,structure open
+1039.88,31.21,,1,2,Hex5HexNAc4Neu5Ac1dHex1,[M+2H]2+,465000.0,87,added,structure open
+1040.3902,17.83,Fuc(a1-3)[Gal(b1-4)]GlcNAc(b1-2)Man(a1-3)[Fuc(a1-3)[Gal(b1-4)]GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,2,Hex5HexNAc4dHex3,[M+K+H]2+,172000.0,7,given,given structure
+1047.8775,28.44,,1,2,Hex5HexNAc4Neu5Gc1dHex1,[M+K+H]2+,114000.0,32,added,structure open
+1047.8775,30.75,,1,2,Hex5HexNAc4Neu5Gc1dHex1,[M+2H]2+,630000.0,37,added,structure open
+1056.3851,21.42,Gal(b1-4)GlcNAc(b1-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,2,Hex7HexNAc4dHex1,[M+K+H]2+,98200.0,15,given,given structure
+1120.9064,31.76,,1,2,Hex6HexNAc4Neu5Ac1dHex1,[M+2H]2+,73800.0,5,added,structure open
+1128.9039,31.26,,1,2,Hex6HexNAc4Neu5Gc1dHex1,[M+2H]2+,96700.0,4,added,structure open

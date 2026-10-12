@@ -38,8 +38,9 @@ TEST_DICTS = [
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000374/") if '_NG_' in x]},
     {'name': 'GPST000374_O', 'folder': 'GPST000374', 'args': {'glycan_class': 'O'},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000374/") if '_OG_' in x]},
-    # {'name':'GPST000134'
-   # {'name':'GPST000134','args': {'glycan_class':'N', 'mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1]}
+    # RNase B N-glycans with a free reducing end (a 'custom' label without mass), positive mode; the .raw runs with --input-format mzml, the .xlsx otherwise
+    {'name': 'GPST000134', 'args': {'glycan_class': 'N', 'modification': 'custom', 'max_charge': 3},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x]},
 ]
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too), run by --input-format mzml
 MS1_FORMATS = ('.mzml', '.mzxml', '.raw')

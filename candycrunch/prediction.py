@@ -1668,6 +1668,9 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
         proton_offset = (charges_abs - 1) * PROTON_MASS
         df_out.loc[(charges_abs > 1) & (
                 np.abs(computed_masses + adduct_mass + multiplier * proton_offset - raw_masses) < mass_tolerance), 'adduct'] = adduct
+        # A multiply charged precursor may carry only cations, e.g., [M+2Na]2+ (assign_candidate_structures matches these too)
+        df_out.loc[(charges_abs > 1) & (np.abs(
+            computed_masses + charges_abs * adduct_mass - raw_masses) < mass_tolerance), 'adduct'] = adduct
     new_preds = []
     top_fragments_col = df_out['top_fragments'].tolist()
     peak_col = df_out['peak_d'].tolist()
@@ -1750,7 +1753,8 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             if len(top_frags) < 2:
                 truth.append(False)
             # Check neutral loss of adduct for adducts
-            if isinstance(adduct_name, str):
+            # An anion adduct (or NH4+, as NH3) leaves as a neutral and gives the (de)protonated ion; a metal cation stays on the fragments
+            if isinstance(adduct_name, str) and (mode == 'negative' or adduct_name == 'NH4+'):
                 neutral_loss = mass_dict.get(adduct_name, 999) - (PROTON_MASS * multiplier)
                 expected_frag = precursor_mz - neutral_loss / c
                 truth.append(any(abs(expected_frag - j) < mass_tolerance for j in top_frags[:10]))
@@ -2127,6 +2131,8 @@ def combine_adduct_species(df_out, rt_diff = 1.0):
     repeated = repeated[repeated > 1].index.tolist()
     # Only act when multiple rows share a prediction but differ in m/z (i.e., different ionization forms)
     rows_to_drop = []
+    # The (de)protonated ion reports the species when it was observed, as it is the m/z every other tool lists, else the stronger signal
+    plain = dict(zip(df_out.index, ~df_out['adduct'].apply(lambda a: isinstance(a, str)))) if 'adduct' in df_out.columns else defaultdict(lambda: True)
     for pred in repeated:
         pred_df = df_out[df_out['top_pred'] == pred].sort_values('RT')
         mz_vals = pred_df.index.values
@@ -2144,7 +2150,7 @@ def combine_adduct_species(df_out, rt_diff = 1.0):
                 if abs(idx_i - idx_j) < 1.0:
                     continue
                 # Fold the weaker signal into the stronger one, with current values, as either row may already have absorbed another
-                if df_out.at[idx_i, 'rel_abundance'] >= df_out.at[idx_j, 'rel_abundance']:
+                if (plain[idx_i], df_out.at[idx_i, 'rel_abundance']) >= (plain[idx_j], df_out.at[idx_j, 'rel_abundance']):
                     df_out.at[idx_i, 'rel_abundance'] = df_out.at[idx_i, 'rel_abundance'] + df_out.at[idx_j, 'rel_abundance']
                     df_out.at[idx_i, 'num_spectra'] = df_out.at[idx_i, 'num_spectra'] + df_out.at[idx_j, 'num_spectra']
                     rows_to_drop.append(idx_j)
@@ -2413,6 +2419,29 @@ def finalise_predictions(df_out, get_missing, pred_thresh, mode, modification, m
     df_out = df_out.drop(columns = ['theo_mz'])
     df_out = combine_charge_states(df_out)
     df_out = combine_adduct_species(df_out, rt_diff = rt_diff)
+    if 'adduct' in df_out.columns and sialic_derivatization is None:
+        # A species seen only as an adduct is reported at the m/z of the (de)protonated ion of its charge, the m/z it is listed by elsewhere (and that its
+        # (de)protonated row would have had); 'adduct' then names the observed ion
+        new_index, observed = [], []
+        for obs, top1, z, add in zip(df_out.index, df_out['top1_pred'], df_out['charge'], df_out['adduct']):
+            ions = {}
+            if isinstance(add, str) and isinstance(top1, str):
+                try:
+                    mass = glycan_to_mass(top1, sample_prep = sample_prep, modification = modification) + (mass_tag or 0)
+                    ions = {k: float(v) for k, v in get_ion_mzs(mass, max_charge = int(z), adducts = get_adduct_list(mode)).items() if int(k.rsplit(']', 1)[1][:-1] or 1) == abs(int(z))}
+                except Exception:
+                    ions = {}
+            z_str = str(abs(int(z))) if abs(int(z)) > 1 else ''
+            plain = f"[M{'+' if z > 0 else '-'}{z_str}H]{z_str}{'+' if z > 0 else '-'}"
+            if ions and plain in ions:
+                name = min(ions, key = lambda k: abs(ions[k] - obs))
+                new_index.append(obs - ions[name] + ions[plain])
+                observed.append(name)
+            else:
+                new_index.append(obs)
+                observed.append(add)
+        df_out.index = pd.Index(new_index, name = df_out.index.name)
+        df_out['adduct'] = observed
     # Map GlyTouCan IDs of the structure reported, which can differ from the first candidate
     df_out["GlyTouCan_ID"] = [glytoucan_mapping.get(g, '') if isinstance(g, str) else '' for g in df_out['top1_pred']]
     # MS2 peaks that support the reported structure, per residue: intense single glycosidic cleavages that no other placement of that residue could form
