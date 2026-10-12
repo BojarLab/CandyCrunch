@@ -47,7 +47,7 @@ include-package-data = false
 packages = ["candycrunch"]
 
 [tool.setuptools.package-data]
-candycrunch = ["*.csv", "*.pkl", "*.jpg", "*.pt", "*.png"]
+candycrunch = ["*.csv", "*.pkl", "*.jpg", "*.pt", "*.png", "*.xlsx"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["tests*", "*.ipynb"]

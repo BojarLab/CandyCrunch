@@ -18,7 +18,7 @@ def pytest_addoption(parser):
         action="store",
         default="xlsx",
         choices=["xlsx", "mzml", "both"],
-        help="Which spectra format to test: xlsx (default), mzml, or both",
+        help="Which spectra format to test: xlsx (default), mzml (files with MS1: .mzML, .mzXML, Thermo .raw), or both",
     )
 
 

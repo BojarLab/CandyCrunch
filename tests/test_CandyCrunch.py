@@ -32,6 +32,8 @@ TEST_DICTS = [
     {'name':'GPST000169_N','folder':'GPST000169','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'NGlycan' in x]},
    # {'name':'GPST000134','args': {'glycan_class':'N', 'mode':'positive'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x][:1]}
 ]
+# Spectra files with MS1 (lower-case, Thermo writes .RAW too), run by --input-format mzml
+MS1_FORMATS = ('.mzml', '.mzxml', '.raw')
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
@@ -166,11 +168,11 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
     if test_files is None:
         test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{folder}")]
     test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
-    # mzXML files count as mzML (raw spectra with MS1), so they never enter an xlsx run
+    # mzXML and Thermo .raw files count as mzML (raw spectra with MS1), so they never enter an xlsx run
     if input_format == "xlsx":
-        test_files = [x for x in test_files if not x.endswith((".mzML", ".mzXML"))]
+        test_files = [x for x in test_files if not x.lower().endswith(MS1_FORMATS)]
     elif input_format == "mzml":
-        mzml = [x for x in test_files if x.endswith((".mzML", ".mzXML"))]
+        mzml = [x for x in test_files if x.lower().endswith(MS1_FORMATS)]
         test_files = mzml if mzml else test_files  # fall back to xlsx if no mzML present
     if not test_files:
         pytest.skip(f"no test file for {test_dict['name']} {test_dict['args']}")
@@ -198,7 +200,8 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
         print('incorrect_preds',eval_scores[4])
         print('peaks_not_picked',eval_scores[-6])
         test_outputs.append(eval_scores)
-        file_format = 'mzML' if filename.endswith(('.mzML', '.mzXML')) else 'xlsx'
+        # .raw gets a format of its own, so its scores keep their own baseline in the results log
+        file_format = 'raw' if filename.lower().endswith('.raw') else 'mzML' if filename.lower().endswith(MS1_FORMATS) else 'xlsx'
         print(f'file_score:{eval_scores[0]} ({file_format})')
         test_params['format'] = file_format
         result_collector.add_result(test_params, eval_scores[0], eval_scores)

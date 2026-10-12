@@ -1,4 +1,5 @@
 import ast
+import bisect
 import copy
 import os
 import re
@@ -1059,6 +1060,72 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3'):
                 c[key].extend(w[key])
     clusters = [c for c in clusters if id(c) not in tail_of]
+    # Two clusters at one m/z are one chromatographic peak if their precursor intensities never drop below 0.7 of the smaller apex (apexes as medians of 3
+    # spectra) between their apexes, as a ground-truth peak needs such a valley: a long PGC tail that keeps triggering MS2 becomes clusters rt_diff apart,
+    # each only a few times weaker than the one before, so the tenfold rule above catches only its end. Similar MS2 spectra (cosine >= 0.9) also join
+    # across a valley down to 0.5, or across gaps of up to 2 min without spectra (else 0.25 min); weakest first, so a cluster that absorbed weaker ones
+    # can still join a stronger one
+    apex_mzs, apex_ints = np.array([c['apex_mz'] for c in clusters]), np.array([max(c['intensity']) for c in clusters])
+    joined = set()
+    for i in np.argsort(apex_ints, kind = 'stable'):
+        w = clusters[i]
+        if apex_ints[i] <= 0:
+            continue
+        for j in np.flatnonzero((np.abs(apex_mzs - apex_mzs[i]) <= mz_diff) & (apex_ints >= apex_ints[i])):
+            c = clusters[j]
+            if j == i or j in joined:
+                continue
+            order = np.argsort(c['RT'] + w['RT'], kind = 'stable')
+            rts, ints = np.array(c['RT'] + w['RT'])[order], np.array(c['intensity'] + w['intensity'], dtype = float)[order]
+            own = (np.arange(len(order)) < len(c['RT']))[order]
+            sm = np.array([np.median(ints[max(k - 1, 0):k + 2]) for k in range(len(ints))])
+            a, b = sorted([np.flatnonzero(own)[np.argmax(sm[own])], np.flatnonzero(~own)[np.argmax(sm[~own])]])
+            gap = np.diff(rts[a:b + 1]).max() if b > a else 0.0
+            depth = (ints[a + 1:b].min() if b > a + 1 else np.inf) / min(sm[a], sm[b])
+            if gap > 2 or depth < 0.5 or (gap > 0.25 and depth < 0.7):
+                continue
+            if depth < 0.7 or gap > 0.25:
+                vecs = [np.zeros(int(max_mz) + 1), np.zeros(int(max_mz) + 1)]
+                for v, cl in zip(vecs, (c, w)):
+                    for spec in cl['peak_d']:
+                        for m, x in spec.items():
+                            v[int(round(min(max(m, 0), max_mz)))] += x
+                vecs = [np.sqrt(v) / (np.linalg.norm(np.sqrt(v)) + 1e-12) for v in vecs]
+                if vecs[0] @ vecs[1] < 0.9:
+                    continue
+            for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3'):
+                c[key].extend(w[key])
+            joined.add(i)
+            break
+    clusters = [c for k, c in enumerate(clusters) if k not in joined]
+    # The other way round, a cluster whose precursor intensities fall below half the smaller of two maxima (medians of 3 spectra) between them holds two
+    # peaks (isomers within rt_diff of each other), each with at least 2 spectra; the MS3 spectra stay with the half holding the apex
+    stack, clusters = clusters, []
+    while stack:
+        c = stack.pop()
+        order = np.argsort(c['RT'], kind = 'stable')
+        ints = np.array(c['intensity'], dtype = float)[order]
+        cut = None
+        if len(ints) >= 4 and ints.max() > 0:
+            sm = np.array([np.median(ints[max(k - 1, 0):k + 2]) for k in range(len(ints))])
+            top = int(np.argmax(sm))
+            for m in sorted(range(len(sm)), key = lambda k: -sm[k]):
+                if abs(m - top) < 2 or sm[m] <= 0:
+                    continue
+                lo, hi = sorted([top, m])
+                v = lo + 1 + int(np.argmin(ints[lo + 1:hi]))
+                if ints[v] < 0.5 * min(sm[top], sm[m]) and min(v, len(ints) - v) >= 2:
+                    cut = v
+                    break
+        if cut is None:
+            clusters.append(c)
+            continue
+        for ix in (order[:cut], order[cut:]):
+            h = {key: [c[key][x] for x in ix] for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge')}
+            k = int(np.argmax(h['intensity']))
+            h['apex_int'], h['apex_mz'], h['apex_rt'] = h['intensity'][k], h['m/z'][k], h['RT'][k]
+            h['ms3'] = c['ms3'] if c['apex_rt'] in h['RT'] else []
+            stack.append(h)
     # Create a condensed dataframe
     condensed_data = []
     for cluster in clusters:
@@ -1258,24 +1325,24 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
    | Returns a dictionary of form (fragment) m/z : intensity, sorted by descending intensity
    """
     sorted_peaks = sorted([(m, i) for m, i in peaks.items() if i >= min_intensity])
-    mass_arr = np.array([m for m, _ in sorted_peaks])
-    consumed = np.zeros(len(sorted_peaks), dtype = bool)
+    # plain lists and bisect, as indexing numpy arrays element by element in these loops was most of the time
+    masses = [m for m, _ in sorted_peaks]
+    consumed = [False] * len(sorted_peaks)
     deisotoped = {}
     spacings = [1.0034 / z for z in range(1, precursor_charge + 1)]
     for i, (current_mass, current_intensity) in enumerate(sorted_peaks):
         # Skip if already processed
         if consumed[i]:
             continue
-        consumed[np.searchsorted(mass_arr, current_mass - mass_tolerance, 'left'):np.searchsorted(mass_arr, current_mass + mass_tolerance, 'right')] = True
+        lo, hi = bisect.bisect_left(masses, current_mass - mass_tolerance), bisect.bisect_right(masses, current_mass + mass_tolerance)
+        consumed[lo:hi] = [True] * (hi - lo)
         best_pattern = [(current_mass, current_intensity)]
         # Check all charge states
         for spacing in spacings:
             next_mass = current_mass
             charge_pattern = [(current_mass, current_intensity)]
-            start_idx = i + 1
             # Fast-forward to relevant mass range
-            while start_idx < len(sorted_peaks) and sorted_peaks[start_idx][0] < next_mass + spacing - mass_tolerance:
-                start_idx += 1
+            start_idx = bisect.bisect_left(masses, next_mass + spacing - mass_tolerance, i + 1)
             for j in range(start_idx, len(sorted_peaks)):
                 candidate_mass, candidate_intensity = sorted_peaks[j]
                 if candidate_mass > next_mass + spacing + mass_tolerance:
@@ -1293,7 +1360,8 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
         if len(best_pattern) >= min_isotope_count:
             mono_mass = best_pattern[0][0]
             for peak_mass, _ in best_pattern[1:]:
-                consumed[np.searchsorted(mass_arr, peak_mass - mass_tolerance, 'left'):np.searchsorted(mass_arr, peak_mass + mass_tolerance, 'right')] = True
+                lo, hi = bisect.bisect_left(masses, peak_mass - mass_tolerance), bisect.bisect_right(masses, peak_mass + mass_tolerance)
+                consumed[lo:hi] = [True] * (hi - lo)
             deisotoped[mono_mass] = sum(i for _, i in best_pattern) if sum_intensities else best_pattern[0][1]
         else:
             deisotoped[current_mass] = current_intensity
@@ -1783,6 +1851,13 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
                     return None
                 if 'np.float64' in text:
                     text = re.sub(r'np\.float64\(([^)]+)\)', r'\1', text)
+                # A plain {m/z: intensity, ...} (as extract_spectra writes it) is split and read with float, which reads numbers as literal_eval does but
+                # ~4x faster; anything else, or anything float rejects, goes through literal_eval
+                if text[0] == '{' and text[-1] == '}' and set('0123456789.eE+-:, {}').issuperset(text):
+                    try:
+                        return dict(map(float, kv.split(':')) for kv in text[1:-1].split(','))
+                    except ValueError:
+                        pass
                 try:
                     parsed = ast.literal_eval(text)
                 except (SyntaxError, ValueError):
@@ -1963,7 +2038,7 @@ def Ac_follows_Gc(df_out):
 
 
 def filter_delayed_rts(df_out, mass_tolerance):
-    """drops rows more than 10 min after the first row with the same top1 prediction and m/z, unless they have the group's highest confidence x spectra\n
+    """drops rows more than 10 min after the first row with the same top1 prediction and m/z, unless they have the group's highest confidence x precursor intensity (x spectra without intensities)\n
     | Arguments:
     | :-
     | df_out (dataframe): prediction dataframe generated within wrap_inference
@@ -1975,7 +2050,9 @@ def filter_delayed_rts(df_out, mass_tolerance):
     # Create an empty list to store indices of rows to discard
     rows_to_discard = []
     # Group by m/z within mass_tolerance and identical top1 predictions
-    df_work = df_out.assign(_cxn = np.array([p[0][1] if p else 0.0 for p in df_out['predictions']]) * df_out['num_spectra'].to_numpy())
+    # A flat background ion that triggers MS2 for minutes becomes one cluster of hundreds of spectra, so spectra would make it outweigh the real peak
+    weight = df_out['rel_abundance'].to_numpy() if 'rel_abundance' in df_out.columns and (df_out['rel_abundance'] > 0).any() else df_out['num_spectra'].to_numpy()
+    df_work = df_out.assign(_cxn = np.array([p[0][1] if p else 0.0 for p in df_out['predictions']]) * weight)
     for mz_val in df_out.index.unique():
         mz_group = df_work.loc[(df_work.index >= mz_val - mass_tolerance) & (df_work.index <= mz_val + mass_tolerance)]
         # Further group by top1 prediction
