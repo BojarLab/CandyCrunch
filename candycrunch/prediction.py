@@ -2936,7 +2936,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                          zip(df_out['composition'], df_out['charge'])])
         ppm = (df_out.index.values - theo) / theo * 1e6
         has_pred = np.array([bool(p) for p in df_out['predictions']])
-        known = has_pred & ~np.isnan(ppm)
+        # ppm is to the (de)protonated ion, so rows matched as adducts sit thousands of ppm off; they never pass and must not set the calibration either
+        known = has_pred & (np.abs(ppm) <= ppm_thresh)
         if known.sum() >= 5:
             center = np.median(ppm[known])
             width = max(3 * 1.4826 * np.median(np.abs(ppm[known] - center)), 3)

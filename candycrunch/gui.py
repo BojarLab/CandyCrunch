@@ -1,13 +1,17 @@
 """CandyCrunch desktop app: run CandyCrunch on LC-MS/MS files, inspect and curate its predictions, and annotate spectra with CandyCrumbs"""
 import ast
 import contextlib
+import faulthandler
+import glob
 import importlib.util
 import io
 import itertools
 import json
+import linecache
 import multiprocessing as mp
 import os
 import pickle
+import platform
 import queue
 import re
 import subprocess
@@ -16,7 +20,9 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 import urllib.request
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
@@ -24,7 +30,7 @@ try:
     from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRectF, QSize, QUrl, QStringListModel
     from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QBrush, QShortcut, QFontDatabase, \
         QCursor
-    from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
+    from PySide6.QtWidgets import (QApplication, QMainWindow, QDialog, QDialogButtonBox, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
                                    QToolButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QTextBrowser, QListWidget,
                                    QListWidgetItem, QTreeWidget, QTreeWidgetItem, QTableView, QAbstractItemView, QSplitter, QStackedWidget, QTabWidget, QScrollArea,
                                    QFrame, QFileDialog, QMessageBox, QInputDialog, QDockWidget, QProgressBar, QStyledItemDelegate, QStyleOptionViewItem,
@@ -65,6 +71,12 @@ FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'),
 SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mgf')
 # extract_spectra xlsx of 4.5 min (25-29.5) of a pig gastric mucin O-glycan run (GPST000029, as packaging/self_test.mzML): 275 MS2 spectra, ~20 glycan peaks
 EXAMPLE_RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'example_PGM_O-glycans.xlsx')
+# Crash and bug reports go to the CandyCrunch project on Sentry (its DSN, from Settings > Client Keys: public by design, it can only submit reports);
+# without one, or if sending fails, a report opens as a prefilled GitHub issue instead
+REPORT_DSN = 'https://5ecf60f667f420d84bd6b3c8c4b437bd@o4512244953776128.ingest.de.sentry.io/4512244961837136'
+ISSUES_URL = 'https://github.com/BojarLab/CandyCrunch/issues/new'
+# faulthandler writes native crashes and fatal Python errors of the window and the worker here; a process that ends cleanly removes its file
+CRASH_FILE = os.path.join(tempfile.gettempdir(), 'CandyCrunch-crash-{}-{}.txt')
 # What the worker reports while wrap_inference(_batch) runs, keyed by the prediction.py function that starts each step
 STAGES = {'load_spectra_filepath': 'Reading {}', 'condense_dataframe': 'Grouping spectra into chromatographic peaks',
           'assign_candidate_structures': 'Matching precursor compositions', 'assign_annotation_scores_pooled': 'Scoring fragment evidence',
@@ -103,6 +115,46 @@ QTabWidget::pane {{ border-top: 1px solid #ddd0e8; }}
 """
 
 
+def _scrub(text):
+    """Shortens paths in the user's home folder (which hold the user name) to ~, also as Qt writes them on Windows and as escaped in JSON"""
+    home = os.path.expanduser('~')
+    for variant in sorted({home, home.replace('\\', '/'), json.dumps(home)[1:-1]}, key = len, reverse = True):
+        text = text.replace(variant, '~')
+    return text
+
+
+def _exception_values(error):
+    """An exception and those it was raised from or during, oldest first, in Sentry's format; frames name the module and file, not the folder"""
+    values, seen = [], set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        frames = [{'module': str(frame.f_globals.get('__name__', '?')), 'filename': os.path.basename(frame.f_code.co_filename), 'function': frame.f_code.co_name,
+                   'lineno': lineno, 'context_line': linecache.getline(frame.f_code.co_filename, lineno).strip() or None,
+                   'in_app': str(frame.f_globals.get('__name__', '')).startswith('candycrunch')} for frame, lineno in traceback.walk_tb(error.__traceback__)]
+        values.insert(0, {'type': type(error).__qualname__, 'module': type(error).__module__, 'value': str(error), 'stacktrace': {'frames': frames}})
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    return values
+
+
+def _send_report(event, files = None):
+    """Posts a Sentry event (an error, or a bug report as type 'feedback') and text attachments ({file name: text}) as one envelope; True if Sentry took it"""
+    if not REPORT_DSN:
+        return False
+    dsn = urllib.parse.urlsplit(REPORT_DSN)
+    prefix, project = dsn.path.rstrip('/').rsplit('/', 1)
+    items = [({'type': event.get('type', 'event')}, _scrub(json.dumps(event, default = str)).encode())]
+    items += [({'type': 'attachment', 'filename': name, 'content_type': 'text/plain'}, _scrub(text).encode()) for name, text in (files or {}).items() if text]
+    body = json.dumps({'event_id': event['event_id'], 'sent_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}).encode() + b''.join(
+        b'\n' + json.dumps({**header, 'length': len(payload)}).encode() + b'\n' + payload for header, payload in items)
+    request = urllib.request.Request(f'{dsn.scheme}://{dsn.netloc.rsplit("@", 1)[-1]}{prefix}/api/{project}/envelope/', data = body, headers = {
+        'Content-Type': 'application/x-sentry-envelope', 'X-Sentry-Auth': f'Sentry sentry_version=7, sentry_client=candycrunch-app, sentry_key={dsn.username}'})
+    try:
+        with urllib.request.urlopen(request, timeout = 20) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
 def _worker_main(jobs, messages, warm_up = False):
     """Runs CandyCrunch in its own process: the window stays responsive, a run is canceled by ending the process, and the model loads once for all runs"""
     class Pipe(io.TextIOBase):
@@ -110,10 +162,13 @@ def _worker_main(jobs, messages, warm_up = False):
             messages.put(('log', text))
             return len(text)
     sys.stdout = sys.stderr = Pipe()
+    # If this process dies, the window reads the traceback of the native crash or fatal Python error from this file
+    with contextlib.suppress(OSError):
+        faulthandler.enable(open(CRASH_FILE.format('worker', os.getpid()), 'w'), all_threads = True)
     try:
         import candycrunch.prediction as cp
-    except Exception:
-        messages.put(('fatal', traceback.format_exc()))
+    except Exception as error:
+        messages.put(('fatal', (traceback.format_exc(), _exception_values(error))))
         return
     if warm_up and jobs.empty() and os.path.exists(EXAMPLE_RUN):
         # A silent run on the example does the lazy imports, cache filling and first model passes that would otherwise slow down the first real run
@@ -147,8 +202,8 @@ def _worker_main(jobs, messages, warm_up = False):
                     features, tables = cp.wrap_inference_batch(files, spectra = True, **kwargs, **{k: settings[k] for k in BATCH_KEYS})
                 results.append({'name': name, 'files': files, 'settings': settings, 'tables': tables, 'features': features})
             messages.put(('result', {'experiments': results, 'elapsed': time.time() - start, 'finished': time.strftime('%Y-%m-%d %H:%M')}))
-        except Exception:
-            messages.put(('error', traceback.format_exc()))
+        except Exception as error:
+            messages.put(('error', (traceback.format_exc(), _exception_values(error))))
 
 
 def _install_progress(messages, weights, n_files):
@@ -248,7 +303,7 @@ class InferenceRunner(QObject):
 
     def __init__(self):
         super().__init__()
-        self.context, self.busy, self.dead, self.warm_up = mp.get_context('spawn'), False, False, True
+        self.context, self.busy, self.dead, self.warm_up, self.report = mp.get_context('spawn'), False, False, True, None
         self.timer = QTimer(self)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.poll)
@@ -271,6 +326,7 @@ class InferenceRunner(QObject):
     def cancel(self):
         self.process.terminate()
         self.process.join(5)
+        self.forget()
         self.busy = False
         self.start()
 
@@ -281,6 +337,13 @@ class InferenceRunner(QObject):
             self.process.join(1.5)
         if self.process.is_alive():
             self.process.terminate()
+            self.process.join(1)
+        self.forget()
+
+    def forget(self):
+        """Removes the crash file of a worker that has ended"""
+        with contextlib.suppress(OSError):
+            os.remove(CRASH_FILE.format('worker', self.process.pid))
 
     def poll(self):
         while True:
@@ -300,13 +363,21 @@ class InferenceRunner(QObject):
                 self.busy = False
                 self.finished.emit(content)
             elif kind in ('error', 'fatal'):
-                self.busy, self.dead = False, kind == 'fatal'
-                self.failed.emit(content)
+                (text, values), self.busy, self.dead = content, False, kind == 'fatal'
+                self.report = {'values': values}
+                self.failed.emit(text)
         if not self.process.is_alive() and not self.dead:
             self.timer.stop()
             if self.busy:
                 self.busy = False
+                try:
+                    with open(CRASH_FILE.format('worker', self.process.pid), encoding = 'utf-8', errors = 'replace') as file:
+                        dump = file.read()[-100000:]
+                except OSError:
+                    dump = ''
+                self.report = {'files': {'worker_crash.txt': f'Exit code {self.process.exitcode}\n{dump}'}}
                 self.failed.emit('The CandyCrunch worker stopped unexpectedly, most likely because it ran out of memory.')
+            self.forget()
             self.start()
 
 
@@ -2054,13 +2125,65 @@ class CrumbsTab(QWidget):
                                self.charge.currentData(), _mass_tag(settings), self.sample_prep.currentData(), **kwargs)
 
 
+class ReportDialog(QDialog):
+    """The report form, for bug reports and, given an error, crash reports: what happened in the user's words, an address for a reply, and everything that
+    would be sent, readable before sending"""
+
+    def __init__(self, parent, event, files, summary = None):
+        super().__init__(parent)
+        self.setWindowTitle('Send a crash report' if summary else 'Report a bug')
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.addWidget(_label('CandyCrunch ran into an error' if summary else 'Report a bug or suggest an improvement'))
+        if summary:
+            error = _label(summary, 'hint')
+            error.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            layout.addWidget(error)
+        self.text, self.email = QPlainTextEdit(), QLineEdit()
+        self.text.setPlaceholderText('What were you doing when it happened? (optional)' if summary else
+                                     'What went wrong, and what did you expect instead? Or what would you like CandyCrunch to do?')
+        self.text.setMaximumHeight(140)
+        self.email.setPlaceholderText('Your email address, if you would like a reply (optional)')
+        layout.addWidget(self.text)
+        layout.addWidget(self.email)
+        layout.addWidget(_label(f'The report holds {"the error and where in CandyCrunch it happened, " if summary else ""}the log of this session, the settings and '
+                                'file types of your runs, and the versions of CandyCrunch, its packages, and your operating system, but none of your data. Paths '
+                                'in your home folder are shortened to ~.', 'hint'))
+        details = QPlainTextEdit(_scrub(json.dumps(event, indent = 1, default = str) + ''.join(f'\n\n{name}:\n{text}' for name, text in files.items() if text)))
+        details.setReadOnly(True)
+        details.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        details.setMinimumHeight(240)
+        details.hide()
+        toggle = QToolButton()
+        toggle.setText('Show what is sent')
+        toggle.setCheckable(True)
+        toggle.toggled.connect(lambda shown: (details.setVisible(shown), toggle.setText('Hide what is sent' if shown else 'Show what is sent'), self.adjustSize()))
+        layout.addWidget(toggle, 0, Qt.AlignLeft)
+        layout.addWidget(details, 1)
+        # Only a report Sentry can take can go out without asking
+        self.automatic = QCheckBox('Do this automatically from now on')
+        self.automatic.setVisible(bool(summary and REPORT_DSN))
+        layout.addWidget(self.automatic)
+        buttons = QDialogButtonBox()
+        send = buttons.addButton('Send report' if summary else 'Send', QDialogButtonBox.AcceptRole)
+        buttons.addButton("Don't send" if summary else 'Cancel', QDialogButtonBox.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        if not summary:
+            send.setEnabled(False)
+            self.text.textChanged.connect(lambda: send.setEnabled(bool(self.text.toPlainText().strip())))
+        layout.addWidget(buttons)
+
+
 class MainWindow(QMainWindow):
     taxa_ready = Signal(object)
     update_found = Signal(str)
     update_progress = Signal(int)
     update_downloaded = Signal(bool)
+    error_caught = Signal(str, object)
+    report_done = Signal(bool, object)
 
-    def __init__(self, paths):
+    def __init__(self, paths, crashes = ()):
         super().__init__()
         self.store = QSettings()
         self.setWindowTitle('CandyCrunch')
@@ -2162,6 +2285,14 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.log_dock.toggleViewAction())
         help_menu = self.menuBar().addMenu('&Help')
         help_menu.addAction('CandyCrunch on GitHub', lambda: QDesktopServices.openUrl(QUrl('https://github.com/BojarLab/CandyCrunch')))
+        help_menu.addAction('Report a bug…', lambda: self.open_report())
+        # triggered, not toggled: Don't send with 'Do this automatically' unticks it and must not reset the choice to asking
+        self.auto_action = help_menu.addAction('Send crash reports automatically')
+        self.auto_action.setCheckable(True)
+        self.auto_action.setChecked(self.store.value('crash_reports', '') == 'always')
+        self.auto_action.setVisible(bool(REPORT_DSN))
+        self.auto_action.triggered.connect(lambda on: self.store.setValue('crash_reports', 'always' if on else ''))
+        help_menu.addSeparator()
         help_menu.addAction('About CandyCrunch', self.about)
         self.settings.add_files.clicked.connect(self.choose_files)
         self.settings.add_folder.clicked.connect(self.choose_folder)
@@ -2183,6 +2314,28 @@ class MainWindow(QMainWindow):
         self.update_found.connect(lambda tag: (self.update_button.setText(f'Update to CandyCrunch {tag}'), self.update_button.show()))
         self.update_progress.connect(lambda percent: self.update_button.setText(f'Downloading update… {percent}%'))
         self.update_downloaded.connect(lambda ok: (self.update_button.setEnabled(True), self.update_button.setText('Install update and restart' if ok else 'Download failed, retry')))
+        self.error_caught.connect(self.caught_error, Qt.QueuedConnection)
+        self.report_done.connect(self.report_sent)
+        # Errors in the window and its threads went nowhere, as the app has no console; now they go to the log and become crash reports
+        previous, previous_thread, self.reported, self.reporting = sys.excepthook, threading.excepthook, set(), False
+
+        def hook(kind, error, tb):
+            if issubclass(kind, Exception):
+                with contextlib.suppress(RuntimeError):
+                    self.error_caught.emit(''.join(traceback.format_exception(kind, error, tb)), _exception_values(error))
+            if sys.stderr is not None:
+                previous(kind, error, tb)
+
+        def thread_hook(args):
+            if args.exc_value is not None and issubclass(args.exc_type, Exception):
+                with contextlib.suppress(RuntimeError):
+                    self.error_caught.emit(''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)), _exception_values(args.exc_value))
+            if sys.stderr is not None:
+                previous_thread(args)
+
+        sys.excepthook, threading.excepthook = hook, thread_hook
+        if crashes:
+            QTimer.singleShot(0, lambda: self.report_error('CandyCrunch closed unexpectedly the last time it ran', files = {'window_crash.txt': '\n\n'.join(crashes)}))
         self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
         if self.store.value('settings'):
             stored = json.loads(self.store.value('settings'))
@@ -2212,6 +2365,122 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             threading.Thread(target = check, daemon = True).start()
+
+    def caught_error(self, text, values):
+        self.append_log(text)
+        self.report_error(text.strip().splitlines()[-1], values)
+
+    def report_event(self, level, values = None, summary = None):
+        """A Sentry event, an error (values from _exception_values) or a message, with where it happened: versions, computer, and the run list"""
+        from importlib.metadata import version, PackageNotFoundError
+        versions = {}
+        for package in ('candycrunch', 'glycowork', 'glycorender', 'torch', 'numpy', 'pandas', 'PySide6'):
+            with contextlib.suppress(PackageNotFoundError):
+                versions[package] = version(package)
+        memory = None
+        with contextlib.suppress(Exception):
+            if sys.platform == 'win32':
+                import ctypes
+                class Status(ctypes.Structure):
+                    # MEMORYSTATUSEX
+                    _fields_ = [('length', ctypes.c_ulong), ('load', ctypes.c_ulong), ('total', ctypes.c_ulonglong)] + [
+                        (f'other{i}', ctypes.c_ulonglong) for i in range(6)]
+
+                status = Status(length = ctypes.sizeof(Status))
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+                memory = status.total
+            else:
+                memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+        runs = [{'experiment': name,
+                 'files': [os.path.splitext(p)[1].lower() + (f', {os.path.getsize(p) / 1e6:.0f} MB' if os.path.isfile(p) else '') for p in paths],
+                 'settings': {k: sorted(v) if isinstance(v, set) else v for k, v in settings.items()}} for name, paths, settings in
+                self.settings.experiments()]
+        event = {'event_id': uuid.uuid4().hex, 'timestamp': time.time(), 'platform': 'python', 'level': level,
+                 'release': f'candycrunch@{versions.get("candycrunch")}',
+                 'environment': 'app' if getattr(sys, 'frozen', False) else 'package', 'tags': {'tab': self.tabs.tabText(self.tabs.currentIndex())},
+                 'contexts': {'os': {'name': platform.system(), 'version': platform.release(), 'build': platform.version()},
+                              'runtime': {'name': 'CPython', 'version': platform.python_version()},
+                              'device': {'arch': platform.machine(), 'processor_count': os.cpu_count(), 'memory_size': memory}},
+                 'extra': {'versions': versions, 'runs': runs, 'running': self.runner.busy}}
+        if values:
+            event['exception'] = {'values': values}
+        elif summary:
+            event['message'] = summary
+        return event
+
+    def report_error(self, summary, values = None, files = None, box = False):
+        """An error the user did not cause on purpose: sent right away if they chose automatic crash reports, else offered, each kind of error once per
+        session; box: tell the user about the error in a message box (a failed run), else in the status bar"""
+        signature = (values[-1]['type'], *[(f['module'], f['lineno']) for f in values[-1]['stacktrace']['frames'][-3:]]) if values else summary
+        choice, new = self.store.value('crash_reports', ''), signature not in self.reported
+        self.reported.add(signature)
+        note = ''
+        if new and choice == 'always' and REPORT_DSN:
+            self.send_report(self.report_event('error', values, summary), {**(files or {}), 'log.txt': self.log.toPlainText()[-300000:]})
+            note = 'A crash report was sent to the CandyCrunch developers.'
+        elif new and choice != 'never' and not self.reporting:
+            self.open_report(summary, values, files)
+            return
+        if box:
+            QMessageBox.critical(self, 'CandyCrunch', f'{summary}\n\n{note}'.strip())
+        else:
+            self.statusBar().showMessage(f'Something went wrong ({summary}). {note} Details are in the log (View > Log).'.replace('  ', ' '), 10000)
+
+    def open_report(self, summary = None, values = None, files = None):
+        """The report form: a bug report (Help > Report a bug), or for an error (summary), the offer to send a crash report"""
+        event = self.report_event('error', values, summary) if summary else None
+        files = {**(files or {}), 'log.txt': self.log.toPlainText()[-300000:]}
+        # A bug report is user feedback; with a crash report, a description goes with the error as feedback on it
+        feedback = self.report_event('info')
+        feedback['type'] = 'feedback'
+        dialog, self.reporting = ReportDialog(self, event or feedback, files, summary), True
+        accepted, self.reporting = dialog.exec() == QDialog.Accepted, False
+        message, email = dialog.text.toPlainText().strip(), dialog.email.text().strip()
+        if summary and dialog.automatic.isChecked():
+            self.store.setValue('crash_reports', 'always' if accepted else 'never')
+            self.auto_action.setChecked(accepted)
+        dialog.deleteLater()
+        if not accepted:
+            return
+        feedback['contexts']['feedback'] = {k: v for k, v in {'message': message, 'contact_email': email, 'source': 'app',
+                                                              'associated_event_id': event and event['event_id']}.items() if v}
+        self.send_report(event, files, feedback if message else None, quiet = False)
+
+    def send_report(self, event, files, feedback = None, quiet = True):
+        """Sends in the background; one the user sent by hand that cannot be sent opens as a GitHub issue instead (report_sent)"""
+
+        def work():
+            # The files go with the error, or with a bug report, which has none
+            ok = (event is None or _send_report(event, files)) and (feedback is None or _send_report(feedback, None if event else files))
+            self.report_done.emit(ok, None if quiet else (event, files, feedback))
+
+        threading.Thread(target = work, daemon = True).start()
+
+    def report_sent(self, ok, report):
+        if report is None:
+            return
+        if ok:
+            self.statusBar().showMessage('Report sent. Thank you!', 6000)
+            return
+        event, files, feedback = report
+        # The issue form gets what fits into a link, the clipboard everything; the email address stays out, as issues are public
+        error = '\n'.join(''.join(
+            f'  File "{f["filename"]}", line {f["lineno"]}, in {f["function"]}\n' + (f'    {f["context_line"]}\n' if f['context_line'] else '')
+            for f in value['stacktrace']['frames']) + f'{value["type"]}: {value["value"]}' for value in
+                          (event or {}).get('exception', {}).get('values', []))
+        source = event or feedback
+        body = _scrub('\n\n'.join(filter(None, [feedback and feedback['contexts']['feedback']['message'], event and event.get('message'),
+                                                error and f'```\n{error}\n```',
+                                                'Versions: ' + ', '.join(f'{k} {v}' for k, v in source['extra']['versions'].items()) +
+                                                f'; {source["contexts"]["os"]["name"]} {source["contexts"]["os"]["version"]}'])))
+        full = body + _scrub(''.join(f'\n\n{name}:\n```\n{text}\n```' for name, text in files.items() if text))
+        title = (event.get('message') or f'{event["exception"]["values"][-1]["type"]}: {event["exception"]["values"][-1]["value"]}') if event else \
+        body.splitlines()[0]
+        QApplication.clipboard().setText(full)
+        QDesktopServices.openUrl(QUrl(f'{ISSUES_URL}?{urllib.parse.urlencode({"title": title[:120], "body": body[:6000]})}'))
+        QMessageBox.information(self, 'CandyCrunch',
+                                'The report could not be sent from here, so it opens as a GitHub issue in your browser instead (public once '
+                                'you submit it; it needs a GitHub account). The full report, with the log, is on the clipboard to paste into the issue.')
 
     def load_taxa(self):
         level = self.settings.inputs['taxonomy_level'].currentText()
@@ -2398,7 +2667,8 @@ class MainWindow(QMainWindow):
         self.stop('CandyCrunch stopped with an error; details are in the log')
         self.append_log(text)
         self.log_dock.show()
-        QMessageBox.critical(self, 'CandyCrunch', text.strip().splitlines()[-1])
+        report = self.runner.report or {}
+        self.report_error(text.strip().splitlines()[-1], report.get('values'), report.get('files'), box = True)
 
     def cancel(self):
         self.runner.cancel()
@@ -2526,9 +2796,28 @@ def main():
             file.write(''.join(
                 log) + f'\nGlycan peaks found: {outcome[0] if outcome else 0}\nExample run bundled: {os.path.exists(EXAMPLE_RUN)}\n')
         sys.exit(0 if outcome and outcome[0] > 0 and os.path.exists(EXAMPLE_RUN) else 1)
-    window = MainWindow([os.path.abspath(p) for p in sys.argv[1:]])
+    # A window crash file that can be removed belongs to an earlier session that did not end cleanly (one in use is a running CandyCrunch's), and is
+    # offered as a crash report; worker files are removed by their window, or here once a day old
+    crashes = []
+    for path in glob.glob(CRASH_FILE.format('*', '*')):
+        own = '-window-' in os.path.basename(path)
+        with contextlib.suppress(OSError):
+            if own or time.time() - os.path.getmtime(path) > 86400:
+                with open(path, encoding = 'utf-8', errors = 'replace') as file:
+                    text = file.read()
+                os.remove(path)
+                if own and text.strip():
+                    crashes.append(text[-100000:])
+    crash_file = open(CRASH_FILE.format('window', os.getpid()), 'w')
+    faulthandler.enable(crash_file, all_threads = True)
+    window = MainWindow([os.path.abspath(p) for p in sys.argv[1:]], crashes)
     window.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    faulthandler.disable()
+    crash_file.close()
+    with contextlib.suppress(OSError):
+        os.remove(crash_file.name)
+    sys.exit(code)
 
 
 if __name__ == '__main__':

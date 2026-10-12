@@ -239,3 +239,54 @@ def test_gui_save_image(app, tmp_path, monkeypatch):
     _, ax = plot_annotated_spectrum(g, mzs, ints, charge = -1, mass_tag = 2.0156, mz_labels = True)
     texts = [t.get_text() for t in ax.texts]
     assert any(t.startswith('510.19 ') for t in texts) and '990.00' in texts
+
+
+def test_gui_reports(app, monkeypatch):
+    import json
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from candycrunch import gui
+    posts = []
+    class Sentry(BaseHTTPRequestHandler):
+        def do_POST(self):
+            posts.append((self.path, self.headers['X-Sentry-Auth'], self.rfile.read(int(self.headers['Content-Length']))))
+            self.send_response(200)
+            self.end_headers()
+        def log_message(self, *args):
+            pass
+    server = HTTPServer(('127.0.0.1', 0), Sentry)
+    threading.Thread(target = server.serve_forever, daemon = True).start()
+    monkeypatch.setattr(gui, 'REPORT_DSN', f'http://key@127.0.0.1:{server.server_port}/7')
+    home = os.path.expanduser('~')
+    try:
+        try:
+            {}['run']
+        except KeyError as error:
+            raise ValueError(os.path.join(home, 'run.raw')) from error
+    except ValueError as error:
+        values = gui._exception_values(error)
+    # The cause comes first, and frames name their file, never the folder it sits in
+    assert [v['type'] for v in values] == ['KeyError', 'ValueError'] and values[-1]['stacktrace']['frames'][-1]['filename'] == 'test_gui.py'
+    event = {'event_id': 'a' * 32, 'level': 'error', 'exception': {'values': values}}
+    assert gui._send_report(event, {'log.txt': f'Reading {home}{os.sep}run.raw\nDone', 'empty.txt': ''})
+    server.shutdown()
+    path, auth, body = posts[0]
+    assert path == '/api/7/envelope/' and 'sentry_key=key' in auth
+    header, rest = body.split(b'\n', 1)
+    items = []
+    while rest:
+        item, rest = rest.split(b'\n', 1)
+        item = json.loads(item)
+        items.append((item, rest[:item['length']]))
+        rest = rest[item['length'] + 1:]
+    assert json.loads(header)['event_id'] == 'a' * 32 and [(i['type'], i.get('filename')) for i, _ in items] == [('event', None), ('attachment', 'log.txt')]
+    # Paths in the home folder are shortened to ~, also inside the JSON
+    assert home.encode() not in body and json.loads(items[0][1])['exception']['values'][-1]['value'] == os.path.join('~', 'run.raw')
+    assert items[1][1].decode() == f'Reading ~{os.sep}run.raw\nDone'
+    # A bug report needs a description before it can be sent
+    dialog = gui.ReportDialog(None, event, {'log.txt': 'Done'})
+    box = dialog.findChild(QtWidgets.QDialogButtonBox)
+    send = next(b for b in box.buttons() if box.buttonRole(b) == QtWidgets.QDialogButtonBox.AcceptRole)
+    assert not send.isEnabled()
+    dialog.text.setPlainText('The spectrum is empty')
+    assert send.isEnabled() and dialog.automatic.isHidden()
