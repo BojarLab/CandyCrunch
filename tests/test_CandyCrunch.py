@@ -3,6 +3,8 @@ import unittest
 import os
 import base64
 import pathlib
+import struct
+import zlib
 import sys
 from tabulate import tabulate
 import numpy as np
@@ -46,9 +48,11 @@ TEST_DICTS = [
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x]},
     # N-glycans with Neu5Gc (Thermo LTQ Velos .raw, ion-trap MS1 and MS2 at ~1000x lower intensities), one run; the .raw runs with --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000596', 'args': {'glycan_class': 'N'}},
+    # O-glycans from slide-fixed tissue (Bruker amaZon speed .d, read from its Analysis.yep); the .d runs with --input-format mzml, the .xlsx otherwise
+    {'name': 'GPST000316', 'args': {'glycan_class': 'O'}},
 ]
-# Spectra files with MS1 (lower-case, Thermo writes .RAW too), run by --input-format mzml
-MS1_FORMATS = ('.mzml', '.mzxml', '.raw')
+# Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
+MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d')
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
@@ -369,6 +373,40 @@ def test_bruker_mzxml(tmp_path):
     # dropped as isotope-triggered, as a Bruker isolation window always holds the whole envelope
     assert np.allclose(df['m/z'], [965.844, 675.36, 675.36], atol = 0.02) and df['precursor_charge'].tolist()[0] == 2
     assert df.attrs['detected_trap'] == 'linear' and df.attrs['detected_mode'] == 'negative'
+
+
+def test_bruker_yep(tmp_path):
+    # A Bruker ion trap .d folder (amaZon): Analysis.yep pages of zlib records, a spectrum header (type 316) and a line spectrum (type 315, kind 2000) per
+    # spectrum, and the parameter definitions; MS2 headers give the isolation target (966.20 for a [M-2H]2- at 965.844) and the trigger charge
+    def record(kind, number, spectrum, body):
+        packed = zlib.compress(body)
+        key = (31, 0, 0, spectrum, 2000 if spectrum else 1000, 11)
+        return struct.pack('<4s5I6I', b'\xfa\x0b\xdb\xdb', len(packed), 3, kind, number, 3, *key) + packed + bytes(16) + b'   '
+    def spectrum(number, ticks, peaks, precursor = None, charge = 0):
+        params = struct.pack('<5I', 2, 0x6b, 1, 0x403, charge)
+        header = struct.pack('<ifIff3f5I', ticks, sum(i for _, i in peaks), number, 100, 2000, 0, max(i for _, i in peaks), 0, ticks, 0, 3,
+                             0 if precursor is None else 4, 20)
+        header = header if precursor is None else header[:48] + struct.pack('<f', precursor) + header[48:]
+        body = (struct.pack('<HIH4x', 12, 2, 0xbfa2) + struct.pack('<HIH', 8 + len(params), 8, 0xbfa0) + params +
+                np.array(peaks, dtype = '<f4').tobytes())
+        return record(316, 2 * number, number, header) + record(315, 2 * number + 1, number, body)
+    definitions = b''.join(struct.pack('<II', pid, 2) + b"\x1d'\xab\xbf" + struct.pack('<I', len(name) + 1) + name + b'\x00' for pid, name in
+                           [(0x6b, b'iIonNeg'), (0x403, b'iTrgChrgAto02')]) + b"\x1d'\xab\xbf\x0d\x00\x00\x00amaZon speed\x00"
+    survey = [(675.36, 2e6), (965.844, 6e5), (965.844 + 1.003355 / 2, 9e5), (965.844 + 1.003355, 5.4e5), (966.47, 4e3)]
+    fragments = [(290.09, 1e4), (675.3, 1e4), (800.3, 3e4)]
+    records = (record(315, 1, 0, definitions) + spectrum(1, 2812500, survey) + spectrum(2, 2813000, fragments, 966.2045, 2) +
+               spectrum(3, 2813500, fragments, 675.8138, 1))
+    folder = tmp_path / 'run.d'
+    folder.mkdir()
+    (folder / 'Analysis.yep').write_bytes(b'Yellop1.1\x00' + bytes(8) + b'\xfa\x0b\x00\xee' + struct.pack('<I', 24 + len(records)) + bytes(20) + records)
+    df = load_spectra_filepath(str(folder), extract_ms1 = True)
+    # Both precursors move onto their monoisotopic centroids; Bruker's trigger charge 2 is kept, its charge 1 counts as undetermined
+    assert np.allclose(df['m/z'], [965.844, 675.36], atol = 0.01)
+    assert df['precursor_charge'].tolist()[0] == 2 and np.isnan(df['precursor_charge'].tolist()[1])
+    # RT ticks are 64 us, and the MS2 peaks are the line spectrum's
+    assert np.allclose(df['RT'], np.array([2813000, 2813500]) * 64e-6 / 60)
+    assert len(df['peak_d'][0]) == 3 and max(df['peak_d'][0], key = df['peak_d'][0].get) == pytest.approx(800.3)
+    assert df.attrs['detected_trap'] == 'amazon' and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
 
 
 def test_tims_scans(tmp_path):

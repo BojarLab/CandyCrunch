@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -21,20 +21,22 @@ dependencies = [
     "glycowork>=1.11.0",
     "networkx",
     "scipy",
-    "torch~=2.1",
+    "torch>=2.3,<3; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    "torch>=2.2,<2.3; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    "numpy<2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
     "numpy",
     "pandas>=2.2.2",
-    "opentfraw>=2.0,<3",
-    "timsrust_pyo3>=0.4.1,<0.5",
+    "opentfraw>=2.0,<4",
+    "timsrust_pyo3>=0.4.1,<0.5; python_version < '3.14'",
     "openpyxl",
-    "matplotlib",
+    "matplotlib>=3.10",
 ]
 
 [project.urls]
 Homepage = "https://github.com/BojarLab/CandyCrunch"
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.5"]
+gui = ["PySide6>=6.7", "matplotlib<3.11"]
 train = ["glycowork[ml]>=1.11.0", "torchmetrics"]
 
 [project.scripts]

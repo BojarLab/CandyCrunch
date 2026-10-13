@@ -7,7 +7,9 @@ import re
 import pickle
 import pathlib
 import sqlite3
+import struct
 import tempfile
+import zlib
 from collections import Counter, defaultdict
 from itertools import combinations_with_replacement, groupby
 from concurrent.futures import ProcessPoolExecutor
@@ -276,7 +278,8 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 iso_mz, charge = window.get('MS:1000827', spectrum['precursor']['mz']), spectrum['precursor'].get('charge')
                 upper = max(iso_mz + window.get('MS:1000829', 0), spectrum['precursor']['mz'] + 6 * ISOTOPE_SPACING / abs(charge) + 0.05 if charge else 0)
                 peaks = peaks[(peaks[:, 0] < iso_mz - window.get('MS:1000828', 0)) | (peaks[:, 0] > upper)]
-            mz_i_dict = dict(peaks[peaks[:, 1].argsort()][-(min(num_peaks, TIMS_MS2_PEAKS) if spectrum['ion_mobility'] else num_peaks):])
+            # dict(zip()) over the two columns is the same dict as dict() over the rows, without a row view per peak (~2.5x faster)
+            mz_i_dict = dict(zip(*peaks[peaks[:, 1].argsort()][-(min(num_peaks, TIMS_MS2_PEAKS) if spectrum['ion_mobility'] else num_peaks):].T))
             if mz_i_dict:
                 if not spectrum['precursor']:
                     continue
@@ -480,7 +483,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
    """
     raw = opentfraw.RawFile(filepath)
     table = raw.scan_table()
-    # opentfraw 2.0.0 misreads the scan events of version 66 files from ion traps (LTQ, LTQ XL, LTQ Orbitrap Velos with Xcalibur 4): they are
+    # opentfraw 2.0.0 and 3.0.0 misread the scan events of version 66 files from ion traps (LTQ, LTQ XL, LTQ Orbitrap Velos with Xcalibur 4): they are
     # self-describing (136-byte preamble, then counted 56-byte reactions, 16-byte scan windows and 8-byte coefficients, then 3 u32), not of the
     # fixed size it assumes. Its peaks, profile intensities, retention times and trailers are right, so if this layout walks exactly over the event
     # stream, the columns read below are rebuilt from the events and the trailer
@@ -659,7 +662,11 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
    | activation as in process_mzML_stack, one spectrum per precursor (its PASEF scans summed); survey frames are summed over their ion mobility
    | scans; both are centroided with centroid_tof, on m/z from the file's own TOF calibration (MzCalibration)
    """
-    import timsrust_pyo3
+    try:
+        import timsrust_pyo3
+    except ImportError:
+        raise ValueError("Reading timsTOF .d folders needs timsrust_pyo3, which is not installed (it has no build for Python 3.14 or later yet); convert "
+                         f"{os.path.basename(os.path.normpath(filepath))} to mzML with msconvert first, or use Python 3.11-3.13.") from None
     tdf = os.path.join(filepath, 'analysis.tdf')
     if not os.path.exists(tdf):
         raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no analysis.tdf. CandyCrunch reads timsTOF .d folders directly; other Bruker "
@@ -755,6 +762,102 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = 'other'
     df_out.attrs['detected_ms1_trap'] = 'tof'
+    if extract_ms1:
+        df_out.attrs['ms1'] = ms1
+    return df_out
+
+
+def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
+    """function extracting all MS/MS spectra from a Bruker ion trap .d folder (esquire, HCT, amaZon; with an Analysis.yep)\n
+   | Arguments:
+   | :-
+   | filepath (string): absolute path to the .d folder
+   | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
+   | Returns:
+   | :-
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, and activation as in
+   | process_mzML_stack, from the line (centroided) spectra the instrument stores next to its profile spectra
+   """
+    with open(os.path.join(filepath, 'Analysis.yep'), 'rb') as f:
+        data = f.read()
+    if not data.startswith(b'Yellop'):
+        raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no readable Analysis.yep; convert it to mzML or mzXML with msconvert first.")
+    # Analysis.yep is a sequence of pages (FA 0B 00 EE, length, 20 more header bytes) of records: FA 0B DB DB (zlib body) or DA DA, body length,
+    # padding after the 16-byte trailer, record type, record number, then a 24-byte key whose 4th and 5th fields are the spectrum number and its kind
+    # (2000 the line spectrum, 2010 the profile). Type 316 bodies are spectrum headers, type 315 bodies the spectra, and the other type 315 bodies hold
+    # the definitions of the acquisition parameters every spectrum lists by number
+    headers, bodies, definitions = {}, {}, b''
+    p = data.find(b'\xfa\x0b\x00\xee')
+    while 0 <= p and data[p:p + 4] == b'\xfa\x0b\x00\xee':
+        end, j = p + 4 + struct.unpack_from('<I', data, p + 4)[0], p + 28
+        while j + 48 <= end and data[j:j + 2] == b'\xfa\x0b' and data[j + 2:j + 4] in (b'\xdb\xdb', b'\xda\xda'):
+            length, padding, record = struct.unpack_from('<3I', data, j + 4)
+            key = struct.unpack_from('<6I', data, j + 24)
+            if data[j + 2] == 0xdb and record in (315, 316) and key[4] == 2000:
+                (headers if record == 316 else bodies)[key[3]] = zlib.decompress(data[j + 48:j + 48 + length])
+            elif data[j + 2] == 0xdb and record == 315 and key[4] != 2010:
+                definitions += zlib.decompress(data[j + 48:j + 48 + length])
+            j += 64 + length + padding
+        p = end
+    # A parameter definition is its number and type, then its short and long name as strings (marker 1D 27 AB BF, length incl. the final 0)
+    param_ids = {}
+    for name in (b'iIonNeg', b'iTrgChrgAto02'):
+        i = definitions.find(name + b'\x00')
+        param_ids[name] = struct.unpack_from('<I', definitions, i - 16)[0] if i >= 16 else None
+    ms1_rts, ms1_mzs, ms1_ints = [], [], []
+    peak_ds, rts, mzs, charges, scans, ms1_scans, intensities = [], [], [], [], [], [], []
+    detected_mode = None
+    for number in sorted(set(headers) & set(bodies)):
+        header, body = headers[number], bodies[number]
+        # Header: RT in 64 us ticks, TIC, spectrum number, scan range, ..., the size of the precursor list (4 bytes per MS level above 1), then the
+        # precursor m/z (Bruker's isolation target, not the monoisotopic peak)
+        ms_level = struct.unpack_from('<I', header, 44)[0] // 4 + 1
+        rt = struct.unpack_from('<i', header, 0)[0] * 64e-6 / 60
+        # The body is a chain of blocks (16-bit length, 32-bit type, 16-bit signature A0-A2 BF; type 8 lists the parameters as number and 4-byte value),
+        # and the line spectrum's (m/z, intensity) float32 pairs follow the last block
+        j, values = body.find(b'\xa2\xbf') - 6, {}
+        while j + 8 <= len(body):
+            size, block, signature = struct.unpack_from('<HIH', body, j)
+            if signature not in (0xbfa0, 0xbfa1, 0xbfa2) or size < 8:
+                break
+            if block == 8:
+                values = dict(struct.iter_unpack('<I4s', body[j + 12:j + 12 + 8 * struct.unpack_from('<I', body, j + 8)[0]]))
+            j += size
+        peaks = np.frombuffer(body[j:j + (len(body) - j) // 8 * 8], dtype = '<f4').reshape(-1, 2)
+        if detected_mode is None and param_ids[b'iIonNeg'] in values:
+            detected_mode = 'negative' if struct.unpack('<i', values[param_ids[b'iIonNeg']])[0] else 'positive'
+        if ms_level == 1:
+            ms1_rts.append(rt)
+            ms1_mzs.append(peaks[:, 0].astype(np.float32))
+            ms1_ints.append(peaks[:, 1].astype(np.float32))
+        elif ms_level == 2 and len(peaks):
+            order = np.argsort(peaks[:, 1], kind = 'stable')[::-1][:num_peaks]
+            peak_ds.append(dict(zip(peaks[order, 0].astype(float).tolist(), peaks[order, 1].astype(float).tolist())))
+            mzs.append(float(struct.unpack_from('<f', header, 48)[0]))
+            rts.append(rt)
+            # Bruker's trigger charge (0: none determined); 1 counts as undetermined as for Bruker mzXML (GPST000316's [M-2H]2- disialyl core 2 had 1)
+            charge = struct.unpack('<i', values[param_ids[b'iTrgChrgAto02']])[0] if param_ids[b'iTrgChrgAto02'] in values else 0
+            charges.append(charge if charge > 1 else None)
+            scans.append(number)
+            ms1_scans.append(len(ms1_rts) - 1)
+            # As for Bruker mzXML, the precursor intensity is the survey scan's centroids around the precursor
+            intensities.append(float(ms1_ints[-1][(ms1_mzs[-1] >= mzs[-1] - 1.5) & (ms1_mzs[-1] < mzs[-1] + 1.5)].sum()) if ms1_mzs else np.nan)
+    df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges})
+    if intensity:
+        df_out['intensity'] = intensities
+    df_out['scan'], df_out['activation'] = scans, ['CID'] * len(df_out)
+    ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
+           np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
+           np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    # The precursor m/z is the isolation target, so every precursor is refined from its survey scan as for Bruker HCT mzXML
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [True] * len(mzs), mz_tolerance = 0.6, min_explained = 0.3, charges = charges,
+                                              isolation_mz = True)
+    df_out = df_out[~drop].reset_index(drop = True)
+    df_out.attrs['detected_mode'] = detected_mode
+    # The definitions name the instrument; HCT and esquire count as linear ion traps, as for their mzXML
+    df_out.attrs['detected_trap'] = df_out.attrs['detected_ms1_trap'] = 'amazon' if b'amaZon' in definitions else 'linear'
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
     return df_out
@@ -978,7 +1081,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
                    modification = np.select([modification == 'reduced', modification == 'permethylated'], [0, 1], 2),
                    trap = np.select([trap == 'linear', trap == 'orbitrap', trap == 'amazon'], [0, 1, 2], 3))
     # Retention time normalization
-    max_rt = max(max(df['RT']), rt_max_default)
+    max_rt = max(max(df['RT'], default = 0), rt_max_default)
     df['RT2'] = df['RT'] / max_rt
     # Candidate structures of one composition share spectrum and composition vector, i.e., the model input, so every distinct input is
     # predicted once (input_id points each row to its input)
@@ -1403,11 +1506,13 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
                      processed_df_use.loc[:, 'disease_ref'].map(len))
     processed_df_use = processed_df_use[~(processed_df_use['glycan'].str.contains("}"))]
     processed_df_use = processed_df_use.sort_values('ref_counts', ascending = False)
-    # Every run builds these maps (also for the other classes with accurate MS1), so the topologies of the database glycans are kept across calls
-    processed_df_use = processed_df_use.assign(topology = [_TOPOLOGIES[x] if x in _TOPOLOGIES else _TOPOLOGIES.setdefault(x, structure_to_basic(x)) for x in processed_df_use['glycan']])
+    small = [0 < sum(x.values()) < 6 for x in processed_df_use.Composition]
+    # Only the topology map of compositions below 6 residues needs topologies; every run builds these maps (also for the other classes with accurate
+    # MS1), so they are kept across calls
+    topologies = [_TOPOLOGIES[x] if x in _TOPOLOGIES else _TOPOLOGIES.setdefault(x, structure_to_basic(x)) for x in processed_df_use['glycan'][small]]
     processed_df_use = processed_df_use.assign(
         glycan = [x.replace('-ol', '').replace('1Cer', '') for x in processed_df_use.glycan])
-    small_comps = processed_df_use[[0 < sum(x.values()) < 6 for x in processed_df_use.Composition]]
+    small_comps = processed_df_use[small].assign(topology = topologies)
     df_use_unq_topos = small_comps.groupby('topology').first().groupby('comp_str').agg(list)
     topology_map = dict(zip(df_use_unq_topos.index, df_use_unq_topos.glycan))
     df_use_unq_comps = processed_df_use.groupby('comp_str').first()
@@ -2089,23 +2194,30 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     # A timsTOF .d is a folder, which may come with a trailing separator
     ext = os.path.splitext(os.path.normpath(spectra_filepath))[1].lower()
     if ext == ".d":
-        return process_tdf_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
-    if ext == ".mzml":
-        return process_mzML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
-    if ext == ".mzxml":
-        return process_mzXML_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
+        # timsTOF folders hold an analysis.tdf, the ion traps (esquire, HCT, amaZon) an Analysis.yep
+        stack = process_yep_stack if os.path.exists(os.path.join(spectra_filepath, 'Analysis.yep')) else process_tdf_stack
+        return stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
+    if ext in (".mzml", ".mzxml"):
+        try:
+            return (process_mzML_stack if ext == ".mzml" else process_mzXML_stack)(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
+        except SyntaxError as e:
+            # The XML parser's ParseError (a SyntaxError) does not say that the file is incomplete or no mzML/mzXML at all
+            raise ValueError(f"{os.path.basename(spectra_filepath)} is not a complete {'mzML' if ext == '.mzml' else 'mzXML'} file ({e}); it may have been cut "
+                             f"short while being copied or converted") from e
     if ext == ".raw":
         return process_raw_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mgf":
         rows = []
         for spectrum in read_mgf(spectra_filepath):
             params = spectrum['params']
-            if not len(spectrum['m/z array']):
+            # Like MS1 scans of mzML files, spectra without a precursor m/z (no or an empty PEPMASS) are not predicted
+            if not len(spectrum['m/z array']) or params.get('pepmass', (None,))[0] is None:
                 continue
             if 'rtinseconds' not in params:
                 raise ValueError(f"MGF spectrum '{params.get('title', '')}' has no RTINSECONDS entry; CandyCrunch needs retention times")
-            # Same conventions as process_mzML_stack: top 1000 peaks sorted by intensity, charge 1 treated as undetermined
-            charge = abs(int(params['charge'][0])) if params.get('charge') else None
+            # Same conventions as process_mzML_stack: top 1000 peaks sorted by intensity, charge 1 treated as undetermined; so is CHARGE=0, which some
+            # writers use for an unknown charge and which as a known charge left no candidate composition for any spectrum
+            charge = (abs(int(params['charge'][0])) or None) if params.get('charge') else None
             peak_d = dict(sorted(zip(spectrum['m/z array'].tolist(), spectrum['intensity array'].tolist()), key = lambda x: x[1], reverse = True)[:1000])
             rows.append([float(params['pepmass'][0]), peak_d, float(params['rtinseconds']) / 60,
                          charge if charge != 1 else None, params['pepmass'][1] if params['pepmass'][1] is not None else np.nan,
@@ -2116,6 +2228,9 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         return loaded_file
     if ext == ".xlsx":
         loaded_file = pd.read_excel(spectra_filepath)
+        if 'peak_d' not in loaded_file.columns:
+            raise ValueError(f"{os.path.basename(spectra_filepath)} has no peak_d column; CandyCrunch reads .xlsx files of spectra made by extract_spectra, not "
+                             f"result tables or other spreadsheets")
 
         def parse_peak_dict(value):
 
@@ -2168,15 +2283,15 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         storage = DictStorage()
         loaded_file = storage.read(spectra_filepath, 'peak_d')
         return loaded_file
-    raise FileNotFoundError(
-        'Incorrect filepath or extension, please ensure it is in the intended directory and is one of the supported formats')
+    raise FileNotFoundError(f"{os.path.basename(os.path.normpath(spectra_filepath))} is not a file type CandyCrunch reads (Thermo .raw, Bruker timsTOF .d folder, "
+                            f".mzML, .mzXML, .mgf, or .xlsx made by extract_spectra)")
 
 
 def extract_spectra(spectra_filepath, output_filepath = None):
     """extracts the MS/MS spectra of a .raw/.d/.mzML/.mzXML/.mgf file into a lightweight .xlsx that wrap_inference reads directly\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw", ".d" (Bruker timsTOF folder), ".mzML", ".mzXML", or ".mgf"
+   | spectra_filepath (string): absolute filepath ending in ".raw", ".d" (Bruker timsTOF or ion trap folder), ".mzML", ".mzXML", or ".mgf"
    | output_filepath (string): .xlsx filepath to write; default:None (spectra_filepath with an .xlsx extension)\n
    | Returns:
    | :-
@@ -2186,7 +2301,7 @@ def extract_spectra(spectra_filepath, output_filepath = None):
     df = load_spectra_filepath(spectra_filepath)
     if df.empty:
         # An empty .xlsx would only fail later as a run without glycan peaks
-        raise ValueError(f"{os.path.basename(spectra_filepath)} has no MS2 spectra with a precursor m/z, so there is nothing to extract (some conversions "
+        raise ValueError(f"{os.path.basename(os.path.normpath(spectra_filepath))} has no MS2 spectra with a precursor m/z, so there is nothing to extract (some conversions "
                          f"keep only the MS1 scans; data-independent acquisition such as Waters MSE has no precursors)")
     # Rounding keeps the file small and every peak dictionary below Excel's 32,767-character cell limit; 4 decimals and 4 significant
     # digits sit far below the binning and fragment-annotation tolerances
@@ -2773,7 +2888,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo), ".d" (Bruker timsTOF folder), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to a file containing
+   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo), ".d" (Bruker timsTOF or ion trap folder), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to a file containing
    |                            spectra or preprocessed spectra; MS3 spectra in it (.raw/.mzML/.mzXML, or .xlsx from extract_spectra) are used automatically, as fragment
    |                            evidence and to rank isomers
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
@@ -3097,7 +3212,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                           + multiplier * z * PROTON_MASS) / z if isinstance(c, dict) and z else np.nan for c, z in
                          zip(df_out['composition'], df_out['charge'])])
         ppm = (df_out.index.values - theo) / theo * 1e6
-        has_pred = np.array([bool(p) for p in df_out['predictions']])
+        has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
         # ppm is to the (de)protonated ion, so rows matched as adducts sit thousands of ppm off; they never pass and must not set the calibration either
         known = has_pred & (np.abs(ppm) <= ppm_thresh)
         if known.sum() >= 5:
@@ -3118,10 +3233,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         # with Hex + dHex instead (1 Da heavier, inside the precursor tolerance), so a spectrum without any model prediction whose candidate composition with
         # Neu5Gc, at a charge of at most 2, is backed up by more than 10 fragment annotations takes that composition's database structure. Not for other
         # compositions: there it filled O-glycans into N runs and junk into O runs
-        has_pred = np.array([bool(p) for p in df_out['predictions']])
+        has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
         ok = (~has_pred & ~df_out['cross_class'].values & (df_out['annotation_score'].values >= 10) & (df_out['charge'].values <= 2)
-              & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']])
-              & np.array([isinstance(c, dict) and 'Neu5Gc' in c for c in df_out['composition']]))
+              & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']], dtype = bool)
+              & np.array([isinstance(c, dict) and 'Neu5Gc' in c for c in df_out['composition']], dtype = bool))
         for i in df_out.reset_index(drop = True)[ok].groupby('spec_id')['annotation_score'].idxmax().values if ok.any() else []:
             g = df_out['candidate_structure'].iloc[i]
             df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
@@ -3168,7 +3283,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # One chromatographic peak is one glycan: when a cluster's fragments fail crumbs_thresh while a cluster at least ten times weaker at the same m/z,
     # whose spectra continue it (within 0.25 min), passes with the same top prediction, the tail's evidence counts for the peak, reported at its apex
     tails = []
-    for spec, row in df_out[passes & (df_out['predictions'].str.len() > 0)].iterrows():
+    for spec, row in df_out[passes & np.array([bool(p) for p in df_out['predictions']], dtype = bool)].iterrows():
         apex = df_out[~passes & ((df_out['m/z'] - row['m/z']).abs() <= mass_tolerance) & (df_out['rel_abundance'] >= 10 * row['rel_abundance'])]
         apex = apex[[bool(p) and p[0][0] == row['predictions'][0][0] and max(r[0] - row['rt_range'][1], row['rt_range'][0] - r[1]) <= 0.25
                      for p, r in zip(apex['predictions'], apex['rt_range'])]]
@@ -3359,7 +3474,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
-   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".d" (Bruker timsTOF folder), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to files containing spectra
+   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".d" (Bruker timsTOF or ion trap folder), ".mzML", ".mzXML", ".mgf", or ".xlsx" pointing to files containing spectra
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group, after correcting each file's consistent RT drift against the file with the most predicted peaks (median over peaks both files share)
    | top_n_isomers (int): number of isomer groups at each composition to retain per file (a group stays if it is among the top_n_isomers of any file); default:5
@@ -3482,6 +3597,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                index = pd.Index([], name = 'm/z'))
     non_empty = {k: v for k, v in inference_dfs.items() if not v.empty}
     if not non_empty:
+        ms1_dir.cleanup()
         return pd.DataFrame(), {k: (empty_table.copy(), []) if spectra else empty_table.copy() for k in file_labels}
     all_ms2 = pd.concat(non_empty.values())
     # Cluster precursor m/z across files: split at gaps above the mass tolerance, then split clusters wider than it at their largest gap
@@ -3638,6 +3754,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                glycan_col_num = 'top1_pred')
         # MS3 spectra are output like the MS2 spectra, only with spectra=True
         inference_dfs[file_label] = (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'], errors = 'ignore')
+    # Removed once the MS1 data is not needed any more, as an implicit clean-up raises a ResourceWarning
+    ms1_dir.cleanup()
     all_outputs = [d for d in (v[0] if spectra else v for v in inference_dfs.values()) if not d.empty]
     group_keys = ['mass_label', 'category_label']
     all_outputs = pd.concat(all_outputs).reset_index().sort_values('top1_pred', key = lambda s: s.isna(), kind = 'stable') if all_outputs else pd.DataFrame()

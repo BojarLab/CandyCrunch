@@ -2010,7 +2010,8 @@ def _build_composition_fragments(composition, re_bonus, sample_prep = 'underivat
             folded[linked.get(k, k)] = folded.get(linked.get(k, k), 0) + v
         composition = folded
     mono_types = sorted(m for m in composition if (m in derivatization_sites['permethylated'] or m in CARBOXYL_LABELS) and composition[m] > 0)
-    if not mono_types:
+    # a residue without fragment tables (Kdo, Hep, dHexNAc) would be missing from every fragment, the intact molecule included
+    if not mono_types or any(v > 0 and m not in mono_types and m not in SUBSTITUENTS for m, v in composition.items()):
         return []
     # a substituent (S, P, Ac, ...) of a composition can sit on any residue, so a fragment can carry any number of them
     parts = mono_types + sorted(m for m in composition if m in SUBSTITUENTS and composition[m] > 0)
@@ -2092,6 +2093,9 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         n_glycans = len(compositions)
         # Glycan fragment options per glycan (re_bonus=0: reducing end bonded to peptide)
         all_glycan_frags = [_build_composition_fragments(comp, 0, sample_prep, disable_X_cross_rings) for comp in compositions]
+        # as for a structure, a glycan without fragments (a residue without fragment tables) leaves nothing to annotate
+        if not all(all_glycan_frags):
+            return {m: None for m in fragment_masses}
         glycan_totals = [next((m for m, lb, nc in gf if nc == 0), 0) for gf in all_glycan_frags]
         total_glycan = sum(glycan_totals)
         # Peptide masses
@@ -2186,8 +2190,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                 for combo in combinations_with_replacement(repeatable, n):
                     global_mods_dict[combine_global_mods(combo)] = sum(global_mods_dict[x] for x in combo)
         all_comps = compositions if is_glycopeptide else [composition]
-        # per residue, as the joined labels of {'Hex': 2, 'Ac': 1} contain HexA
-        if any(m in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn'] for comp in all_comps for m in comp):
+        # per residue, as the joined labels of {'Hex': 2, 'Ac': 1} contain HexA; a sialic acid of known linkage (Neu5Ac_a2-6) too
+        if any(m.split('_')[0] in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn'] for comp in all_comps for m in comp):
             global_mods_dict['CO2'] = mono_attributes['Global']['mass']['CO2']
         if any('S' in comp for comp in all_comps):
             global_mods_dict['SO4'] = mono_attributes['Global']['mass']['SO4']
@@ -2862,7 +2866,10 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
         if cut_type[-1] == 'A':
             keep &= nx.ancestors(nx_mono, node) | {node}
             # an A-type cross-ring silently takes any branch attached to a ring atom it does not retain
-            retained_atoms = mono_attributes[map_to_basic(node_dict[node], obfuscate_ptm = False)]['atoms'][cut_type]
+            retained_atoms = mono_attributes[map_to_basic(node_dict[node], obfuscate_ptm = False)]['atoms'].get(cut_type)
+            # a cross-ring this residue has no table entry for (0,4A of Fuc) cannot exist on it
+            if retained_atoms is None:
+                return None
             for child, _ in nx_mono.in_edges(node):
                 if (pos := bond_labels[(child, node)][-1]).isdigit() and int(pos) not in retained_atoms:
                     keep -= nx.ancestors(nx_mono, child) | {child}
@@ -2937,10 +2944,11 @@ def get_plots(df_sub, glycan_list, num_bins_plot, mz_range):
     for g in glycan_list:
         out_dic[g] = [sum(col) / len(col) for col in
                       zip(*df_sub[df_sub.Prediction == g].binned_intensities.values.tolist())]
+        # a glycan without spectra (in this confidence bracket) gets an empty line, which keeps its legend entry
         if len(glycan_list) == 2 and glycan_list.index(g) == 1:
-            plt.plot(mz_range, list(map(neg, out_dic[g]))[:num_bins_plot])
+            plt.plot(mz_range[:len(out_dic[g])], list(map(neg, out_dic[g]))[:num_bins_plot])
         else:
-            plt.plot(mz_range, out_dic[g][:num_bins_plot])
+            plt.plot(mz_range[:len(out_dic[g])], out_dic[g][:num_bins_plot])
     plt.xlabel("m/z")
     plt.ylabel("Relative intensity")
     plt.legend(glycan_list)
@@ -3085,6 +3093,11 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
         df_b2 = df_b[df_b.Confidence.between(conf[0], conf[1])]
         df_a2 = np.array(df_a2.binned_intensities.values.tolist())
         df_b2 = np.array(df_b2.binned_intensities.values.tolist())
+        if not len(df_a2) or not len(df_b2):
+            # a confidence bracket without spectra of one of the glycans has no significant bins
+            for k in bin_keys:
+                bins[k].append(0)
+            continue
         cohensd = [cohen_d(df_a2[:, k], df_b2[:, k]) for k in range(max_bin)]
         pvals = np.array([ttest_ind(df_a2[:, k], df_b2[:, k], equal_var = False)[1] for k in range(max_bin)])
         tested = ~np.isnan(pvals)
@@ -3471,13 +3484,18 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         # the intact glycan. One cartoon per distinct structure, anchored on its most intense member with a
         # leader from every peak it explains: an oxonium series shares a structure and differs only by a
         # neutral loss, so a box per loss repeats the same picture and drags them away from their peaks
+        # cartoons come from the glycans as CandyCrumbs named their fragments: derivatized (heavier sialic acids, or lighter lactones, can reorder the chains)
+        drawn = [derivatize_carboxyls(g, kwargs['sialic_derivatization']) if kwargs.get('sialic_derivatization') is not None and isinstance(g, str) and
+                 not is_composition(g) else g for g in glycans]
         groups = {}
         for mz, rel_int, _, kind, dc_name, rank in peaks:
             # A leader to a noise-level peak is a line across the plot for nothing, so a cartoon only
             # claims the peaks that were worth labeling in the first place
             if kind not in ('oxonium', 'glycan') or (rel_int < annotation_threshold * 100 and rank > 0):
                 continue
-            frag_iupac = fragment_to_fragIUPAC(glycan_string, dc_name)
+            # an oxonium ion of a peptide with several glycans comes from the one glycan it does not lose, whose chains its cleavages name
+            own = [(g, sub) for g, sub in zip(drawn, dc_name[1:]) if not str(sub[0]).startswith('loss of')] if len(drawn) > 1 else [(drawn[0], dc_name)]
+            frag_iupac = fragment_to_fragIUPAC(*own[0]) if len(own) == 1 and isinstance(own[0][0], str) and not is_composition(own[0][0]) else None
             if frag_iupac is not None:
                 groups.setdefault(frag_iupac, []).append((rel_int, mz, rank))
         # Diagnostic fragments first, then single glycosidic cleavages (the cartoons that say something), then cross-rings and multiple cleavages

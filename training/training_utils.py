@@ -5,7 +5,6 @@ import time
 import torch
 
 import matplotlib.pyplot as plt
-from candycrunch.analysis import glycan_to_graph_monos,mono_graph_to_nx,enumerate_k_graphs,mono_frag_to_string
 from glycowork.ml.model_training import EarlyStopping, disable_running_stats, enable_running_stats, training_setup, Poly1CrossEntropyLoss
 from glycowork.ml.models import init_weights
 import torch.nn.functional as F

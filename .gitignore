@@ -45,4 +45,5 @@ htmlcov/
 tests/data/*/*.mzML
 tests/data/*/*.mzXML
 tests/data/*/*.raw
+tests/data/*/*.d/
 tests/untracked/*

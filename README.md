@@ -40,7 +40,7 @@ If you would like to run our main inference function from the command line, you 
 
 #### Requires at a minimum:
 <pre>
---spectra_filepath, type=string(s): one or more filepaths to Thermo .raw files, Bruker timsTOF .d folders, mzML, mzXML, or mgf files or .xlsx files, and/or folders containing such files; several files are processed together via `wrap_inference_batch` <br />
+--spectra_filepath, type=string(s): one or more filepaths to Thermo .raw files, Bruker timsTOF .d folders, mzML, mzXML, or mgf files or .xlsx files, and/or folders of .raw, .d, mzML, mzXML, or mgf files (the .xlsx files in a folder are not used); several files are processed together via `wrap_inference_batch` <br />
 --glycan_class, type=string: the glycan class measured ("N", "O", "lipid"/"free") <br />
 --output, type=string: an output filepath ending with `.csv` or `.xlsx`
 </pre>
@@ -54,17 +54,19 @@ If you would like to run our main inference function from the command line, you 
 --mode, type=string: mass spectrometry mode; options are 'negative' or 'positive'; default: 'negative' <br />
 --max_charge, type=int: maximum precursor charge to consider; default:3 <br />
 --sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
+--sialic_derivatization, type=string: linkage-specific sialic acid derivatization of underivatized samples; options are 'EE' (ethyl esterification), 'EEA' (ethyl esterification and amidation), 'ME' (methyl esterification), 'DMA' (dimethylamidation), and 'SALSA'; precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
+--reducing_end_variants, type=string(s): other reducing ends the glycans may carry: 'free' (glycans that escaped reduction or labelling, counted for their glycan) and/or 'ethyl_glycoside' (rows of their own); give none of them to turn this off; default: free, plus ethyl_glycoside for lipid <br />
 --modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 --lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
 --trap, type=string: type of mass detector used; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear' <br />
---rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 <br />
---rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 <br />
+--rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
+--rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (runs longer than 40 min then skip their last 10%) <br />
 --rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 --spectra, type=bool: whether to also output the actual spectra used for prediction, as a peak_d column; default:False <br />
 --get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
---filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
+--filter_out, type=string(s): space-separated monosaccharide or modification types; compositions containing any of them are not considered (e.g., Pen if you know there is none); the list replaces the default, and giving none of them filters nothing; default: Ac Kdn HexA Pen HexN Me PCho PEtN <br />
 --ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
 --pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
 --crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap or timsTOF survey scans); default:3 <br />
@@ -103,7 +105,7 @@ Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `C
 - spectra_filepath, type = string: a filepath to a Thermo .raw file, a Bruker timsTOF .d folder, an mzML, mzXML, or mgf file, or a .xlsx file <br />
 - glycan_class,type = string: the glycan class measured ("N", "O", "lipid"/"free")
 </pre>
-Thermo .raw, Bruker timsTOF .d, mzML, mzXML, and mgf files are internally processed into extracted spectra; .raw files are read directly (via [opentfraw](https://github.com/Sigilweaver/OpenTFRaw)), and timsTOF .d folders of DDA-PASEF runs via [timsrust](https://github.com/MannLabs/timsrust), without any conversion or vendor software (survey frames are summed over their ion mobility scans, m/z come from the file's own TOF calibration, and the unfragmented precursor is removed from MS2 spectra; diaPASEF and timsTOF data without ion mobility (.tsf) are not supported). With accurate (orbitrap or timsTOF) survey scans, a peak the model has no structure for gets a database structure of its composition (evidence 'composition') if the precursor m/z pins that composition and its fragments back the structure up. mzML files converted from timsTOF data work with or without combining ion mobility scans in msconvert. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `candycrunch.prediction`) writes such an xlsx from a .raw, mzML, mzXML or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept).
+Thermo .raw, Bruker timsTOF .d, mzML, mzXML, and mgf files are internally processed into extracted spectra; .raw files are read directly (via [opentfraw](https://github.com/Sigilweaver/OpenTFRaw)), and timsTOF .d folders of DDA-PASEF runs via [timsrust](https://github.com/MannLabs/timsrust), without any conversion or vendor software (survey frames are summed over their ion mobility scans, m/z come from the file's own TOF calibration, and the unfragmented precursor is removed from MS2 spectra; diaPASEF and timsTOF data without ion mobility (.tsf) are not supported). Bruker ion trap .d folders (esquire, HCT, amaZon, with an Analysis.yep) are read directly as well, from the centroided line spectra the instrument stores. With accurate (orbitrap or timsTOF) survey scans, a peak the model has no structure for gets a database structure of its composition (evidence 'composition') if the precursor m/z pins that composition and its fragments back the structure up. mzML files converted from timsTOF data work with or without combining ion mobility scans in msconvert. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `candycrunch.prediction`) writes such an xlsx from a .raw, mzML, mzXML or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept).
 <details>
 <summary>
 
@@ -120,8 +122,8 @@ modification, type=string: reducing-end modification of glycans; options are 're
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
 trap, type=string: type of mass detector used; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear' <br />
-rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 <br />
-rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 <br />
+rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
+rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (runs longer than 40 min then skip their last 10%) <br />
 rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
 temperature, type=float: the temperature factor used to calibrate logits; default:1.15 <br />
@@ -129,7 +131,7 @@ spectra, type=bool: whether to also output the actual spectra used for predictio
 get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
 filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
 ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
-crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap survey scans); default:3 <br />
+crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap or timsTOF survey scans); default:3 <br />
 sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
 extra_thresh, type=float: prediction confidence threshold at which to allow cross-class predictions (e.g., predicting N-glycans in O-glycan samples); default:0.2 <br />
 supplement, type=bool: whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True <br />
@@ -142,7 +144,10 @@ experimental, type=bool: whether to impute missing predictions via database sear
 |--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia'
 |
 |--df_use, type=DataFrame: only if experimental = "True", sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan <br />
-plot_glycans, type=bool: whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False
+plot_glycans, type=bool: whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False <br />
+sialic_derivatization, type=string or tuple: linkage-specific sialic acid derivatization of underivatized samples, 'EE', 'EEA', 'ME', 'DMA', 'SALSA', or a pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
+reducing_end_variants, type=dict: other reducing ends the glycans may carry, as name: group on the free glycan's reducing end (formula or mass; 0 for a free reducing end), e.g. {'free': 0} or {'ethyl glycoside': 'C2H4'}; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid') <br />
+n_jobs, type=int: number of processes for fragment scoring and supporting peaks (a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS); default:1
 
 </pre>
 </details>
@@ -184,7 +189,8 @@ At each composition, an isomer group is kept if it is among the top_n_isomers gr
 
 #### Optional arguments:
 - top_n_isomers, type = int: number of isomer groups at each composition to retain in each file; default:5 <br />
-- n_jobs, type = int: number of files to process in parallel (in separate processes); default:1 <br />
+- n_jobs, type = int: number of files to process in parallel (in separate processes), and of processes for the supporting peaks of each file's rows; default:1 <br />
+- library_thresh, type = float: MS2 cosine at which a peak without a structure takes the structure of a peak at the same m/z and charge in another file; None turns this off; default:0.9 <br />
 See `wrap_inference`  <br />
 <br />  
 ```python
@@ -229,7 +235,7 @@ annotated_fragments_dict = CandyCrumbs(condensed_iupac_glycan, fragment_masses =
 max_cleavages, type=int: maximum number of allowed concurrent cleavages per possible fragment; default:3 <br />
 simplify, type=bool: whether to select a single fragment for each mass based on mass difference, number of cleavages, and other fragments; default:True <br />
 charge, type=int: the charge state of the precursor ion (singly-charged, doubly-charged, etc.); default:-1 <br />
-mass_tag, type=float: mass of the glycan label or reducing end modification; default:2.0156 <br />
+mass_tag, type=float: mass of the glycan label or reducing end modification; default:None (alditol, 2 H) <br />
 iupac, type=bool: whether to also return the fragment sequence in IUPAC-condensed nomenclature; default:False <br />
 sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
 </pre>

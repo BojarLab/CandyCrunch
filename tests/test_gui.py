@@ -221,6 +221,33 @@ def test_gui_example_run(app):
         pd.read_excel(gui.EXAMPLE_RUN).columns)
 
 
+def test_gui_filter_refresh_and_pasted_peaks(app):
+    from candycrunch import gui
+    df = pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc', 'Fuc(a1-2)Gal(b1-3)GalNAc'], 'predictions': [[('Gal(b1-3)GalNAc', 0.9)], [('Fuc(a1-2)Gal(b1-3)GalNAc', 0.8)]],
+                       'composition': [{'Hex': 1, 'HexNAc': 1}, {'Hex': 1, 'HexNAc': 1, 'dHex': 1}], 'num_spectra': [3, 5], 'charge': [-1, -1], 'RT': [14.3, 26.8],
+                       'rel_abundance': [40.0, 60.0], 'evidence': ['strong', 'strong'], 'notes': ['', ''], 'ppm_error': [10.0, 20.0], 'GlyTouCan_ID': ['', '']},
+                      index = pd.Index([384.15, 530.2], name = 'm/z'))
+    view = gui.ResultsView(gui.GlycanImages())
+    view.set_results({'files': ['a.mzML'], 'settings': dict(gui.DEFAULTS), 'tables': {'a': (df, [{204.09: 10.0}, {384.15: 100.0}])}, 'features': None})
+    view.select_row(0)
+    # A filter that hides every peak leaves none in the detail pane for Exclude to act on; the first match is shown once peaks match again
+    view.search.setText('no such glycan')
+    view.toggle_excluded()
+    assert view.row is None and not view.frame['excluded'].any() and view.search.text() == 'no such glycan'
+    view.search.setText('dHex')
+    assert view.row == 1
+    # A refresh after curation keeps column widths set by hand
+    view.table.setColumnWidth(1, 300)
+    view.toggle_excluded()
+    assert view.table.columnWidth(1) == 300 and view.frame['excluded'].tolist() == [False, True]
+    # Lines that start with text (headers, the fields of a pasted mgf spectrum) are no peaks
+    tab = gui.CrumbsTab(gui.GlycanImages())
+    tab.structure.setText('Fuc(a1-2)Gal(b1-3)GalNAc')
+    tab.peaks.setPlainText('BEGIN IONS\nTITLE=run.1234.1234.2\nPEPMASS=530.19 120000\nCHARGE=1-\nm/z\tintensity\n384.15\t100\n325,12;20\nEND IONS')
+    tab.annotate()
+    assert tab.spectrum.request['mzs'] == [384.15, 325.12] and tab.spectrum.request['intensities'] == [100.0, 20.0]
+
+
 def test_gui_save_image(app, tmp_path, monkeypatch):
     import time
     from candycrunch import gui
@@ -291,3 +318,11 @@ def test_gui_reports(app, monkeypatch):
     assert not send.isEnabled()
     dialog.text.setPlainText('The spectrum is empty')
     assert send.isEnabled() and dialog.automatic.isHidden()
+    # A Windows home with a non-ASCII user name, in an error message that quotes the path (repr), still loses the user name inside the JSON
+    windows_home = 'C:\\Users\\J\u00fcrgen'
+    monkeypatch.setattr(os.path, 'expanduser', lambda path: windows_home if path == '~' else path)
+    try:
+        raise PermissionError(13, 'Permission denied', windows_home + '\\run_output.xlsx')
+    except PermissionError as error:
+        values = gui._exception_values(error)
+    assert 'rgen' not in gui._scrub(json.dumps({'exception': {'values': values}})) and 'rgen' not in gui._scrub(values[-1]['value'])

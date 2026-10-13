@@ -38,11 +38,11 @@ jobs:
       if: runner.os == 'Windows'
       env:
         PYINSTALLER_COMPILE_BOOTLOADER: 1
-      run: pip install --no-binary pyinstaller --no-cache-dir --verbose pyinstaller
+      run: pip install --no-binary pyinstaller --no-cache-dir --verbose pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
 
     - name: Install PyInstaller
       if: runner.os == 'macOS'
-      run: pip install pyinstaller
+      run: pip install pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
 
     - name: Build the app
       run: pyinstaller --noconfirm packaging/candycrunch.spec

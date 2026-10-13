@@ -22,5 +22,8 @@ jobs:
     - name: Build package
       run: |
         python -m build
+    - name: Check that the package installs from PyPI
+      run: |
+        pip install --dry-run dist/*.whl
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1

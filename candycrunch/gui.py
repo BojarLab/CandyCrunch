@@ -116,9 +116,11 @@ QTabWidget::pane {{ border-top: 1px solid #ddd0e8; }}
 
 
 def _scrub(text):
-    """Shortens paths in the user's home folder (which hold the user name) to ~, also as Qt writes them on Windows and as escaped in JSON"""
+    """Shortens paths in the user's home folder (which hold the user name) to ~, also as Qt writes them on Windows, with the backslashes doubled as in
+    error messages (repr), and each of those as escaped in JSON"""
     home = os.path.expanduser('~')
-    for variant in sorted({home, home.replace('\\', '/'), json.dumps(home)[1:-1]}, key = len, reverse = True):
+    variants = {home, home.replace('\\', '/'), home.replace('\\', '\\\\')}
+    for variant in sorted(variants | {json.dumps(v)[1:-1] for v in variants}, key = len, reverse = True):
         text = text.replace(variant, '~')
     return text
 
@@ -241,6 +243,9 @@ def _install_progress(messages, weights, n_files):
     def staged(func, name):
         def run(*args, **kwargs):
             p = _PROGRESS
+            if p['stage'] == 'get_topk' and name in ('assign_candidate_structures', 'assign_annotation_scores_pooled'):
+                # After the prediction, wrap_inference matches and scores the run's structures at other reducing ends: part of that step, not a new one
+                return func(*args, **kwargs)
             p['messages'].put(('stage', (name, STAGES[name].format(os.path.basename(str(args[0]))) if '{}' in STAGES[name] else STAGES[name])))
             if name == 'load_spectra_filepath' and p['key'] != 'tail':
                 p['key'], p['value'] = os.path.normcase(os.path.abspath(str(args[0]))), -1.0
@@ -395,7 +400,7 @@ class GlycanImages(QObject):
 
     def __init__(self):
         super().__init__()
-        self.images, self.pending, self.requests, self.order, self.highlights = {}, set(), queue.PriorityQueue(), itertools.count(), []
+        self.images, self.pending, self.requests, self.order, self.large = {}, set(), queue.PriorityQueue(), itertools.count(), []
         threading.Thread(target = self.render_loop, daemon = True).start()
 
     def get(self, glycan, compact = True, urgent = False, highlight = None):
@@ -404,8 +409,10 @@ class GlycanImages(QObject):
         if not isinstance(glycan, str) or not glycan:
             return QImage()
         key = (glycan, compact) + ((highlight,) if highlight else ())
-        if key in self.images:
-            return self.images[key]
+        # One lookup, as the drawing thread may evict the key between a membership test and the read
+        image = self.images.get(key)
+        if image is not None:
+            return image
         if key not in self.pending or urgent:
             self.pending.add(key)
             self.requests.put((0 if urgent else 1, next(self.order), key))
@@ -432,11 +439,12 @@ class GlycanImages(QObject):
             except Exception:
                 image = QImage()
             self.images[key] = image
-            if len(key) > 2:
-                # Hover highlights are throwaway and a full N-glycan drawing takes ~2.4 MB, so only the newest 30 are kept
-                self.highlights.append(key)
-                if len(self.highlights) > 30:
-                    old = self.highlights.pop(0)
+            if len(key) > 2 or not key[1]:
+                # Drawings with linkages (detail view, previews, hover highlights) take 1.5 MB on average and up to 4 MB, so only the newest 60 are kept:
+                # all of them held 360 MB once every peak of five runs had been looked at
+                self.large.append(key)
+                if len(self.large) > 60:
+                    old = self.large.pop(0)
                     self.images.pop(old, None)
                     self.pending.discard(old)
             self.ready.emit(key)
@@ -637,13 +645,15 @@ class TableModel(QAbstractTableModel):
 
     def __init__(self, images):
         super().__init__()
-        self.images, self.df, self.columns, self.search = images, pd.DataFrame(), [], []
+        self.images, self.df, self.columns, self.search, self.marks = images, pd.DataFrame(), [], [], []
         images.ready.connect(self.image_ready)
 
     def set_table(self, df, columns):
         self.beginResetModel()
         self.df, self.columns = df, columns
         self.search = [' '.join(str(c['text'][r]).lower() for c in columns) for r in range(len(df))]
+        # data() is asked for every role of every cell it sizes and paints, so the excluded and curated flags are not looked up in the dataframe each time
+        self.marks = [(bool(e), bool(c)) for e, c in zip(df['excluded'], df['curation'])]
         self.endResetModel()
 
     def rowCount(self, parent = QModelIndex()):
@@ -661,20 +671,20 @@ class TableModel(QAbstractTableModel):
 
     def data(self, index, role = Qt.DisplayRole):
         column, row = self.columns[index.column()], index.row()
-        if role == Qt.DisplayRole:
+        if role == Qt.ItemDataRole.DisplayRole:
             return column['text'][row]
-        if role == Qt.UserRole:
+        if role == Qt.ItemDataRole.UserRole:
             return column['raw'][row]
         if role == self.BAR_ROLE:
             return column.get('bar', [None] * (row + 1))[row]
-        if role == Qt.ToolTipRole:
+        if role == Qt.ItemDataRole.ToolTipRole:
             return column.get('tips', column['text'])[row] or None
-        if role == Qt.TextAlignmentRole:
-            return int((Qt.AlignRight if column['kind'] in ('number', 'bar') else Qt.AlignLeft) | Qt.AlignVCenter)
-        excluded, curated = bool(self.df['excluded'].iat[row]), bool(self.df['curation'].iat[row])
-        if role == Qt.ForegroundRole and excluded:
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return int((Qt.AlignmentFlag.AlignRight if column['kind'] in ('number', 'bar') else Qt.AlignmentFlag.AlignLeft) | Qt.AlignmentFlag.AlignVCenter)
+        excluded, curated = self.marks[row]
+        if role == Qt.ItemDataRole.ForegroundRole and excluded:
             return QColor(MUTED)
-        if role == Qt.FontRole and (excluded or curated):
+        if role == Qt.ItemDataRole.FontRole and (excluded or curated):
             font = QFont()
             font.setStrikeOut(excluded)
             font.setItalic(curated)
@@ -710,9 +720,12 @@ class TableProxy(QSortFilterProxyModel):
         return not self.needle or all(word in self.sourceModel().search[row] for word in self.needle.split())
 
     def lessThan(self, left, right):
-        a, b = left.data(Qt.UserRole), right.data(Qt.UserRole)
+        # The raw values straight from the source model: going through data() cost two Python calls per comparison
+        raw = self.sourceModel().columns[left.column()]['raw']
+        a, b = raw[left.row()], raw[right.row()]
         if a is None or b is None:
-            return a is None and b is not None
+            # Empty cells go last in either order (Qt sorts in descending order with the arguments swapped)
+            return (a is None) != (b is None) and (a is None) == (self.sortOrder() == Qt.SortOrder.DescendingOrder)
         try:
             return a < b
         except TypeError:
@@ -909,6 +922,10 @@ class SpectrumPanel(QWidget):
         if request_id != self.latest:
             return
         if error:
+            # Nothing of the spectrum shown before stays: its fragment table, or Save image…, which would save that spectrum
+            self.drawn = None
+            self.save.setEnabled(False)
+            self.fragments.setHtml(f'<p style="color:{MUTED}">CandyCrumbs could not annotate this spectrum with {self.request["structure"]}</p>')
             self.message.setText(f'CandyCrumbs could not annotate this spectrum with {self.request["structure"]}.\n\n{error}')
             self.stack.setCurrentWidget(self.message)
             self.summary.setText('')
@@ -1129,6 +1146,9 @@ class SettingsPanel(QScrollArea):
         self.inputs['sample_prep'] = _combo(SAMPLE_PREPS)
         self.sialic = _combo(SIALIC_DERIVATIZATIONS)
         self.sialic.setToolTip(SIALIC_TIP)
+        # As wide as their longest choice, these two made the panel wider than its view, which cut off its right edge (the hint, combo arrows, Restore defaults)
+        for box in (self.inputs['glycan_class'], self.sialic):
+            box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
         self.inputs['trap'].setToolTip('Overridden by the instrument stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
@@ -1499,16 +1519,26 @@ class ResultsView(QWidget):
         info_layout.addWidget(self.facts)
         info_layout.addWidget(_label('Candidates'))
         info_layout.addWidget(self.alternatives, 1)
-        info_layout.addLayout(actions)
         info_scroll = QScrollArea()
         info_scroll.setWidgetResizable(True)
         info_scroll.setFrameShape(QFrame.NoFrame)
         info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         info_scroll.setWidget(info)
-        info_scroll.setMinimumWidth(300)
+        # The curation buttons stay in view below the details, which scroll if they must (inside them, the buttons were out of view at 1440 x 900), and
+        # the candidate list takes the room left instead of its default 192 px height
+        self.alternatives.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        actions.setContentsMargins(10, 0, 10, 8)
+        details = QWidget()
+        details.setMinimumWidth(300)
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.addWidget(info_scroll, 1)
+        details_layout.addLayout(actions)
         self.spectrum = SpectrumPanel()
         self.spectrum_file = QComboBox()
         self.spectrum_file.setToolTip('Run whose MS2 spectrum is shown for this feature')
+        # It may shrink below its longest run name (the list shows them in full): 50-character names made the window at least 1430 px wide
+        self.spectrum_file.setMinimumWidth(80)
         self.spectrum.controls.insertWidget(1, self.spectrum_file)
         # MS3 spectra of the selected peak, pooled per isolated MS2 fragment, annotated as fragments of that fragment
         self.ms3_panel, self.ms3_fragment, self.ms3_tab = SpectrumPanel(), QComboBox(), QSplitter(Qt.Vertical)
@@ -1527,7 +1557,7 @@ class ResultsView(QWidget):
         self.tabs.addTab(self.map, 'Glycan map')
         self.tabs.addTab(self.across, 'Across runs')
         bottom = QSplitter(Qt.Horizontal)
-        bottom.addWidget(info_scroll)
+        bottom.addWidget(details)
         bottom.addWidget(self.tabs)
         bottom.setStretchFactor(1, 1)
         bottom.setSizes([380, 900])
@@ -1542,6 +1572,10 @@ class ResultsView(QWidget):
         self.experiment.currentIndexChanged.connect(self.show_experiment)
         self.dataset.currentIndexChanged.connect(lambda: self.show_dataset())
         self.search.textChanged.connect(self.filter)
+        # A filter that hides every peak empties the detail pane, which kept showing the hidden peak (Exclude and Assign acted on it, and cleared the
+        # filter); once peaks match again, the first one is shown
+        self.search.textChanged.connect(lambda: self.table.selectionModel().hasSelection() or self.select_row(
+            self.proxy.mapToSource(self.proxy.index(0, 0)).row() if self.proxy.rowCount() else None))
         self.table.selectionModel().selectionChanged.connect(self.selection_changed)
         self.table.customContextMenuRequested.connect(self.context_menu)
         self.alternatives.itemClicked.connect(self.pick_alternative)
@@ -1674,14 +1708,15 @@ class ResultsView(QWidget):
         self.model.set_table(df, columns)
         for c, column in enumerate(columns):
             self.table.setItemDelegateForColumn(c, self.structure_delegate if column['kind'] == 'structure' else self.bar_delegate if column['kind'] == 'bar' else None)
-        self.table.resizeColumnsToContents()
-        self.table.setColumnWidth(0, 250)
-        for c, column in enumerate(columns):
-            if column['kind'] == 'bar':
-                self.table.setColumnWidth(c, max(90, self.table.columnWidth(c)))
-            elif column['title'] == 'Composition':
-                self.table.setColumnWidth(c, min(self.table.columnWidth(c), 210))
+        # A refresh after curation keeps the columns as they are, also as resized by hand; measuring them again took ~90% of its time
         if keep_row is None:
+            self.table.resizeColumnsToContents()
+            self.table.setColumnWidth(0, 250)
+            for c, column in enumerate(columns):
+                if column['kind'] == 'bar':
+                    self.table.setColumnWidth(c, max(90, self.table.columnWidth(c)))
+                elif column['title'] == 'Composition':
+                    self.table.setColumnWidth(c, min(self.table.columnWidth(c), 210))
             self.table.sortByColumn(2, Qt.AscendingOrder)
         else:
             self.table.sortByColumn(sort_column, sort_order)
@@ -1946,6 +1981,10 @@ class ResultsView(QWidget):
             colorbar = figure.colorbar(points, cax = figure.add_axes([0.89, 0.14, 0.02, 0.8]))
             colorbar.set_label(color_label, fontsize = 8)
             colorbar.ax.tick_params(labelsize = 7)
+            if self.dataset.currentData() == FEATURES:
+                from matplotlib.ticker import MaxNLocator
+                # A number of runs: whole numbers only (it was labeled 1.2, 1.4, ..., or 0.925 to 1.075 when every feature had MS2 in one run)
+                colorbar.ax.yaxis.set_major_locator(MaxNLocator(integer = True, min_n_ticks = 1))
         # The selection marker is animated: a full draw leaves it out (and keeps that background), so selecting another peak only blits the marker
         self.highlight = ax.scatter([], [], s = 0, facecolors = 'none', edgecolors = INK, linewidths = 1.4, animated = True)
         ax.set_xlabel('Retention time (min)', fontsize = 8)
@@ -2249,9 +2288,10 @@ class CrumbsTab(QWidget):
         self.annotate()
 
     def annotate(self):
-        # A line split by tabs or semicolons without any '.' has decimal commas (Excel or CSV in comma-decimal locales): 1234,5678<Tab>100
+        # A line split by tabs or semicolons without any '.' has decimal commas (Excel or CSV in comma-decimal locales): 1234,5678<Tab>100; lines that start
+        # with text are no peaks (headers, and the TITLE=, PEPMASS=, CHARGE= lines of a pasted mgf spectrum, whose numbers became peaks)
         peaks = [[float(x) for x in re.findall(r'\d+(?:\.\d+)?(?:[eE][-+]?\d+)?', line.replace(',', '.') if '.' not in line and re.search(r'[\t;]', line) else line)[:2]]
-                 for line in self.peaks.toPlainText().splitlines()]
+                 for line in self.peaks.toPlainText().splitlines() if re.match(r'\s*\.?\d', line)]
         peaks = [p for p in peaks if p and p[0] > 0]
         if not self.structure.text().strip() or not peaks:
             self.spectrum.show_message('Enter a structure and at least one peak')
@@ -2637,8 +2677,8 @@ class MainWindow(QMainWindow):
         threading.Thread(target = work, daemon = True).start()
 
     def image_ready(self, key):
-        image = self.images.images[key]
-        if image.isNull():
+        image = self.images.images.get(key)
+        if image is None or image.isNull():
             return
         if key == ('Fuc(a1-2)Gal(b1-3)GalNAc', False):
             pixmap = QPixmap.fromImage(image)
@@ -2667,8 +2707,12 @@ class MainWindow(QMainWindow):
         sessions = [p for p in paths if p.lower().endswith('.candycrunch')]
         if sessions:
             self.open_session(sessions[0])
+        count = len(self.settings.paths())
         self.settings.add_paths([p for p in paths if p not in sessions])
         self.tabs.setCurrentWidget(self.split)
+        # Files CandyCrunch cannot read (e.g., .wiff, .pdf) and folders without runs used to be dropped without a word
+        if len(paths) > len(sessions) and len(self.settings.paths()) == count:
+            self.statusBar().showMessage('No new runs added (CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mgf, and .xlsx made by extract_spectra)', 10000)
 
     def run(self):
         # The results shown are replaced once this run is done
@@ -2824,8 +2868,13 @@ class MainWindow(QMainWindow):
                                               'CandyCrunch results (*.candycrunch)')
         if not path:
             return False
-        with open(path, 'wb') as file:
-            pickle.dump(self.results.session, file)
+        try:
+            with open(path, 'wb') as file:
+                pickle.dump(self.results.session, file)
+        except OSError as error:
+            # A folder without write access or a full disk is no crash; returning False keeps the window (and the curation) open
+            QMessageBox.critical(self, 'Save results', f'Could not write {path}:\n{error}')
+            return False
         self.results.dirty = False
         self.statusBar().showMessage(f'Saved {os.path.basename(path)}', 6000)
         return True

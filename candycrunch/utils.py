@@ -324,7 +324,8 @@ def read_mgf(filepath):
    | tuple, charge as a list of ints, rtinseconds as float), m/z array and intensity array
    """
     header, params, started = {}, None, False
-    with open(filepath, encoding = 'utf-8', errors = 'replace') as f:
+    # utf-8-sig drops a byte order mark, which hid the first BEGIN IONS (its params then became the defaults of every other spectrum)
+    with open(filepath, encoding = 'utf-8-sig', errors = 'replace') as f:
         for line in f:
             sline = line.strip()
             if sline == 'BEGIN IONS':
@@ -352,6 +353,6 @@ def read_mgf(filepath):
             elif '=' in sline:
                 key, value = sline.split('=', 1)
                 params[key.lower()] = value.strip()
-            elif len(sline.split()) > 1:
-                mzs.append(float(sline.split()[0]))
-                ints.append(float(sline.split()[1]))
+            elif len(parts := sline.split()) > 1:
+                mzs.append(float(parts[0]))
+                ints.append(float(parts[1]))

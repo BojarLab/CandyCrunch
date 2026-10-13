@@ -2,7 +2,6 @@
 
 import argparse
 import os
-from candycrunch.prediction import wrap_inference, wrap_inference_batch
 
 def str_to_bool(value):
     if value.lower() in ('true', '1', 'yes'):
@@ -13,7 +12,7 @@ def str_to_bool(value):
 
 def main():
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
-    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker timsTOF .d folders, .mzML, .mzXML, .mgf, .xlsx from extract_spectra) and/or folders of them; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
+    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker .d folders (timsTOF, ion traps), .mzML, .mzXML, .mgf, .xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mgf files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
@@ -37,7 +36,7 @@ def main():
     parser.add_argument('--filter_out', help='Composition elements to filter out/ignore, space-separated', type=str, nargs='*', required=False)
     parser.add_argument('--supplement', help='Whether to use biosynthetic modeling for zero-shot prediction', type=str_to_bool, required=False)
     parser.add_argument('--experimental', help='Whether to use database searches for zero-shot prediction', type=str_to_bool, required=False)
-    parser.add_argument('--taxonomy_level', help='Taxonomic level to restrict database searches to', type=str, required=False)
+    parser.add_argument('--taxonomy_level', help='Taxonomic level to restrict database searches to', type=str, choices=['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain'], required=False)
     parser.add_argument('--taxonomy_filter', help='Taxon at taxonomy_level to restrict database searches to', type=str, required=False)
     parser.add_argument('--intra_cat_thresh', help='Several files only: minutes the RT of a structure can differ from the mean of its group', type=float, required=False)
     parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition in each file; default: 5', type=int, default=5)
@@ -47,11 +46,16 @@ def main():
     args = parser.parse_args()
     if not args.output.endswith(('.csv', '.xlsx')):
         parser.error('--output has to end with .csv or .xlsx')
+    if not os.path.isdir(os.path.dirname(os.path.abspath(args.output))):
+        parser.error(f'the folder of --output {args.output} does not exist')
     # A timsTOF .d folder is one run (a shell completes it with a trailing separator); any other folder gives its runs
     filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.d', '.mzml', '.mzxml', '.mgf'))]
                                                                               if os.path.isdir(p) and not p.lower().endswith('.d') else [p])]
     if not filepaths:
         parser.error('no .raw/.d/.mzML/.mzXML/.mgf files found in --spectra_filepath')
+    missing = [f for f in filepaths if not os.path.exists(f)]
+    if missing:
+        parser.error(f"not found: {', '.join(missing)}")
     if len(filepaths) > 1 and args.intra_cat_thresh is None:
         parser.error('--intra_cat_thresh is required when processing several files')
     args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}
@@ -62,6 +66,8 @@ def main():
         args_dict['filter_out'] = set(args.filter_out)
     if args.reducing_end_variants is not None:
         args_dict['reducing_end_variants'] = {k: v for k, v in {'free': 0, 'ethyl glycoside': 'C2H4'}.items() if k.replace(' ', '_') in args.reducing_end_variants}
+    # Imported only now: it loads the model, which --help and argument errors do not need, and every process of --n_jobs imports this module again
+    from candycrunch.prediction import wrap_inference, wrap_inference_batch
     if len(filepaths) == 1:
         tables = [(args.output, wrap_inference(filepaths[0], n_jobs=args.n_jobs, **args_dict))]
     else:
