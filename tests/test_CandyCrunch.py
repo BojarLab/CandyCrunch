@@ -166,8 +166,18 @@ test_params = [
     for combo in product(*[v for v in extra_param_dict.values()])
 ]
 
-@pytest.mark.parametrize("test_params", test_params)
-def test_candycrunch_accuracy(test_params, result_collector, input_format, verbose, test_files = None):
+
+def pytest_generate_tests(metafunc):
+    # With --input-format both, the .xlsx and the MS1 files (.mzML/.mzXML/.raw) of a dataset are separate tests, so pytest-xdist can run them in parallel;
+    # their scores were already logged and regression-checked per format
+    if metafunc.function.__name__ == 'test_candycrunch_accuracy':
+        input_format = metafunc.config.getoption('--input-format')
+        groups = ['xlsx', 'mzml'] if input_format == 'both' else [input_format]
+        metafunc.parametrize('test_params, file_group', [(p, g) for p in test_params for g in groups],
+                             ids = [f"{p['test_dict']['name']}-{p['test_dict']['args']['glycan_class']}-{g}" for p in test_params for g in groups])
+
+
+def test_candycrunch_accuracy(test_params, file_group, result_collector, input_format, verbose, test_files = None):
     if result_collector.param_names is None:
         result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
     start_time = time.time()  # Start timing
@@ -179,11 +189,12 @@ def test_candycrunch_accuracy(test_params, result_collector, input_format, verbo
         test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{folder}")]
     test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
     # mzXML and Thermo .raw files count as mzML (raw spectra with MS1), so they never enter an xlsx run
-    if input_format == "xlsx":
+    if file_group == "xlsx":
         test_files = [x for x in test_files if not x.lower().endswith(MS1_FORMATS)]
-    elif input_format == "mzml":
+    else:
         mzml = [x for x in test_files if x.lower().endswith(MS1_FORMATS)]
-        test_files = mzml if mzml else test_files  # fall back to xlsx if no mzML present
+        # mzml alone falls back to the xlsx of a dataset without an MS1 file; with both, its xlsx test already runs it
+        test_files = mzml if mzml or input_format == "both" else test_files
     if not test_files:
         pytest.skip(f"no test file for {test_dict['name']} {test_dict['args']}")
     scores_by_key = defaultdict(list)
@@ -266,6 +277,16 @@ def test_candycrunch_batch(batch_set, result_collector, verbose):
     assert {'top1_pred', 'm/z', 'RT', 'n_files_ms2'}.issubset(combined.columns)
     assert all(label in combined.columns and f'evidence_{label}' in combined.columns for label in labels)
     assert (combined['n_files_ms2'] > 0).all()
+
+
+def test_reducing_end_check(capsys):
+    # The example run (reduced PGM O-glycans) set to unreduced or 2-AB-labeled glycans: the reducing end check finds the reduced reducing end and
+    # takes it over, so the run gives the glycans of the reduced run (without the check, almost none are predicted)
+    example = str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx')
+    outs = {m: wrap_inference(example, 'O', modification = m) for m in ['reduced', 'custom', '2AB']}
+    assert capsys.readouterr().out.count("Overriding the reducing end to 'reduced'") == 2
+    reduced = set(outs['reduced']['top1_pred'].dropna())
+    assert len(reduced) >= 15 and all(len(set(outs[m]['top1_pred'].dropna()) & reduced) >= 0.8 * len(reduced) for m in ['custom', '2AB'])
 
 
 def test_xic_quantification():

@@ -8,6 +8,11 @@ import os
 import pandas as pd
 from datetime import datetime
 
+# Each pytest-xdist worker runs its own pipeline, so the workers share the cores instead of each spawning a torch thread per core
+if os.environ.get('PYTEST_XDIST_WORKER_COUNT'):
+    import torch
+    torch.set_num_threads(max(1, (os.cpu_count() or 1) // int(os.environ['PYTEST_XDIST_WORKER_COUNT'])))
+
 # Version of evaluate_predictions in test_CandyCrunch.py; changing the metric moves scores like a ground-truth edit, so it is part of each dataset's key
 METRIC_VERSION = '-hungarian-halfopen'
 
@@ -69,7 +74,22 @@ class ResultCollector:
         # Save to log file
         with open(self.log_file, 'w') as f:
             json.dump(final_results, f, indent=4)
-    
+
+    def export(self):
+        """Results of a pytest-xdist worker, as plain types for the controller, which prints the tables and saves the log"""
+        return {'param_names': self.param_names, 'gt_hashes': self.gt_hashes, 'regressed': [list(x) for x in self.regressed],
+                'results': [[name, list(params), [float(s) for s in scores]] for name, d in self.dict_results.items() for params, scores in d.items()],
+                'full': [[name, list(params), [[float(x) for x in s] for s in scores]] for name, d in self.dict_full_results.items() for params, scores in d.items()]}
+
+    def merge(self, payload):
+        self.param_names = self.param_names or payload['param_names']
+        self.gt_hashes.update(payload['gt_hashes'])
+        self.regressed.update(tuple(x) for x in payload['regressed'])
+        for name, params, scores in payload['results']:
+            self.dict_results[name][tuple(params)].extend(scores)
+        for name, params, scores in payload['full']:
+            self.dict_full_results[name][tuple(params)].extend(scores)
+
     def check_performance(self, test_dict_name, param_key, current_score, gt):
         """Check that the current score has not dropped below the previous run's on the same ground truth"""
         # Editing the ground truth (e.g., adding newly found glycans) moves scores without any code change, so baselines are tied to its content
@@ -133,9 +153,6 @@ class ResultCollector:
     def get_table(self):
         if not self.dict_results:
             return "No results collected!"
-        # Print final results for the last test_dict
-        if self.current_dict:
-            self.print_dict_results(self.current_dict)
         self.save_current_results()
         # Print overall results
         print("\n=== Overall Performance Results ===")
@@ -200,13 +217,45 @@ def pytest_configure(config):
     config.collector = collector
 
 
-def pytest_sessionfinish():
+# Without timings from an earlier run (pytest's cache), the pipeline tests are assumed to be the slow ones
+DEFAULT_DURATIONS = {'test_candycrunch_batch': 300, 'test_candycrunch_accuracy': 60}
+test_durations = {}
+
+
+def pytest_collection_modifyitems(config, items):
+    # Longest tests first, each followed by a short one: with pytest-xdist (--dist load --maxschedchunk 1, as in pytest.ini) every worker holds one
+    # running and one queued test, so this hands the slow tests to different workers as they become free instead of queueing two behind each other
+    durations = config.cache.get('candycrunch/durations', {}) if getattr(config, 'cache', None) else {}
+    est = {item.nodeid: durations.get(item.nodeid, DEFAULT_DURATIONS.get(getattr(item, 'originalname', ''), 0)) for item in items}
+    slow = sorted([item for item in items if est[item.nodeid] >= 10], key = lambda item: -est[item.nodeid])
+    fast = [item for item in items if est[item.nodeid] < 10]
+    items[:] = [x for pair in zip(slow, fast) for x in pair] + slow[len(fast):] + fast[len(slow):]
+
+
+def pytest_runtest_logreport(report):
+    if report.when == 'call':
+        test_durations[report.nodeid] = report.duration
+
+
+@pytest.hookimpl(optionalhook = True)
+def pytest_testnodedown(node, error):
+    # Controller of a pytest-xdist run: collect each worker's results
+    payload = getattr(node, 'workeroutput', {}).get('candycrunch')
+    if payload:
+        collector.merge(json.loads(payload))
+
+
+def pytest_sessionfinish(session):
+    if hasattr(session.config, 'workerinput'):
+        session.config.workeroutput['candycrunch'] = json.dumps(collector.export())
+        return
+    if test_durations and getattr(session.config, 'cache', None):
+        session.config.cache.set('candycrunch/durations', {**session.config.cache.get('candycrunch/durations', {}), **test_durations})
     print("\n=== Final Summary ===")
     # Print tables for each test_dict
     for dict_name in collector.dict_results.keys():
         collector.print_dict_results(dict_name)
-    # Print overall results
-    print("\n=== Overall Performance Results ===")
+    # Print overall results (get_table prints its own header)
     print(collector.get_table())
     print()
     if collector.previous_results:

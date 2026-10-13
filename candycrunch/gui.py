@@ -467,6 +467,19 @@ class Annotator(QObject):
                 # Drawing a spectrum nobody waits for any more only delays the newer one
                 if self.request[0] != request_id:
                     continue
+                # The peaks supporting each residue of a structure (not of a composition, glycopeptide, or MS3 spectrum) are found before drawing (up to a
+                # second for large glycans), so the spectrum labels them whatever their intensity and draws their fragments first
+                support = None
+                if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get('ms3_precursor') is None:
+                    try:
+                        support = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])), charge = request['charge'],
+                                                  candidates = request['candidates'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
+                                                  sialic_derivatization = request['kwargs'].get('sialic_derivatization'))
+                    except Exception:
+                        support = {'residues': [], 'candidates': []}
+                    if self.request[0] != request_id:
+                        continue
+                diagnostic = sorted({s[0] for e in support['residues'] for s in e['support']} | {s[0] for c in support['candidates'] for s in c['support']}) if support else None
                 figure = Figure(figsize = request['figsize'], dpi = 100)
                 FigureCanvasAgg(figure)
                 # Margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it
@@ -475,7 +488,11 @@ class Annotator(QObject):
                 with MPL_LOCK:
                     hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
                                                            charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                           ax = figure.add_subplot(), draw_glycans = request['cartoons'], hit_dict = hit_dict, **request['kwargs'])
+                                                           ax = figure.add_subplot(), draw_glycans = request['cartoons'], hit_dict = hit_dict,
+                                                           diagnostic = diagnostic,
+                                                           **request['kwargs'])
+                    # Save image… draws the spectrum again with the same diagnostic peaks
+                    figure.diagnostic = diagnostic
                     if request['ms3']:
                         # A triangle under every peak that was isolated for MS3 and an invisible stick over that peak, both clickable
                         mzs, ints = np.array(request['mzs']), np.array(request['intensities'])
@@ -486,15 +503,7 @@ class Annotator(QObject):
                                                          clip_on = False, picker = True),
                                               ax.vlines(xs, 0, [ints[k] / (ints.max() or 1) * 100 if h else 0 for k, h in zip(near, hit)], colors = 'none', picker = 5))
                 self.done.emit(request_id, figure, hit_dict, '')
-                # The peaks supporting each residue of a structure (not of a composition, glycopeptide, or MS3 spectrum) follow the spectrum, as they take
-                # up to a second for large glycans
-                if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get('ms3_precursor') is None and self.request[0] == request_id:
-                    try:
-                        support = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])), charge = request['charge'],
-                                                  candidates = request['candidates'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                  sialic_derivatization = request['kwargs'].get('sialic_derivatization'))
-                    except Exception:
-                        support = None
+                if support is not None:
                     self.support.emit(request_id, support)
             except Exception as error:
                 try:
@@ -834,7 +843,7 @@ class SpectrumPanel(QWidget):
         for action in self.toolbar.actions():
             if action.text() == 'Save':
                 self.toolbar.removeAction(action)
-        self.drawn = (dict(self.request), hit_dict)
+        self.drawn = (dict(self.request), hit_dict, getattr(figure, 'diagnostic', None))
         self.save.setEnabled(True)
         self.controls.insertWidget(0, self.toolbar)
         self.holder_layout.addWidget(self.canvas)
@@ -884,7 +893,7 @@ class SpectrumPanel(QWidget):
             return
         if not os.path.splitext(path)[1]:
             path += re.search(r'\*(\.\w+)', chosen).group(1)
-        request, hit_dict = self.drawn
+        request, hit_dict, diagnostic = self.drawn
         width, height = 12.0, 6.0 if request['cartoons'] else 4.6
         figure = Figure(figsize = (width, height), dpi = 100)
         FigureCanvasAgg(figure)
@@ -897,7 +906,7 @@ class SpectrumPanel(QWidget):
             with MPL_LOCK:
                 plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
                                         mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = figure.add_subplot(), draw_glycans = request['cartoons'],
-                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, **request['kwargs'])
+                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, **request['kwargs'])
                 figure.savefig(path, dpi = 300, bbox_inches = 'tight')
         except Exception as error:
             QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}')
@@ -1515,7 +1524,7 @@ class ResultsView(QWidget):
         notes_tip = 'Notes from the pipeline, adducts, and your curation'
         columns = [{'title': 'Structure', 'kind': 'structure', 'raw': [s if isinstance(s, str) else None for s in structures],
                     'text': [s if isinstance(s, str) else '' for s in structures]},
-                   {'title': 'Composition', 'kind': 'text', 'raw': compositions, 'text': compositions},
+                   {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions},
                    _number_column('m/z', df['m/z'], 4), _number_column('z', df['charge'], 0, 'Precursor charge'), _number_column('RT', df['RT'], 2, 'Retention time (min)')]
         if label == FEATURES:
             columns.append(_number_column('MS2 runs', df['n_files_ms2'], 0, 'Runs in which this feature has MS2 evidence'))
@@ -2657,8 +2666,8 @@ class MainWindow(QMainWindow):
         self.results.set_results(payload)
         self.pages.setCurrentWidget(self.results)
         self.save_action.setEnabled(True)
-        # wrap_inference(_batch) processes files as another glycan class if their predictions say they hold that class, which the user has to know
-        notes = [line.removeprefix('WARNING: ') for line in self.log.toPlainText().splitlines() if 'the glycan class' in line]
+        # wrap_inference(_batch) processes files as another glycan class or with another reducing end if their predictions say so, which the user has to know
+        notes = [line.removeprefix('WARNING: ') for line in self.log.toPlainText().splitlines() if 'the glycan class' in line or 'the reducing end' in line]
         if notes:
             QMessageBox.warning(self, 'CandyCrunch', '\n\n'.join(notes))
         QApplication.alert(self)

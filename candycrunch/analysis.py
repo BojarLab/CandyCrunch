@@ -3111,6 +3111,7 @@ OXONIUM_IONS = {
 }
 PEAK_COLORS = {'oxonium': '#b8860b', 'backbone_n': '#1f77b4', 'backbone_c': '#2ca02c',
                'glycopeptide': '#d62728', 'glycan': '#d62728'}
+DIAGNOSTIC_COLOR = '#8c5bb5'
 
 
 def identify_oxonium(mz, tolerance_ppm = 20):
@@ -3258,7 +3259,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                             disable_global_mods = False, prior_weight = 1.0, charge = None, ax = None,
                             annotate_top_n = None, annotation_threshold = 0.05, figsize = None,
                             draw_glycans = True, glycan_zoom = 0.25, max_glycan_cartoons = 8,
-                            label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, mz_labels = False, **kwargs):
+                            label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, mz_labels = False, diagnostic = None, **kwargs):
     """Plots an MS2 spectrum annotated with CandyCrumbs fragment assignments\n
     | Arguments:
     | :-
@@ -3278,13 +3279,16 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | figsize (tuple): figure size if creating a new figure; default:None (chosen for the input type)
     | draw_glycans (bool): whether to add SNFG cartoons for glycan fragments; default:True
     | glycan_zoom (float): scale of the SNFG cartoons; default:0.25
-    | max_glycan_cartoons (int): how many cartoons to draw, most intense first; default:8
+    | max_glycan_cartoons (int): how many cartoons to draw: fragments of diagnostic peaks first, then single glycosidic cleavages, then the rest, most
+    |                            intense first within each; default:8
     | label_fontsize (int): font size of the peak labels; default:6
     | max_label_levels (int): how many times to push a label clear of its neighbors before dropping it; default:6
     | filepath (string): where to save the figure; default:'' (not saved)
     | hit_dict (dict): CandyCrumbs output for these peaks and settings if already computed (e.g., outside a drawing lock); default:None (computed here)
     | mz_labels (bool): whether each label also gives the peak's observed m/z, and unannotated peaks above annotation_threshold get their m/z in grey where
     |                   there is room; default:False
+    | diagnostic (list): m/z (to 2 decimals or better) of peaks that tell this structure apart from its alternatives (e.g., the supporting peaks of
+    |                    supporting_ions); they are labeled whatever their intensity, in lilac, and their fragments are drawn as cartoons first; default:None
     | **kwargs: passed straight to CandyCrumbs, e.g., mass_threshold_ppm, fragmentation_method, max_global_mods\n
     | Returns:
     | :-
@@ -3341,12 +3345,13 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         z = hit['Fragment charges'][0]
         if abs(z) > 1:
             label += f" [{'+' if z > 0 else ''}{z}]"
-        peaks.append((mz, rel_int, label, kind, dc_name))
+        rank = 0 if diagnostic is not None and np.any(np.isclose(np.asarray(diagnostic, dtype = float), mz, rtol = 0, atol = 0.0051)) else 1 if len(shown) == 1 and re.match(r'[BCYZ]_\d', str(shown[0])) else 2
+        peaks.append((mz, rel_int, label, kind, dc_name, rank))
     if annotate_top_n is not None:
         keep = {id(p) for p in sorted(peaks, key = lambda x: -x[1])[:annotate_top_n]}
         peaks = [p for p in peaks if id(p) in keep]
-    for mz, rel_int, _, kind, _ in peaks:
-        ax.vlines([mz], 0, rel_int, colors = PEAK_COLORS.get(kind, 'tab:red'), linewidth = 1.3)
+    for mz, rel_int, _, kind, _, rank in peaks:
+        ax.vlines([mz], 0, rel_int, colors = DIAGNOSTIC_COLOR if rank == 0 else PEAK_COLORS.get(kind, 'tab:red'), linewidth = 1.3)
     # Each label sits directly above its peak, lifted only as far as its neighbors require, with a dotted
     # leader whenever it had to move; anything that cannot be placed at all is dropped rather than overlaid
     figure = ax.figure
@@ -3354,12 +3359,13 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     renderer = figure.canvas.get_renderer()
     axes_box = ax.get_window_extent(renderer)
     placed = []
-    # Annotated peaks are labeled first, most intense first; with mz_labels, unannotated peaks then get their m/z in grey wherever room is left
-    labels = [(mz, rel_int, f'{mz:.2f}  {label}' if mz_labels else label, PEAK_COLORS.get(kind, 'tab:red')) for mz, rel_int, label, kind, _ in sorted(peaks, key = lambda x: -x[1])]
+    # Annotated peaks are labeled first, most intense first; with mz_labels, unannotated peaks then get their m/z in gray wherever room is left
+    labels = [(mz, rel_int, f'{mz:.2f}  {label}' if mz_labels else label, DIAGNOSTIC_COLOR if rank == 0 else PEAK_COLORS.get(kind, 'tab:red'))
+              for mz, rel_int, label, kind, _, rank in sorted(peaks, key = lambda x: (x[5] > 0, -x[1]))]
     if mz_labels:
         labels += [(mz, rel_int, f'{mz:.2f}', 'grey') for mz, rel_int in sorted(zip(mz_values, rel_intensities), key = lambda x: -x[1]) if not hit_dict.get(mz)]
     for mz, rel_int, label, color in labels:
-        if rel_int < annotation_threshold * 100:
+        if rel_int < annotation_threshold * 100 and color != DIAGNOSTIC_COLOR:
             continue
         text = place_peak_label(ax, renderer, mz, rel_int, label, color, placed,
                                 (axes_box.y0, axes_box.y1), label_fontsize, max_label_levels)
@@ -3384,15 +3390,16 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         # leader from every peak it explains: an oxonium series shares a structure and differs only by a
         # neutral loss, so a box per loss repeats the same picture and drags them away from their peaks
         groups = {}
-        for mz, rel_int, _, kind, dc_name in peaks:
+        for mz, rel_int, _, kind, dc_name, rank in peaks:
             # A leader to a noise-level peak is a line across the plot for nothing, so a cartoon only
             # claims the peaks that were worth labeling in the first place
-            if kind not in ('oxonium', 'glycan') or rel_int < annotation_threshold * 100:
+            if kind not in ('oxonium', 'glycan') or (rel_int < annotation_threshold * 100 and rank > 0):
                 continue
             frag_iupac = fragment_to_fragIUPAC(glycan_string, dc_name)
             if frag_iupac is not None:
-                groups.setdefault(frag_iupac, []).append((rel_int, mz))
-        ranked = sorted(groups.items(), key = lambda group: -max(group[1])[0])[:max_glycan_cartoons]
+                groups.setdefault(frag_iupac, []).append((rel_int, mz, rank))
+        # Diagnostic fragments first, then single glycosidic cleavages (the cartoons that say something), then cross-rings and multiple cleavages
+        ranked = sorted(groups.items(), key = lambda group: (min(m[2] for m in group[1]), -max(group[1])[0]))[:max_glycan_cartoons]
         mz_per_pixel = (ax.get_xlim()[1] - ax.get_xlim()[0]) / max(axes_box.width, 1)
         rows, row_ends = [1.08, 1.26], [-np.inf, -np.inf]
         for frag_iupac, members in sorted(ranked, key = lambda group: max(group[1])[1]):
@@ -3407,7 +3414,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                                          xycoords = blended, frameon = True, annotation_clip = False,
                                          bboxprops = dict(boxstyle = 'round,pad=0.15', fc = 'white',
                                                           ec = '#cccccc', lw = 0.5)))
-            for rel_int, mz in members:
+            for rel_int, mz, _ in members:
                 ax.plot([mz, x], [rel_int / max(rel_intensities) * 0.95, rows[row] - 0.05], transform = blended,
                         color = '#cccccc', lw = 0.5, ls = '--', clip_on = False)
             row_ends[row] = x + half_width
