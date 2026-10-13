@@ -13,8 +13,13 @@ if os.environ.get('PYTEST_XDIST_WORKER_COUNT'):
     import torch
     torch.set_num_threads(max(1, (os.cpu_count() or 1) // int(os.environ['PYTEST_XDIST_WORKER_COUNT'])))
 
-# Version of evaluate_predictions in test_CandyCrunch.py; changing the metric moves scores like a ground-truth edit, so it is part of each dataset's key
-METRIC_VERSION = '-hungarian-halfopen'
+# Workers inherit this from the main process, which loads this file before it starts them: with a fixed hash seed, set iteration order (which leaks into
+# impute's variant choice and subgraph order) and with it every seeded run repeats exactly
+os.environ.setdefault('PYTHONHASHSEED', '0')
+
+# Version of evaluate_predictions in test_CandyCrunch.py and of how runs are made; changing either moves scores like a ground-truth edit, so it is part of
+# each dataset's key ('-seeded': every run is seeded since 2026-10-13, so the unseeded baselines before it do not compare)
+METRIC_VERSION = '-hungarian-halfopen-seeded'
 
 
 def pytest_addoption(parser):
@@ -100,7 +105,7 @@ class ResultCollector:
             param_key_str = str(param_key[1:])
             if param_key_str in prev_scores:
                 prev_score = prev_scores[param_key_str]
-                # Unseeded runs differ by up to 0.02 per dataset, so only a ~2x larger drop is a regression
+                # Runs are seeded, so a drop comes from the code; the margin dates from unseeded runs, which differed by up to 0.02 per dataset (one of milk's 16 peaks is 0.04)
                 if current_score < prev_score - 0.04:
                     self.regressed.add((test_dict_name, param_key_str))
                     raise AssertionError(

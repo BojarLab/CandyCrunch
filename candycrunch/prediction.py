@@ -3113,6 +3113,20 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
                 df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
                 database_rows.add(df_out.index[i])
+    else:
+        # The model knows few Neu5Gc glycans: in ion-trap runs it mostly has no structure of their composition in its top 25 and prefers the composition
+        # with Hex + dHex instead (1 Da heavier, inside the precursor tolerance), so a spectrum without any model prediction whose candidate composition with
+        # Neu5Gc, at a charge of at most 2, is backed up by more than 10 fragment annotations takes that composition's database structure. Not for other
+        # compositions: there it filled O-glycans into N runs and junk into O runs
+        has_pred = np.array([bool(p) for p in df_out['predictions']])
+        ok = (~has_pred & ~df_out['cross_class'].values & (df_out['annotation_score'].values >= 10) & (df_out['charge'].values <= 2)
+              & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']])
+              & np.array([isinstance(c, dict) and 'Neu5Gc' in c for c in df_out['composition']]))
+        for i in df_out.reset_index(drop = True)[ok].groupby('spec_id')['annotation_score'].idxmax().values if ok.any() else []:
+            g = df_out['candidate_structure'].iloc[i]
+            df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
+            df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
+            database_rows.add(df_out.index[i])
     df_out['charge'] = [c * multiplier for c in df_out['charge']]
     df_out['RT'] = df_out['RT'].round(2)
     # Extract & sort the top 100 fragments by intensity
@@ -3274,6 +3288,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             replaced = set(zip(np.round(df_var.index.values, 5), df_var['RT']))
             df_var.index = pd.Index(df_var.index.values - df_var['re_offset'].values / np.abs(df_var['charge'].values), name = df_out.index.name)
             df_out = pd.concat([df_out[[key not in replaced for key in zip(np.round(df_out.index.values, 5), df_out['RT'])]].assign(re_offset = 0.0), df_var])
+        else:
+            # A run without side products carries the columns too: wrap_inference_batch concatenates runs, which gave such a run NaN offsets (NaN m/z, and a ZeroDivisionError in the MS1 quantification)
+            df_out = df_out.assign(re_offset = 0.0, reducing_end = None)
     if not _return_intermediate:
         # A wrong reducing end shows in the run itself: few model predictions among its most intense clusters
         strong = df_out[df_out['evidence'] == 'strong'] if 'evidence' in df_out.columns else df_out.iloc[:0]
@@ -3410,9 +3427,14 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Worker processes load the default model themselves, so only a custom model has to be sent to them
     if model is not candycrunch:
         inference_kwargs['model'] = model
-    # The reducing end check of wrap_inference, on the first file: all files are then processed with the reducing end it takes over
-    best, _ = check_reducing_end(spectra_filepath_list[0], glycan_class, {**inference_kwargs, 'model': model, 'df_use': df_use},
-                                 loaded = load_spectra_filepath(spectra_filepath_list[0]))
+    # The reducing end check of wrap_inference, on the first file: all files are then processed with the reducing end it takes over. The file is read once,
+    # with its MS1 data, which the check does not need; when files are processed one after the other, the first one's prediction then takes it as read
+    first = load_spectra_filepath(spectra_filepath_list[0], extract_ms1 = spectra_filepath_list[0].lower().endswith(('.mzml', '.mzxml', '.raw', '.d')))
+    ms1 = first.attrs.pop('ms1', None)
+    best, _ = check_reducing_end(spectra_filepath_list[0], glycan_class, {**inference_kwargs, 'model': model, 'df_use': df_use}, loaded = first)
+    if ms1 is not None:
+        first.attrs['ms1'] = ms1
+    first, ms1 = ([first] if n_jobs <= 1 else []), None
     if best is not None:
         modification, mass_tag, mass_dic = (None if best[0] == 'custom' else best[0]), best[1], None
         inference_kwargs.update(modification = best[0], mass_tag = best[1])
@@ -3429,14 +3451,15 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 break
             use_c = copy.deepcopy(df_glycan[df_glycan.glycan_type == c])
             use_c = use_c[use_c[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
-        tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), {**inference_kwargs, 'glycan_class': c, 'df_use': use_c}) for i, fp in
-                 enumerate(spectra_filepath_list)]
+        tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), {**inference_kwargs, 'glycan_class': c, 'df_use': use_c, **({'_loaded': first.pop()} if i == 0 and first else {})})
+                 for i, fp in enumerate(spectra_filepath_list)]
         if n_jobs > 1:
             with ProcessPoolExecutor(max_workers = n_jobs, initializer = torch.set_num_threads,
                                      initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
                 runs[c] = (list(pool.map(_batch_inference_file, *zip(*tasks))), use_c)
         else:
-            runs[c] = ([_batch_inference_file(*task) for task in tasks], use_c)
+            # each task is let go once done, so the first file's spectra and MS1 data are not kept while the others run
+            runs[c] = ([_batch_inference_file(*tasks.pop(0)) for _ in range(len(tasks))], use_c)
     if len(runs) > 1:
         found = sum(bool(p) and enforce_class(p[0][0], c) for r in runs[c][0] for p in (
             r[0].loc[r[0]['re_offset'] == 0, 'predictions'] if 're_offset' in r[0].columns else r[0]['predictions']))

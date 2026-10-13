@@ -25,10 +25,12 @@ def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
    | bin_shift (bool): whether centroids of wide peaks move one profile bin down, as Thermo's do; default:True\n
    | Returns:
    | :-
-   | Returns an (n, 2) array of centroid m/z and intensity: profile points below 1 are dropped, the profile is split at the lowest point between
+   | Returns an (n, 2) array of centroid m/z and intensity: profile points below min(1, 0.1% of the scan's maximum) are dropped, the profile is split at the lowest point between
    | maxima and neighboring centroids closer than min_gap are merged, each carrying the summed signal of its share of the profile
    """
-    ints = np.where(ints < 1, 0, ints)
+    # Thermo's centroider drops points below 1; some ion traps store intensities ~1000x lower (GPST000374, GPST000596: MS2 base peaks of 1-30), where that
+    # dropped most fragments, so the floor is at most 0.1% of the scan's maximum
+    ints = np.where(ints < min(1, 1e-3 * ints.max(initial = 0)), 0, ints)
     apex = np.where((ints[1:-1] > ints[:-2]) & (ints[1:-1] >= ints[2:]) & (ints[1:-1] > 0))[0] + 1
     if not len(apex):
         return np.zeros((0, 2))

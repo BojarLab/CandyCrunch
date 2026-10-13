@@ -3204,8 +3204,16 @@ def classify_fragment(dc_name):
     return 'glycopeptide'
 
 
+_FRAG_IUPAC = {}
+
+
 def fragment_to_fragIUPAC(glycan_string, dc_name):
-    """Reduces the glycan part of a fragment label to the IUPAC-condensed structure it describes"""
+    """Reduces the glycan part of a fragment label to the IUPAC-condensed structure it describes; cached, as every spectrum drawn asks for its cartoons"""
+    key = (glycan_string, repr(dc_name))
+    if key in _FRAG_IUPAC:
+        return _FRAG_IUPAC[key]
+    if len(_FRAG_IUPAC) > 5000:
+        _FRAG_IUPAC.clear()
     flat = [y for sub in dc_name for y in sub] if dc_name and isinstance(dc_name[0], list) else list(dc_name)
     chain_lengths = {rank: len(chain) for rank, chain in
                      rank_chains(mono_graph_to_nx(glycan_to_graph_monos(glycan_string), directed = True))}
@@ -3222,9 +3230,10 @@ def fragment_to_fragIUPAC(glycan_string, dc_name):
             continue
         cuts.append(cut)
     try:
-        return domon_costello_to_fragIUPAC(glycan_string, cuts) if cuts else glycan_string
+        _FRAG_IUPAC[key] = domon_costello_to_fragIUPAC(glycan_string, cuts) if cuts else glycan_string
     except Exception:
-        return None
+        _FRAG_IUPAC[key] = None
+    return _FRAG_IUPAC[key]
 
 
 _CARTOONS = {}
@@ -3419,8 +3428,10 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     if annotate_top_n is not None:
         keep = {id(p) for p in sorted(peaks, key = lambda x: -x[1])[:annotate_top_n]}
         peaks = [p for p in peaks if id(p) in keep]
-    for mz, rel_int, _, kind, _, rank in peaks:
-        ax.vlines([mz], 0, rel_int, colors = DIAGNOSTIC_COLOR if rank == 0 else PEAK_COLORS.get(kind, 'tab:red'), linewidth = 1.3)
+    # one collection for all annotated peaks (a vlines call per peak took ~80 ms of every spectrum the app draws), drawn in the same order
+    if peaks:
+        ax.vlines([p[0] for p in peaks], 0, [p[1] for p in peaks], colors = [DIAGNOSTIC_COLOR if p[5] == 0 else PEAK_COLORS.get(p[3], 'tab:red') for p in peaks],
+                  linewidth = 1.3)
     # Each label sits directly above its peak, lifted only as far as its neighbors require, with a dotted
     # leader whenever it had to move; anything that cannot be placed at all is dropped rather than overlaid
     figure = ax.figure

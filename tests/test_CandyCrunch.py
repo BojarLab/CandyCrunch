@@ -15,6 +15,9 @@ from itertools import product
 from scipy.optimize import linear_sum_assignment
 from glycowork.motif.processing import canonicalize_iupac
 import time
+import random
+import torch
+import time
 
 BASE_DIR = pathlib.Path(__file__).parent.parent  # Go up one level from the test file
 TEST_DATA_DIR = BASE_DIR / "tests" / "data"
@@ -41,6 +44,8 @@ TEST_DICTS = [
     # RNase B N-glycans with a free reducing end (a 'custom' label without mass), positive mode; the .raw runs with --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000134', 'args': {'glycan_class': 'N', 'modification': 'custom', 'max_charge': 3},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x]},
+    # N-glycans with Neu5Gc (Thermo LTQ Velos .raw, ion-trap MS1 and MS2 at ~1000x lower intensities), one run; the .raw runs with --input-format mzml, the .xlsx otherwise
+    {'name': 'GPST000596', 'args': {'glycan_class': 'N'}},
 ]
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too), run by --input-format mzml
 MS1_FORMATS = ('.mzml', '.mzxml', '.raw')
@@ -203,6 +208,10 @@ def test_candycrunch_accuracy(test_params, file_group, result_collector, input_f
         posthoc_params = {k: v for k,v in test_params.items() if 'posthoc' in k}
         print(filename)
         print(inference_params|posthoc_params)
+        # Seeded, so a score only moves with the code: unseeded, test-time augmentation alone moved milk by 0.04 between runs
+        random.seed(0)
+        np.random.seed(0)
+        torch.manual_seed(0)
         start_time = time.time()
         preds_out = wrap_inference(f"{TEST_DATA_DIR}/{folder}/{filename}",**test_dict['args'],
                                 **inference_params)
@@ -248,6 +257,9 @@ def test_candycrunch_batch(batch_set, result_collector, verbose):
     if not runs or not all(os.path.exists(f"{TEST_DATA_DIR}/{folder}/{file}") for _, folder, file in runs):
         pytest.skip(f"{batch_set}: not every run has its mzML/mzXML")
     labels = [os.path.splitext(file)[0] for _, _, file in runs]
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
     combined, outputs = wrap_inference_batch([f"{TEST_DATA_DIR}/{folder}/{file}" for _, folder, file in runs], glycan_class, intra_cat_thresh = 1.0,
                                              spectra = True)
     assert list(outputs) == labels

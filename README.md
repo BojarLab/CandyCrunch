@@ -77,7 +77,7 @@ If you would like to run our main inference function from the command line, you 
 |--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
 --intra_cat_thresh, type=float: required for several files, minutes the RT of a structure can differ from the mean of its group across files <br />
 --top_n_isomers, type=int: several files only, number of isomer groups at each composition to retain in each file; default:5 <br />
---n_jobs, type=int: several files only, number of files to process in parallel; default:1 <br />
+--n_jobs, type=int: number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default:1 <br />
 --plot_glycans, type=bool: whether to write the output as an .xlsx file that contains SNFG images of all top1 predictions (a `.csv` output additionally gets an `.xlsx` of the same name); default:False
 </pre>
 </details>

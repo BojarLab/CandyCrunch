@@ -125,6 +125,7 @@ def test_gui_support_hover(app):
         time.sleep(0.05)
     # The mouse on the lilac marker of the B3 ion highlights its residues (Fuc, Gal, GlcNAc of the 6-arm) and the cleaved GlcNAc(b1-6) bond, and moving
     # off it clears the highlight
+    assert panel.hover_targets, panel.message.text() or panel.summary.text()
     artist = panel.hover_targets[0][0]
     x, y = artist.axes.transData.transform(artist.get_offsets()[list(artist.get_offsets()[:, 0]).index(510.19)])
     panel.hover(MouseEvent('motion_notify_event', panel.canvas, x, y))
