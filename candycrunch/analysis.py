@@ -8,6 +8,10 @@ import warnings
 from itertools import combinations_with_replacement, product
 from operator import neg
 import bisect
+import multiprocessing
+import threading
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 import matplotlib.pyplot as plt
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from matplotlib.transforms import Bbox
@@ -2515,6 +2519,44 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
 
 
 _PLACEMENTS = {}
+_EXPLAINED = {}
+_POOL = {}
+
+
+def _run_job(job):
+    func, args, kwargs = job
+    return func(*args, **kwargs)
+
+
+def _watch_parent():
+    # A pool process ends with the process that started it; terminated (e.g., the app's worker on Cancel), it would otherwise wait for jobs forever
+    parent = multiprocessing.parent_process()
+    threading.Thread(target = lambda: (parent.join(), os._exit(1)), daemon = True).start()
+
+
+def run_jobs(jobs, n_jobs = 1):
+    """Runs (function, args, kwargs) jobs and returns their results in order; with n_jobs > 1 in a pool of that many spawned processes, which stays up for
+    later calls (CandyCrumbs and supporting_ions are pure Python, so threads would only take turns, and starting the processes costs a few seconds).
+    A script calling this with n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS, as every pool process imports it again\n
+    | Arguments:
+    | :-
+    | jobs (list): (function, args tuple, kwargs dict) per job; the functions have to be module-level so that they can be sent to the pool
+    | n_jobs (int): number of processes; default:1 (no pool)\n
+    | Returns:
+    | :-
+    | Returns a list of the results of the jobs
+    """
+    if n_jobs <= 1 or len(jobs) < 2:
+        return [func(*args, **kwargs) for func, args, kwargs in jobs]
+    if _POOL.get('n_jobs') != n_jobs:
+        if 'pool' in _POOL:
+            _POOL['pool'].shutdown()
+        _POOL.update(n_jobs = n_jobs, pool = ProcessPoolExecutor(max_workers = n_jobs, mp_context = multiprocessing.get_context('spawn'), initializer = _watch_parent))
+    try:
+        return list(_POOL['pool'].map(_run_job, jobs))
+    except BrokenProcessPool:
+        _POOL.clear()
+        raise
 
 
 def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance = 0.3, top_n_peaks = 20, mass_tag = None, sample_prep = 'underivatized',
@@ -2612,34 +2654,48 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
         if glycan not in explained and g != glycan:
             break
         relevant = range(len(observed)) if g == glycan else [i for i, (single, any_fragment) in explained[glycan].items() if single or not any_fragment]
-        try:
-            if sialic_derivatization is not None and g != glycan and glycan_to_composition(g, sialic_linkage = True) != glycan_to_composition(glycan, sialic_linkage = True):
+        # What a structure explains only depends on it, the masses asked for and the settings, and about a quarter of these come up again within a run
+        # (the isomer override and finalise_predictions look at the same spectra, and placements and candidates of related structures overlap)
+        needed = tuple(g == glycan or not explained[glycan][i][1] for i in relevant)
+        key = (g, glycan if sialic_derivatization is not None else None, charge, mass_tolerance, mass_tag, sample_prep, sialic_derivatization,
+               g in alternatives, tuple(observed[i][0] for i in relevant), needed)
+        found = _EXPLAINED.get(key, False)
+        if found is False:
+            if len(_EXPLAINED) > 20000:
+                _EXPLAINED.clear()
+            try:
+                if sialic_derivatization is not None and g != glycan and glycan_to_composition(g, sialic_linkage = True) != glycan_to_composition(glycan, sialic_linkage = True):
+                    raise ValueError('other sialic acid linkages than the precursor mass allows')
+                nx_mono, _ = input_to_graph(glycopeptide_string_to_input(g if sialic_derivatization is None else derivatize_carboxyls(g, sialic_derivatization)))
+                global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = True)
+                subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, [], max_cleavages = 2, fragment_masses = [observed[i][0] for i in relevant],
+                                                   threshold = mass_tolerance, mass_tag = mass_tag, charge = charge, sample_prep = sample_prep,
+                                                   disable_A_cross_rings = charge > 0 or g in alternatives) if relevant else {}
+            except Exception:
+                _EXPLAINED[key] = None
                 continue
-            nx_mono, _ = input_to_graph(glycopeptide_string_to_input(g if sialic_derivatization is None else derivatize_carboxyls(g, sialic_derivatization)))
-            global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = True)
-            subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, [], max_cleavages = 2, fragment_masses = [observed[i][0] for i in relevant],
-                                               threshold = mass_tolerance, mass_tag = mass_tag, charge = charge, sample_prep = sample_prep,
-                                               disable_A_cross_rings = charge > 0 or g in alternatives) if relevant else {}
-        except Exception:
+            frag_keys, chain_rank, found = sorted(subg_frags), list(rank_chains(nx_mono)), []
+            for i, names_needed in zip(relevant, needed):
+                single, any_fragment = [], False
+                for z in range(1, abs(charge) + 1):
+                    target = observed[i][0] * z - (z - 1) * PROTON_MASS * np.sign(charge)
+                    for mass in frag_keys[bisect.bisect_left(frag_keys, target - mass_tolerance):bisect.bisect_right(frag_keys, target + mass_tolerance)]:
+                        graphs = [x for x in subg_frags[mass] if z <= x.number_of_nodes()]
+                        for frag, names in zip(graphs, subgraphs_to_domon_costello(nx_mono, graphs, chain_rank)):
+                            types = [x.split('_')[0] for x in names]
+                            if not types or (len(types) > 1 and any(t[-1] in 'AX' for t in types)):
+                                continue
+                            any_fragment = True
+                            if names_needed and len(types) == 1 and types[0] in ('B', 'C', 'Y', 'Z'):
+                                single.append((tuple(names), mono_frag_to_string(frag), tuple(sorted(frag)),
+                                               next((u for u, v in nx_mono.edges() if (u in frag) != (v in frag)), None)))
+                        if any_fragment and not names_needed:
+                            break
+                found.append((tuple(single), any_fragment))
+            found = _EXPLAINED[key] = tuple(found)
+        if found is None:
             continue
-        frag_keys, chain_rank, explained[g] = sorted(subg_frags), list(rank_chains(nx_mono)), {}
-        for i in relevant:
-            single, any_fragment, names_needed = [], False, g == glycan or not explained[glycan][i][1]
-            for z in range(1, abs(charge) + 1):
-                target = observed[i][0] * z - (z - 1) * PROTON_MASS * np.sign(charge)
-                for mass in frag_keys[bisect.bisect_left(frag_keys, target - mass_tolerance):bisect.bisect_right(frag_keys, target + mass_tolerance)]:
-                    graphs = [x for x in subg_frags[mass] if z <= x.number_of_nodes()]
-                    for frag, names in zip(graphs, subgraphs_to_domon_costello(nx_mono, graphs, chain_rank)):
-                        types = [x.split('_')[0] for x in names]
-                        if not types or (len(types) > 1 and any(t[-1] in 'AX' for t in types)):
-                            continue
-                        any_fragment = True
-                        if names_needed and len(types) == 1 and types[0] in ('B', 'C', 'Y', 'Z'):
-                            single.append((tuple(names), mono_frag_to_string(frag), tuple(sorted(frag)),
-                                           next((u for u, v in nx_mono.edges() if (u in frag) != (v in frag)), None)))
-                    if any_fragment and not names_needed:
-                        break
-            explained[g][i] = (single, any_fragment)
+        explained[g] = dict(zip(relevant, found))
     if glycan not in explained:
         return {'residues': [], 'candidates': []}
     out = {'residues': [], 'candidates': []}
@@ -3171,8 +3227,14 @@ def fragment_to_fragIUPAC(glycan_string, dc_name):
         return None
 
 
+_CARTOONS = {}
+
+
 def fragIUPAC_to_image(frag_iupac, padding = 4):
-    """Renders a glycan fragment as a cropped SNFG cartoon, or None if the drawing stack is unavailable"""
+    """Renders a glycan fragment as a cropped SNFG cartoon, or None if the drawing stack is unavailable; cached, as spectra are drawn again for
+    every candidate, panel size, and saved image"""
+    if (frag_iupac, padding) in _CARTOONS:
+        return _CARTOONS[(frag_iupac, padding)]
     try:
         from io import BytesIO
         from glycowork.motif.draw import GlycoDraw
@@ -3189,6 +3251,9 @@ def fragIUPAC_to_image(frag_iupac, padding = 4):
     if box:
         image = image.crop((max(0, box[0] - padding), max(0, box[1] - padding),
                             min(image.width, box[2] + padding), min(image.height, box[3] + padding)))
+    if len(_CARTOONS) > 2000:
+        _CARTOONS.clear()
+    _CARTOONS[(frag_iupac, padding)] = image
     return image
 
 
@@ -3258,7 +3323,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                             max_cleavages = 3, mass_tag = None, sample_prep = 'underivatized',
                             disable_global_mods = False, prior_weight = 1.0, charge = None, ax = None,
                             annotate_top_n = None, annotation_threshold = 0.05, figsize = None,
-                            draw_glycans = True, glycan_zoom = 0.25, max_glycan_cartoons = 8,
+                            draw_glycans = True, glycan_zoom = 0.25, max_glycan_cartoons = None,
                             label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, mz_labels = False, diagnostic = None, **kwargs):
     """Plots an MS2 spectrum annotated with CandyCrumbs fragment assignments\n
     | Arguments:
@@ -3279,8 +3344,9 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | figsize (tuple): figure size if creating a new figure; default:None (chosen for the input type)
     | draw_glycans (bool): whether to add SNFG cartoons for glycan fragments; default:True
     | glycan_zoom (float): scale of the SNFG cartoons; default:0.25
-    | max_glycan_cartoons (int): how many cartoons to draw: fragments of diagnostic peaks first, then single glycosidic cleavages, then the rest, most
-    |                            intense first within each; default:8
+    | max_glycan_cartoons (int): the most cartoons to draw; they are placed in this order wherever they fit without overlapping each other, the
+    |                            title, or another cartoon's leader, near their peak: fragments of diagnostic peaks first, then single glycosidic
+    |                            cleavages, then the rest, most intense first within each; default:None (as many as fit)
     | label_fontsize (int): font size of the peak labels; default:6
     | max_label_levels (int): how many times to push a label clear of its neighbors before dropping it; default:6
     | filepath (string): where to save the figure; default:'' (not saved)
@@ -3331,6 +3397,9 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     elif peptide:
         ladder_ax = ax.inset_axes([0.28, 0.58, 0.70, 0.30])
     ax.vlines(mz_values, 0, rel_intensities, colors = 'grey', linewidth = 0.8, alpha = 0.4)
+    # Final limits before anything is placed in pixels: labels and cartoons are laid out for this data-to-pixel mapping
+    ax.set_xlim(mz_values.min() - 20, mz_values.max() + 20)
+    ax.set_ylim(0, 104)
     peaks = []
     for mz, rel_int in zip(mz_values, rel_intensities):
         hit = hit_dict.get(mz)
@@ -3358,7 +3427,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     figure.canvas.draw()
     renderer = figure.canvas.get_renderer()
     axes_box = ax.get_window_extent(renderer)
-    placed = []
+    placed, label_tops = [], {}
     # Annotated peaks are labeled first, most intense first; with mz_labels, unannotated peaks then get their m/z in gray wherever room is left
     labels = [(mz, rel_int, f'{mz:.2f}  {label}' if mz_labels else label, DIAGNOSTIC_COLOR if rank == 0 else PEAK_COLORS.get(kind, 'tab:red'))
               for mz, rel_int, label, kind, _, rank in sorted(peaks, key = lambda x: (x[5] > 0, -x[1]))]
@@ -3376,6 +3445,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                 text.remove()
                 placed.pop()
                 continue
+        if text is not None:
+            label_tops[mz] = text.get_window_extent(renderer).y1
         if text is not None and abs(text.xyann[1]) > 8:
             ax.annotate('', xy = (mz, rel_int),
                         xytext = (text.xyann[0], text.xyann[1] - np.sign(text.xyann[1])),
@@ -3400,24 +3471,67 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                 groups.setdefault(frag_iupac, []).append((rel_int, mz, rank))
         # Diagnostic fragments first, then single glycosidic cleavages (the cartoons that say something), then cross-rings and multiple cleavages
         ranked = sorted(groups.items(), key = lambda group: (min(m[2] for m in group[1]), -max(group[1])[0]))[:max_glycan_cartoons]
-        mz_per_pixel = (ax.get_xlim()[1] - ax.get_xlim()[0]) / max(axes_box.width, 1)
-        rows, row_ends = [1.08, 1.26], [-np.inf, -np.inf]
-        for frag_iupac, members in sorted(ranked, key = lambda group: max(group[1])[1]):
+        # In display pixels: cartoons fill the band between the axes and the title (which sits at 1.4 axes heights) or the peptide ladder, each at
+        # the free spot closest to its peak, lower rows preferred; a cartoon is left out rather than drawn more than max_shift from its peak, over
+        # another one, or where a leader (box to the top of its peak's label) would cross a box, a label, or another leader
+        gap = 3
+        band = (axes_box.y1 + gap, min(axes_box.y0 + 1.4 * axes_box.height, figure.bbox.y1) - gap)
+        if ladder_ax is not None and ladder_ax.get_window_extent(renderer).y0 > axes_box.y1:
+            band = (band[0], min(band[1], ladder_ax.get_window_extent(renderer).y0 - gap))
+        max_shift = 0.08 * axes_box.width
+        boxes, leaders = [], []
+        # Boxes and labels block leaders through their diagonals, which any segment passing through a box with both ends outside it crosses
+        blocking = [segment for b in placed for segment in (((b.x0, b.y0), (b.x1, b.y1)), ((b.x0, b.y1), (b.x1, b.y0)))]
+        to_blended = blended.inverted()
+        def crosses(a, b):
+            # Whether any segment of a properly intersects any segment of b
+            if not len(a) or not len(b):
+                return False
+            a, b = np.asarray(a, dtype = float)[:, None], np.asarray(b, dtype = float)[None]
+            side = lambda p, q, r: (q[..., 0] - p[..., 0]) * (r[..., 1] - p[..., 1]) - (q[..., 1] - p[..., 1]) * (r[..., 0] - p[..., 0])
+            return bool(np.any((side(b[..., 0, :], b[..., 1, :], a[..., 0, :]) * side(b[..., 0, :], b[..., 1, :], a[..., 1, :]) < 0) &
+                               (side(a[..., 0, :], a[..., 1, :], b[..., 0, :]) * side(a[..., 0, :], a[..., 1, :], b[..., 1, :]) < 0)))
+        for frag_iupac, members in ranked:
             image = fragIUPAC_to_image(frag_iupac)
             if image is None:
                 continue
-            half_width = (image.width * glycan_zoom * figure.dpi / 72 + 8) * mz_per_pixel / 2
-            anchor = max(members)[1]
-            row = min(range(len(rows)), key = lambda i: max(anchor, row_ends[i] + half_width))
-            x = max(anchor, row_ends[row] + half_width)
-            ax.add_artist(AnnotationBbox(OffsetImage(np.array(image), zoom = glycan_zoom), (x, rows[row]),
-                                         xycoords = blended, frameon = True, annotation_clip = False,
-                                         bboxprops = dict(boxstyle = 'round,pad=0.15', fc = 'white',
-                                                          ec = '#cccccc', lw = 0.5)))
-            for rel_int, mz, _ in members:
-                ax.plot([mz, x], [rel_int / max(rel_intensities) * 0.95, rows[row] - 0.05], transform = blended,
-                        color = '#cccccc', lw = 0.5, ls = '--', clip_on = False)
-            row_ends[row] = x + half_width
+            box = AnnotationBbox(OffsetImage(np.array(image), zoom = glycan_zoom), (0, 0), xycoords = blended, frameon = True, annotation_clip = False,
+                                 bboxprops = dict(boxstyle = 'round,pad=0.15', fc = 'white', ec = '#cccccc', lw = 0.5))
+            ax.add_artist(box)
+            extent = box.get_window_extent(renderer)
+            width, height = extent.width, extent.height
+            # Leaders end at the top of a peak's label (or of the peak), most intense peak first
+            tops = []
+            for rel_int, mz, _ in sorted(members, reverse = True):
+                px, py = ax.transData.transform((mz, rel_int))
+                tops.append((px, max(py, label_tops.get(mz, -np.inf))))
+            anchor, lo, hi = tops[0][0], axes_box.x0 + width / 2, axes_box.x1 - width / 2
+            candidates = []
+            for y in sorted({band[0]} | {b[3] + gap for b in boxes}):
+                if y + height > band[1]:
+                    continue
+                # Box centers that would overlap a box already placed at this height
+                blocked = [(b[0] - width / 2 - gap, b[2] + width / 2 + gap) for b in boxes if b[1] < y + height + gap and b[3] + gap > y]
+                for x in {min(max(x, lo), hi) for x in [anchor, lo, hi] + [edge for interval in blocked for edge in interval]}:
+                    if abs(x - anchor) <= max_shift and not any(a < x < b for a, b in blocked):
+                        candidates.append((abs(x - anchor) + 0.5 * (y - band[0]), x, y))
+            # The leader to the cartoon's most intense peak must be clear; those to its other peaks (neutral losses, other charges) are drawn where clear
+            for _, x, y in sorted(candidates):
+                rect = (x - width / 2 - gap, y - gap, x + width / 2 + gap, y + height + gap)
+                diagonals = [((rect[0], rect[1]), (rect[2], rect[3])), ((rect[0], rect[3]), (rect[2], rect[1]))]
+                if not crosses([((x, y), tops[0])], blocking) and not crosses(leaders, diagonals):
+                    break
+            else:
+                box.remove()
+                continue
+            box.xy = box.xybox = tuple(to_blended.transform((x, y + height / 2)))
+            for top in tops:
+                if top is tops[0] or not crosses([((x, y), top)], blocking):
+                    ax.plot(*zip(to_blended.transform((x, y)), to_blended.transform(top)), transform = blended, color = '#cccccc', lw = 0.5, ls = '--', clip_on = False)
+                    leaders.append(((x, y), top))
+                    blocking.append(((x, y), top))
+            boxes.append((x - width / 2, y, x + width / 2, y + height))
+            blocking += diagonals
             cartoons_drawn = True
     ax.set_xlabel('m/z')
     ax.set_ylabel('Relative Intensity (%)')
@@ -3428,8 +3542,6 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         ladder_ax.set_title(title, fontsize = title_size)
     else:
         ax.set_title(title, fontsize = title_size, y = 1.40 if cartoons_drawn else 1.0)
-    ax.set_xlim(mz_values.min() - 20, mz_values.max() + 20)
-    ax.set_ylim(0, 104)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
