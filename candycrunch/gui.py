@@ -67,7 +67,8 @@ SIALIC_TIP = 'Linkage-specific sialic acid derivatization: precursor masses then
 LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
-FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD')]
+FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD'), ('EED', 'EED'),
+                  ('EDD', 'EDD'), ('NETD', 'NETD'), ('UVPD', 'UVPD')]
 SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mgf')
 # extract_spectra xlsx of 4.5 min (25-29.5) of a pig gastric mucin O-glycan run (GPST000029, as packaging/self_test.mzML): 275 MS2 spectra, ~20 glycan peaks
 EXAMPLE_RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'example_PGM_O-glycans.xlsx')
@@ -2237,7 +2238,8 @@ class CrumbsTab(QWidget):
         self.cleavages.setValue(3)
         self.cleavages.setToolTip('Maximum number of concurrent cleavages per fragment')
         self.fragmentation = _combo(FRAGMENTATIONS)
-        self.fragmentation.setToolTip('Restricts peptide backbone ion types for glycopeptides')
+        self.fragmentation.setToolTip('Restricts peptide backbone ion types for glycopeptides (not EED/EDD/NETD/UVPD); every method but CID/HCD also '
+                                      'annotates free-glycan fragments one or two hydrogen atoms off (odd-electron, hydrogen-shifted ions)')
         self.ms3_precursor = _spin(0, 5000, 1, 4, ' m/z')
         self.ms3_precursor.setSpecialValueText('None (MS2 spectrum)')
         self.ms3_precursor.setToolTip('For an MS3 spectrum: m/z of the MS2 fragment that was isolated, so its peaks are only annotated as fragments of that '

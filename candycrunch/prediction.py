@@ -1779,7 +1779,7 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         structs.append((rows, rounded_mass_rows, ms3_rows, list(pools)))
         jobs += [(CandyCrumbs, (struct, unq_rounded_masses, mass_tolerance),
                   dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative"),
-                       disable_X_cross_rings = True, max_cleavages = 2, mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + offset,
+                       disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + offset,
                        sample_prep = sample_prep, ms3_precursor = ms3_precursor, sialic_derivatization = sialic_derivatization))
                  for ms3_precursor, unq_rounded_masses in pools.values()]
     # Every CandyCrumbs call first, so that n_jobs processes can share them
@@ -2693,6 +2693,12 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         width = max(4 * 1.4826 * np.median(np.abs(errors[singly] - offset)), 0.2)
         keep = np.where(np.abs(df_out['charge'].values) == 1,
                         df_out['ppm_error'].isna().values | (np.abs(errors - offset) <= width), keep)
+        # ... unless the model and the fragments both back a multiply charged row (strong evidence, annotation score of at least 20): its merged centroid then
+        # counts anywhere between the monoisotopic and the 13C position above the file's offset, as large glycans, whose 13C peak outgrows the monoisotopic
+        # one, read half a spacing high
+        z = np.abs(df_out['charge'].values)
+        strong = (df_out['evidence'].values == 'strong') & (df_out['annotation_score'].values >= 20)
+        keep |= strong & (z > 1) & (np.abs(errors - offset - ISOTOPE_SPACING / (2 * z)) <= ISOTOPE_SPACING / (2 * z))
     df_out = df_out[keep]
     # Retention-time outlier removal: drop predictions whose RT lies far outside the file's overall
     # elution distribution, scaled to the observed spread (tight cluster => strict, wide spread => permissive)
@@ -3258,7 +3264,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 _cc_out = CandyCrumbs(_struct if sialic_derivatization is None else _fitted, _unq_rounded, mass_tolerance, simplify = False,
                                       charge = int(multiplier * _row_charge),
                                       disable_global_mods = (not _is_adduct or mode == "negative"),
-                                      disable_X_cross_rings = True, max_cleavages = 2,
+                                      disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2,
                                       mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0),
                                       sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
             except Exception:
@@ -3318,12 +3324,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     else:
         # The model knows few Neu5Gc glycans: in ion-trap runs it mostly has no structure of their composition in its top 25 and prefers the composition
         # with Hex + dHex instead (1 Da heavier, inside the precursor tolerance), so a spectrum without any model prediction whose candidate composition with
-        # Neu5Gc, at a charge of at most 2, is backed up by more than 10 fragment annotations takes that composition's database structure. Not for other
-        # compositions: there it filled O-glycans into N runs and junk into O runs
+        # Neu5Gc, at a charge of at most 2, is backed up by more than 10 fragment annotations takes that composition's database structure. The same holds for
+        # free glycans, as the model knows few of the large milk oligosaccharides. Not for other compositions: there
+        # it filled O-glycans into N runs and junk into O runs
         has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
         ok = (~has_pred & ~df_out['cross_class'].values & (df_out['annotation_score'].values >= 10) & (df_out['charge'].values <= 2)
               & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']], dtype = bool)
-              & np.array([isinstance(c, dict) and 'Neu5Gc' in c for c in df_out['composition']], dtype = bool))
+              & np.array([isinstance(c, dict) and ('Neu5Gc' in c or glycan_class == 'free') for c in df_out['composition']], dtype = bool))
         for i in df_out.reset_index(drop = True)[ok].groupby('spec_id')['annotation_score'].idxmax().values if ok.any() else []:
             g = df_out['candidate_structure'].iloc[i]
             df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]

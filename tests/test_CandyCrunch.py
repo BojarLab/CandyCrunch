@@ -50,6 +50,9 @@ TEST_DICTS = [
     {'name': 'GPST000596', 'args': {'glycan_class': 'N'}},
     # O-glycans from slide-fixed tissue (Bruker amaZon speed .d, read from its Analysis.yep); the .d runs with --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000316', 'args': {'glycan_class': 'O'}},
+    # Milk oligosaccharides up to Hex8HexNAc6dHex4, the larger ones as [M-2H]2- (Thermo LTQ .raw, ion-trap MS1 and MS2), one run; the .raw runs with
+    # --input-format mzml, the .xlsx otherwise
+    {'name': 'GPST000556', 'args': {'glycan_class': 'free'}},
 ]
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
 MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d')
@@ -67,7 +70,7 @@ BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.65, 'GPST000169_O': 0
 
 def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array1_alt = None, array2_alt = None):
     # One-to-one assignment minimizing the summed normalized m/z and RT distances (as GlycoGauntlet's evaluator): a greedy pass in ground-truth
-    # order let a peak take the row of its neighbouring isomer, and the result depended on how the ground truth was sorted
+    # order let a peak take the row of its neighboring isomer, and the result depended on how the ground truth was sorted
     array1_alt = array1 if array1_alt is None else array1_alt
     array2_alt = array2 if array2_alt is None else array2_alt
     # fmin, so a row without a charge (NaN singly charged equivalent) still matches on its m/z
