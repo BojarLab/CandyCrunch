@@ -19,7 +19,7 @@ os.environ.setdefault('PYTHONHASHSEED', '0')
 
 # Version of evaluate_predictions in test_CandyCrunch.py and of how runs are made; changing either moves scores like a ground-truth edit, so it is part of
 # each dataset's key ('-seeded': every run is seeded since 2026-10-13, so the unseeded baselines before it do not compare)
-METRIC_VERSION = '-hungarian-halfopen-seeded'
+METRIC_VERSION = '-hungarian-halfopen-seeded-braces'
 
 
 def pytest_addoption(parser):

@@ -114,8 +114,12 @@ def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbos
       similarity_scores.append(0.0)
       continue
     if '{' in gt_glycan:
-      possible_structures = [graph_to_string(x) for x in get_possible_topologies(gt_glycan, exhaustive = True)]
-      similarity_scores.append(max([1.0 if compare_glycans(p, pred_glycan) else get_glycan_similarity(p, pred_glycan) for p in possible_structures]))
+      # get_possible_topologies places one floating part per call, so it runs until none is left (a GT with two placed none of them before, and no prediction
+      # could match it exactly); a prediction written with the same floating parts is the GT itself
+      possible_structures = [gt_glycan]
+      while any('{' in p for p in possible_structures):
+        possible_structures = list(dict.fromkeys(q for p in possible_structures for q in ([graph_to_string(x) for x in get_possible_topologies(p, exhaustive = True)] if '{' in p else [p])))
+      similarity_scores.append(1.0 if compare_glycans(gt_glycan, pred_glycan) else max([1.0 if compare_glycans(p, pred_glycan) else get_glycan_similarity(p, pred_glycan) for p in possible_structures]))
     else:
       if compare_glycans(gt_glycan, pred_glycan):
         similarity_scores.append(1.0)

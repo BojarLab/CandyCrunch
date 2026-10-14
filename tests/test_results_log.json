@@ -1,150 +1,150 @@
 {
     "milk": {
         "scores": {
-            "(True, True, 'raw')": 0.7661662273061299,
-            "(True, True, 'xlsx')": 0.7933570818637964
+            "(True, True, 'raw')": 0.722378087051523,
+            "(True, True, 'xlsx')": 0.8347125476600042
         },
-        "gt_hash": "18207195472153515264-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "18207195472153515264-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000350": {
         "scores": {
-            "(True, True, 'mzML')": 0.8130648020887754,
-            "(True, True, 'xlsx')": 0.8130648020887754
+            "(True, True, 'xlsx')": 0.8246848028110368,
+            "(True, True, 'mzML')": 0.8246848028110368
         },
-        "gt_hash": "8974627088648322374-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "8974627088648322374-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000017": {
         "scores": {
-            "(True, True, 'xlsx')": 0.8611666440307513,
-            "(True, True, 'mzML')": 0.8583110380681805
+            "(True, True, 'mzML')": 0.8583110380681805,
+            "(True, True, 'xlsx')": 0.8611666440307513
         },
-        "gt_hash": "6989303403701479652-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "6989303403701479652-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000029": {
         "scores": {
-            "(True, True, 'xlsx')": 0.773056219688874,
-            "(True, True, 'mzML')": 0.7798727521853371
+            "(True, True, 'mzML')": 0.7798727521853371,
+            "(True, True, 'xlsx')": 0.773056219688874
         },
-        "gt_hash": "16945319985575801331-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "16945319985575801331-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "PMC8950484_CHO": {
         "scores": {
-            "(True, True, 'mzML')": 0.9456973127065533,
-            "(True, True, 'xlsx')": 0.9456973127065533
+            "(True, True, 'mzML')": 0.9444810410238546,
+            "(True, True, 'xlsx')": 0.9444810410238546
         },
-        "gt_hash": "10926790978904648008-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "10926790978904648008-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000307": {
         "scores": {
-            "(True, True, 'mzML')": 0.8220713276996088,
-            "(True, True, 'xlsx')": 0.8220713276996088
+            "(True, True, 'xlsx')": 0.8318585882444287,
+            "(True, True, 'mzML')": 0.8318585882444287
         },
-        "gt_hash": "4569966042868254508-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "4569966042868254508-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000487": {
         "scores": {
-            "(True, True, 'xlsx')": 0.8178137483452548,
-            "(True, True, 'mzML')": 0.8081632485189599
+            "(True, True, 'xlsx')": 0.7987378512203043,
+            "(True, True, 'mzML')": 0.7987378512203043
         },
-        "gt_hash": "10338202327038719931-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "10338202327038719931-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000029_batch": {
         "scores": {
             "(True, True, 'mzML')": 0.7827555211371696
         },
-        "gt_hash": "16945319985575801331-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "16945319985575801331-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000017_batch": {
         "scores": {
             "(True, True, 'mzML')": 0.8686826298978612
         },
-        "gt_hash": "6989303403701479652-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "6989303403701479652-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000169_O": {
         "scores": {
-            "(True, True, 'xlsx')": 0.7858966265208263,
-            "(True, True, 'mzML')": 0.7858966265208263
+            "(True, True, 'mzML')": 0.8299927806613481,
+            "(True, True, 'xlsx')": 0.8299927806613481
         },
-        "gt_hash": "18282863671313821490-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "18282863671313821490-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000169_N": {
         "scores": {
-            "(True, True, 'xlsx')": 0.7688276368425433,
-            "(True, True, 'mzML')": 0.7688276368425433
+            "(True, True, 'mzML')": 0.7615171603089583,
+            "(True, True, 'xlsx')": 0.7615171603089583
         },
-        "gt_hash": "3288668576285830043-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "3288668576285830043-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000169_O_batch": {
         "scores": {
-            "(True, True, 'mzML')": 0.8089036977231925
+            "(True, True, 'mzML')": 0.831329025146459
         },
-        "gt_hash": "18282863671313821490-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "18282863671313821490-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000169_N_batch": {
         "scores": {
-            "(True, True, 'mzML')": 0.7776399619613573
+            "(True, True, 'mzML')": 0.7696334133898961
         },
-        "gt_hash": "3288668576285830043-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "3288668576285830043-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000374_GSL": {
         "scores": {
-            "(True, True, 'raw')": 0.699187688470733,
-            "(True, True, 'xlsx')": 0.5527529211233881
+            "(True, True, 'xlsx')": 0.654819100287876,
+            "(True, True, 'raw')": 0.7008908639672491
         },
-        "gt_hash": "14372159782494145472-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "14372159782494145472-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000374_N": {
         "scores": {
-            "(True, True, 'raw')": 0.6181015876975222,
-            "(True, True, 'xlsx')": 0.567480685098464
+            "(True, True, 'xlsx')": 0.6296895634458171,
+            "(True, True, 'raw')": 0.6305378694777127
         },
-        "gt_hash": "10691703716618688226-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "10691703716618688226-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000374_O": {
         "scores": {
-            "(True, True, 'raw')": 0.6671543486835677,
-            "(True, True, 'xlsx')": 0.7373341894728718
+            "(True, True, 'xlsx')": 0.7391304294801513,
+            "(True, True, 'raw')": 0.6671543486835677
         },
-        "gt_hash": "14257491862426676932-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "14257491862426676932-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000134": {
         "scores": {
-            "(True, True, 'xlsx')": 0.6729397463653267,
-            "(True, True, 'raw')": 0.6684267445059395
+            "(True, True, 'raw')": 0.7244048719954232,
+            "(True, True, 'xlsx')": 0.7244048719954232
         },
-        "gt_hash": "17700413425660117801-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "17700413425660117801-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000596": {
         "scores": {
-            "(True, True, 'raw')": 0.7108468184841742,
-            "(True, True, 'xlsx')": 0.7108468184841742
+            "(True, True, 'raw')": 0.7342000917077748,
+            "(True, True, 'xlsx')": 0.7342000917077748
         },
-        "gt_hash": "14978324076783595133-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "14978324076783595133-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     },
     "GPST000316": {
         "scores": {
-            "(True, True, 'mzML')": 0.9999999921428571,
-            "(True, True, 'xlsx')": 0.9999999921428571
+            "(True, True, 'xlsx')": 0.9999999921428571,
+            "(True, True, 'mzML')": 0.9999999921428571
         },
-        "gt_hash": "6650205287617465133-hungarian-halfopen-seeded",
-        "timestamp": "2026-10-13 21:37:27"
+        "gt_hash": "6650205287617465133-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-10-14 06:00:15"
     }
 }
