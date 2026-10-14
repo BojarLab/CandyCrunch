@@ -496,7 +496,7 @@ class Annotator(QObject):
                 try:
                     with IMPORT_LOCK:
                         from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, classify_fragment, \
-                            fragment_to_fragIUPAC, fragIUPAC_to_image, is_composition
+                            fragment_cartoon, fragIUPAC_to_image, is_composition, derivatize_carboxyls
                         # fragIUPAC_to_image imports these itself, now outside MPL_LOCK too
                         with contextlib.suppress(ImportError):
                             import glycowork.motif.draw, glycorender.render, PIL.Image
@@ -534,13 +534,15 @@ class Annotator(QObject):
                     # rendered into its cache here, outside MPL_LOCK (GlycoDraw and glycorender need no matplotlib) and one by one, so a newer request cuts it short
                     glycans = resolve_spectrum_input(request['structure'])[1] if request['cartoons'] else []
                     if glycans and isinstance(glycans[0], str) and not is_composition(glycans[0]):
+                        sialic = request['kwargs'].get('sialic_derivatization')
+                        glycans = [derivatize_carboxyls(g, sialic) if sialic is not None and isinstance(g, str) and not is_composition(g) else g for g in glycans]
                         top = max(request['intensities'], default = 0)
                         for mz, intensity in zip(request['mzs'], request['intensities']):
                             hit = hit_dict.get(mz)
                             if hit and classify_fragment(hit['Domon-Costello nomenclatures'][0]) in ('oxonium', 'glycan') and (
                                     (top > 0 and intensity / top >= 0.05) or (diagnostic and np.isclose(diagnostic, mz, rtol = 0, atol = 0.0051).any())):
-                                frag_iupac = fragment_to_fragIUPAC(glycans[0], hit['Domon-Costello nomenclatures'][0])
-                                if frag_iupac is not None:
+                                frag_iupac = fragment_cartoon(glycans, hit['Domon-Costello nomenclatures'][0])
+                                if frag_iupac is not None and request['toggles'].get(frag_iupac) is not False:
                                     fragIUPAC_to_image(frag_iupac)
                                 if stale():
                                     break
@@ -555,7 +557,7 @@ class Annotator(QObject):
                         hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
                                                                charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
                                                                ax = figure.add_subplot(), draw_glycans = request['cartoons'], hit_dict = hit_dict,
-                                                               diagnostic = diagnostic,
+                                                               diagnostic = diagnostic, cartoons = request['toggles'],
                                                                **request['kwargs'])
                         # Save image… draws the spectrum again with the same diagnostic peaks
                         figure.diagnostic = diagnostic
@@ -641,7 +643,7 @@ def _composition(composition):
 
 class TableModel(QAbstractTableModel):
     """Read-only view of one result table, column by column as ResultsView lays them out; curation lives in the dataframe's own columns"""
-    BAR_ROLE = Qt.UserRole + 1
+    BAR_ROLE, IMAGE_ROLE = Qt.UserRole + 1, Qt.UserRole + 2
 
     def __init__(self, images):
         super().__init__()
@@ -677,6 +679,8 @@ class TableModel(QAbstractTableModel):
             return column['raw'][row]
         if role == self.BAR_ROLE:
             return column.get('bar', [None] * (row + 1))[row]
+        if role == self.IMAGE_ROLE:
+            return column.get('image', column['raw'])[row]
         if role == Qt.ItemDataRole.ToolTipRole:
             return column.get('tips', column['text'])[row] or None
         if role == Qt.ItemDataRole.TextAlignmentRole:
@@ -740,7 +744,7 @@ class StructureDelegate(QStyledItemDelegate):
         self.images = images
 
     def paint(self, painter, option, index):
-        image = self.images.get(index.data(Qt.UserRole))
+        image = self.images.get(index.data(TableModel.IMAGE_ROLE))
         if image is None or image.isNull():
             return super().paint(painter, option, index)
         opt = QStyleOptionViewItem(option)
@@ -809,7 +813,7 @@ class SpectrumPanel(QWidget):
         self.spec, self.ahead, self.cache = None, [], {}
         self.annotator.done.connect(self.show_figure)
         self.annotator.prefetched.connect(self.store)
-        self.fragment_html, self.hover_targets, self.label_targets, self.hovered = '', [], [], None
+        self.fragment_html, self.hover_targets, self.label_targets, self.hovered, self.toggles = '', [], [], None, {}
         self.controls = QHBoxLayout()
         self.controls.setContentsMargins(6, 4, 6, 0)
         self.summary = _label('', 'hint')
@@ -861,16 +865,16 @@ class SpectrumPanel(QWidget):
     def annotate(self, *args, prefetch = (), **kwargs):
         """args and kwargs as make_request takes them; prefetch: (args, kwargs) of the spectra likely shown next (e.g., the neighboring table rows),
         which are drawn ahead while the panel is idle and then appear at once"""
-        self.spec, self.ahead = (args, kwargs), list(prefetch)
+        self.spec, self.ahead, self.toggles = (args, kwargs), list(prefetch), {}
         self.resubmit()
 
-    def make_request(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), **kwargs):
+    def make_request(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), toggles = None, **kwargs):
         """ms3: (m/z, number of MS3 spectra) of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index;
         candidates: competing structures whose distinguishing peaks are listed; the request is drawn for the panel's current size and settings"""
         size = self.stack.size()
         request = {'structure': structure, 'mzs': [float(x) for x in mzs], 'intensities': [float(x) for x in intensities], 'charge': int(charge),
                    'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
-                   'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value(), 'cartoons': self.cartoons.isChecked(),
+                   'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value(), 'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}),
                    'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100)}
         request['key'] = repr(sorted((k, sorted(v.items()) if isinstance(v, dict) else v) for k, v in request.items()))
         return request
@@ -878,7 +882,7 @@ class SpectrumPanel(QWidget):
     def resubmit(self):
         if self.spec is None:
             return
-        self.request = self.make_request(*self.spec[0], **self.spec[1])
+        self.request = self.make_request(*self.spec[0], toggles = self.toggles, **self.spec[1])
         ahead = [r for r in (self.make_request(*a, **k) for a, k in self.ahead) if r['key'] not in self.cache and r['key'] != self.request['key']]
         if self.request['key'] in self.cache:
             # Drawn before or ahead: shown at once, and the annotation thread drops whatever it was doing for the new neighbors
@@ -945,6 +949,7 @@ class SpectrumPanel(QWidget):
             # Pan and zoom hold the canvas' widgetlock, so clicks while using them never count as picks
             entry['canvas'].mpl_connect('pick_event', lambda event: event.artist in getattr(figure, 'ms3_artists', ()) and len(event.ind) and self.ms3_clicked.emit(int(event.ind[0])))
             entry['canvas'].mpl_connect('motion_notify_event', self.hover)
+            entry['canvas'].mpl_connect('button_press_event', self.toggle_cartoon)
             entry['toolbar'] = NavigationToolbar2QT(entry['canvas'], self, coordinates = False)
             entry['toolbar'].setIconSize(QSize(16, 16))
             # Its save button would save the small on-screen figure; Save image… draws it at print size instead
@@ -994,7 +999,9 @@ class SpectrumPanel(QWidget):
                               f'<th align="right">z</th></tr>{"".join(rows)}</table>')
         self.fragments.setHtml(self.fragment_html)
         # Hovering a fragment label shows the observed and theoretical m/z of its peak
-        self.label_targets = [(text, [(None, tips[text.xy[0]])]) for text in figure.axes[0].texts if text.get_text() and text.xy[0] in tips]
+        fragments = getattr(figure.axes[0], 'cartoon_fragments', {})
+        self.label_targets = [(text, [(None, tips[text.xy[0]] + (f'<br>Click to {"hide" if fragments[text.xy[0]][1] else "draw"} its cartoon' if text.xy[0] in fragments else ''))])
+                              for text in figure.axes[0].texts if text.get_text() and text.xy[0] in tips]
         self.show_support(support)
 
 
@@ -1021,7 +1028,7 @@ class SpectrumPanel(QWidget):
             with MPL_LOCK:
                 plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
                                         mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = figure.add_subplot(), draw_glycans = request['cartoons'],
-                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, **request['kwargs'])
+                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, cartoons = request['toggles'], **request['kwargs'])
                 figure.savefig(path, dpi = 300, bbox_inches = 'tight')
         except Exception as error:
             QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}')
@@ -1066,6 +1073,21 @@ class SpectrumPanel(QWidget):
                                f'</table><br>' + self.fragment_html)
 
 
+    def toggle_cartoon(self, event):
+        """A click on a fragment label hides that fragment's cartoon if it is drawn, else draws it (every peak of one fragment shares its cartoon)"""
+        # Pan and zoom clicks are not label clicks; hit-testing a label lays out its mathtext, which waits for no annotation thread
+        if self.toolbar.mode or event.button != 1 or self.request is None or not MPL_LOCK.acquire(blocking = False):
+            return
+        try:
+            fragments = getattr(self.canvas.figure.axes[0], 'cartoon_fragments', {})
+            text = next((t for t in self.canvas.figure.axes[0].texts if t.get_text() and t.xy[0] in fragments and t.contains(event)[0]), None)
+        finally:
+            MPL_LOCK.release()
+        if text is not None:
+            frag_iupac, drawn = fragments[text.xy[0]]
+            self.toggles[frag_iupac] = not drawn
+            self.resubmit()
+
     def hover(self, event):
         """Shows the fragment of the supporting (or contradicting) peak under the mouse as a tooltip, and its supported part in the SNFG drawing; over a
         peak isolated for MS3, what clicking it does, with a hand cursor"""
@@ -1079,7 +1101,7 @@ class SpectrumPanel(QWidget):
                 hit, info = artist.contains(event)
                 if hit:
                     highlight, tip = meta[info.get('ind', [0])[0]]
-                    clickable = artist in getattr(self.canvas.figure, 'ms3_artists', ())
+                    clickable = artist in getattr(self.canvas.figure, 'ms3_artists', ()) or getattr(artist, 'xy', (None,))[0] in getattr(self.canvas.figure.axes[0], 'cartoon_fragments', {})
                     break
         finally:
             if locked:
@@ -1440,7 +1462,7 @@ class ResultsView(QWidget):
     def __init__(self, images):
         super().__init__()
         self.images, self.payload, self.frame, self.row, self.source, self.glytoucan = images, None, None, None, None, None
-        self.alternative, self.ms3_groups, self.ms3_args, self.support_highlight, self.dirty = None, [], None, None, False
+        self.alternative, self.ms3_groups, self.ms3_args, self.support_highlight, self.dirty, self.drawing_of = None, [], None, None, False, None
         top = QHBoxLayout()
         top.setContentsMargins(8, 6, 8, 4)
         self.experiment = QComboBox()
@@ -1662,7 +1684,7 @@ class ResultsView(QWidget):
         compositions = [_composition(c) for c in df['composition']]
         notes_tip = 'Notes from the pipeline, adducts, and your curation'
         columns = [{'title': 'Structure', 'kind': 'structure', 'raw': [s if isinstance(s, str) else None for s in structures],
-                    'text': [s if isinstance(s, str) else '' for s in structures]},
+                    'text': [s if isinstance(s, str) else '' for s in structures], 'image': [s if isinstance(s, str) else c or None for s, c in zip(structures, compositions)]},
                    {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions},
                    _number_column('m/z', df['m/z'], 4), _number_column('z', df['charge'], 0, 'Precursor charge'), _number_column('RT', df['RT'], 2, 'Retention time (min)')]
         if label == FEATURES:
@@ -1824,6 +1846,7 @@ class ResultsView(QWidget):
 
     def update_drawing(self):
         structure = self.alternative or self.frame['top1_pred'].iat[self.row]
+        structure = self.drawing_of = structure if isinstance(structure, str) else _composition(self.frame['composition'].iat[self.row]) or None
         # While a supporting peak is hovered, its fragment and cleaved bond are highlighted; the plain drawing stays until that version is rendered (or
         # if the installed glycowork cannot draw it)
         image = self.images.get(structure, compact = False, urgent = True, highlight = self.support_highlight[1:]) if self.support_highlight and self.support_highlight[0] == structure else None
@@ -1955,7 +1978,7 @@ class ResultsView(QWidget):
     def image_ready(self, key):
         if self.row is None or self.frame is None:
             return
-        if key[1] is False and key[0] == (self.alternative or self.frame['top1_pred'].iat[self.row]):
+        if key[1] is False and key[0] == self.drawing_of:
             self.update_drawing()
         if key[1] is True and any(self.alternatives.item(i).data(Qt.UserRole) == key[0] for i in range(self.alternatives.count())):
             self.update_alternative_icons()

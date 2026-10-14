@@ -167,7 +167,7 @@ def test_candycrumbs_smiles_residues():
     result = CandyCrumbs('LDManHep(a1-3)LDManHep(a1-5)Kdo', [191.06, 209.07, 429.13], 0.02, charge = -1, mass_tag = 0)
     assert [result[m]['Domon-Costello nomenclatures'][0] for m in (191.06, 209.07, 429.13)] == [['B_1_Alpha'], ['C_1_Alpha'], ['Y_2_Alpha']]
     # an anhydro bridge keeps the ring in one piece across it, so 3,6-anhydrogalactose has no cleavage separating C3 from C6
-    assert set(smiles_mono_attributes('3,6-Anhydro-L-Gal')['mass']) == {'3,6-Anhydro-L-Gal', '02X', '02A', '15X', '15A', '25A'}
+    assert set(smiles_mono_attributes('3,6-Anhydro-L-Gal')['mass']) == {'3,6-Anhydro-L-Gal', '02X', '02A', '15X', '15A', '25A', '25X'}
 
 
 def test_candycrumbs_floating_parts():

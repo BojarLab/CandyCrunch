@@ -13,6 +13,11 @@ TIMS_MS1_PEAKS = 5000
 # A PASEF MS2 spectrum (a precursor's mobility scans summed) holds a median of ~190 centroids, most of them single ions, against the 10-50 peaks of the ion
 # trap spectra the model was trained on; its 100 most intense peaks gave more glycans, with fewer false ones, than all of them or than intensity cut-offs
 TIMS_MS2_PEAKS = 100
+# Ion-trap analyzers, and the models of the Bruker ion traps (HCT, esquire, amaZon) and the Agilent 6300 ion traps Bruker built; without a Thermo filter
+# string, their profile spectra are centroided as Bruker ion-trap scans
+ION_TRAP_TERMS = {'MS:1000264', 'MS:1000082', 'MS:1000083', 'MS:1000078', 'MS:1000291', 'MS:1000697', 'MS:1000160', 'MS:1000161', 'MS:1000698',
+                  'MS:1000699', 'MS:1000700', 'MS:1001533', 'MS:1000156', 'MS:1000157', 'MS:1003461', 'MS:1001545', 'MS:1001542', 'MS:1001546',
+                  'MS:1002300', 'MS:1002301', 'MS:1003466', 'MS:1000473', 'MS:1000474', 'MS:1000475', 'MS:1000476'}
 
 
 def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
@@ -133,8 +138,8 @@ def read_mzml(filepath, centroid_levels = ()):
    | Arguments:
    | :-
    | filepath (string): absolute filepath to the .mzML file
-   | centroid_levels (tuple): MS levels whose profile spectra are centroided (Thermo ion-trap scans as by Thermo's centroider, others by a 3-point
-   |                          Gaussian fit at each local maximum); default:()\n
+   | centroid_levels (tuple): MS levels whose profile spectra are centroided (Thermo ion-trap scans as by Thermo's centroider, Bruker and Agilent ion-trap
+   |                          scans at valleys as in read_mzxml, others by a 3-point Gaussian fit at each local maximum); default:()\n
    | Returns:
    | :-
    | Yields a dict per spectrum: element (its XML element, with the params of a referenced param group appended), ms_level (int or None),
@@ -156,8 +161,9 @@ def read_mzml(filepath, centroid_levels = ()):
             groups[el.get('id')] = el
         elif tag == 'instrumentConfiguration':
             # Param groups precede the instrument configurations, which hold the instrument model in a referenced group (Thermo) or directly
-            configs[el.get('id')] = {e.get('accession') for p in [el] + [groups[r.get('ref')] for r in el.iter() if r.tag.endswith('referenceableParamGroupRef') and r.get('ref') in groups]
-                                     for e in p.iter() if e.get('accession')}
+            # msconvert writes every Bruker ion trap as HCT series and names an amaZon only in an 'instrument model' userParam, which counts as the amaZon series
+            configs[el.get('id')] = {e.get('accession') or 'MS:1001545' for p in [el] + [groups[r.get('ref')] for r in el.iter() if r.tag.endswith('referenceableParamGroupRef') and r.get('ref') in groups]
+                                     for e in p.iter() if e.get('accession') or (e.get('name') == 'instrument model' and 'amazon' in e.get('value', '').lower())}
         elif tag == 'chromatogram':
             el.clear()
         if tag != 'spectrum':
@@ -211,12 +217,18 @@ def read_mzml(filepath, centroid_levels = ()):
                                                                         ('MS:1000522', '<i8')) if acc in terms), '<f8'))
         peaks = np.stack((arrays.get('mz', np.zeros(0)), arrays.get('i', np.zeros(0))), axis = -1)
         ms_level = int(first['MS:1000511'].get('value')) if 'MS:1000511' in first else None
+        scan = el.find(f'{ns}scanList/{ns}scan')
+        instrument = configs.get(scan.get('instrumentConfigurationRef') if scan is not None else None, next(iter(configs.values()), set()))
         if ms_level in centroid_levels and 'MS:1000128' in first and (first['MS:1000512'].get('value', '') if 'MS:1000512' in first else '').startswith('ITMS'):
             # msconvert writes ion-trap scans as profiles unless asked to peak-pick; Thermo's centroids of them gave GPST000017 F1 0.735 (as from the
             # .raw file) against 0.695 with the Gaussian fit below
             peaks = centroid_ion_trap(peaks[:, 0], peaks[:, 1])
         elif ms_level in centroid_levels and mobility:
             peaks = centroid_tof(peaks[:, 0], peaks[:, 1], max_peaks = TIMS_MS1_PEAKS if ms_level == 1 else None)
+        elif ms_level in centroid_levels and 'MS:1000128' in first and 'MS:1000512' not in first and instrument & ION_TRAP_TERMS and 'MS:1000084' not in instrument:
+            # As in read_mzxml: Bruker and Agilent ion traps resolve the isotopes of doubly charged ions, so peaks are split at valleys and only merged
+            # below 0.3 m/z; on an HCT run the Gaussian fit below kept 56% of the MS2 intensity of Bruker's own line spectra within 0.1 m/z, this 94%
+            peaks = centroid_ion_trap(peaks[:, 0], peaks[:, 1], min_gap = 0.3, bin_shift = False)
         elif ms_level in centroid_levels and 'MS:1000128' in first:
             peaks = centroid_gaussian(peaks[:, 0], peaks[:, 1])
         rt = first.get('MS:1000016')
@@ -227,8 +239,6 @@ def read_mzml(filepath, centroid_levels = ()):
             rt = rt * 60.0 if unit == 'hour' else rt / {'minute': 1, 'second': 60.0, 'millisecond': 60000.0}[unit]
         precursor = {key: conv(first[acc].get('value')) for key, acc, conv in (('mz', 'MS:1000744', float), ('charge', 'MS:1000041', int),
                                                                                ('i', 'MS:1000042', float)) if acc in first} if 'MS:1000744' in first else None
-        scan = el.find(f'{ns}scanList/{ns}scan')
-        instrument = configs.get(scan.get('instrumentConfigurationRef') if scan is not None else None, next(iter(configs.values()), set()))
         spectrum = {'element': el, 'ms_level': ms_level, 'rt': rt, 'peaks': peaks, 'precursor': precursor,
                     'instrument': instrument, 'ion_mobility': mobility}
         # One spectrum per ion mobility scan (native ID frame=f scan=s, from msconvert without combining them): its scans of one frame, MS level, and

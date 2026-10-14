@@ -379,9 +379,48 @@ def test_bruker_mzxml(tmp_path):
     assert df.attrs['detected_trap'] == 'linear' and df.attrs['detected_mode'] == 'negative'
 
 
-def test_bruker_yep(tmp_path):
+def test_bruker_ion_trap_mzml(tmp_path):
+    # The scans of test_bruker_mzxml as msconvert writes a Bruker ion trap .d to mzML: profiles, the HCT series model with the amaZon named in a userParam,
+    # and the isolation window centre as selected ion m/z, also with a charge state; mzML and mzXML of one run give the same spectra and precursors
+    grid = np.arange(600, 1000, 0.03125)
+    def profile(peaks):
+        ints = sum(h * np.exp(-0.5 * ((grid - mz) / 0.05) ** 2) for mz, h in peaks)
+        return np.where(ints < 1, 0, ints)
+    def cv(acc, value = ''):
+        return f'<cvParam cvRef="MS" accession="{acc}" name="" value="{value}"/>'
+    def spectrum(i, level, rt, ints, precursor = None, charge = None):
+        arrays = ''.join(f'<binaryDataArray encodedLength="0">{cv("MS:1000523")}{cv("MS:1000576")}{cv(acc)}<binary>'
+                         f'{base64.b64encode(values.astype("<f8").tobytes()).decode()}</binary></binaryDataArray>' for acc, values in (('MS:1000514', grid), ('MS:1000515', ints)))
+        prec = (f'<precursorList count="1"><precursor><isolationWindow>{cv("MS:1000827", precursor)}</isolationWindow><selectedIonList count="1"><selectedIon>'
+                f'{cv("MS:1000744", precursor)}{cv("MS:1000041", charge)}</selectedIon></selectedIonList><activation>{cv("MS:1000133")}</activation></precursor>'
+                f'</precursorList>') if precursor else ''
+        return (f'<spectrum index="{i}" id="scan={i + 1}" defaultArrayLength="{len(grid)}">{cv("MS:1000511", level)}{cv("MS:1000129")}{cv("MS:1000128")}'
+                f'<scanList count="1"><scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" unitName="second"/></scan></scanList>'
+                f'{prec}<binaryDataArrayList count="2">{arrays}</binaryDataArrayList></spectrum>')
+    survey = [(965.79, 6e5), (965.9, 6e5), (965.844 + 1.003355 / 2, 9e5), (965.844 + 1.003355, 5.4e5), (675.36, 2e6), (675.97, 5e3)]
+    fragments = profile([(675.3, 1e4), (800.3, 3e4), (900.4, 2e4)])
+    spectra = [spectrum(0, 1, 3000, profile(survey)), spectrum(1, 2, 3002, fragments, 966.204528808594, 2), spectrum(2, 2, 3004, fragments, 675.813842773438, 1),
+               spectrum(3, 2, 3006, fragments, 675.418823242188, 1)]
+    path = tmp_path / 'amazon.mzML'
+    path.write_text('<?xml version="1.0" encoding="utf-8"?><mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1.0"><referenceableParamGroupList count="1">'
+                    f'<referenceableParamGroup id="CommonInstrumentParams">{cv("MS:1000697")}<userParam name="instrument model" value="amaZon speed ETD"/>'
+                    '</referenceableParamGroup></referenceableParamGroupList><instrumentConfigurationList count="1"><instrumentConfiguration id="IC1">'
+                    f'<referenceableParamGroupRef ref="CommonInstrumentParams"/><componentList count="1"><analyzer order="2">{cv("MS:1000083")}</analyzer></componentList>'
+                    f'</instrumentConfiguration></instrumentConfigurationList><run id="r"><spectrumList count="4">{"".join(spectra)}</spectrumList></run></mzML>')
+    df = process_mzML_stack(str(path), intensity = True, extract_ms1 = True)
+    _, ms1_mzs, _, _ = df.attrs['ms1']
+    # One centroid per isotope (the Gaussian fit made two of the dipping top), and the noise shoulder stays apart, as in test_bruker_mzxml
+    assert np.sum(np.abs(ms1_mzs - 965.85) < 0.3) == 1 and np.sum(np.abs(ms1_mzs - 966.35) < 0.2) == 1 and np.sum(np.abs(ms1_mzs - 675.97) < 0.1) == 1
+    # Every precursor moves onto its monoisotopic centroid, also the charged one, and keeps its header charge
+    assert np.allclose(df['m/z'], [965.844, 675.36, 675.36], atol = 0.02) and df['precursor_charge'].tolist()[0] == 2
+    assert df.attrs['detected_trap'] == df.attrs['detected_ms1_trap'] == 'amazon' and df.attrs['detected_mode'] == 'negative'
+
+
+@pytest.mark.parametrize('hct', [False, True])
+def test_bruker_yep(tmp_path, hct):
     # A Bruker ion trap .d folder (amaZon): Analysis.yep pages of zlib records, a spectrum header (type 316) and a line spectrum (type 315, kind 2000) per
-    # spectrum, and the parameter definitions; MS2 headers give the isolation target (966.20 for a [M-2H]2- at 965.844) and the trigger charge
+    # spectrum, and the parameter definitions; MS2 headers give the isolation target (966.20 for a [M-2H]2- at 965.844) and the trigger charge. HCT files
+    # (pwiz's Sample_1-A,1_01_985.d) put 80 bytes with an A0 BF signature before the block chain and start it with an A1 BF block
     def record(kind, number, spectrum, body):
         packed = zlib.compress(body)
         key = (31, 0, 0, spectrum, 2000 if spectrum else 1000, 11)
@@ -391,11 +430,12 @@ def test_bruker_yep(tmp_path):
         header = struct.pack('<ifIff3f5I', ticks, sum(i for _, i in peaks), number, 100, 2000, 0, max(i for _, i in peaks), 0, ticks, 0, 3,
                              0 if precursor is None else 4, 20)
         header = header if precursor is None else header[:48] + struct.pack('<f', precursor) + header[48:]
-        body = (struct.pack('<HIH4x', 12, 2, 0xbfa2) + struct.pack('<HIH', 8 + len(params), 8, 0xbfa0) + params +
-                np.array(peaks, dtype = '<f4').tobytes())
+        body = ((bytes(20) + struct.pack('<HH', 4, 0xbfa0) + bytes(56) if hct else b'') + struct.pack('<HIH4x', 12, 2, 0xbfa1 if hct else 0xbfa2) +
+                struct.pack('<HIH', 8 + len(params), 8, 0xbfa0) + params + np.array(peaks, dtype = '<f4').tobytes())
         return record(316, 2 * number, number, header) + record(315, 2 * number + 1, number, body)
+    model = b'HCTultra' if hct else b'amaZon speed'
     definitions = b''.join(struct.pack('<II', pid, 2) + b"\x1d'\xab\xbf" + struct.pack('<I', len(name) + 1) + name + b'\x00' for pid, name in
-                           [(0x6b, b'iIonNeg'), (0x403, b'iTrgChrgAto02')]) + b"\x1d'\xab\xbf\x0d\x00\x00\x00amaZon speed\x00"
+                           [(0x6b, b'iIonNeg'), (0x403, b'iTrgChrgAto02')]) + b"\x1d'\xab\xbf" + struct.pack('<I', len(model) + 1) + model + b'\x00'
     survey = [(675.36, 2e6), (965.844, 6e5), (965.844 + 1.003355 / 2, 9e5), (965.844 + 1.003355, 5.4e5), (966.47, 4e3)]
     fragments = [(290.09, 1e4), (675.3, 1e4), (800.3, 3e4)]
     records = (record(315, 1, 0, definitions) + spectrum(1, 2812500, survey) + spectrum(2, 2813000, fragments, 966.2045, 2) +
@@ -410,7 +450,7 @@ def test_bruker_yep(tmp_path):
     # RT ticks are 64 us, and the MS2 peaks are the line spectrum's
     assert np.allclose(df['RT'], np.array([2813000, 2813500]) * 64e-6 / 60)
     assert len(df['peak_d'][0]) == 3 and max(df['peak_d'][0], key = df['peak_d'][0].get) == pytest.approx(800.3)
-    assert df.attrs['detected_trap'] == 'amazon' and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
+    assert df.attrs['detected_trap'] == ('linear' if hct else 'amazon') and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
 
 
 def test_tims_scans(tmp_path):
@@ -461,6 +501,43 @@ def test_tof_precursors():
     out, drop, intensities = refine_tof_precursors(ms1, [1111.392, 1111.892, 1000.0], [10.0, 10.0, 10.0], [0, 0, 0], [2, 2, 1])
     assert out[0] == 1111.392 and abs(out[1] - 1111.392) < 1e-3 and out[2] == 1000.0 and not drop.any()
     assert np.allclose(intensities, [266, 266, 500])
+
+
+def test_qtof_mzml(tmp_path):
+    # A Waters Q-TOF DDA run as msconvert writes it (pwiz's ATEHLSTLSEK_LM_684.3469.raw): the generic Waters model without analyzers, native IDs
+    # function=f process=0 scan=s, survey scans in function 1, the lockmass function 3 written as MS1 scans between them and the MS2 spectra (function 2),
+    # and the set mass as precursor m/z without a charge state; a SCIEX-style MS2 spectrum names the TOF analyzer, a charge state and the isolation window
+    def cv(acc, value = ''):
+        return f'<cvParam cvRef="MS" accession="{acc}" name="" value="{value}"/>'
+    def spectrum(i, native, level, rt, peaks, precursor = None, charge = None, ic = 'IC1'):
+        arrays = ''.join(f'<binaryDataArray encodedLength="0">{cv("MS:1000523")}{cv("MS:1000576")}{cv(acc)}<binary>'
+                         f'{base64.b64encode(np.array(values, dtype = "<f8").tobytes()).decode()}</binary></binaryDataArray>'
+                         for acc, values in (('MS:1000514', [m for m, _ in peaks]), ('MS:1000515', [x for _, x in peaks])))
+        prec = (f'<precursorList count="1"><precursor><isolationWindow>{cv("MS:1000827", precursor)}{cv("MS:1000828", 0.7)}{cv("MS:1000829", 0.7)}</isolationWindow>'
+                f'<selectedIonList count="1"><selectedIon>{cv("MS:1000744", precursor)}{cv("MS:1000041", charge) if charge else ""}</selectedIon></selectedIonList>'
+                f'<activation>{cv("MS:1000422")}</activation></precursor></precursorList>') if precursor else ''
+        return (f'<spectrum index="{i}" id="{native}" defaultArrayLength="{len(peaks)}">{cv("MS:1000511", level)}{cv("MS:1000130")}{cv("MS:1000127")}'
+                f'<scanList count="1"><scan instrumentConfigurationRef="{ic}"><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" '
+                f'unitName="minute"/></scan></scanList>{prec}<binaryDataArrayList count="2">{arrays}</binaryDataArrayList></spectrum>')
+    rng = np.random.default_rng(0)
+    survey = [(500.2, 2e5), (608.3163, 8e5), (608.8172, 4.8e5), (609.319, 1.8e5), (609.82, 5e4)]
+    envelope = [(608.3163, 9e4), (608.8172, 5e4), (609.319, 2e4)]
+    fragments = [(float(m), 1e4 * (k + 1)) for k, m in enumerate(np.linspace(200, 1100, 20))] + [(float(m), float(i)) for m, i in zip(rng.uniform(100, 1200, 300), rng.uniform(5, 30, 300))]
+    spectra = [spectrum(0, 'function=3 process=0 scan=1', 1, 22.39, [(556.2771, 5e4)]), spectrum(1, 'function=1 process=0 scan=1', 1, 22.40, survey),
+               spectrum(2, 'function=3 process=0 scan=2', 1, 22.41, [(556.2771, 5e4), (608.3156, 633)]),
+               spectrum(3, 'function=2 process=0 scan=1', 2, 22.42, fragments + envelope, 608.321),
+               spectrum(4, 'function=2 process=0 scan=2', 2, 22.43, fragments + envelope, 608.3245, 2, 'IC2')]
+    path = tmp_path / 'qtof.mzML'
+    path.write_text('<?xml version="1.0" encoding="utf-8"?><mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1.0"><instrumentConfigurationList count="2">'
+                    f'<instrumentConfiguration id="IC1">{cv("MS:1000126")}</instrumentConfiguration><instrumentConfiguration id="IC2">{cv("MS:1000121")}'
+                    f'<componentList count="2"><analyzer order="2">{cv("MS:1000081")}</analyzer><analyzer order="3">{cv("MS:1000084")}</analyzer></componentList>'
+                    f'</instrumentConfiguration></instrumentConfigurationList><run id="r"><spectrumList count="5">{"".join(spectra)}</spectrumList></run></mzML>')
+    df = process_mzML_stack(str(path), intensity = True, extract_ms1 = True)
+    # The lockmass scans are no survey scans: the precursors (8 ppm and 14 ppm off) move onto the function 1 centroid and take its intensities
+    assert len(df.attrs['ms1'][0]) == 1 and np.allclose(df['m/z'], 608.3163, atol = 1e-4) and np.allclose(df['intensity'], 1.51e6)
+    # TOF MS2 keep their 100 most intense peaks, and the unfragmented envelope of a precursor with a charge state goes
+    assert [len(p) for p in df['peak_d']] == [100, 100] and not any(608.2 < m < 609.5 for m in df['peak_d'][1])
+    assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof'
 
 
 def test_spectra_scan_activation(tmp_path):
