@@ -194,11 +194,16 @@ def refine_tof_precursors(ms1, mzs, rts, scans, charges):
     # The intensity is the precursor's isotope envelope (M to M+3, within 20 ppm) in its survey frame: Bruker's per-precursor intensity belongs to one
     # ion mobility feature, so precursors of one peak picked at different mobilities from one frame differ up to 20-fold, which split chromatographic peaks
     intensities = []
-    for mz, z, s in zip(out, charges, scans):
+    for k, (mz, z, s) in enumerate(zip(out, charges, scans)):
         scan_mzs, scan_ints = ms1[1][ms1[3][s]:ms1[3][s + 1]], ms1[2][ms1[3][s]:ms1[3][s + 1]]
         if s < 0:
             intensities.append(np.nan)
         elif z:
+            # Bruker's m/z is that of one ion mobility feature (robust SD 2.4 ppm against the compositions of the timsTOF serum ground truth), the survey
+            # frame's centroid, summed over mobility, that of the whole precursor (1.6 ppm), as finalise_predictions' accurate-MS1 window expects
+            near = np.flatnonzero(np.abs(scan_mzs - mz) <= 2e-5 * mz)
+            if len(near):
+                out[k] = mz = float(scan_mzs[near[np.argmax(scan_ints[near])]])
             targets = mz + np.arange(4) * ISOTOPE_SPACING / z
             lo, hi = np.searchsorted(scan_mzs, targets * (1 - 2e-5)), np.searchsorted(scan_mzs, targets * (1 + 2e-5))
             intensities.append(float(sum(scan_ints[a:b].sum() for a, b in zip(lo, hi))))
@@ -1281,6 +1286,27 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     return [m for ion, ms in ions.items() if int(ion.rsplit(']', 1)[1][:-1] or 1) in permitted_charges for m in np.atleast_1d(ms) if abs(mass - m) < mass_tolerance]
 
 
+def accurate_ms1_window(ppm, scores, ppm_thresh, floor = 3.0):
+    """center and half-width (ppm) of the composition errors of a run with accurate (orbitrap, timsTOF) survey scans: real glycans pile up within a few ppm,
+    while matches of other compositions spread over the whole ppm_thresh and swamp a plain median and MAD (permethylated serum on a Q Exactive: 3 robust SD
+    of all rows 116 ppm). The center is the densest 4 ppm window, refined to the median of the rows within 5 ppm of it whose fragments back them up best
+    (annotation score in their top 10%), and the half-width 3 robust SD of those rows, at least floor; None with fewer than 5 rows"""
+    ok = np.isfinite(ppm) & (np.abs(ppm) <= ppm_thresh)
+    ppm, scores = ppm[ok], np.asarray(scores, dtype = float)[ok]
+    if len(ppm) < 5:
+        return None
+    s = np.sort(ppm)
+    grid = np.arange(s[0], s[-1] + 0.25, 0.25)
+    center = grid[np.argmax(np.searchsorted(s, grid + 2, side = 'right') - np.searchsorted(s, grid - 2))]
+    near = np.abs(ppm - center) <= 5
+    best = near & (scores >= np.quantile(scores[near], 0.9))
+    best = best if best.sum() >= 5 else near
+    if best.sum() < 5:
+        return None
+    center = float(np.median(ppm[best]))
+    return center, max(3 * 1.4826 * float(np.median(np.abs(ppm[best] - center))), floor)
+
+
 def median3(x):
     """np.median of each value with its two neighbors (one at the ends), vectorized and bitwise identical to calling np.median on each window"""
     if len(x) < 3:
@@ -1746,8 +1772,12 @@ def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
 
 
 def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance, modification = 'reduced',
-                                    sample_prep = 'underivatized', sialic_derivatization = None, n_jobs = 1):
+                                    sample_prep = 'underivatized', sialic_derivatization = None, n_jobs = 1, fragment_tolerance = None):
     mode = 'negative' if multiplier == -1 else 'positive'
+    # Fragments are matched within mass_tolerance (the precursor tolerance, 0.48 Da at 300 ppm) unless the MS2 is accurate (fragment_tolerance); they are
+    # pooled at 0.01 m/z then, as 0.1 m/z rounding alone would be off by up to 0.05
+    fragment_tolerance = fragment_tolerance or mass_tolerance
+    decimals = 2 if fragment_tolerance < 0.1 else 1
     adduct_list = get_adduct_list(mode)
     idx_col = 'm/z' if 'm/z' in df_in.columns else 'reducing_mass'
     unq_structs = df_in[df_in['candidate_structure'].notnull()].groupby('candidate_structure').first().reset_index()
@@ -1779,20 +1809,20 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         # A single spectrum keeps them: there the freed places let chance annotations pass crumbs_thresh (5 of the 6 single spectra it newly passed were
         # in no ground truth)
         rounded_mass_rows = [rounded_masses[key] if (key := (spec, row_charge)) in rounded_masses else
-                             rounded_masses.setdefault(key, [np.round(y, 1) for y in list(deisotope_ms2(({m: i for m, i in x.items() if m <= abs(row_charge) * mz + 1.5} if n > 1 else x), int(abs(row_charge)), 0.05, relabel = n >= 20))[:15]])
+                             rounded_masses.setdefault(key, [np.round(y, decimals) for y in list(deisotope_ms2(({m: i for m, i in x.items() if m <= abs(row_charge) * mz + 1.5} if n > 1 else x), int(abs(row_charge)), 0.05, relabel = n >= 20))[:15]])
                              for spec, x, n, mz in zip(spec_ids[rows], peak_vals[rows], df_in['num_spectra'].values[rows], mz_vals[rows])]
         # MS3 spectra (if the file has them) are pooled per isolated MS2 fragment, as CandyCrumbs only explains their peaks with fragments of
         # what that fragment is in this structure
         ms3_rows = [rounded_ms3[key] if (key := (spec, row_charge)) in rounded_ms3 else
                     rounded_ms3.setdefault(key,
-                                           [(round(p), p, [np.round(y, 1) for y in list(deisotope_ms2(x, int(abs(row_charge)), 0.05))[:15]]) for p, x
+                                           [(round(p), p, [np.round(y, decimals) for y in list(deisotope_ms2(x, int(abs(row_charge)), 0.05))[:15]]) for p, x
                                             in ms3])
                     for spec, ms3 in zip(spec_ids[rows], df_in['ms3'].values[rows])] if 'ms3' in df_in.columns else []
         pools = {None: (None, set([x for y in rounded_mass_rows for x in y]))}
         for key, p, masses in [x for y in ms3_rows for x in y]:
             pools.setdefault(key, (p, set()))[1].update(masses)
         structs.append((rows, rounded_mass_rows, ms3_rows, list(pools)))
-        jobs += [(CandyCrumbs, (struct, unq_rounded_masses, mass_tolerance),
+        jobs += [(CandyCrumbs, (struct, unq_rounded_masses, fragment_tolerance),
                   dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative"),
                        disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + offset,
                        sample_prep = sample_prep, ms3_precursor = ms3_precursor, sialic_derivatization = sialic_derivatization))
@@ -2721,11 +2751,18 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         df_out['unlabelled'] = (np.abs(df_out['re_offset'].values + modification_mass_dict.get(modification, 0) + (mass_tag or 0)) < 0.01) & (df_out['re_offset'].values != 0)
     regular = ~df_out['unlabelled'].values if 're_offset' in df_out.columns else np.ones(len(df_out), dtype = bool)
     known_ppm = df_out['ppm_error'].values[regular & df_out['ppm_error'].notna().values]
-    if len(known_ppm) >= 5:
-        med = np.median(known_ppm)
-        # ... but not below 100 ppm without accurate survey scans, which no few rows can show to read better than that
-        ppm_thresh = min(ppm_thresh, max(med + 3.0 * np.median(np.abs(known_ppm - med)) * 1.4826, 0 if accurate_ms1 else 100))
-    keep = (~(df_out['ppm_error'] >= ppm_thresh)).values
+    signed = (df_out.index.values - df_out['theo_mz'].values) / df_out['theo_mz'].values * 1e6
+    known = regular & df_out['ppm_error'].notna().values
+    # With accurate survey scans the errors center on the run's calibration, which the composition matches of junk spectra hide from a median and MAD
+    window = accurate_ms1_window(signed[known], df_out['annotation_score'].values[known], ppm_thresh) if accurate_ms1 else None
+    if window is not None:
+        keep = (df_out['ppm_error'].isna() | (np.abs(signed - window[0]) <= window[1])).values
+    else:
+        if len(known_ppm) >= 5:
+            med = np.median(known_ppm)
+            # ... but not below 100 ppm without accurate survey scans, which no few rows can show to read better than that
+            ppm_thresh = min(ppm_thresh, max(med + 3.0 * np.median(np.abs(known_ppm - med)) * 1.4826, 0 if accurate_ms1 else 100))
+        keep = (~(df_out['ppm_error'] >= ppm_thresh)).values
     errors, singly = df_out.index.values - df_out['theo_mz'].values, df_out['ppm_error'].notna().values & (
                 np.abs(df_out['charge'].values) == 1) & regular
     if not accurate_ms1 and singly.sum() >= 5:
@@ -2810,6 +2847,28 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     df_out = df_out.drop(columns = ['rt_range'], errors = 'ignore')
     df_out = combine_charge_states(df_out)
     df_out = combine_adduct_species(df_out, rt_diff = rt_diff)
+    if mode == 'positive' and sample_prep == 'permethylated' and len(df_out):
+        # Permethylated, an NH4+ in place of a proton weighs exactly what Hex + dHex add in place of a Neu5Ac (NH3, 17.0265 Da, either way), so the
+        # [M+NH4+2H]3+ of A2G2S2 (935.16, 60% of its [M+3H]3+ in serum) reads as Hex6HexNAc4dHex1Neu5Ac1 [M+3H]3+: a row whose composition is that of a
+        # co-eluting, at least as abundant row with k Hex + dHex in place of k Neu5Ac (k up to its charge) is that row's NH4+ adduct, and counts for it
+        comps = [c if isinstance(c, dict) else {} for c in df_out['composition']]
+        keys = [stringify_dict(c) for c in comps]
+        rts, zs = df_out['RT'].values, np.abs(df_out['charge'].values)
+        ab, ns = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra')
+        folded = set()
+        for i in sorted(range(len(df_out)), key = lambda i: df_out.iat[i, ab]):
+            c = comps[i]
+            for k in range(1, min(c.get('Hex', 0), c.get('dHex', 0), zs[i]) + 1):
+                target = stringify_dict({m: n for m, n in {**c, 'Hex': c['Hex'] - k, 'dHex': c['dHex'] - k, 'Neu5Ac': c.get('Neu5Ac', 0) + k}.items() if n})
+                partners = [j for j in range(len(df_out)) if j != i and j not in folded and keys[j] == target and abs(rts[j] - rts[i]) <= rt_diff
+                            and df_out.iat[j, ab] >= df_out.iat[i, ab]]
+                if partners:
+                    j = min(partners, key = lambda j: abs(rts[j] - rts[i]))
+                    df_out.iat[j, ab] += df_out.iat[i, ab]
+                    df_out.iat[j, ns] += df_out.iat[i, ns]
+                    folded.add(i)
+                    break
+        df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in folded]]
     if mode == 'positive' and 'adduct' in df_out.columns:
         # In positive mode a metal adduct ion ([M+K+H]2+, [M+Na+H]2+, [M+2Na]2+, ...) is reported by the co-eluting (de)protonated ion of its composition,
         # which takes its abundance and spectra count, whichever isomer each was given; without one it is no glycan peak
@@ -3145,7 +3204,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     common_structure_map, df_use, topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out,
                                                                       phylo_level = taxonomy_level,
                                                                       phylo_filter = taxonomy_filter)
-    if accurate_ms1 and 'precursor_charge' in loaded_file.columns and loaded_file['precursor_charge'].notna().any():
+    if loaded_file.attrs.get('detected_ms1_trap') == 'orbitrap' and 'precursor_charge' in loaded_file.columns and loaded_file['precursor_charge'].notna().any():
         # With a header charge, the precursor m/z is the instrument's own monoisotopic pick in the orbitrap survey scan, which for large multiply charged
         # glycans sometimes lands on the 13C isotope. Such a precursor sits one or two isotope spacings / z above a
         # composition, and only the accurate m/z tells this from a composition at the m/z itself (isobaric combinations, e.g., Neu5Gc2 vs Hex2Neu5Ac, differ from
@@ -3190,8 +3249,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                          mass_tag, modification = modification, max_charge = max_charge,
                                          sample_prep = sample_prep, cross_class = cross_class, ms1_ppm = 20 if accurate_ms1 else None,
                                          sialic_derivatization = sialic_derivatization)
+    # Orbitrap and TOF MS2 hold hundreds of fragments, which the 0.48 Da window annotated by chance: junk spectra of a permethylated serum run (Q Exactive
+    # HCD) reached annotation scores of 4-10 and filled 400+ rows through the accurate-MS1 database fallback, while its real glycans scored 9-46
+    # TOF MS2 fragments sit 10-40 ppm off, 0.02 Da lost glycans there
+    fragment_tolerance = {'orbitrap': 0.02, 'other': 0.05}.get(trap)
     df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, modification = modification,
-                                             sample_prep = sample_prep, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs)
+                                             sample_prep = sample_prep, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
+                                             fragment_tolerance = fragment_tolerance)
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
     # Spectra without an annotation above crumbs_thresh are dropped unless rescued, so their inputs get one plain pass instead of 5 augmented ones
     # The model knows permethylated spectra by their own modification code (as build_training_pickles encodes them), whatever the reducing end
@@ -3352,10 +3416,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         ppm = (df_out.index.values - theo) / theo * 1e6
         has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
         # ppm is to the (de)protonated ion, so rows matched as adducts sit thousands of ppm off; they never pass and must not set the calibration either
-        known = has_pred & (np.abs(ppm) <= ppm_thresh)
-        if known.sum() >= 5:
-            center = np.median(ppm[known])
-            width = max(3 * 1.4826 * np.median(np.abs(ppm[known] - center)), 3)
+        window = accurate_ms1_window(ppm[has_pred], df_out['annotation_score'].values[has_pred], ppm_thresh)
+        if window is not None:
+            center, width = window
             predicted_specs = set(df_out['spec_id'][has_pred])
             ok = (~has_pred & ~df_out['cross_class'].values & (np.abs(ppm - center) <= width) & (
                         df_out['annotation_score'].values > cross_crumbs_thresh)
@@ -3532,7 +3595,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             if len(cands):
                 cands = cands.assign(candidate_structure = [list(known[c]) for c in cands['comp_str']], re_offset = offset, reducing_end = name)
                 found.append(assign_annotation_scores_pooled(cands.explode('candidate_structure').reset_index(drop = True), multiplier, mass_tag, mass_tolerance,
-                                                             modification = modification, sample_prep = sample_prep, n_jobs = n_jobs))
+                                                             modification = modification, sample_prep = sample_prep, n_jobs = n_jobs,
+                                                             fragment_tolerance = fragment_tolerance))
         df_var = pd.concat(found, ignore_index = True) if found else pd.DataFrame(columns = ['annotation_score'])
         df_var['conf'] = [known[c][g] for c, g in zip(df_var.get('comp_str', []), df_var.get('candidate_structure', []))]
         if len(df_var):

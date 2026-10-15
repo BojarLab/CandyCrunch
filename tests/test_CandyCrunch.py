@@ -55,6 +55,10 @@ TEST_DICTS = [
     {'name': 'GPST000556', 'args': {'glycan_class': 'free'}},
     # Bruker ion-trap N-glycans (mzXML, its extract_spectra .xlsx otherwise); the dot in the file name makes the GT run column end at '-35C-0'
     {'name': 'GPST000302', 'args': {'glycan_class': 'N'}},
+    # Permethylated reduced human serum N-glycans (Mechref lab, C18, Q Exactive HF, positive HCD; .raw with --input-format mzml, its .xlsx otherwise);
+    # trisialylated glycans are mostly [M+4H]4+, so max_charge 4
+    {'name': 'GPST000548', 'args': {'glycan_class': 'N', 'sample_prep': 'permethylated', 'max_charge': 4, 'lc': 'C18'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000548/") if 'Serum_control' in x]},
 ]
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
 MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d')
@@ -503,8 +507,9 @@ def test_tof_precursors():
     # envelope M..M+3 within 20 ppm, not the window around it
     peaks = [(1000.0, 500), (1111.392, 100), (1111.892, 98), (1112.393, 50), (1112.895, 18)]
     ms1 = (np.array([10.0]), np.array([m for m, _ in peaks], dtype = np.float32), np.array([i for _, i in peaks], dtype = np.float32), np.array([0, 5]))
-    out, drop, intensities = refine_tof_precursors(ms1, [1111.392, 1111.892, 1000.0], [10.0, 10.0, 10.0], [0, 0, 0], [2, 2, 1])
-    assert out[0] == 1111.392 and abs(out[1] - 1111.392) < 1e-3 and out[2] == 1000.0 and not drop.any()
+    # Picks a few ppm off their survey centroid (Bruker's per-mobility-feature m/z) move onto it
+    out, drop, intensities = refine_tof_precursors(ms1, [1111.3935, 1111.892, 1000.003], [10.0, 10.0, 10.0], [0, 0, 0], [2, 2, 1])
+    assert abs(out[0] - 1111.392) < 1e-3 and abs(out[1] - 1111.392) < 1e-3 and abs(out[2] - 1000.0) < 1e-4 and not drop.any()
     assert np.allclose(intensities, [266, 266, 500])
 
 
