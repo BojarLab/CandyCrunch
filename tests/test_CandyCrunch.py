@@ -59,7 +59,17 @@ TEST_DICTS = [
     # trisialylated glycans are mostly [M+4H]4+, so max_charge 4
     {'name': 'GPST000548', 'args': {'glycan_class': 'N', 'sample_prep': 'permethylated', 'max_charge': 4, 'lc': 'C18'},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000548/") if 'Serum_control' in x]},
+    # Permethylated reduced rat serum N-glycans with Neu5Gc (Mechref lab, C18, Q Exactive HF, positive HCD), the DDA run only (the PRM run of the sample has no
+    # survey scans and its precursors sit 18 Da above the DDA ones); .raw with --input-format mzml, its .xlsx otherwise
+    {'name': 'GPST000403', 'args': {'glycan_class': 'N', 'sample_prep': 'permethylated', 'max_charge': 4, 'lc': 'C18'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000403/") if 'Rat_Glyphosate' in x]},
 ]
+# timsTOF Pro serum N-glycans (negative, reduced, PGC, DDA-PASEF .d with --input-format mzml, its extract_spectra .xlsx otherwise) live in tests/untracked,
+# which git does not track, so the set is only added where its (preliminary, open-peak) ground truth is present; 'folder' is relative to TEST_DATA_DIR
+UNTRACKED_DIR = BASE_DIR / "tests" / "untracked"
+if os.path.exists(UNTRACKED_DIR / 'df_mz_timsTOF_serum.csv'):
+    TEST_DICTS.append({'name': 'timsTOF_serum', 'folder': '../untracked', 'args': {'glycan_class': 'N'},
+                       'test_files': [x for x in os.listdir(UNTRACKED_DIR) if x.startswith('20260831_TIMS_SC_NG') and x.lower().endswith(('.d', '.xlsx'))]})
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
 MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d')
 AVG_THRESHOLD = 0.05
