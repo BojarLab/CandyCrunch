@@ -1,4 +1,4 @@
-"""Readers for mzML, mzXML and mgf spectra files, on the standard library and numpy"""
+"""Readers for mzML, mzXML and mgf spectra files and for the scan table of Thermo .raw files, on the standard library, numpy and opentfraw"""
 import base64
 import heapq
 import itertools
@@ -7,6 +7,7 @@ import struct
 import zlib
 import xml.etree.ElementTree as ET
 import numpy as np
+import opentfraw
 # A timsTOF survey frame summed over its ion mobility scans holds ~40k centroids, mostly single-ion noise; the 5000 most intense reach down to ~0.04%
 # of the base peak and keep the MS1 data of an hour-long run near 150 MB
 TIMS_MS1_PEAKS = 5000
@@ -366,3 +367,65 @@ def read_mgf(filepath):
             elif len(parts := sline.split()) > 1:
                 mzs.append(float(parts[0]))
                 ints.append(float(parts[1]))
+
+
+def read_raw_scan_table(filepath):
+    """opens a Thermo .raw file with opentfraw and reads its scan table, rebuilt from the scan events where opentfraw misreads them\n
+   | Arguments:
+   | :-
+   | filepath (string): absolute filepath to the .raw file\n
+   | Returns:
+   | :-
+   | Returns the opentfraw RawFile, its scan table (a list per column: ms_level, polarity, scan_mode, analyzer, filter_string, precursor_mz, charge,
+   | isolation_width, retention_time, ...), and the index and data addresses of the scan packets if the table was rebuilt (else 0 and 0)
+   """
+    raw = opentfraw.RawFile(filepath)
+    table = raw.scan_table()
+    # opentfraw 2.0.0 and 3.0.0 misread the scan events of version 66 files from ion traps (LTQ, LTQ XL, LTQ Orbitrap Velos with Xcalibur 4): they are
+    # self-describing (136-byte preamble, then counted 56-byte reactions, 16-byte scan windows and 8-byte coefficients, then 3 u32), not of the
+    # fixed size it assumes. Its peaks, profile intensities, retention times and trailers are right, so if this layout walks exactly over the event
+    # stream, the columns read below are rebuilt from the events and the trailer
+    index_addr, data_addr = 0, 0
+    with open(filepath, 'rb') as f:
+        f.seek(36)
+        if int.from_bytes(f.read(4), 'little') >= 66:
+            # Skips the sequence row (64 bytes, 31 strings with a u32 after the 16th) and the autosampler info (24 bytes, a string), each string
+            # being a u32 count of UTF-16 characters followed by them
+            f.seek(1420)
+            for size in [None] * 16 + [4] + [None] * 15 + [24, None]:
+                f.seek(size or 2 * int.from_bytes(f.read(4), 'little'), 1)
+            info = f.read(824)
+            addrs = f.read(16 * max(int.from_bytes(info[28:32], 'little'), 2))
+            # The MS controller's run header has scan events or the file's data address
+            for a in range(0, len(addrs), 16):
+                f.seek(int.from_bytes(addrs[a:a + 8], 'little'))
+                run_header = f.read(7464)
+                n_events = int.from_bytes(run_header[7376:7380], 'little')
+                if int.from_bytes(addrs[a:a + 8], 'little') and (n_events or run_header[7416:7424] == info[808:816]):
+                    break
+            trailer_addr, params_addr = int.from_bytes(run_header[7448:7456], 'little'), int.from_bytes(run_header[7456:7464], 'little')
+            f.seek(trailer_addr + 4)
+            stream = f.read(max(params_addr - trailer_addr - 4, 0))
+            starts, pos = [], 0
+            while pos + 148 <= len(stream) and len(starts) < n_events:
+                starts.append(pos)
+                pos += 140 + 56 * int.from_bytes(stream[pos + 136:pos + 140], 'little')
+                pos += 4 + 16 * int.from_bytes(stream[pos:pos + 4], 'little')
+                pos += 16 + 8 * int.from_bytes(stream[pos:pos + 4], 'little')
+            if pos == len(stream) and len(starts) == len(table['ms_level']) and len(set(np.diff(starts + [pos]))) > 1:
+                index_addr, data_addr = int.from_bytes(run_header[7408:7416], 'little'), int.from_bytes(info[808:816], 'little')
+                for i, s in enumerate(starts):
+                    level = max(stream[s + 6], 1)
+                    reactions = [np.frombuffer(stream, '<f8', 3, s + 140 + 56 * k) for k in range(int.from_bytes(stream[s + 136:s + 140], 'little'))]
+                    act = {1: 'hcd', 3: 'etd', 4: 'cid', 5: 'ecd'}.get(stream[s + 24], '')
+                    params = (raw.scan_parameters(raw.first_scan + i) or {}) if level > 1 else {}
+                    mono, charge = params.get('Monoisotopic M/Z:') or 0, int(params.get('Charge State:') or 0)
+                    table['ms_level'][i] = level
+                    table['polarity'][i] = {0: '-', 1: '+'}.get(stream[s + 4])
+                    table['scan_mode'][i] = {0: 'centroid', 1: 'profile'}.get(stream[s + 5])
+                    table['analyzer'][i] = {0: 'ITMS', 1: 'TQMS', 2: 'SQMS', 3: 'TOFMS', 4: 'FTMS', 5: 'Sector'}.get(stream[s + 40])
+                    table['filter_string'][i] = ' '.join(f'{mz:.4f}@{act}{energy:.2f}' for mz, width, energy in reactions if mz > 0)
+                    table['precursor_mz'][i] = mono if mono > 0 else float(reactions[-1][0]) if reactions else None
+                    table['charge'][i] = charge if charge > 0 else None
+                    table['isolation_width'][i] = params.get('MS2 Isolation Width:') or params.get('MSn Isolation Width:')
+    return raw, table, index_addr, data_addr

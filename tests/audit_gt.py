@@ -122,7 +122,8 @@ def pooled_vector(peak_ds, precursor, z):
 def build_library(data_dir, cache_path):
     """pooled MS2 of the curated (structure-carrying) rows of every test set's GT, from its extract_spectra .xlsx; cached by file sizes and times"""
     gts = sorted(p for p in Path(data_dir).glob('*/df_mz_*.csv') if not p.stem.endswith(('_source', '_removed', '_review', '_audited')))
-    xlsxs = sorted(Path(data_dir).glob('*/*.xlsx'))
+    # extract_spectra files, a .cc in place of the .xlsx of the same run
+    xlsxs = sorted({p.with_suffix(''): p for p in sorted(Path(data_dir).glob('*/*.xlsx')) + sorted(Path(data_dir).glob('*/*.cc'))}.values())
     stamp = [LIBRARY_VERSION] + [(str(p), p.stat().st_size, p.stat().st_mtime) for p in gts + xlsxs]
     if cache_path and Path(cache_path).exists():
         with open(cache_path, 'rb') as f:
@@ -275,7 +276,9 @@ class Run:
         signal = raw > 0
         stretch = np.cumsum(signal & ~np.r_[False, signal[:-1]]) * signal
         stretch = np.where(signal, np.bincount(stretch)[stretch], 0)
-        candidates = (s > np.r_[-1, s[:-1]]) & (s >= np.r_[s[1:], -1]) & (s > 0) & (s >= MIN_OVER_BASELINE * baseline)
+        # Maxima above twice the local baseline, or, where isomers elute back to back and the baseline median sits on their peaks, maxima above it that
+        # are well resolved: GPST000239 Hex4HexNAc2 [M-H]- at 54.98 (valley 0.31 towards the given isomer at 56.14, 9 MS2) lies below twice its baseline
+        candidates = (s > np.r_[-1, s[:-1]]) & (s >= np.r_[s[1:], -1]) & (s > 0) & (s >= baseline)
         for i in np.flatnonzero(candidates & ((stretch >= 3) if self.cycle <= SLOW_CYCLE else True)):
             higher_l, higher_r = np.flatnonzero(s[:i] > s[i]), i + 1 + np.flatnonzero(s[i + 1:] > s[i])
             valley, neighbour = 0.0, None
@@ -283,12 +286,22 @@ class Run:
                 v = float(s[min(i, j):max(i, j) + 1].min() / s[i])
                 if v >= valley:
                     valley, neighbour = v, j
+            if s[i] < MIN_OVER_BASELINE * baseline[i] and valley >= VALLEY_SAME_MS2:
+                continue
             if neighbour is not None:
                 while 0 < neighbour < len(s) - 1 and max(s[neighbour - 1], s[neighbour + 1]) > s[neighbour]:
                     neighbour += 1 if s[neighbour + 1] > s[neighbour - 1] else -1
             below_l, below_r = np.flatnonzero(s[:i] <= s[i] / 2), i + 1 + np.flatnonzero(s[i + 1:] <= s[i] / 2)
-            t0 = (rts[below_l[-1]] + rts[below_l[-1] + 1]) / 2 if len(below_l) else rts[0]
-            t1 = (rts[below_r[0]] + rts[below_r[0] - 1]) / 2 if len(below_r) else rts[-1]
+            # Out to the survey scans where the signal has fallen to half: MS2 between the last scan above half height and that one were triggered on the
+            # peak (GPST000054 1177.43 at 42.37: its MS2 at 42.60, 0.003 min after the midpoint the window used to end at)
+            t0 = rts[below_l[-1]] if len(below_l) else rts[0]
+            t1 = rts[below_r[0]] if len(below_r) else rts[-1]
+            # The half-height window ends at the valley towards a higher point: a small maximum before a long stretch of higher signal (GPST000054
+            # Hex5HexNAc2 [M-H]- at 15.65, 46k, before the 0.2-42M of 17-57 min) otherwise reached to 57.5 min and took the MS2 of Man5 at 27.3
+            if len(higher_l):
+                t0 = max(t0, rts[higher_l[-1] + int(np.argmin(s[higher_l[-1]:i + 1]))])
+            if len(higher_r):
+                t1 = min(t1, rts[i + int(np.argmin(s[i:higher_r[0] + 1]))])
             # MS2 triggered by the apex survey scan come up to one cycle after it
             nxt = rts[min(i + 1, len(rts) - 1)]
             out.append({'i': int(i), 'RT': float(rts[i]), 'height': float(s[i]), 'baseline': float(baseline[i]), 'valley': valley, 'neighbour': neighbour,
@@ -305,7 +318,9 @@ def glycan_fragments(run, hits, comp, z, precursor, cc_kwargs):
         d = run.peak_d[k]
         total = sum(d.values()) or 1
         pooled.update({round(m, 1): i / total for m, i in d.items()})
-    deisotoped = deisotope_ms2(dict(pooled), z, 0.2, relabel = len(hits) >= 20)
+    # Named by the most intense peak of each pattern whatever the number of spectra: in the noise-rich centroids of Bruker ion traps, peaks 1-2 Da below a
+    # fragment claimed it as their isotope (GPST000239 Gb3 505.18: 161.04, 263.04 and 343.14 became 159.1, 261.0 and 340.2, 1 of 10 annotated instead of 6)
+    deisotoped = deisotope_ms2(dict(pooled), z, 0.2, relabel = True)
     frags = [m for m in deisotoped if not -0.6 <= m - precursor <= 3.6 / z][:TOP_FRAGMENTS]
     fragmentation = sum(i for m, i in pooled.items() if not -0.6 <= m - precursor <= 3.6 / z) / (sum(pooled.values()) or 1)
     if not frags:
@@ -448,9 +463,17 @@ def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = '
             smoothed = [run.smooth(t) for t in traces]
             total = np.sum(smoothed, axis = 0) if smoothed else np.zeros(len(run.rts))
             # Maxima are found on each ion's own trace (summed, the noise of an empty charge state blurred the valleys of the other), and maxima of
-            # several ions within 1.5 MS1 cycles are one peak, judged on its most intense ion
+            # several ions within 1.5 MS1 cycles are one peak, judged on its most intense ion that has MS2 inside its own maximum (else its most intense ion):
+            # at unit resolution the z = 3 window of an N-glycan catches the isotopes of co-eluting ions, which made 519.18 [M-3H]3- the peak of the Man7
+            # [M-2H]2- precursors at 779.32 (GPST000054) and 499.17 [M-2H]2- that of 999.39 [M-H]- (GPST000239)
             peaks = []
-            for p, k in sorted(((p, k) for k, t in enumerate(traces) for p in run.maxima(t)), key = lambda x: -x[0]['height']):
+            with_ms2 = lambda p, k: any(p['window'][0] <= run.rt[h] <= p['window'][1] for h in ion_hits[k])
+            for p, k in sorted(((p, k) for k, t in enumerate(traces) for p in run.maxima(t)), key = lambda x: (not with_ms2(*x), -x[0]['height'])):
+                # A maximum of an ion that was not fragmented there while another ion of the composition was is no peak of its own: the fragmented ion's
+                # trace has to show it (499.17 [M-2H]2- at 43.75 under 999.35 [M-H]- in GPST000239; 526.51 [M-3H]3- at 29.81 on the tail of the 790.27
+                # [M-2H]2- peak at 28.90)
+                if not with_ms2(p, k) and any(with_ms2(p, m) for m in range(len(ions)) if m != k):
+                    continue
                 same = next((q for q in peaks if abs(q['RT'] - p['RT']) <= max(0.1, 1.5 * run.cycle)), None)
                 if same is None:
                     p['dominant'] = k

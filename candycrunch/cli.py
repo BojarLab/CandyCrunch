@@ -12,7 +12,7 @@ def str_to_bool(value):
 
 def main():
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
-    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker .d folders (timsTOF, ion traps), .mzML, .mzXML, .mgf, .xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mgf files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
+    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker .d folders (timsTOF, ion traps), .mzML, .mzXML, .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
@@ -49,10 +49,10 @@ def main():
     if not os.path.isdir(os.path.dirname(os.path.abspath(args.output))):
         parser.error(f'the folder of --output {args.output} does not exist')
     # A timsTOF .d folder is one run (a shell completes it with a trailing separator); any other folder gives its runs
-    filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.d', '.mzml', '.mzxml', '.mgf'))]
+    filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.d', '.mzml', '.mzxml', '.mgf', '.cc'))]
                                                                               if os.path.isdir(p) and not p.lower().endswith('.d') else [p])]
     if not filepaths:
-        parser.error('no .raw/.d/.mzML/.mzXML/.mgf files found in --spectra_filepath')
+        parser.error('no .raw/.d/.mzML/.mzXML/.mgf/.cc files found in --spectra_filepath')
     missing = [f for f in filepaths if not os.path.exists(f)]
     if missing:
         parser.error(f"not found: {', '.join(missing)}")

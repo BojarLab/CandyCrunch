@@ -55,10 +55,18 @@ for _arg, _default in zip(_batch_def.args.args[-len(_batch_def.args.defaults):],
 _constants = {node.targets[0].id: node.value for node in _tree.body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)}
 MZ_REF = ast.literal_eval(_constants['MZ_REF'])
 FILTER_CHOICES = sorted(set(ast.literal_eval(_constants['comp_vector_order'])) | DEFAULTS['filter_out'], key = str.lower)
+ANALYZER_TRAPS, MZXML_ANALYZER_TRAPS = ast.literal_eval(_constants['ANALYZER_TRAPS']), ast.literal_eval(_constants['MZXML_ANALYZER_TRAPS'])
+# What a run's name may say about its settings; a setting is only taken from the name if it names exactly one of its choices
+NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?glycans?|og|o(?![a-z0-9])|mucins?', 'lipid': r'gsls?|glycosphingolipids?|glycolipids?|gangliosides?',
+                               'free': r'milk|hmos?'},
+              'modification': {'reduced': r'(?<!non-)reduced|alditols?', 'unreduced': r'un-?reduced|non-?reduced', '2AB': r'2-?ab', '2AA': r'2-?aa', 'procainamide': r'procainamide'},
+              'sample_prep': {'permethylated': r'permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
 BATCH_KEYS = ('intra_cat_thresh', 'top_n_isomers', 'n_jobs')
 FEATURES = '\x00features'
 GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharides (e.g., milk)', 'free'), ('Glycolipid glycans', 'lipid')]
-REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'), ('Custom tag mass', 'custom')]
+# 'unreduced' exists only in the app: wrap_inference takes a free reducing end as a custom label without mass (its reducing end check calls that 'unreduced')
+REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('Unreduced (free reducing end)', 'unreduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'),
+                 ('Other label (enter its mass)', 'custom')]
 SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethylated'), ('Peracetylated', 'peracetylated')]
 # Linkage-specific sialic acid derivatizations of underivatized samples, as wrap_inference's sialic_derivatization
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
@@ -69,7 +77,7 @@ TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZo
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD'), ('EED', 'EED'),
                   ('EDD', 'EDD'), ('NETD', 'NETD'), ('UVPD', 'UVPD')]
-SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mgf')
+SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mgf', '.cc')
 # extract_spectra xlsx of 4.5 min (25-29.5) of a pig gastric mucin O-glycan run (GPST000029, as packaging/self_test.mzML): 275 MS2 spectra, ~20 glycan peaks
 EXAMPLE_RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'example_PGM_O-glycans.xlsx')
 # Crash and bug reports go to the CandyCrunch project on Sentry (its DSN, from Settings > Client Keys: public by design, it can only submit reports);
@@ -309,6 +317,81 @@ def _pool_initializer(messages, weights, n_files, initializer, initargs):
     # Cancel and quit end the worker; without this its pool processes would finish their file unseen and then wait forever
     parent = mp.parent_process()
     threading.Thread(target = lambda: (parent.join(), os._exit(1)), daemon = True).start()
+
+
+def _detect_run(path, results):
+    """Runs in a process of its own, as reading a large file takes seconds: what a run's file says about its settings, as the pipeline reads it (ion mode, MS2
+    analyzer, and how many MS2 spectra carry each precursor charge), and what its name says (NAME_HINTS); puts (path, found, charges) on results"""
+    found, charges, ext = {}, {}, os.path.splitext(os.path.normpath(path))[1].lower()
+    try:
+        if ext in ('.mzml', '.mzxml', '.mgf'):
+            # Only tags and their attributes are read, never the binary data, in chunks cut after a tag (mgf: a line); the first chunk holds the instruments
+            mode_re, filter_re, charge_re = [re.compile(x) if x else None for x in {'.mzml': (rb'"MS:10001(29|30)"', rb'"MS:1000512"[^>]*?value="(ITMS|FTMS)[^"]* ms2 ', rb'"MS:1000041"[^>]*?value="(\d+)"'),
+                                                                                  '.mzxml': (rb'polarity="([+-])"', rb'filterLine="(ITMS|FTMS)[^"]* ms2 ', rb'precursorCharge="(\d+)"'),
+                                                                                  '.mgf': (rb'(?m)^CHARGE=\d+([+-])', None, rb'(?m)^CHARGE=(\d+)')}[ext]]
+            cut, tail, header = b'\n' if ext == '.mgf' else b'>', b'', None
+            with open(path, 'rb') as file:
+                while True:
+                    chunk = file.read(1 << 24)
+                    text = tail + chunk
+                    end = text.rfind(cut) + 1 if chunk else len(text)
+                    text, tail, header = text[:end], text[end:], text if header is None else header
+                    if 'mode' not in found and (match := mode_re.search(text)):
+                        found['mode'] = {b'29': 'negative', b'30': 'positive', b'-': 'negative', b'+': 'positive'}[match.group(1)]
+                    if 'trap' not in found and filter_re and (match := filter_re.search(text)):
+                        found['trap'] = {b'ITMS': 'linear', b'FTMS': 'orbitrap'}[match.group(1)]
+                    for z in charge_re.findall(text):
+                        charges[int(z)] = charges.get(int(z), 0) + 1
+                    if not chunk:
+                        break
+            # Without a Thermo filter string, the analyzer (or Bruker amaZon model) of the instrument configuration
+            if 'trap' not in found and ext == '.mzml':
+                found['trap'] = next((t for a, t in ANALYZER_TRAPS.items() if a.encode() in header), None)
+            elif 'trap' not in found and ext == '.mzxml':
+                instrument = b' '.join(re.findall(rb'<(?:msModel|msMassAnalyzer)[^>]*value="([^"]*)"', header)).decode(errors = 'replace').lower()
+                found['trap'] = next((t for a, t in MZXML_ANALYZER_TRAPS.items() if a in instrument), None)
+        elif ext == '.xlsx':
+            # Files written by extract_spectra carry the ion mode and analyzer of their raw file
+            df = pd.read_excel(path, usecols = lambda c: c in ('mode', 'trap', 'precursor_charge'))
+            found.update({k: df[k].dropna().iloc[0] for k in ('mode', 'trap') if k in df.columns and df[k].notna().any()})
+            charges = {int(z): int(n) for z, n in df['precursor_charge'].dropna().abs().value_counts().items()} if 'precursor_charge' in df.columns else {}
+        elif ext == '.cc':
+            # extract_spectra's binary files carry the ion mode and analyzer in their JSON header, and precursor charges as a column of byte planes
+            with np.load(path) as f:
+                meta = json.loads(f['meta'].tobytes())
+                found.update(mode = meta['attrs'].get('detected_mode'), trap = meta['attrs'].get('detected_trap'))
+                key = f"col{meta['columns'].index('precursor_charge')}" if 'precursor_charge' in meta['columns'] else None
+                if key in f.files:
+                    z = np.abs(np.ascontiguousarray(f[key].T).view(meta['dtypes'][key]).ravel().astype(float))
+                    charges = {int(c): int(k) for c, k in zip(*np.unique(z[~np.isnan(z)], return_counts = True))}
+        elif ext == '.raw':
+            from candycrunch.utils import read_raw_scan_table
+            _, table, _, _ = read_raw_scan_table(path)
+            ms2 = [i for i, level in enumerate(table['ms_level']) if level == 2]
+            if ms2:
+                found.update(mode = {'-': 'negative', '+': 'positive'}.get(table['polarity'][ms2[0]]), trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(table['analyzer'][ms2[0]]))
+            for i in ms2:
+                if table['charge'][i]:
+                    charges[int(table['charge'][i])] = charges.get(int(table['charge'][i]), 0) + 1
+        elif ext == '.d' and os.path.exists(os.path.join(path, 'analysis.tdf')):
+            import pathlib
+            import sqlite3
+            db = sqlite3.connect(pathlib.Path(path, 'analysis.tdf').resolve().as_uri() + '?mode=ro', uri = True)
+            try:
+                polarity = db.execute('SELECT Polarity FROM Frames WHERE Polarity IS NOT NULL LIMIT 1').fetchone()
+                charges = dict(db.execute('SELECT Charge, COUNT(*) FROM Precursors WHERE Charge > 0 GROUP BY Charge').fetchall())
+            finally:
+                db.close()
+            found.update(mode = {'+': 'positive', '-': 'negative'}.get(polarity[0] if polarity else None), trap = 'other')
+    except Exception:
+        # An unreadable file is reported when it is run; here it only tells nothing
+        pass
+    name = os.path.basename(os.path.normpath(path)).lower()
+    for key, choices in NAME_HINTS.items():
+        named = [value for value, pattern in choices.items() if re.search(rf'(?<![a-z0-9])(?:{pattern})(?![a-z])', name)]
+        if len(named) == 1:
+            found[key] = named[0]
+    results.put((path, {k: v for k, v in found.items() if v is not None}, charges))
 
 
 class InferenceRunner(QObject):
@@ -1140,8 +1223,8 @@ class SettingsPanel(QScrollArea):
         self.files.setRootIsDecorated(False)
         self.files.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.files.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.files.setMinimumHeight(110)
-        self.files.setMaximumHeight(240)
+        # As high as its runs, from 110 to 240 px: at its default height the empty list pushed Advanced settings out of view in a 720 px high window
+        self.files.setFixedHeight(110)
         self.files.setToolTip('Runs of one experiment are predicted together and harmonized into one feature table; experiments are predicted and reported '
                               'separately, each with its own settings. Double-click an experiment to rename it, right-click runs to move them.')
         layout.addWidget(self.files)
@@ -1151,7 +1234,7 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, Bruker timsTOF .d (DDA-PASEF), mzML, mzXML, mgf, or an .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, Bruker timsTOF .d (DDA-PASEF), mzML, mzXML, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -1165,7 +1248,7 @@ class SettingsPanel(QScrollArea):
         self.charge.setToolTip('Highest absolute precursor charge considered for composition matching')
         self.inputs['modification'] = _combo(REDUCING_ENDS)
         self.inputs['mass_tag'] = _spin(-1000, 3000, 1, 4, ' Da')
-        self.inputs['mass_tag'].setToolTip('Mass a custom reducing-end label adds; 0 for a free reducing end')
+        self.inputs['mass_tag'].setToolTip('Mass the reducing-end label adds to the free glycan')
         self.inputs['sample_prep'] = _combo(SAMPLE_PREPS)
         self.sialic = _combo(SIALIC_DERIVATIZATIONS)
         self.sialic.setToolTip(SIALIC_TIP)
@@ -1185,6 +1268,14 @@ class SettingsPanel(QScrollArea):
         form.addRow('Chromatography', self.inputs['lc'])
         form.addRow('Mass analyzer', self.inputs['trap'])
         layout.addLayout(form)
+        self.sample_form = form
+        # What the first run of the experiment shown set (_detect_run)
+        self.detected = _label('', 'hint')
+        self.detected.hide()
+        layout.addWidget(self.detected)
+        self.detections, self.detecting, self.detect_timer = mp.get_context('spawn').Queue(), 0, QTimer(self)
+        self.detect_timer.setInterval(200)
+        self.detect_timer.timeout.connect(self.receive_detections)
         self.batch = QWidget()
         batch_layout = QVBoxLayout(self.batch)
         batch_layout.setContentsMargins(0, 0, 0, 0)
@@ -1273,8 +1364,10 @@ class SettingsPanel(QScrollArea):
         layout.addWidget(self.advanced)
         layout.addStretch(1)
         self.setWidget(body)
-        self.advanced_toggle.toggled.connect(lambda on: (self.advanced.setVisible(on), self.advanced_toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)))
-        self.inputs['modification'].currentIndexChanged.connect(lambda: self.inputs['mass_tag'].setEnabled(self.inputs['modification'].currentData() == 'custom'))
+        # Opened, the advanced settings scroll into view (they opened below the window's edge, so nothing seemed to happen)
+        self.advanced_toggle.toggled.connect(lambda on: (self.advanced.setVisible(on), self.advanced_toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow),
+                                                         on and QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.advanced_toggle.y() - 8))))
+        self.inputs['modification'].currentIndexChanged.connect(lambda: self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom'))
         self.inputs['experimental'].toggled.connect(lambda on: (self.inputs['taxonomy_level'].setEnabled(on), self.inputs['taxonomy_filter'].setEnabled(on)))
         self.reset.clicked.connect(lambda: self.set_values(DEFAULTS))
         self.remove.clicked.connect(self.remove_selected)
@@ -1286,6 +1379,8 @@ class SettingsPanel(QScrollArea):
         self.files.itemChanged.connect(self.rename_experiment)
         self.files.customContextMenuRequested.connect(self.files_menu)
         self.files_changed.connect(lambda: self.show_experiment(self.current_experiment()))
+        self.files_changed.connect(lambda: self.files.setFixedHeight(min(240, max(110, 6 + max(self.files.sizeHintForRow(0), self.files.fontMetrics().height() + 4) * sum(
+            self.files.topLevelItem(i).childCount() + 1 for i in range(self.files.topLevelItemCount()))))))
         for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic]:
             getattr(widget, {QComboBox: 'currentIndexChanged', QCheckBox: 'toggled', QLineEdit: 'textChanged'}.get(type(widget), 'valueChanged')).connect(
                 lambda *_: self.reset.setEnabled(any(v != DEFAULTS.get(k, v) for k, v in self.values().items())))
@@ -1318,6 +1413,8 @@ class SettingsPanel(QScrollArea):
             self.set_values(item.settings)
         self.sample_heading.setText('Sample' if item is None else f'Sample: {item.text(0)}')
         self.batch.setVisible(item is not None and item.childCount() > 1)
+        self.detected.setText(getattr(item, 'note', ''))
+        self.detected.setVisible(bool(self.detected.text()))
 
     def rename_experiment(self, item):
         if item.parent() is not None:
@@ -1369,12 +1466,14 @@ class SettingsPanel(QScrollArea):
         self.files.blockSignals(False)
         for experiment in experiments:
             self.files.setCurrentItem(self.add_experiment(dict(experiment['settings']), experiment['name']))
-            self.add_paths(experiment['files'])
+            self.add_paths(experiment['files'], detect = False)
         self.files.setCurrentItem(self.files.topLevelItem(0))
 
-    def add_paths(self, paths):
-        """Adds runs to the current experiment, or to a new one with the settings shown"""
+    def add_paths(self, paths, detect = True):
+        """Adds runs to the current experiment, or to a new one with the settings shown; detect: whether the first run of an experiment without runs sets
+        what its file and name tell about the experiment's settings"""
         existing, target = set(self.paths()), self.current_experiment()
+        empty = target is None or not target.childCount()
         for path in map(os.path.normpath, paths):
             # A timsTOF .d folder is one run; any other folder adds its runs
             found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith('.d') else [path]
@@ -1390,6 +1489,48 @@ class SettingsPanel(QScrollArea):
         if target is not None and target is not self.current_experiment():
             self.files.setCurrentItem(target)
         self.files_changed.emit()
+        path = target.child(0).data(0, Qt.UserRole) if detect and empty and target is not None and target.childCount() else None
+        if path is not None and os.path.exists(path):
+            # Read in a process of its own (seconds for a large file); a setting changed in the meantime is kept
+            target.detecting = (path, self.values() if target is self.shown else dict(target.settings))
+            mp.get_context('spawn').Process(target = _detect_run, args = (path, self.detections), daemon = True, name = 'CandyCrunch file check').start()
+            self.detecting += 1
+            self.detect_timer.start()
+
+    def receive_detections(self):
+        """Sets what the first run of an experiment tells (_detect_run) on the experiment's settings the user has not changed since adding it: the ion mode,
+        the analyzer, the highest precursor charge of at least 1% of the MS2 spectra (never below the default), and what the run's name names"""
+        while True:
+            try:
+                path, found, charges = self.detections.get_nowait()
+            except (queue.Empty, EOFError, OSError):
+                return
+            self.detecting -= 1
+            if not self.detecting:
+                self.detect_timer.stop()
+            experiment = next((e for e in map(self.files.topLevelItem, range(self.files.topLevelItemCount())) if getattr(e, 'detecting', (None,))[0] == path), None)
+            if experiment is None:
+                continue
+            before, current = experiment.detecting[1], self.values() if experiment is self.shown else dict(experiment.settings)
+            del experiment.detecting
+            mode = found.pop('mode', None)
+            top = max([z for z, n in charges.items() if n >= max(3, 0.01 * sum(charges.values()))] or [0])
+            if mode or top:
+                found['max_charge'] = (max(abs(DEFAULTS['max_charge']), min(top, 8)) if top else abs(current['max_charge'])) * (
+                    -1 if (mode or ('negative' if current['max_charge'] < 0 else 'positive')) == 'negative' else 1)
+            if found.get('modification') == 'unreduced':
+                found.update(modification = 'custom', mass_tag = None)
+            changed = {k: v for k, v in found.items() if current.get(k) == before.get(k) and current.get(k) != v}
+            if experiment is self.shown:
+                self.set_values({**current, **changed})
+            else:
+                experiment.settings = {**current, **changed}
+            told = [f'{"negative" if v < 0 else "positive"} ions up to charge {abs(v)}' if k == 'max_charge' else
+                    self.inputs[k].itemText(self.inputs[k].findData('unreduced' if k == 'modification' and v == 'custom' else v)) for k, v in changed.items() if k != 'mass_tag']
+            experiment.note = f'Set from {os.path.basename(path)}: {", ".join(told)}' if told else ''
+            if experiment is self.shown:
+                self.detected.setText(experiment.note)
+                self.detected.setVisible(bool(experiment.note))
 
     def add_example(self):
         """Adds the bundled example run once, as an experiment of its own with the default settings for its O-glycans"""
@@ -1428,7 +1569,7 @@ class SettingsPanel(QScrollArea):
                 values[key] = widget.value()
         values['max_charge'] = self.charge.value() * (-1 if self.mode.currentData() == 'negative' else 1)
         values['filter_out'] = {name for name, box in self.filter_boxes.items() if box.isChecked()}
-        values['mass_tag'] = values['mass_tag'] if values['modification'] == 'custom' else None
+        values['modification'], values['mass_tag'] = ('custom', None) if values['modification'] == 'unreduced' else (values['modification'], values['mass_tag'] if values['modification'] == 'custom' else None)
         values['sialic_derivatization'] = self.sialic.currentData()
         return values
 
@@ -1450,7 +1591,10 @@ class SettingsPanel(QScrollArea):
         self.charge.setValue(abs(charge))
         for name, box in self.filter_boxes.items():
             box.setChecked(name in set(values.get('filter_out', DEFAULTS['filter_out'])))
-        self.inputs['mass_tag'].setEnabled(self.inputs['modification'].currentData() == 'custom')
+        # A custom label without mass (as earlier versions saved a free reducing end) is shown as unreduced
+        if values.get('modification') == 'custom' and not values.get('mass_tag'):
+            _set_combo(self.inputs['modification'], 'unreduced')
+        self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom')
         self.sialic.setCurrentIndex(max(self.sialic.findData(values.get('sialic_derivatization')), 0) if values.get('sialic_derivatization') else 0)
 
 
@@ -1509,6 +1653,8 @@ class ResultsView(QWidget):
         self.drawing = QLabel()
         self.drawing.setAlignment(Qt.AlignCenter)
         self.drawing.setMinimumHeight(90)
+        # Its width comes from the pane, never from the drawing shown (a wide drawing widened the pane's content beyond its view, which cut it off)
+        self.drawing.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         # A read-only text box rather than a label: IUPAC strings have no spaces to wrap at, and copying must give the plain string
         self.structure = QPlainTextEdit()
         self.structure.setReadOnly(True)
@@ -1542,11 +1688,11 @@ class ResultsView(QWidget):
         info_layout.addWidget(self.facts)
         info_layout.addWidget(_label('Candidates'))
         info_layout.addWidget(self.alternatives, 1)
-        info_scroll = QScrollArea()
-        info_scroll.setWidgetResizable(True)
-        info_scroll.setFrameShape(QFrame.NoFrame)
-        info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        info_scroll.setWidget(info)
+        self.info_scroll = QScrollArea()
+        self.info_scroll.setWidgetResizable(True)
+        self.info_scroll.setFrameShape(QFrame.NoFrame)
+        self.info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.info_scroll.setWidget(info)
         # The curation buttons stay in view below the details, which scroll if they must (inside them, the buttons were out of view at 1440 x 900), and
         # the candidate list takes the room left instead of its default 192 px height
         self.alternatives.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
@@ -1555,7 +1701,7 @@ class ResultsView(QWidget):
         details.setMinimumWidth(300)
         details_layout = QVBoxLayout(details)
         details_layout.setContentsMargins(0, 0, 0, 0)
-        details_layout.addWidget(info_scroll, 1)
+        details_layout.addWidget(self.info_scroll, 1)
         details_layout.addLayout(actions)
         self.spectrum = SpectrumPanel()
         self.spectrum_file = QComboBox()
@@ -1584,6 +1730,8 @@ class ResultsView(QWidget):
         bottom.addWidget(self.tabs)
         bottom.setStretchFactor(1, 1)
         bottom.setSizes([380, 900])
+        # The detail drawing is fitted to the pane's width, so it is fitted again when the pane is resized
+        bottom.splitterMoved.connect(lambda: self.row is not None and self.update_drawing())
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.addWidget(self.table)
         self.splitter.addWidget(bottom)
@@ -1857,10 +2005,13 @@ class ResultsView(QWidget):
         elif image.isNull():
             self.drawing.clear()
         else:
+            # At most its natural size, the pane's width and 150 px high, and the label at least as high as the drawing: the label kept 90 px, so it cut off
+            # the top and bottom of every drawing taller than that (most N-glycans)
             ratio = self.devicePixelRatioF()
-            width = min(image.width() * 0.3, max(120, self.drawing.width() - 10))
-            pixmap = QPixmap.fromImage(image.scaledToWidth(int(width * ratio), Qt.SmoothTransformation))
+            box = QSize(min(int(image.width() * 0.3), max(120, self.info_scroll.viewport().width() - 30)), 150)
+            pixmap = QPixmap.fromImage(image.scaled(box * ratio, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             pixmap.setDevicePixelRatio(ratio)
+            self.drawing.setMinimumHeight(max(90, round(pixmap.height() / ratio)))
             self.drawing.setPixmap(pixmap)
 
     def show_source(self):
@@ -2269,14 +2420,14 @@ class CrumbsTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(splitter)
         self.spectrum.show_message('Enter a structure and a peak list, then annotate the spectrum')
-        self.mass_tag.setEnabled(False)
+        form.setRowVisible(self.mass_tag, False)
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.setInterval(350)
         self.debounce.timeout.connect(self.update_preview)
         self.structure.textChanged.connect(self.debounce.start)
         self.structure.returnPressed.connect(self.annotate)
-        self.modification.currentIndexChanged.connect(lambda: self.mass_tag.setEnabled(self.modification.currentData() == 'custom'))
+        self.modification.currentIndexChanged.connect(lambda: form.setRowVisible(self.mass_tag, self.modification.currentData() == 'custom'))
         self.go.clicked.connect(self.annotate)
         images.ready.connect(lambda key: key[:2] == (self.structure.text().strip(), False) and self.update_preview())
         self.support_highlight = None
@@ -2295,9 +2446,11 @@ class CrumbsTab(QWidget):
         elif image.isNull():
             self.preview.setText('GlycoDraw cannot draw this; CandyCrumbs may still read it')
         else:
+            # As in the results' detail drawing: at most its natural size, the panel's width and 150 px high, and the label as high as the drawing
             ratio = self.devicePixelRatioF()
-            pixmap = QPixmap.fromImage(image.scaledToWidth(int(min(image.width() * 0.3, self.preview.width() - 10) * ratio), Qt.SmoothTransformation))
+            pixmap = QPixmap.fromImage(image.scaled(QSize(min(int(image.width() * 0.3), self.preview.width() - 10), 150) * ratio, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             pixmap.setDevicePixelRatio(ratio)
+            self.preview.setMinimumHeight(max(70, round(pixmap.height() / ratio)))
             self.preview.setPixmap(pixmap)
 
     def load(self, request):
@@ -2305,7 +2458,7 @@ class CrumbsTab(QWidget):
         self.structure.setText(request['structure'] or '')
         self.peaks.setPlainText('\n'.join(f'{mz:.4f}\t{intensity:.1f}' for mz, intensity in sorted(request['peaks'].items())))
         _set_combo(self.charge, request['charge'])
-        _set_combo(self.modification, settings.get('modification'))
+        _set_combo(self.modification, 'unreduced' if settings.get('modification') == 'custom' and not settings.get('mass_tag') else settings.get('modification'))
         self.mass_tag.setValue(settings.get('mass_tag') or 0)
         _set_combo(self.sample_prep, settings.get('sample_prep'))
         self.sialic.setCurrentIndex(max(self.sialic.findData(settings.get('sialic_derivatization')), 0) if settings.get('sialic_derivatization') else 0)
@@ -2712,7 +2865,7 @@ class MainWindow(QMainWindow):
 
     def choose_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Add LC-MS/MS runs', self.store.value('folder', os.path.expanduser('~')),
-                                                'Spectra (*.raw *.RAW *.mzML *.mzXML *.mgf *.xlsx);;All files (*)')
+                                                'Spectra (*.raw *.RAW *.mzML *.mzXML *.mgf *.cc *.xlsx);;All files (*)')
         if paths:
             self.store.setValue('folder', os.path.dirname(paths[0]))
             self.settings.add_paths(paths)
@@ -2737,7 +2890,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.split)
         # Files CandyCrunch cannot read (e.g., .wiff, .pdf) and folders without runs used to be dropped without a word
         if len(paths) > len(sessions) and len(self.settings.paths()) == count:
-            self.statusBar().showMessage('No new runs added (CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mgf, and .xlsx made by extract_spectra)', 10000)
+            self.statusBar().showMessage('No new runs added (CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mgf, and .cc or .xlsx made by extract_spectra)', 10000)
 
     def run(self):
         # The results shown are replaced once this run is done

@@ -63,6 +63,10 @@ TEST_DICTS = [
     # survey scans and its precursors sit 18 Da above the DDA ones); .raw with --input-format mzml, its .xlsx otherwise
     {'name': 'GPST000403', 'args': {'glycan_class': 'N', 'sample_prep': 'permethylated', 'max_charge': 4, 'lc': 'C18'},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000403/") if 'Rat_Glyphosate' in x]},
+    # N-glycans of carcinoembryonic antigen (human, Merck preparation; Bruker amaZon speed ETD, msconvert profile mzML with MS1, its extract_spectra .xlsx otherwise)
+    {'name': 'GPST000054', 'args': {'glycan_class': 'N'}, 'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000054/") if x.startswith('CEA_Human_Merk')]},
+    # Glycosphingolipid glycans of SW1116 colorectal cancer cells with a GT1b spike (Bruker HCT, profile mzXML, its extract_spectra .xlsx otherwise)
+    {'name': 'GPST000239', 'args': {'glycan_class': 'lipid'}, 'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000239/") if 'SW1116' in x]},
 ]
 # timsTOF Pro serum N-glycans (negative, reduced, PGC, DDA-PASEF .d with --input-format mzml, its extract_spectra .xlsx otherwise) live in tests/untracked,
 # which git does not track, so the set is only added where its (preliminary, open-peak) ground truth is present; 'folder' is relative to TEST_DATA_DIR
@@ -71,7 +75,7 @@ if os.path.exists(UNTRACKED_DIR / 'df_mz_timsTOF_serum.csv'):
     TEST_DICTS.append({'name': 'timsTOF_serum', 'folder': '../untracked', 'args': {'glycan_class': 'N'},
                        'test_files': [x for x in os.listdir(UNTRACKED_DIR) if x.startswith('20260831_TIMS_SC_NG') and x.lower().endswith(('.d', '.xlsx'))]})
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
-MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d')
+MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d', '.cc')
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
@@ -596,6 +600,8 @@ def test_spectra_scan_activation(tmp_path):
     df = load_spectra_filepath(sciex)
     assert df['scan'].tolist() == [f'sample=1 period=1 cycle={c} experiment=2' for c in (1, 2, 3)]
     assert df['activation'].tolist() == ['ECD', 'CID', 'ETciD']
+    # Text scan IDs travel in the .cc export's JSON header
+    assert load_spectra_filepath(extract_spectra(sciex, file_format = 'cc'))['scan'].tolist() == df['scan'].tolist()
     # MGF scan numbers are integers as in mzML
     mgf_path = tmp_path / 'glycopeptides.mgf'
     mgf_path.write_text('BEGIN IONS\nTITLE=s1\nPEPMASS=878.69 1000\nCHARGE=3+\nRTINSECONDS=600\nSCANS=1234\n204.0867 100\n1189.512 50\nEND IONS\n')
@@ -636,6 +642,11 @@ def test_ms3_spectra(tmp_path):
     df = load_spectra_filepath(path)
     assert [[(p, list(d)) for p, d in x] for x in df['ms3']] == [[(290.09, [272.08, 170.05])], []]
     assert load_spectra_filepath(extract_spectra(path))['ms3'].tolist() == df['ms3'].tolist()
+    # The .cc export keeps every column, the MS3 spectra and the survey scans as loaded (survey scan intensities to 0.02%)
+    full, cc = load_spectra_filepath(path, extract_ms1 = True), load_spectra_filepath(extract_spectra(path, file_format = 'cc'), extract_ms1 = True)
+    assert cc.drop(columns = ['peak_d', 'ms3']).equals(full.drop(columns = ['peak_d', 'ms3'])) and cc.attrs['detected_mode'] == full.attrs['detected_mode'] == 'negative'
+    assert cc['peak_d'].tolist() == full['peak_d'].tolist() and cc['ms3'].tolist() == full['ms3'].tolist()
+    assert all(np.array_equal(cc.attrs['ms1'][i], full.attrs['ms1'][i]) for i in (0, 1, 3)) and np.allclose(cc.attrs['ms1'][2], full.attrs['ms1'][2], rtol = 3e-4, atol = 0)
     assert 'ms3' not in load_spectra_filepath(write('ms2.mzML', [ms1, (2, 10.01, ms2, [(1, 675.25)])])).columns
 
 

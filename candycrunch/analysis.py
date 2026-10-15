@@ -3806,10 +3806,16 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     stage = f'MS\u00b3 spectrum of m/z {kwargs["ms3_precursor"]:.2f}' if kwargs.get('ms3_precursor') is not None else 'MS\u00b2 spectrum'
     title = f'Annotated {stage}: {peptide + "*" + str(glycan_string) if peptide else input_string}'
     title_size = 9 if len(title) > 90 else 'large'
-    if ladder_ax is not None:
-        ladder_ax.set_title(title, fontsize = title_size)
-    else:
-        ax.set_title(title, fontsize = title_size, y = 1.40 if cartoons_drawn else 1.0)
+    title_text = ladder_ax.set_title(title, fontsize = title_size) if ladder_ax is not None else ax.set_title(title, fontsize = title_size, y = 1.40 if cartoons_drawn else 1.0)
+    # A long structure made the title (centered on its axes, which may be an inset) wider than the figure, which cut it off at both ends, so it breaks
+    # after a bracket where it would leave the figure; beyond two lines (more ran off the top of the figure) its middle is left out
+    extent = title_text.get_window_extent(ax.figure._get_renderer())
+    room = 2 * min(extent.x0 + extent.width / 2, ax.figure.bbox.width - extent.x0 - extent.width / 2)
+    if extent.width > 0.95 * room:
+        chars, lines = int(len(title) * 0.95 * room / extent.width), ['']
+        for part in re.findall(r'[^)\]]*[)\]]|[^)\]]+', title):
+            lines[-1:] = [lines[-1], part] if lines[-1] and len(lines[-1]) + len(part) > chars else [lines[-1] + part]
+        title_text.set_text('\n'.join(lines if len(lines) < 3 else [lines[0], '\u2026' + title[1 - chars:]]))
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)

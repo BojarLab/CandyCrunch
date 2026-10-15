@@ -269,6 +269,31 @@ def test_gui_save_image(app, tmp_path, monkeypatch):
     assert any(t.startswith('510.19 ') for t in texts) and '990.00' in texts
 
 
+def test_gui_unreduced_and_detection(app):
+    import multiprocessing as mp
+    import time
+    from candycrunch import gui
+    panel = gui.SettingsPanel()
+    # The pipeline takes a free reducing end as a custom label without mass, and settings saved that way (also as mass 0) show as unreduced
+    gui._set_combo(panel.inputs['modification'], 'unreduced')
+    assert (panel.values()['modification'], panel.values()['mass_tag']) == ('custom', None) and not panel.sample_form.isRowVisible(panel.inputs['mass_tag'])
+    panel.set_values({**panel.values(), 'mass_tag': 0.0})
+    assert panel.inputs['modification'].currentData() == 'unreduced'
+    results = mp.get_context('spawn').Queue()
+    gui._detect_run(gui.EXAMPLE_RUN, results)
+    path, found, charges = results.get(timeout = 10)
+    assert found == {'mode': 'negative', 'trap': 'linear', 'glycan_class': 'O'} and max(charges) == 2
+    # Found settings are set where the user has not changed them since adding the run (here the chromatography)
+    experiment = panel.add_experiment({**panel.values(), 'glycan_class': 'N', 'max_charge': 4, 'lc': 'C18'})
+    experiment.detecting, panel.detecting = (path, {**experiment.settings, 'lc': 'PGC'}), 1
+    panel.detections.put((path, {**found, 'lc': 'PGC'}, charges))
+    end = time.time() + 10
+    while panel.detecting and time.time() < end:
+        panel.receive_detections()
+        time.sleep(0.05)
+    assert (experiment.settings['glycan_class'], experiment.settings['max_charge'], experiment.settings['lc']) == ('O', -3, 'C18') and 'O-glycans' in experiment.note
+
+
 def test_gui_reports(app, monkeypatch):
     import json
     import threading
