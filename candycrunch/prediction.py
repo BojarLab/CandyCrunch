@@ -1120,10 +1120,21 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
                  df_in.modification.values.tolist(), df_in.trap.values.tolist()))
     # Test-time augmentation (5 augmented copies, aggregated by max) only where the prediction can reach the output
     tta = df_in['tta'].values
-    X_tta = unwrap([[k] * 5 for k, t in zip(X, tta) if t])
+    # Each input's 5 copies are augmented from a seed taken from the input itself (spectrum, remainders, composition vector), so the augmentation of an
+    # input no longer depends on how many inputs came before it: with one global random stream, a change adding or dropping a single candidate row
+    # reshuffled the augmentation of every later input (up to 0.02 F1 per dataset), and comparisons needed several seeds. The global random states are
+    # left as they were
+    state = (random.getstate(), np.random.get_state())
+    X_tta = []
+    for k in [k for k, t in zip(X, tta) if t]:
+        seed = zlib.crc32(b''.join(np.asarray(v, dtype = np.float32).tobytes() for v in k[:3]))
+        random.seed(seed)
+        np.random.seed(seed)
+        X_tta.extend((transform_mz(np.asarray(k[0])), *k[1:4], transform_rt(k[4]), *k[5:]) for _ in range(5))
+    random.setstate(state[0])
+    np.random.set_state(state[1])
     X_plain = [k for k, t in zip(X, tta) if not t]
-    dset = torch.utils.data.ConcatDataset([SimpleDataset(X_tta, pd.Series([0] * len(X_tta)), transform_mz = transform_mz, transform_rt = transform_rt),
-                                           SimpleDataset(X_plain, pd.Series([0] * len(X_plain)))])
+    dset = torch.utils.data.ConcatDataset([SimpleDataset(X_tta, pd.Series([0] * len(X_tta))), SimpleDataset(X_plain, pd.Series([0] * len(X_plain)))])
     dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
     idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
     df.set_index(idx_col, inplace = True)
@@ -1763,9 +1774,13 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
             for adduct in adduct_list)
         # Clusters of at least 20 MS2 spectra name a deisotoped pattern by its most intense peak (relabel), as their pooled noise puts a weak peak 1-3 Da
         # below most fragments, which deisotope_ms2 otherwise takes as their monoisotopic peak (10 or 40 spectra were worse)
+        # Peaks above the heaviest fragment a precursor of this charge can give (its singly charged ion, plus a charge-reduced one) are noise or another
+        # ion's, and in pooled spectra would otherwise take places among the 15 most intense fragments (Bruker ion-trap MS2 scans up to 2500 m/z carry many).
+        # A single spectrum keeps them: there the freed places let chance annotations pass crumbs_thresh (5 of the 6 single spectra it newly passed were
+        # in no ground truth)
         rounded_mass_rows = [rounded_masses[key] if (key := (spec, row_charge)) in rounded_masses else
-                             rounded_masses.setdefault(key, [np.round(y, 1) for y in list(deisotope_ms2(x, int(abs(row_charge)), 0.05, relabel = n >= 20))[:15]])
-                             for spec, x, n in zip(spec_ids[rows], peak_vals[rows], df_in['num_spectra'].values[rows])]
+                             rounded_masses.setdefault(key, [np.round(y, 1) for y in list(deisotope_ms2(({m: i for m, i in x.items() if m <= abs(row_charge) * mz + 1.5} if n > 1 else x), int(abs(row_charge)), 0.05, relabel = n >= 20))[:15]])
+                             for spec, x, n, mz in zip(spec_ids[rows], peak_vals[rows], df_in['num_spectra'].values[rows], mz_vals[rows])]
         # MS3 spectra (if the file has them) are pooled per isolated MS2 fragment, as CandyCrumbs only explains their peaks with fragments of
         # what that fragment is in this structure
         ms3_rows = [rounded_ms3[key] if (key := (spec, row_charge)) in rounded_ms3 else
@@ -1935,9 +1950,19 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
     computed_masses = np.array(
         [composition_to_mass(comp, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization) + tag for comp in
          df_out['composition'].values]) + (df_out['re_offset'].values if 're_offset' in df_out.columns else 0)
+    # Residue masses of the sample's derivatization; a residue that leaves the glycan (lost as a neutral, or as its ion less the charge carrier) also takes the
+    # group capping the bond it left by (CH2 when permethylated, C2H2O when peracetylated), e.g., permethylated Neu5Ac 375.19 (ion 376.20), not 291.10 (292.10).
+    # With underivatized masses, sialylated permethylated structures were only kept when some fragment happened to lie within 1 Da of one of them, which held
+    # for one charge state of a glycan and not for another (A2G2S2 [M+3H]3+ 929.48 lost, [M+2H]2+ 1393.72 kept)
+    if sample_prep == 'underivatized':
+        res_mass, cap = mass_dict, 0.0
+    else:
+        base = composition_to_mass({}, sample_prep = sample_prep)
+        res_mass = {r: composition_to_mass({r: 1}, sample_prep = sample_prep) - base for r in ('Hex', 'HexNAc', 'dHex', 'Pen', 'Neu5Ac', 'Neu5Gc', 'Kdn', 'HexA', 'HexN')}
+        cap = (base - composition_to_mass({})) / 2
     # A derivatized sialic acid leaves its ion, or is lost, as its a2-6 or its lactone-derived product
-    sia_masses = {sia: [mass_dict[sia]] if sialic_derivatization is None else [composition_to_mass({k: 1}, sialic_derivatization = sialic_derivatization) - composition_to_mass({})
-                                                                              for k in SIALIC_KEYS[sia]] for sia in SIALIC_KEYS}
+    sia_masses = {sia: [res_mass[sia] + cap] if sialic_derivatization is None else [composition_to_mass({k: 1}, sialic_derivatization = sialic_derivatization) - composition_to_mass({})
+                                                                                   for k in SIALIC_KEYS[sia]] for sia in SIALIC_KEYS}
     raw_masses = df_out.index.values * np.abs(df_out['charge'].values)
     df_out['adduct'] = None
     charges_abs = np.abs(df_out['charge'].values)
@@ -1992,7 +2017,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                     lacnac = re.search(sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)GlcNAc', m) is not None
                     # ... and, on an N-glycan antenna, together with the mannose it sits on (Neu5Ac-Hex-HexNAc-Hex C ion 835.3, the base peak of many z = 2
                     # monosialylated N-glycans in ion traps, whose 290 ion lies below the low-mass cutoff and which lose no sialic acid as a charged fragment)
-                    antenna = [mass_dict['Hex'] + mass_dict['HexNAc']] + ([2 * mass_dict['Hex'] + mass_dict['HexNAc']] if re.search(
+                    antenna = [res_mass['Hex'] + res_mass['HexNAc']] + ([2 * res_mass['Hex'] + res_mass['HexNAc']] if re.search(
                         sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)GlcNAc\(b1-[^)]*\)Man', m) else [])
                     truth.append(any(
                         any(abs(sm + PROTON_MASS * multiplier - j) < double_mass_tolerance for sm in sia_masses[sia]) or
@@ -2036,10 +2061,28 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             trusted = header_col[k] is not None and not pd.isna(header_col[k]) and abs(int(header_col[k])) == c
             if c > 1 and not trusted:
                 top10 = sorted(peak_col[k].items(), key = lambda x: x[1], reverse = True)[:10]
-                truth.append(any(j > precursor_mz * 1.2 for j in top_frags[:15]) or any(
+                multiply_charged = any(j > precursor_mz * 1.2 for j in top_frags[:15]) or any(
                     abs(precursor_mz - rm / c - j) < mass_tolerance / 2 for j in float_frags[:3] for r in
-                    get_comp(m) if r in mass_dict for rm in sia_masses.get(r, [mass_dict[r]])) or any(
-                    0.4 <= q - j <= 0.62 and 0.3 * y <= w <= 1.5 * y for j, y in top10[:5] for q, w in top10))
+                    get_comp(m) if r in res_mass for rm in sia_masses.get(r, [res_mass[r] + cap])) or any(
+                    0.4 <= q - j <= 0.62 and 0.3 * y <= w <= 1.5 * y for j, y in top10[:5] for q, w in top10)
+                # Without these signs, the charge state still holds if CandyCrumbs explains at least 3 of the 20 most intense peaks (one per mass_tolerance)
+                # only as fragments of a single glycosidic cleavage above charge 1, with no singly charged fragment of the structure at that peak (z = 2
+                # N-glycans in ion traps whose doubly charged Y ions dominate)
+                if not multiply_charged and all(truth) and sialic_derivatization is None:
+                    peaks = []
+                    for j in sorted(peak_col[k], key = peak_col[k].get, reverse = True)[:20]:
+                        if all(abs(j - q) > mass_tolerance for q in peaks):
+                            peaks.append(j)
+                    try:
+                        cc_out = CandyCrumbs(m.replace('-ol', '').replace('1Cer', ''), peaks, mass_tolerance, simplify = False, charge = int(charge_col[k]),
+                                             disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2, sample_prep = sample_prep,
+                                             mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + (
+                                                 df_out['re_offset'].values[k] if 're_offset' in df_out.columns else 0))
+                    except Exception:
+                        cc_out = {}
+                    multiply_charged = sum(bool(v) and all(abs(q) > 1 for q in v['Fragment charges']) and any(
+                        len(d) == 1 and d[0].split('_')[0] in ('B', 'C', 'Y', 'Z') for d in v['Domon-Costello nomenclatures']) for v in cc_out.values()) >= 3
+                truth.append(multiply_charged)
             if c == 1 and not trusted:
                 # A singly charged precursor cannot have fragments above its m/z; a weak one (below 20% of the base peak) is a co-isolated ion, not a wrong charge
                 top_peaks = sorted(peak_col[k].items(), key = lambda x: x[1], reverse = True)[:5]
@@ -2412,6 +2455,7 @@ def combine_charge_states(df_out):
             group = pd.concat([pred_rows.loc[[idx]], partners])
             rep = group.assign(_weak = group['top1_pred'].isna()).sort_values(['_weak', 'rel_abundance'], ascending = [True, False], kind = 'stable').index[0]
             df_filtered.at[rep, 'rel_abundance'] = group['rel_abundance'].sum()
+            df_filtered.at[rep, 'num_spectra'] = group['num_spectra'].sum()
             df_filtered = df_filtered.drop(group.index.drop(rep))
     df_out = pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index()
     df_out.drop(['top_pred'], axis = 1, inplace = True)
@@ -3095,7 +3139,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Prepare file for processing
     loaded_file.dropna(subset = ['peak_d'], inplace = True)
     idx_col = 'm/z' if 'm/z' in loaded_file.columns else 'reducing_mass'
-    loaded_file[idx_col] += np.random.uniform(10 ** (-20), 0.00001, size = len(loaded_file))
+    # A fixed tie-break jitter, so the output does not depend on the global random state
+    loaded_file[idx_col] += np.random.RandomState(0).uniform(10 ** (-20), 0.00001, size = len(loaded_file))
     coded_class = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}[glycan_class]
     common_structure_map, df_use, topo_struct_map = create_struct_map(df_use, glycan_class, filter_out = filter_out,
                                                                       phylo_level = taxonomy_level,

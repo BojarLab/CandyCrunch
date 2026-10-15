@@ -53,6 +53,8 @@ TEST_DICTS = [
     # Milk oligosaccharides up to Hex8HexNAc6dHex4, the larger ones as [M-2H]2- (Thermo LTQ .raw, ion-trap MS1 and MS2), one run; the .raw runs with
     # --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000556', 'args': {'glycan_class': 'free'}},
+    # Bruker ion-trap N-glycans (mzXML, its extract_spectra .xlsx otherwise); the dot in the file name makes the GT run column end at '-35C-0'
+    {'name': 'GPST000302', 'args': {'glycan_class': 'N'}},
 ]
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
 MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d')
