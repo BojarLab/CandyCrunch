@@ -2455,16 +2455,21 @@ try:
         load_spectra_filepath)]).encode()).hexdigest()[:12]
 except (OSError, TypeError):
     SPECTRA_LOADER = None
+# Minutes around a peak that extract_spectra(region = ...) keeps, for misprediction reports: tails and neighboring isomers of PGC peaks lie within it
+REGION_RT = 3.0
 
 
-def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xlsx'):
+def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xlsx', region = None):
     """extracts the MS/MS spectra of a .raw/.d/.mzML/.mzXML/.mgf file into a lightweight .xlsx or .cc file that wrap_inference reads directly\n
    | Arguments:
    | :-
    | spectra_filepath (string): absolute filepath ending in ".raw", ".d" (Bruker timsTOF or ion trap folder), ".mzML", ".mzXML", or ".mgf"
    | output_filepath (string): .xlsx or .cc filepath to write; default:None (spectra_filepath with the extension of file_format)
    | file_format (string): 'xlsx' (opens in Excel; MS2 and MS3 spectra) or 'cc' (compact binary file that also keeps the survey scans, so predictions
-   |                       from it are quantified by XIC areas, as from the original file); an output_filepath ending in .cc writes 'cc'; default:'xlsx'\n
+   |                       from it are quantified by XIC areas, as from the original file); an output_filepath ending in .cc writes 'cc'; default:'xlsx'
+   | region (tuple): (m/z, signed charge, RT) of a peak, to keep only its surroundings: the survey scans within REGION_RT min of RT and the MS2 (with
+   |                 their MS3) spectra there of the same neutral mass at any charge up to 4, within 1.5 Da (isotope picks included); a .cc then also
+   |                 records the peak, how many MS2 spectra the whole run has and its last MS2 RT, and names the source only by its file type; default:None\n
    | Returns:
    | :-
    | Returns the filepath of the written file; precursor m/z values are already refined from MS1 and isotope-triggered repeat spectra removed,
@@ -2476,6 +2481,21 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
         # An empty .xlsx would only fail later as a run without glycan peaks
         raise ValueError(f"{os.path.basename(os.path.normpath(spectra_filepath))} has no MS2 spectra with a precursor m/z, so there is nothing to extract (some conversions "
                          f"keep only the MS1 scans; data-independent acquisition such as Waters MSE has no precursors)")
+    region_meta = None
+    if region is not None:
+        # The surroundings of one peak, as a misprediction report sends them: its ion at every charge state, in the survey scans and in the MS2/MS3 spectra
+        mz, charge, rt = region
+        z, sign = abs(int(charge)) or 1, -1 if charge < 0 else 1
+        neutral, attrs = z * mz - sign * z * PROTON_MASS, df.attrs
+        region_meta = {'mz': float(mz), 'charge': int(charge), 'rt': float(rt), 'rt_window': REGION_RT, 'run_ms2': len(df), 'run_rt_max': float(df['RT'].max())}
+        keep = (np.abs(df['RT'].to_numpy(float) - rt) <= REGION_RT) & np.any(
+            [np.abs(df['m/z'].to_numpy(float) - (neutral + sign * c * PROTON_MASS) / c) <= 1.5 / c for c in range(1, 5)], axis = 0)
+        df = df[keep].reset_index(drop = True)
+        df.attrs = attrs
+        if attrs.get('ms1') is not None:
+            rts, mzs, ints, offsets = attrs['ms1']
+            lo, hi = np.searchsorted(rts, rt - REGION_RT, side = 'left'), np.searchsorted(rts, rt + REGION_RT, side = 'right')
+            df.attrs['ms1'] = (rts[lo:hi], mzs[offsets[lo]:offsets[hi]], ints[offsets[lo]:offsets[hi]], offsets[lo:hi + 1] - offsets[lo])
     if cc:
         output_filepath = output_filepath or os.path.splitext(os.path.normpath(spectra_filepath))[0] + '.cc'
         # A .cc is a zip of numpy arrays (np.load reads it), each stored as its byte planes (all first bytes, then all second bytes, ...), which deflate packs
@@ -2488,6 +2508,8 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
         meta = {'format': 'CandyCrunch spectra', 'version': 1, 'source': os.path.basename(os.path.normpath(spectra_filepath)), 'loader': SPECTRA_LOADER, 'columns': columns,
                 'attrs': {k: v for k, v in df.attrs.items() if k != 'ms1'}, 'json_columns': {c: df[c].tolist() for c in columns if c not in ('peak_d', 'ms3') and
                                                                                              not pd.api.types.is_numeric_dtype(df[c])}}
+        if region_meta:
+            meta.update(region = region_meta, source = 'run' + os.path.splitext(os.path.normpath(spectra_filepath))[1].lower())
         arrays = {f'col{i}': df[c].to_numpy() for i, c in enumerate(columns) if c not in ('peak_d', 'ms3') and c not in meta['json_columns']}
         spectra = [('', df['peak_d'])] + ([('ms3_', [d for x in df['ms3'] for _, d in x])] if 'ms3' in columns else [])
         for prefix, dicts in spectra:
@@ -3600,7 +3622,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # The same for a multiply charged composition without a model structure that joined a singly charged one for its doubly charged fragment pairs
     # (assign_candidate_structures)
     zabs = np.abs(df_out['charge'].values.astype(float))
-    df_out['doomed'] |= (zabs >= 2) & np.array([not p for p in df_out['predictions']]) & pd.Series(zabs == 1).groupby(df_out['spec_id'].values).transform('max').values
+    df_out['doomed'] |= (zabs >= 2) & np.array([not p for p in df_out['predictions']], dtype = bool) & pd.Series(zabs == 1).groupby(df_out['spec_id'].values).transform('max').values
     # Of the rest, a composition with a model structure counts one annotation more (ties going to it too): an ion-trap precursor fits isobars 0.5 m/z apart at
     # z = 2, and chance annotations of the one without a structure won (Hex4HexNAc4S1 over Man7 779.27, Hex4HexNAc4Neu5Gc1dHex2 over A2G2S1F 1038.87 in GPST000054)
     df_out['_pred'] = np.array([bool(p) for p in df_out['predictions']], dtype = float)
@@ -3937,7 +3959,11 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if not non_empty:
         ms1_dir.cleanup()
         return pd.DataFrame(), {k: (empty_table.copy(), []) if spectra else empty_table.copy() for k in file_labels}
-    all_ms2 = pd.concat(non_empty.values())
+    # A column without any value in one file (precursor_charge of a file without instrument charges) would set the dtype of the concatenation in future
+    # pandas; it takes the dtype that the files with values give it, which is what pandas does so far
+    dtypes = {c: pd.concat([v[c] for v in non_empty.values() if c in v.columns and v[c].notna().any()]).dtype for c in {c for v in non_empty.values() for c in v.columns}
+              if any(c in v.columns and v[c].notna().any() for v in non_empty.values())}
+    all_ms2 = pd.concat([v.astype({c: dtypes[c] for c in v.columns if c in dtypes and v[c].isna().all()}) for v in non_empty.values()])
     # Cluster precursor m/z across files: split at gaps above the mass tolerance, then split clusters wider than it at their largest gap
     mz_sorted = np.unique(all_ms2.index.values)
     to_split, mz_clusters = np.split(mz_sorted, np.where(np.diff(mz_sorted) > mass_tolerance)[0] + 1), []

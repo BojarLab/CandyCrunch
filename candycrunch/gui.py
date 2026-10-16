@@ -155,23 +155,39 @@ def _exception_values(error):
     return values
 
 
-def _send_report(event, files = None):
-    """Posts a Sentry event (an error, or a bug report as type 'feedback') and text attachments ({file name: text}) as one envelope; True if Sentry took it"""
+def _post_envelope(header, items):
+    """Posts a Sentry envelope, its header and items as (item header, payload bytes); True if Sentry took it"""
     if not REPORT_DSN:
         return False
     dsn = urllib.parse.urlsplit(REPORT_DSN)
     prefix, project = dsn.path.rstrip('/').rsplit('/', 1)
-    items = [({'type': event.get('type', 'event')}, _scrub(json.dumps(event, default = str)).encode())]
-    items += [({'type': 'attachment', 'filename': name, 'content_type': 'text/plain'}, _scrub(text).encode()) for name, text in (files or {}).items() if text]
-    body = json.dumps({'event_id': event['event_id'], 'sent_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}).encode() + b''.join(
-        b'\n' + json.dumps({**header, 'length': len(payload)}).encode() + b'\n' + payload for header, payload in items)
+    body = json.dumps(header).encode() + b''.join(b'\n' + json.dumps({**item, 'length': len(payload)}).encode() + b'\n' + payload for item, payload in items)
     request = urllib.request.Request(f'{dsn.scheme}://{dsn.netloc.rsplit("@", 1)[-1]}{prefix}/api/{project}/envelope/', data = body, headers = {
         'Content-Type': 'application/x-sentry-envelope', 'X-Sentry-Auth': f'Sentry sentry_version=7, sentry_client=candycrunch-app, sentry_key={dsn.username}'})
     try:
-        with urllib.request.urlopen(request, timeout = 20) as response:
+        # A report with the data around a peak can be a few MB, which takes a while on a slow connection
+        with urllib.request.urlopen(request, timeout = max(20, len(body) / 50000)) as response:
             return response.status == 200
     except Exception:
         return False
+
+
+def _send_report(event, files = None):
+    """Posts a Sentry event (an error, or a bug report as type 'feedback') and text attachments ({file name: text}) as one envelope; True if Sentry took it"""
+    items = [({'type': event.get('type', 'event')}, _scrub(json.dumps(event, default = str)).encode())]
+    # Text is scrubbed of the home folder; bytes (the .cc of a misprediction's surroundings) go as they are
+    items += [({'type': 'attachment', 'filename': name, 'content_type': 'application/octet-stream' if isinstance(data, bytes) else 'text/plain'},
+               data if isinstance(data, bytes) else _scrub(data).encode()) for name, data in (files or {}).items() if data]
+    return _post_envelope({'event_id': event['event_id'], 'sent_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}, items)
+
+
+def _send_session(update):
+    """Release health on Sentry: one session update (release, start, status, error count; nothing about the user or their runs), stamped with the time
+    and posted in a background thread, which is returned"""
+    now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    thread = threading.Thread(target = _post_envelope, args = ({'sent_at': now}, [({'type': 'session'}, json.dumps({**update, 'timestamp': now}).encode())]), daemon = True)
+    thread.start()
+    return thread
 
 
 def _load_model(path):
@@ -200,6 +216,15 @@ def _load_model(path):
 def _check_model(path):
     """Loads a model file in a process of its own (the window never imports torch): the number of structures it predicts, or why it cannot be used"""
     return len(_load_model(path)[1])
+
+
+def _extract_peak_data(path, mz, charge, rt):
+    """Runs in a process of its own (it imports the pipeline and reads the whole run again): the bytes of a .cc of a peak's surroundings for a
+    misprediction report (extract_spectra with region: survey scans within REGION_RT min, the MS2/MS3 spectra of its ion at every charge state there)"""
+    from candycrunch.prediction import extract_spectra
+    with tempfile.TemporaryDirectory() as folder:
+        with open(extract_spectra(path, os.path.join(folder, 'peak.cc'), 'cc', region = (mz, charge, rt)), 'rb') as file:
+            return file.read()
 
 
 def _worker_main(jobs, messages, warm_up = False):
@@ -1333,7 +1358,6 @@ class SettingsPanel(QScrollArea):
         form.addRow('Sialic acid linkage', self.sialic)
         form.addRow('Chromatography', self.inputs['lc'])
         form.addRow('Mass analyzer', self.inputs['trap'])
-        form.addRow('Model', model_row)
         layout.addLayout(form)
         self.sample_form = form
         # What the first run of the experiment shown set (_detect_run)
@@ -1427,6 +1451,7 @@ class SettingsPanel(QScrollArea):
             grid.addWidget(self.filter_boxes[name], n // 3, n % 3)
         form.addRow(_label('Ignore compositions containing', 'hint'))
         form.addRow(grid)
+        form.addRow('Model', model_row)
         self.advanced.setVisible(False)
         layout.addWidget(self.advanced)
         layout.addStretch(1)
@@ -1638,6 +1663,10 @@ class SettingsPanel(QScrollArea):
         self.model.addItem(os.path.splitext(os.path.basename(target))[0], target)
         self.model.setItemData(self.model.count() - 1, f'{structures} structures; {target}', Qt.ToolTipRole)
         _set_combo(self.model, target)
+        # The model choice is the last advanced setting: they open, and the panel scrolls down to it, so the imported model is seen to be chosen
+        # (after the scroll to the top of the advanced settings that opening them queues)
+        self.advanced_toggle.setChecked(True)
+        QTimer.singleShot(0, lambda: self.ensureWidgetVisible(self.model))
 
     def remove_selected(self):
         for item in self.files.selectedItems():
@@ -2164,6 +2193,12 @@ class ResultsView(QWidget):
                   'settings': {k: sorted(v) if isinstance(v, set) else v for k, v in self.payload['settings'].items()}, 'tolerance': self.spectrum.tolerance.value()}
         if self.dataset.currentData() == FEATURES:
             report['feature'] = {k: v for k, v in self.frame.iloc[self.row].items() if k not in self.payload['tables'] and not k.startswith('evidence_') and k not in ('excluded', '_top1')}
+        # What the report can add if the user agrees, kept out of the report itself as the path names the run: the run's file (to cut out the peak's
+        # surroundings) and its table of peaks without spectra
+        run, charge = next((f for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None), table['charge'].iat[r]
+        self.report_data = {'path': run, 'mz': float(table['m/z'].iat[r]), 'rt': float(table['RT'].iat[r]),
+                            'charge': int(charge) if pd.notna(charge) else -1 if self.payload['settings'].get('max_charge', -3) < 0 else 1,
+                            'table': table.drop(columns = [c for c in ('ms3', 'excluded', '_top1') if c in table.columns]).to_csv(index = False)}
         return report
 
     def update_alternative_icons(self):
@@ -2639,6 +2674,11 @@ class ReportDialog(QDialog):
             self.correct.setPlaceholderText('The right structure or composition, if you know it (e.g., Neu5Ac(a2-3)Gal(b1-3)GalNAc or Hex1HexNAc1NeuAc1)')
             layout.addWidget(self.problem)
             layout.addWidget(self.correct)
+            self.include_data = QCheckBox('Include the measured data around this peak')
+            self.include_data.setChecked(True)
+            self.include_data.setToolTip('Sending the full information for this peak. This lets the developers rerun '
+                                         'CandyCrunch on exactly this peak; without it, they only have the pooled MS2 spectrum')
+            layout.addWidget(self.include_data)
         self.text, self.email = QPlainTextEdit(), QLineEdit()
         self.text.setPlaceholderText('What were you doing when it happened? (optional)' if summary else
                                      'Anything else that helps, e.g., which fragments point to the right structure (optional)' if peak else
@@ -2691,7 +2731,7 @@ class MainWindow(QMainWindow):
     error_caught = Signal(str, object)
     report_done = Signal(bool, object)
 
-    def __init__(self, paths, crashes = ()):
+    def __init__(self, paths, crashes = (), ended = {}):
         super().__init__()
         self.store = QSettings()
         self.setWindowTitle('CandyCrunch')
@@ -2844,6 +2884,29 @@ class MainWindow(QMainWindow):
                 previous_thread(args)
 
         sys.excepthook, threading.excepthook = hook, thread_hook
+        # Release health on Sentry (crash-free sessions and users, adoption per release): a session per window, kept in the settings under the window's
+        # process ID until it closes; one still there from a window that never closed (ended, from main) ends as crashed (its crash file has a trace) or
+        # abnormal (killed, power cut). None when the user declined crash reports
+        self.session = None
+        if REPORT_DSN and self.store.value('crash_reports', '') != 'never':
+            from importlib.metadata import version, PackageNotFoundError
+            self.store.beginGroup('sessions')
+            for pid in self.store.childKeys():
+                stored, started = json.loads(self.store.value(pid))
+                if int(pid) in ended:
+                    _send_session({**stored, 'init': False, 'status': 'crashed' if ended[int(pid)] else 'abnormal', 'errors': stored['errors'] + ended[int(pid)]})
+                if int(pid) in ended or time.time() - started > 5 * 86400:
+                    self.store.remove(pid)
+            self.store.endGroup()
+            if not self.store.value('install_id'):
+                self.store.setValue('install_id', uuid.uuid4().hex)
+            with contextlib.suppress(PackageNotFoundError):
+                self.session, self.session_start = {'sid': str(uuid.uuid4()), 'did': self.store.value('install_id'), 'init': True, 'status': 'ok', 'errors': 0,
+                                                    'started': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                                    'attrs': {'release': f'candycrunch@{version("candycrunch")}',
+                                                              'environment': 'app' if getattr(sys, 'frozen', False) else 'package'}}, time.time()
+                self.store.setValue(f'sessions/{os.getpid()}', json.dumps([self.session, self.session_start]))
+                _send_session(self.session)
         if crashes:
             QTimer.singleShot(0, lambda: self.report_error('CandyCrunch closed unexpectedly the last time it ran', files = {'window_crash.txt': '\n\n'.join(crashes)}))
         self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
@@ -2921,6 +2984,9 @@ class MainWindow(QMainWindow):
     def report_error(self, summary, values = None, files = None, box = False):
         """An error the user did not cause on purpose: sent right away if they chose automatic crash reports, else offered, each kind of error once per
         session; box: tell the user about the error in a message box (a failed run), else in the status bar"""
+        if self.session:
+            self.session['errors'] += 1
+            self.store.setValue(f'sessions/{os.getpid()}', json.dumps([self.session, self.session_start]))
         signature = (values[-1]['type'], *[(f['module'], f['lineno']) for f in values[-1]['stacktrace']['frames'][-3:]]) if values else summary
         choice, new = self.store.value('crash_reports', ''), signature not in self.reported
         self.reported.add(signature)
@@ -2940,13 +3006,14 @@ class MainWindow(QMainWindow):
         """The report form: a bug report (Help > Report a bug), for an error (summary) the offer to send a crash report, or for a peak of the results (peak,
         from ResultsView.peak_report) a misprediction report"""
         event = self.report_event('error', values, summary) if summary else None
-        files = {**({'misprediction.json': json.dumps(peak, indent = 1, default = str)} if peak else {}), **(files or {}), 'log.txt': self.log.toPlainText()[-300000:]}
+        files = {**({'misprediction.json': json.dumps(peak, indent = 1, default = lambda x: x.item() if isinstance(x, np.generic) else str(x))} if peak else {}), **(files or {}), 'log.txt': self.log.toPlainText()[-300000:]}
         # A bug report is user feedback; with a crash report, a description goes with the error as feedback on it
         feedback = self.report_event('info')
         feedback['type'] = 'feedback'
         dialog, self.reporting = ReportDialog(self, event or feedback, files, summary, peak), True
         accepted, self.reporting = dialog.exec() == QDialog.Accepted, False
         message, email = dialog.text.toPlainText().strip(), dialog.email.text().strip()
+        include = peak is not None and dialog.include_data.isChecked()
         if summary and dialog.automatic.isChecked():
             self.store.setValue('crash_reports', 'always' if accepted else 'never')
             self.auto_action.setChecked(accepted)
@@ -2962,6 +3029,24 @@ class MainWindow(QMainWindow):
                                                dialog.correct.text().strip() and f'Correct: {dialog.correct.text().strip()}', message]))
         feedback['contexts']['feedback'] = {k: v for k, v in {'message': message, 'contact_email': email, 'source': 'app',
                                                               'associated_event_id': event and event['event_id']}.items() if v}
+        if include:
+            data = self.results.report_data
+            files['run_peaks.csv'] = data['table']
+            if data['path'] and os.path.exists(data['path']):
+                # The peak's surroundings are cut out of the run file in a process of its own (it reads the whole run again, seconds to a minute); the
+                # report goes once that is done
+                def work():
+                    try:
+                        with ProcessPoolExecutor(1, mp_context = mp.get_context('spawn')) as pool:
+                            files['peak_data.cc'] = pool.submit(_extract_peak_data, data['path'], data['mz'], data['charge'], data['rt']).result()
+                    except Exception as error:
+                        files['peak_data_error.txt'] = f'{type(error).__name__}: {error}'
+                    self.send_report(event, files, feedback, quiet = False)
+
+                threading.Thread(target = work, daemon = True).start()
+                self.statusBar().showMessage('Cutting the data around the peak out of the run; the report is sent when that is done', 15000)
+                return
+            files['peak_data_error.txt'] = 'The run file is no longer where it was analyzed, so the data around the peak could not be included'
         self.send_report(event, files, feedback if message else None, quiet = False)
 
     def send_report(self, event, files, feedback = None, quiet = True):
@@ -2991,7 +3076,16 @@ class MainWindow(QMainWindow):
                                                 error and f'```\n{error}\n```',
                                                 'Versions: ' + ', '.join(f'{k} {v}' for k, v in source['extra']['versions'].items()) +
                                                 f'; {source["contexts"]["os"]["name"]} {source["contexts"]["os"]["version"]}'])))
-        full = body + _scrub(''.join(f'\n\n{name}:\n```\n{text}\n```' for name, text in files.items() if text))
+        # A data file (the .cc of a misprediction's surroundings) cannot go into a link or the clipboard: it is saved for the user to attach to the issue
+        saved = []
+        for name, data in files.items():
+            if isinstance(data, bytes):
+                os.makedirs(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation), exist_ok = True)
+                saved.append(os.path.join(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation), f'CandyCrunch_report_{name}'))
+                with open(saved[-1], 'wb') as file:
+                    file.write(data)
+        body += _scrub(''.join(f'\n\nPlease attach {path} to this issue.' for path in saved))
+        full = body + _scrub(''.join(f'\n\n{name}:\n```\n{text}\n```' for name, text in files.items() if isinstance(text, str) and text))
         title = (event.get('message') or f'{event["exception"]["values"][-1]["type"]}: {event["exception"]["values"][-1]["value"]}') if event else \
         body.splitlines()[0]
         QApplication.clipboard().setText(full)
@@ -3286,6 +3380,11 @@ class MainWindow(QMainWindow):
         self.store.setValue('geometry', self.saveGeometry())
         self.store.setValue('state', self.saveState())
         self.runner.shutdown()
+        if self.session:
+            # Waits a little for the session's end to reach Sentry, as the process ends right after; nothing counts for the session after this
+            session, self.session = self.session, None
+            self.store.remove(f'sessions/{os.getpid()}')
+            _send_session({**session, 'init': False, 'status': 'exited', 'duration': time.time() - self.session_start}).join(3)
         event.accept()
 
 
@@ -3325,7 +3424,7 @@ def main():
         sys.exit(0 if outcome and outcome[0] > 0 and os.path.exists(EXAMPLE_RUN) else 1)
     # A window crash file that can be removed belongs to an earlier session that did not end cleanly (one in use is a running CandyCrunch's), and is
     # offered as a crash report; worker files are removed by their window, or here once a day old
-    crashes = []
+    crashes, ended = [], {}
     for path in glob.glob(CRASH_FILE.format('*', '*')):
         own = '-window-' in os.path.basename(path)
         with contextlib.suppress(OSError):
@@ -3333,11 +3432,14 @@ def main():
                 with open(path, encoding = 'utf-8', errors = 'replace') as file:
                     text = file.read()
                 os.remove(path)
+                if own:
+                    # The window of that process never closed; faulthandler wrote a trace if it crashed
+                    ended[int(os.path.splitext(os.path.basename(path))[0].rsplit('-', 1)[1])] = bool(text.strip())
                 if own and text.strip():
                     crashes.append(text[-100000:])
     crash_file = open(CRASH_FILE.format('window', os.getpid()), 'w')
     faulthandler.enable(crash_file, all_threads = True)
-    window = MainWindow([os.path.abspath(p) for p in sys.argv[1:]], crashes)
+    window = MainWindow([os.path.abspath(p) for p in sys.argv[1:]], crashes, ended)
     window.show()
     code = app.exec()
     faulthandler.disable()

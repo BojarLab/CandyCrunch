@@ -331,7 +331,14 @@ def test_gui_reports(app, monkeypatch):
     assert [v['type'] for v in values] == ['KeyError', 'ValueError'] and values[-1]['stacktrace']['frames'][-1]['filename'] == 'test_gui.py'
     event = {'event_id': 'a' * 32, 'level': 'error', 'exception': {'values': values}}
     assert gui._send_report(event, {'log.txt': f'Reading {home}{os.sep}run.raw\nDone', 'empty.txt': ''})
+    gui._send_session({'sid': 's', 'started': '2026-10-16T05:00:00Z', 'status': 'exited', 'errors': 1, 'attrs': {'release': 'candycrunch@1.0.0'}}).join(10)
+    # A data file goes as bytes, untouched
+    assert gui._send_report({'event_id': 'b' * 32}, {'peak_data.cc': b'\x00\x01cc'})
     server.shutdown()
+    # A session update is an envelope of one 'session' item, stamped with the time it is sent
+    header, item, payload = posts[1][2].split(b'\n')
+    assert 'event_id' not in json.loads(header) and json.loads(item)['type'] == 'session' and json.loads(payload)['status'] == 'exited' and 'timestamp' in json.loads(payload)
+    assert b'"content_type": "application/octet-stream"' in posts[2][2] and posts[2][2].endswith(b'\x00\x01cc')
     path, auth, body = posts[0]
     assert path == '/api/7/envelope/' and 'sentry_key=key' in auth
     header, rest = body.split(b'\n', 1)
@@ -368,6 +375,8 @@ def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
     import torch
     from candycrunch import gui
     from candycrunch.model import CandyCrunch_CNN
+    import numpy as np
+    import candycrunch.prediction as cp
     from candycrunch.prediction import glycans
     # Weights saved with their own vocabulary are a model; weights that do not fit the built-in vocabulary, or a file of anything else, are refused with why
     torch.save({'state_dict': CandyCrunch_CNN(2048, num_classes = len(glycans) + 1, input_precursor_dim = 12).state_dict(), 'glycans': glycans + ['Gal(b1-3)GalNAc6S']},
@@ -390,7 +399,8 @@ def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
             app.processEvents()
             time.sleep(0.05)
     assert panel.values()['model_file'] == os.path.join(str(tmp_path / 'models'), 'tuned_2.pt') and os.path.exists(panel.values()['model_file'])
-    assert panel.reset.isEnabled()
+    # The model choice is an advanced setting, opened by an import so the chosen model is in view
+    assert panel.reset.isEnabled() and panel.advanced.isAncestorOf(panel.model) and panel.advanced_toggle.isChecked()
     panel.set_values({**panel.values(), 'model_file': str(tmp_path / 'gone.pt')})
     assert panel.values()['model_file'] is None
     # A misprediction report holds the peak shown (with the structure the user assigned as the likely right one), but not the run's name
@@ -409,9 +419,16 @@ def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
     peak = reports[0]
     assert peak['predicted'] == 'Gal(b1-3)GalNAc' and peak['peak']['top1_pred'] == 'Gal(b1-4)GlcNAc' and peak['ms2'] == {204.09: 10.0, 384.15: 100.0}
     assert peak['run_format'] == '.mzml' and 'patient_17' not in json.dumps(peak, default = str)
+    # The run's file and its table of peaks stay out of the report itself; with the user's consent, the peak's surroundings are cut out of the file
+    assert view.report_data['path'] == '/data/patient_17.mzML' and view.report_data['charge'] == -1 and 'Gal(b1-4)GlcNAc' in view.report_data['table']
+    (tmp_path / 'peak.cc').write_bytes(gui._extract_peak_data(gui.EXAMPLE_RUN, 530.29, -1, 26.76))
+    with np.load(tmp_path / 'peak.cc') as file:
+        meta = json.loads(file['meta'].tobytes())
+    spectra = cp.load_spectra_filepath(str(tmp_path / 'peak.cc'))
+    assert meta['source'] == 'run.xlsx' and meta['region']['run_ms2'] == 275 and 0 < len(spectra) < 275 and (abs(spectra['RT'] - 26.76) <= 3).all()
     dialog = gui.ReportDialog(None, {'event_id': 'a' * 32}, {'misprediction.json': json.dumps(peak, default = str)}, peak = peak)
     box = dialog.findChild(QtWidgets.QDialogButtonBox)
     send = next(b for b in box.buttons() if box.buttonRole(b) == QtWidgets.QDialogButtonBox.AcceptRole)
-    assert not send.isEnabled() and dialog.correct.text() == 'Gal(b1-4)GlcNAc'
+    assert not send.isEnabled() and dialog.correct.text() == 'Gal(b1-4)GlcNAc' and dialog.include_data.isChecked()
     gui._set_combo(dialog.problem, 'structure')
     assert send.isEnabled()

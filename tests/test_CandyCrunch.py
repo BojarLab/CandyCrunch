@@ -6,6 +6,7 @@ import pathlib
 import struct
 import zlib
 import sys
+import json
 from tabulate import tabulate
 import numpy as np
 from collections import defaultdict
@@ -82,6 +83,12 @@ UNTRACKED_DIR = BASE_DIR / "tests" / "untracked"
 if os.path.exists(UNTRACKED_DIR / 'df_mz_timsTOF_serum.csv'):
     TEST_DICTS.append({'name': 'timsTOF_serum', 'folder': '../untracked', 'args': {'glycan_class': 'N'},
                        'test_files': [x for x in os.listdir(UNTRACKED_DIR) if x.startswith('20260831_TIMS_SC_NG') and x.lower().endswith(('.d', '.xlsx'))]})
+# Misprediction reports from the app (fetched from Sentry by the misprediction cell into tests/untracked/mispredictions): one set per report, the .cc of
+# the peak's surroundings and an .xlsx made from it (older reports: the pooled MS2 spectrum as a one-spectrum .xlsx)
+if os.path.exists(UNTRACKED_DIR / 'mispredictions' / 'index.json'):
+    with open(UNTRACKED_DIR / 'mispredictions' / 'index.json', encoding = 'utf-8') as file:
+        # JSON has no sets, wrap_inference takes filter_out as one
+        TEST_DICTS.extend({**d, 'folder': '../untracked/mispredictions', 'args': {k: set(v) if k == 'filter_out' else v for k, v in d['args'].items()}} for d in json.load(file))
 # Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
 MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d', '.cc')
 AVG_THRESHOLD = 0.05
