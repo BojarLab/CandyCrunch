@@ -158,6 +158,7 @@ def test_gui_label_tooltip_and_reset(app, monkeypatch):
         app.processEvents()
         time.sleep(0.05)
     monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: shown.append(text))
+    assert panel.label_targets, panel.message.text() or panel.summary.text()
     text = next(t for t, _ in panel.label_targets if t.xy[0] == 384.15)
     box = text.get_window_extent()
     panel.hover(MouseEvent('motion_notify_event', panel.canvas, (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2))
@@ -183,6 +184,7 @@ def test_gui_ms3_hover_and_menu(app, monkeypatch):
         time.sleep(0.05)
     # Hovering the MS3 marker names the isolated fragment and what clicking does, with a hand cursor that goes away off the marker
     monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: shown.append(text))
+    assert panel.hover_targets, panel.message.text() or panel.summary.text()
     artist = panel.canvas.figure.ms3_artists[0]
     x, y = artist.axes.transData.transform(artist.get_offsets()[0])
     panel.hover(MouseEvent('motion_notify_event', panel.canvas, x, y))
@@ -261,6 +263,7 @@ def test_gui_save_image(app, tmp_path, monkeypatch):
         app.processEvents()
         time.sleep(0.05)
     # Drawn again at print size (12 inches at 300 dpi), with the file type of the chosen filter when the name has none
+    assert panel.save.isEnabled(), panel.message.text() or panel.summary.text()
     monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'spectrum'), 'PNG image, 300 dpi (*.png)'))
     panel.save_image()
     assert gui.QImage(str(tmp_path / 'spectrum.png')).width() > 3000

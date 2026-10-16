@@ -77,6 +77,7 @@ SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), (
 SIALIC_TIP = 'Linkage-specific sialic acid derivatization: precursor masses then tell a2-6 from a2-3/8 sialic acids, and fragments carry the derivatized sialic acids'
 LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
+FRAGMENT_TYPES = [('Automatic', None), ('Glycosidic only', 'glycosidic'), ('All cross-rings', 'cross_rings')]
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD'), ('EED', 'EED'),
                   ('EDD', 'EDD'), ('NETD', 'NETD'), ('UVPD', 'UVPD')]
@@ -659,7 +660,7 @@ class Annotator(QObject):
                 try:
                     with IMPORT_LOCK:
                         from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, classify_fragment, \
-                            fragment_cartoon, fragIUPAC_to_image, is_composition, derivatize_carboxyls
+                            fragment_cartoon, fragIUPAC_to_image, is_composition, derivatize_carboxyls, deisotope_ms2
                         # fragIUPAC_to_image imports these itself, now outside MPL_LOCK too
                         with contextlib.suppress(ImportError):
                             import glycowork.motif.draw, glycorender.render, PIL.Image
@@ -670,9 +671,16 @@ class Annotator(QObject):
                     if len(self.results) > 200:
                         self.results.clear()
                     if key not in self.results:
-                        self.results[key] = CandyCrumbs(request['structure'], request['mzs'], request['tolerance'], max_cleavages = request['kwargs'].get('max_cleavages', 3),
+                        # Isotope peaks stay unlabeled, as the pipeline scores deisotoped spectra: offered to CandyCrumbs, the M+1 and M+2 of carbon-rich
+                        # (permethylated) fragments took cross-ring or three-cleavage labels. A pattern whose apex is more than twice its first peak keeps both: the
+                        # first is a noise peak below a fragment as often as the monoisotopic peak of a heavy fragment, whose M+1 is often the most intense one
+                        # (and more so when the isolation window centred the precursor's M+1)
+                        peaks = dict(zip(request['mzs'], request['intensities']))
+                        mono = sorted({m for relabel in (False, True) for m in deisotope_ms2(peaks, max(abs(request['charge']), 1), min(request['tolerance'], 0.05),
+                                                                                              relabel = relabel)})
+                        self.results[key] = CandyCrumbs(request['structure'], mono, request['tolerance'], max_cleavages = request['kwargs'].get('max_cleavages', 3),
                                                         simplify = True, charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                        intensities = request['intensities'], **{k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'})
+                                                        intensities = [peaks[m] for m in mono], **{k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'})
                     hit_dict = self.results[key]
                     # Drawing a spectrum nobody waits for any more only delays the newer one
                     if stale():
@@ -696,7 +704,7 @@ class Annotator(QObject):
                     # The fragment cartoons plot_annotated_spectrum will place (glycan and oxonium ions of labeled or diagnostic peaks, ~30-50 ms each) are
                     # rendered into its cache here, outside MPL_LOCK (GlycoDraw and glycorender need no matplotlib) and one by one, so a newer request cuts it short
                     glycans = resolve_spectrum_input(request['structure'])[1] if request['cartoons'] else []
-                    if glycans and isinstance(glycans[0], str) and not is_composition(glycans[0]):
+                    if glycans:
                         sialic = request['kwargs'].get('sialic_derivatization')
                         glycans = [derivatize_carboxyls(g, sialic) if sialic is not None and isinstance(g, str) and not is_composition(g) else g for g in glycans]
                         top = max(request['intensities'], default = 0)
@@ -888,7 +896,8 @@ class TableProxy(QSortFilterProxyModel):
 
     def lessThan(self, left, right):
         # The raw values straight from the source model: going through data() cost two Python calls per comparison
-        raw = self.sourceModel().columns[left.column()]['raw']
+        column = self.sourceModel().columns[left.column()]
+        raw = column.get('sort', column['raw'])
         a, b = raw[left.row()], raw[right.row()]
         if a is None or b is None:
             # Empty cells go last in either order (Qt sorts in descending order with the arguments swapped)
@@ -988,6 +997,11 @@ class SpectrumPanel(QWidget):
         self.tolerance.setToolTip('Maximum difference between an observed peak and a theoretical fragment mass')
         self.cartoons = QCheckBox('Fragment cartoons')
         self.cartoons.setChecked(True)
+        self.fragment_types = _combo(FRAGMENT_TYPES)
+        self.fragment_types.setToolTip('Fragment types to annotate with. Automatic: glycosidic fragments (B, C, Y, Z, also internal ones) for permethylated glycans, whose '
+                                       'cross-ring readings matched no more peaks than in m/z-shifted spectra (CID and HCD of protonated ions); otherwise also X '
+                                       'cross-rings, and A cross-rings in negative mode and of the reducing end of metal-adducted unreduced glycans in positive mode. '
+                                       'All cross-rings: every A and X cross-ring, e.g., for sodiated permethylated glycans at high collision energy or in MSn')
         # The figure on screen is laid out for the panel, so saving it gave a small picture with cramped labels; this draws it again at print size
         self.save = QPushButton('Save image…')
         self.save.setToolTip('Saves this annotated spectrum at print size (12 inches wide) as PNG (300 dpi), SVG, or PDF, with the m/z of every labeled peak')
@@ -996,6 +1010,8 @@ class SpectrumPanel(QWidget):
         self.controls.addStretch(1)
         self.controls.addWidget(QLabel('Tolerance'))
         self.controls.addWidget(self.tolerance)
+        self.controls.addWidget(QLabel('Fragments'))
+        self.controls.addWidget(self.fragment_types)
         self.controls.addWidget(self.cartoons)
         self.controls.addWidget(self.save)
         self.message = QLabel()
@@ -1019,6 +1035,7 @@ class SpectrumPanel(QWidget):
         self.fragments.setOpenLinks(False)
         self.tolerance.valueChanged.connect(self.resubmit)
         self.cartoons.toggled.connect(self.resubmit)
+        self.fragment_types.currentIndexChanged.connect(self.resubmit)
         # Labels and cartoons are placed for one figure size, so a resized panel gets a freshly laid out spectrum once resizing stops
         self.relayout = QTimer(self)
         self.relayout.setSingleShot(True)
@@ -1035,6 +1052,11 @@ class SpectrumPanel(QWidget):
         """ms3: (m/z, number of MS3 spectra) of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index;
         candidates: competing structures whose distinguishing peaks are listed; the request is drawn for the panel's current size and settings"""
         size = self.stack.size()
+        choice = self.fragment_types.currentData()
+        if choice == 'glycosidic' or (choice is None and sample_prep == 'permethylated'):
+            kwargs = {'disable_X_cross_rings': True, 'disable_A_cross_rings': True} | kwargs
+        elif choice == 'cross_rings':
+            kwargs = {'disable_X_cross_rings': False, 'disable_A_cross_rings': False} | kwargs
         request = {'structure': structure, 'mzs': [float(x) for x in mzs], 'intensities': [float(x) for x in intensities], 'charge': int(charge),
                    'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
                    'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value(), 'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}),
@@ -1966,10 +1988,11 @@ class ResultsView(QWidget):
     def show_experiment(self):
         """self.payload is the experiment shown: its files, settings, tables, and feature table"""
         payload = self.payload = self.session['experiments'][max(self.experiment.currentIndex(), 0)]
-        # Spectra are annotated with the tolerance this experiment was predicted with, as the pipeline scored them
+        # Spectra are annotated with the fragment tolerance the pipeline scored them with: that of accurate MS2 (orbitrap, TOF), else the precursor tolerance
+        tolerance = {'orbitrap': 0.02, 'other': 0.05}.get(payload['settings'].get('trap'), payload['settings'].get('ppm_thresh', DEFAULTS['ppm_thresh']) * MZ_REF / 1e6)
         for panel in (self.spectrum, self.ms3_panel):
             panel.tolerance.blockSignals(True)
-            panel.tolerance.setValue(payload['settings'].get('ppm_thresh', DEFAULTS['ppm_thresh']) * MZ_REF / 1e6)
+            panel.tolerance.setValue(tolerance)
             panel.tolerance.blockSignals(False)
         self.dataset.blockSignals(True)
         self.dataset.clear()
@@ -2001,13 +2024,17 @@ class ResultsView(QWidget):
         self.tabs.setTabVisible(self.tabs.indexOf(self.across), label == FEATURES)
         if label != FEATURES and self.tabs.currentWidget() is self.across:
             self.tabs.setCurrentIndex(0)
+        with IMPORT_LOCK:
+            from candycrunch.utils import mz_order
         structures = list(df['top1_pred'])
         compositions = [_composition(c) for c in df['composition']]
         notes_tip = 'Notes from the pipeline, adducts, and your curation'
         columns = [{'title': 'Structure', 'kind': 'structure', 'raw': [s if isinstance(s, str) else None for s in structures],
                     'text': [s if isinstance(s, str) else '' for s in structures], 'image': [s if isinstance(s, str) else c or None for s, c in zip(structures, compositions)]},
                    {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions},
-                   _number_column('m/z', df['m/z'], 4), _number_column('z', df['charge'], 0, 'Precursor charge'), _number_column('RT', df['RT'], 2, 'Retention time (min)')]
+                   # sorted by m/z, the rows of one ion (a composition and charge, whose m/z differ by noise) go by RT
+                   dict(_number_column('m/z', df['m/z'], 4), sort = mz_order(df['m/z'], df['RT'], df['charge'].values, df['composition'].tolist()).tolist()),
+                   _number_column('z', df['charge'], 0, 'Precursor charge'), _number_column('RT', df['RT'], 2, 'Retention time (min)')]
         if label == FEATURES:
             columns.append(_number_column('MS2 runs', df['n_files_ms2'], 0, 'Runs in which this feature has MS2 evidence'))
             for run in self.payload['tables']:
@@ -2277,7 +2304,8 @@ class ResultsView(QWidget):
         preds = table['predictions'].iat[r]
         return structure, ms3_groups, ((structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]), _mass_tag(settings), settings['sample_prep']),
                                        dict(ms3 = [(p, n) for p, _, n in ms3_groups], candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [],
-                                            sialic_derivatization = settings.get('sialic_derivatization')))
+                                            sialic_derivatization = settings.get('sialic_derivatization'),
+                                            metal_cations = 'adduct' not in table.columns or isinstance(table['adduct'].iat[r], str)))
 
     def annotate(self):
         table, spectra = self.payload['tables'][self.source[0]]

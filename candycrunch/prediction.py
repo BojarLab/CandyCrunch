@@ -33,8 +33,8 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           sialic_linkage_splits, resolve_sialic_linkages, _carboxyl_sites)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
-from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs
-from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, centroid_ion_trap, centroid_tof, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
+from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2
+from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir, this_filename = os.path.split(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
@@ -1693,74 +1693,6 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     return df_in
 
 
-def deisotope_ms2(peaks: Dict[float, float], precursor_charge: int,
-                  mass_tolerance: float = 0.2, sum_intensities: bool = True,
-                  min_intensity: float = 0.0, min_isotope_count: int = 2,
-                  validate_pattern: bool = True, relabel: bool = False) -> Dict[float, float]:
-    """collapses isotope patterns of an MS2 spectrum onto their monoisotopic peak\n
-   | Arguments:
-   | :-
-   | peaks (dict): dictionary of form (fragment) m/z : intensity
-   | precursor_charge (int): highest fragment charge whose isotope spacing is tested
-   | mass_tolerance (float): m/z tolerance for isotope spacing and for peaks consumed by a pattern; default:0.2
-   | sum_intensities (bool): whether a pattern's monoisotopic peak carries the summed intensity of the pattern; default:True
-   | min_intensity (float): peaks below this intensity are ignored; default:0.0
-   | min_isotope_count (int): minimum number of peaks of a pattern; default:2
-   | validate_pattern (bool): whether to check each isotope's intensity against the previous one; default:True
-   | relabel (bool): whether a pattern whose first peak has less than half the intensity of its most intense peak is named by the latter; default:False\n
-   | Returns:
-   | :-
-   | Returns a dictionary of form (fragment) m/z : intensity, sorted by descending intensity
-   """
-    sorted_peaks = sorted([(m, i) for m, i in peaks.items() if i >= min_intensity])
-    # plain lists and bisect, as indexing numpy arrays element by element in these loops was most of the time
-    masses = [m for m, _ in sorted_peaks]
-    consumed = [False] * len(sorted_peaks)
-    deisotoped = {}
-    spacings = [1.0034 / z for z in range(1, precursor_charge + 1)]
-    for i, (current_mass, current_intensity) in enumerate(sorted_peaks):
-        # Skip if already processed
-        if consumed[i]:
-            continue
-        lo, hi = bisect.bisect_left(masses, current_mass - mass_tolerance), bisect.bisect_right(masses, current_mass + mass_tolerance)
-        consumed[lo:hi] = [True] * (hi - lo)
-        best_pattern = [(current_mass, current_intensity)]
-        # Check all charge states
-        for spacing in spacings:
-            next_mass = current_mass
-            charge_pattern = [(current_mass, current_intensity)]
-            # Fast-forward to relevant mass range
-            start_idx = bisect.bisect_left(masses, next_mass + spacing - mass_tolerance, i + 1)
-            for j in range(start_idx, len(sorted_peaks)):
-                candidate_mass, candidate_intensity = sorted_peaks[j]
-                if candidate_mass > next_mass + spacing + mass_tolerance:
-                    break
-                if consumed[j]:
-                    continue
-                if abs(candidate_mass - next_mass - spacing) <= mass_tolerance:
-                    if validate_pattern and not (candidate_intensity <= charge_pattern[-1][1] * 1.20 or
-                                                 candidate_intensity >= charge_pattern[-1][1] * 0.05):
-                        continue
-                    charge_pattern.append((candidate_mass, candidate_intensity))
-                    next_mass = candidate_mass
-            if len(charge_pattern) > len(best_pattern):
-                best_pattern = charge_pattern
-        if len(best_pattern) >= min_isotope_count:
-            mono_mass = best_pattern[0][0]
-            apex = max(best_pattern, key = lambda x: x[1])
-            # With relabel, a pattern whose first peak is less than half its most intense one is named by the most intense: in spectra pooled from many
-            # MS2, a noise peak 1-3 Da below a fragment starts its 'pattern'
-            if relabel and apex[1] > 2 * best_pattern[0][1]:
-                mono_mass = apex[0]
-            for peak_mass, _ in best_pattern[1:]:
-                lo, hi = bisect.bisect_left(masses, peak_mass - mass_tolerance), bisect.bisect_right(masses, peak_mass + mass_tolerance)
-                consumed[lo:hi] = [True] * (hi - lo)
-            deisotoped[mono_mass] = sum(i for _, i in best_pattern) if sum_intensities else best_pattern[0][1]
-        else:
-            deisotoped[current_mass] = current_intensity
-    return dict(sorted(deisotoped.items(), key = lambda x: x[1], reverse = True))
-
-
 def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance, modification = 'reduced',
                                     sample_prep = 'underivatized', sialic_derivatization = None, n_jobs = 1, fragment_tolerance = None):
     mode = 'negative' if multiplier == -1 else 'positive'
@@ -3106,6 +3038,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         df_out = df_out.drop(columns = ['re_offset', 'unlabelled'] + (['reducing_end'] if df_out['reducing_end'].isna().all() else []))
     if (df_out['rel_abundance'] == 0).all():
         df_out = df_out.drop(columns = ['rel_abundance'])
+    # By m/z, but the rows of one ion (a composition and charge, whose m/z differ by noise) by RT; before the spectra are split off, which keep the row order
+    df_out = df_out.iloc[np.argsort(mz_order(df_out.index, df_out['RT'], df_out['charge'].values, df_out['composition'].tolist()))]
     spectra_out = df_out.pop('peak_d').values.tolist()
     df_out = df_out[['top1_pred', 'predictions'] + [c for c in df_out.columns if c not in ('top1_pred', 'predictions')]]
     df_out.index.name = "m/z"
@@ -4242,7 +4176,9 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Every input file keeps its columns, even without any feature, so they can serve as groups downstream
     combined_batch = combined_batch.join(abundances.reindex(columns = file_labels)).join(
         evidence.reindex(columns = file_labels).add_prefix('evidence_'))
-    combined_batch = combined_batch.rename(columns = {'mz': 'm/z'}).sort_values(['m/z', 'RT']).reset_index(drop = True)
+    combined_batch = combined_batch.rename(columns = {'mz': 'm/z'})
+    combined_batch = combined_batch.iloc[np.argsort(mz_order(combined_batch['m/z'], combined_batch['RT'], combined_batch['charge'].values,
+                                                             combined_batch['composition'].tolist()))].reset_index(drop = True)
     return combined_batch, inference_dfs
 
 

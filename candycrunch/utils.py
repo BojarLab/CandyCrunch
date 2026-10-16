@@ -429,3 +429,21 @@ def read_raw_scan_table(filepath):
                     table['charge'][i] = charge if charge > 0 else None
                     table['isolation_width'][i] = params.get('MS2 Isolation Width:') or params.get('MSn Isolation Width:')
     return raw, table, index_addr, data_addr
+
+
+def mz_order(mzs, rts, charges, compositions):
+    """Rank of each result row by m/z, except that the rows of one composition and charge within 1 Da of each other (one ion, whose m/z differ only by noise;
+    its adducts and reducing-end variants are several Da apart even at z = 4) rank together by RT, at the m/z of the lightest of them"""
+    mzs, rts = np.asarray(mzs, dtype = float), np.asarray(rts, dtype = float)
+    heads, last = np.arange(len(mzs)), {}
+    for i in np.argsort(mzs, kind = 'stable'):
+        composition = compositions[i]
+        if not isinstance(composition, (dict, str)) or not composition:
+            continue
+        key = (str(sorted(composition.items())) if isinstance(composition, dict) else composition, charges[i])
+        if key in last and mzs[i] - mzs[heads[last[key]]] < 1:
+            heads[i] = heads[last[key]]
+        last[key] = i
+    ranks = np.empty(len(mzs), dtype = int)
+    ranks[np.lexsort((mzs, rts, heads, mzs[heads]))] = np.arange(len(mzs))
+    return ranks
