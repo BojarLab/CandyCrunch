@@ -902,7 +902,7 @@ def bin_intensities(peak_d, frames):
     return binned_intensities, mz_diff
 
 
-def ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = 0.5):
+def ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = 0.5, accurate = False):
     """estimates the MS1 m/z offset and spread from the most intense centroid near each singly charged precursor\n
     | Arguments:
     | :-
@@ -910,7 +910,9 @@ def ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = 0.5)
     | target_mzs (array-like): (theoretical) precursor m/z values
     | rt_centers (array-like): retention time of each precursor
     | charges (array-like): charge of each precursor; only singly charged ones are used, as low-resolution MS1 merges the isotopes of the others
-    | mz_tolerance (float): m/z tolerance within which to look for the centroid; default:0.5\n
+    | mz_tolerance (float): m/z tolerance within which to look for the centroid; default:0.5
+    | accurate (bool): whether survey scans resolve the isotopes of every charge state (orbitrap, timsTOF); with fewer than 5 usable singly charged precursors,
+    |                  all precursors then count, each by its most intense centroid within 20 ppm; default:False\n
     | Returns:
     | :-
     | Returns a tuple of (median m/z offset, half-width covering the m/z spread), or (0, mz_tolerance) with fewer than 5 usable precursors
@@ -918,12 +920,18 @@ def ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = 0.5)
     ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
     target_mzs, charges = np.asarray(target_mzs, dtype = np.float64), np.abs(np.asarray(charges, dtype = np.float64))
     nearest = np.clip(np.searchsorted(ms1_rts, np.asarray(rt_centers, dtype = np.float64)), 0, len(ms1_rts) - 1)
-    offsets = []
-    for t in np.where(charges <= 1)[0]:
-        s0, s1 = ms1_offsets[nearest[t]], ms1_offsets[nearest[t] + 1]
-        lo, hi = np.searchsorted(ms1_mzs[s0:s1], target_mzs[t] - mz_tolerance), np.searchsorted(ms1_mzs[s0:s1], target_mzs[t] + mz_tolerance)
-        if hi > lo:
-            offsets.append(ms1_mzs[s0 + lo + np.argmax(ms1_ints[s0 + lo:s0 + hi])] - target_mzs[t])
+    # Runs of mostly multiply charged precursors (N-glycans, permethylated glycans in positive mode) fell back to (0, mz_tolerance), whose contiguous isotope
+    # windows sum every ion within two m/z above an accurate survey scan's precursor; there, every charge state calibrates, within 20 ppm so no 13C peak counts
+    for narrow in ((False, True) if accurate else (False,)):
+        offsets = []
+        for t in (range(len(target_mzs)) if narrow else np.where(charges <= 1)[0]):
+            s0, s1 = ms1_offsets[nearest[t]], ms1_offsets[nearest[t] + 1]
+            tol = 2e-5 * target_mzs[t] if narrow else mz_tolerance
+            lo, hi = np.searchsorted(ms1_mzs[s0:s1], target_mzs[t] - tol), np.searchsorted(ms1_mzs[s0:s1], target_mzs[t] + tol)
+            if hi > lo:
+                offsets.append(ms1_mzs[s0 + lo + np.argmax(ms1_ints[s0 + lo:s0 + hi])] - target_mzs[t])
+        if len(offsets) >= 5:
+            break
     if len(offsets) < 5:
         return 0.0, mz_tolerance
     shift = float(np.median(offsets))
@@ -2870,7 +2878,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # Quantify via MS1 where available, else keep precursor intensities: each row's isotope envelope at its theoretical m/z, over its own chromatographic peak, before charge states and adducts of a glycan are summed
     if ms1 is not None and len(ms1[0]) > 0 and len(df_out) > 0:
         calibration = ms1_mz_calibration(ms1, df_out['theo_mz'].values, df_out['RT'].values, df_out['charge'].values,
-                                         mz_tolerance = mass_tolerance)
+                                         mz_tolerance = mass_tolerance, accurate = accurate_ms1)
         xic_areas = extract_xic_areas(ms1, df_out['theo_mz'].values, df_out['RT'].values, charges = df_out['charge'].values,
                                       mz_tolerance = mass_tolerance, weights = df_out['rel_abundance'].values,
                                       mz_calibration = calibration, sample_prep = sample_prep,
