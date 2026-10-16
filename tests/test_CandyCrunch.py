@@ -67,6 +67,14 @@ TEST_DICTS = [
     {'name': 'GPST000054', 'args': {'glycan_class': 'N'}, 'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000054/") if x.startswith('CEA_Human_Merk')]},
     # Glycosphingolipid glycans of SW1116 colorectal cancer cells with a GT1b spike (Bruker HCT, profile mzXML, its extract_spectra .xlsx otherwise)
     {'name': 'GPST000239', 'args': {'glycan_class': 'lipid'}, 'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000239/") if 'SW1116' in x]},
+    # Permethylated reduced human milk O-glycans and free oligosaccharides (Mechref lab, MGC column, Thermo orbitrap MS1 with ion-trap CID MS2, positive),
+    # one run each from one folder with one open-peak ground truth per run (.raw with --input-format mzml, its .xlsx otherwise); rt_min 21 as the gradient
+    # starts at ~21 min (earlier MS2 are re-triggered targets), Homo_sapiens as Mammalia let the database fallback fill Neu5Gc compositions; the GSL run of
+    # the project is not a test, as its MS2 hold 1-2 peaks and its ground truth would be lactose alone
+    {'name': 'GPST000461_O', 'folder': 'GPST000461', 'args': {'glycan_class': 'O', 'sample_prep': 'permethylated', 'rt_min': 21, 'taxonomy_level': 'Species', 'taxonomy_filter': 'Homo_sapiens'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000461/") if x.startswith('MilkOglycan')]},
+    {'name': 'GPST000461_free', 'folder': 'GPST000461', 'args': {'glycan_class': 'free', 'sample_prep': 'permethylated', 'rt_min': 21, 'taxonomy_level': 'Species', 'taxonomy_filter': 'Homo_sapiens'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000461/") if x.startswith('MilkOligos')]},
 ]
 # timsTOF Pro serum N-glycans (negative, reduced, PGC, DDA-PASEF .d with --input-format mzml, its extract_spectra .xlsx otherwise) live in tests/untracked,
 # which git does not track, so the set is only added where its (preliminary, open-peak) ground truth is present; 'folder' is relative to TEST_DATA_DIR

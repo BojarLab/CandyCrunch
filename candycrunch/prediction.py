@@ -1239,16 +1239,22 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     return [m for ion, ms in ions.items() if int(ion.rsplit(']', 1)[1][:-1] or 1) in permitted_charges for m in np.atleast_1d(ms) if abs(mass - m) < mass_tolerance]
 
 
-def accurate_ms1_window(ppm, scores, ppm_thresh, floor = 3.0):
+def accurate_ms1_window(ppm, scores, ppm_thresh, floor = 3.0, groups = None):
     """center and half-width (ppm) of the composition errors of a run with accurate (orbitrap, timsTOF) survey scans: real glycans pile up within a few ppm,
     while matches of other compositions spread over the whole ppm_thresh and swamp a plain median and MAD (permethylated serum on a Q Exactive: 3 robust SD
     of all rows 116 ppm). The center is the densest 4 ppm window, refined to the median of the rows within 5 ppm of it whose fragments back them up best
-    (annotation score in their top 10%), and the half-width 3 robust SD of those rows, at least floor; None with fewer than 5 rows"""
+    (annotation score in their top 10%), and the half-width 3 robust SD of those rows, at least floor; None with fewer than 5 rows. With groups (e.g., the
+    rows' spectra and compositions), the densest window counts each group once, at its median error: one junk spectrum of GPST000461 gave 8 rows (one
+    per candidate structure) at -41.9 ppm, which made it the densest window of its free oligosaccharide run"""
     ok = np.isfinite(ppm) & (np.abs(ppm) <= ppm_thresh)
     ppm, scores = ppm[ok], np.asarray(scores, dtype = float)[ok]
     if len(ppm) < 5:
         return None
-    s = np.sort(ppm)
+    if groups is None:
+        s = np.sort(ppm)
+    else:
+        groups = np.asarray(groups, dtype = object)[ok]
+        s = np.sort([np.median(ppm[groups == g]) for g in pd.unique(groups)])
     grid = np.arange(s[0], s[-1] + 0.25, 0.25)
     center = grid[np.argmax(np.searchsorted(s, grid + 2, side = 'right') - np.searchsorted(s, grid - 2))]
     near = np.abs(ppm - center) <= 5
@@ -1386,6 +1392,14 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     # each only a few times weaker than the one before, so the tenfold rule above catches only its end. Similar MS2 spectra (cosine >= 0.9) also join
     # across a valley down to 0.5, or across gaps of up to 2 min without spectra (else 0.25 min); weakest first, so a cluster that absorbed weaker ones
     # can still join a stronger one
+    # Files that fragment a precursor again only after a long dynamic exclusion (every ~1.5 min in GPST000461 and GPST000548) have gaps of that length inside
+    # every peak, so there the gap allowed without spectra is 1.2x the file's re-trigger interval (lower quartile of the time between successive spectra of
+    # one precursor m/z) if that is a minute or more (0.13-0.5 min in the other test files; GPST000596 at 0.42 lost 0.006 with it)
+    order = np.lexsort((rt_arr, np.round(mz_arr / 0.02)))
+    gaps = np.diff(rt_arr[order])[np.abs(np.diff(mz_arr[order])) <= 0.02]
+    gaps = gaps[gaps > 0.1]
+    retrigger = float(np.quantile(gaps, 0.25)) if len(gaps) >= 50 else 0.0
+    max_gap = 1.2 * retrigger if retrigger >= 1.0 else 0.25
     apex_mzs, apex_ints = np.array([c['apex_mz'] for c in clusters]), np.array([max(c['intensity']) for c in clusters])
     joined = set()
     for i in np.argsort(apex_ints, kind = 'stable'):
@@ -1403,9 +1417,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             a, b = sorted([np.flatnonzero(own)[np.argmax(sm[own])], np.flatnonzero(~own)[np.argmax(sm[~own])]])
             gap = np.diff(rts[a:b + 1]).max() if b > a else 0.0
             depth = (ints[a + 1:b].min() if b > a + 1 else np.inf) / min(sm[a], sm[b])
-            if gap > 2 or depth < 0.5 or (gap > 0.25 and depth < 0.7):
+            if gap > max(2, max_gap) or depth < 0.5 or (gap > max_gap and depth < 0.7):
                 continue
-            if depth < 0.7 or gap > 0.25:
+            if depth < 0.7 or gap > max_gap:
                 vecs = [np.zeros(int(max_mz) + 1), np.zeros(int(max_mz) + 1)]
                 for v, cl in zip(vecs, (c, w)):
                     for spec in cl['peak_d']:
@@ -1767,7 +1781,9 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         rounded_mass_rows, strong_counts = [], []
         for spec, x, n, mz in zip(spec_ids[rows], peak_vals[rows], df_in['num_spectra'].values[rows], mz_vals[rows]):
             if (key := (spec, row_charge)) not in rounded_masses:
-                deiso = list(deisotope_ms2(({m: i for m, i in x.items() if m <= abs(row_charge) * mz + 1.5} if n > 1 else x), int(abs(row_charge)), 0.05, relabel = n >= 20).items())[:15]
+                # Nor is anything within 1.5 m/z of the precursor a fragment of any charge: the unfragmented precursor and co-isolated ions, which CandyCrumbs
+                # explains as the intact M of every candidate (junk and tail rows passed crumbs_thresh on it)
+                deiso = list(deisotope_ms2({m: i for m, i in x.items() if (n == 1 or m <= abs(row_charge) * mz + 1.5) and abs(m - mz) > 1.5}, int(abs(row_charge)), 0.05, relabel = n >= 20).items())[:15]
                 rounded_masses[key] = ([np.round(y, decimals) for y, _ in deiso], len({np.round(y, decimals) for y, i in deiso if abs(row_charge) > 1 or i >= 0.02 * deiso[0][1]}))
             rounded_mass_rows.append(rounded_masses[key][0])
             strong_counts.append(rounded_masses[key][1])
@@ -3148,7 +3164,9 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
                                 _loaded = loaded)
         n_best = (df_end['evidence'] == 'strong').sum() if 'evidence' in df_end.columns else 0
         chosen_name = names.get(chosen, f'custom (mass_tag {chosen[1]})')
-        switch = n_best >= max(5, 1.5 * n_chosen)
+        # A wrong reducing end gave at most 25 model predictions on the test sets (5-187 with the right one), so a file with 50 or more under the chosen one
+        # holds glycans of that reducing end: GPST000461's partly unreduced permethylated milk oligosaccharides gave 127 reduced against 158 unreduced
+        switch = n_best >= max(5, 1.5 * n_chosen) and n_chosen < 50
         print(f"WARNING: With {chosen_name} glycans, {os.path.basename(spectra_filepath)} gave {n_chosen} predicted structures; with {names[best]} glycans, it gives "
               f"{n_best}. " + (f"Overriding the reducing end to '{names[best]}'." if switch else f"Keeping '{chosen_name}', but check the reducing end."))
         if switch:
@@ -3506,7 +3524,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         ppm = (df_out.index.values - theo) / theo * 1e6
         has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
         # ppm is to the (de)protonated ion, so rows matched as adducts sit thousands of ppm off; they never pass and must not set the calibration either
-        window = accurate_ms1_window(ppm[has_pred], df_out['annotation_score'].values[has_pred], ppm_thresh)
+        window = accurate_ms1_window(ppm[has_pred], df_out['annotation_score'].values[has_pred], ppm_thresh,
+                                     groups = [f'{i} {c}' for i, c in zip(df_out['spec_id'].values[has_pred], df_out['composition'].values[has_pred])])
         if window is not None:
             center, width = window
             predicted_specs = set(df_out['spec_id'][has_pred])

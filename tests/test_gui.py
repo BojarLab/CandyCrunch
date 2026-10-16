@@ -17,8 +17,9 @@ def test_gui_settings_match_wrap_inference(app):
     panel = gui.SettingsPanel()
     values = panel.values()
     params = inspect.signature(wrap_inference).parameters
-    # Every setting the app sends must be an argument of wrap_inference(_batch), and the app's defaults must be the library's
-    assert set(values) - set(gui.BATCH_KEYS) <= set(params)
+    # Every setting the app sends must be an argument of wrap_inference(_batch) (the worker turns model_file into model and glycans), and the app's
+    # defaults must be the library's
+    assert set(values) - set(gui.BATCH_KEYS) - {'model_file'} <= set(params)
     assert set(gui.BATCH_KEYS) <= set(inspect.signature(wrap_inference_batch).parameters)
     assert {k: v for k, v in values.items() if k in params and params[k].default is not inspect.Parameter.empty} == {
         k: params[k].default for k in values if k in params and params[k].default is not inspect.Parameter.empty}
@@ -351,3 +352,58 @@ def test_gui_reports(app, monkeypatch):
     except PermissionError as error:
         values = gui._exception_values(error)
     assert 'rgen' not in gui._scrub(json.dumps({'exception': {'values': values}})) and 'rgen' not in gui._scrub(values[-1]['value'])
+
+
+def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
+    import json
+    import time
+    import torch
+    from candycrunch import gui
+    from candycrunch.model import CandyCrunch_CNN
+    from candycrunch.prediction import glycans
+    # Weights saved with their own vocabulary are a model; weights that do not fit the built-in vocabulary, or a file of anything else, are refused with why
+    torch.save({'state_dict': CandyCrunch_CNN(2048, num_classes = len(glycans) + 1, input_precursor_dim = 12).state_dict(), 'glycans': glycans + ['Gal(b1-3)GalNAc6S']},
+               tmp_path / 'tuned.pt')
+    torch.save(CandyCrunch_CNN(2048, num_classes = 3, input_precursor_dim = 12).state_dict(), tmp_path / 'small.pt')
+    (tmp_path / 'notes.pt').write_text('not a model')
+    assert gui._check_model(str(tmp_path / 'tuned.pt')) == len(glycans) + 1
+    for name, reason in (('small.pt', 'no CandyCrunch model'), ('notes.pt', 'no PyTorch weights file')):
+        with pytest.raises(ValueError, match = reason):
+            gui._load_model(str(tmp_path / name))
+    # Importing checks the file in a process of its own, then copies it into the model folder and chooses it; a session's model that no longer exists
+    # falls back to the built-in one
+    panel = gui.SettingsPanel()
+    panel.model_dir = str(tmp_path / 'models')
+    monkeypatch.setattr(gui.QFileDialog, 'getOpenFileName', lambda *args, **kwargs: (str(tmp_path / 'tuned.pt'), ''))
+    for _ in range(2):
+        panel.import_model()
+        end = time.time() + 120
+        while not panel.import_model_button.isEnabled() and time.time() < end:
+            app.processEvents()
+            time.sleep(0.05)
+    assert panel.values()['model_file'] == os.path.join(str(tmp_path / 'models'), 'tuned_2.pt') and os.path.exists(panel.values()['model_file'])
+    assert panel.reset.isEnabled()
+    panel.set_values({**panel.values(), 'model_file': str(tmp_path / 'gone.pt')})
+    assert panel.values()['model_file'] is None
+    # A misprediction report holds the peak shown (with the structure the user assigned as the likely right one), but not the run's name
+    df = pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc'], 'predictions': [[('Gal(b1-3)GalNAc', 0.9), ('Gal(b1-4)GlcNAc', 0.05)]],
+                       'composition': [{'Hex': 1, 'HexNAc': 1}], 'num_spectra': [3], 'charge': [-1], 'RT': [14.3], 'rel_abundance': [100.0],
+                       'evidence': ['strong'], 'notes': [''], 'ppm_error': [10.0], 'GlyTouCan_ID': ['']}, index = pd.Index([384.15], name = 'm/z'))
+    view = gui.ResultsView(gui.GlycanImages())
+    view.set_results({'files': ['/data/patient_17.mzML'], 'settings': dict(gui.DEFAULTS), 'tables': {'patient_17': (df, [{204.09: 10.0, 384.15: 100.0}])},
+                      'features': None})
+    view.select_row(0)
+    assert view.report_button.isEnabled()
+    view.curate('Gal(b1-4)GlcNAc', 'reassigned')
+    reports = []
+    view.report_peak.connect(reports.append)
+    view.report_button.click()
+    peak = reports[0]
+    assert peak['predicted'] == 'Gal(b1-3)GalNAc' and peak['peak']['top1_pred'] == 'Gal(b1-4)GlcNAc' and peak['ms2'] == {204.09: 10.0, 384.15: 100.0}
+    assert peak['run_format'] == '.mzml' and 'patient_17' not in json.dumps(peak, default = str)
+    dialog = gui.ReportDialog(None, {'event_id': 'a' * 32}, {'misprediction.json': json.dumps(peak, default = str)}, peak = peak)
+    box = dialog.findChild(QtWidgets.QDialogButtonBox)
+    send = next(b for b in box.buttons() if box.buttonRole(b) == QtWidgets.QDialogButtonBox.AcceptRole)
+    assert not send.isEnabled() and dialog.correct.text() == 'Gal(b1-4)GlcNAc'
+    gui._set_combo(dialog.problem, 'structure')
+    assert send.isEnabled()

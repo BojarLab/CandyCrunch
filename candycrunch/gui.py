@@ -14,6 +14,7 @@ import pickle
 import platform
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,8 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
 try:
-    from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRectF, QSize, QUrl, QStringListModel
+    from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRectF, QSize, QUrl, QStringListModel, \
+        QStandardPaths
     from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QBrush, QShortcut, QFontDatabase, \
         QCursor
     from PySide6.QtWidgets import (QApplication, QMainWindow, QDialog, QDialogButtonBox, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
@@ -46,7 +48,8 @@ from matplotlib.backend_tools import Cursors
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch
 _tree = ast.parse(open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8').read())
 _batch_def = next(node for node in _tree.body if isinstance(node, ast.FunctionDef) and node.name == 'wrap_inference_batch')
-DEFAULTS = {'intra_cat_thresh': 1.0}
+# model_file is the app's own setting (an imported model, None for the built-in one), which the worker turns into wrap_inference's model and glycans
+DEFAULTS = {'intra_cat_thresh': 1.0, 'model_file': None}
 for _arg, _default in zip(_batch_def.args.args[-len(_batch_def.args.defaults):], _batch_def.args.defaults):
     try:
         DEFAULTS[_arg.arg] = ast.literal_eval(_default)
@@ -78,6 +81,11 @@ TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Ki
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD'), ('EED', 'EED'),
                   ('EDD', 'EDD'), ('NETD', 'NETD'), ('UVPD', 'UVPD')]
 SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mgf', '.cc')
+# What can be wrong with a peak's prediction, for misprediction reports from the spectrum view; the value tags the report
+MISPREDICTIONS = [('Choose what is wrong…', None), ('Wrong structure (the composition is right)', 'structure'), ('Wrong composition', 'composition'),
+                  ('No structure, though it is a glycan', 'missing'), ('Not a glycan (noise, contaminant, adduct, or isotope)', 'not_glycan'),
+                  ('Wrong charge state', 'charge'), ('Two peaks merged, or one peak split', 'peak_boundaries'), ('Wrong fragment annotation', 'annotation'),
+                  ('Something else', 'other')]
 # extract_spectra xlsx of 4.5 min (25-29.5) of a pig gastric mucin O-glycan run (GPST000029, as packaging/self_test.mzML): 275 MS2 spectra, ~20 glycan peaks
 EXAMPLE_RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'example_PGM_O-glycans.xlsx')
 # Crash and bug reports go to the CandyCrunch project on Sentry (its DSN, from Settings > Client Keys: public by design, it can only submit reports);
@@ -166,6 +174,34 @@ def _send_report(event, files = None):
         return False
 
 
+def _load_model(path):
+    """An imported CandyCrunch model: weights saved with their own vocabulary ({'state_dict': ..., 'glycans': [...]}, as the fine-tuning cell saves them)
+    or bare weights for the built-in vocabulary; read with weights_only, so a model file from elsewhere cannot run code. Returns (model, glycans)"""
+    import torch
+    from candycrunch.model import CandyCrunch_CNN
+    try:
+        state = torch.load(path, map_location = 'cpu', weights_only = True)
+    except Exception as error:
+        raise ValueError(f'{os.path.basename(path)} is no PyTorch weights file, or holds code, which CandyCrunch does not load ({type(error).__name__})') from error
+    if not isinstance(state, dict):
+        raise ValueError(f'{os.path.basename(path)} holds no model weights')
+    glycans = state.get('glycans')
+    if glycans is None:
+        with open(os.path.join(os.path.dirname(importlib.util.find_spec('candycrunch').origin), 'glycans.pkl'), 'rb') as file:
+            glycans = pickle.load(file)
+    model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12)
+    try:
+        model.load_state_dict({k.replace('module.', ''): v for k, v in state.get('state_dict', state).items()})
+    except (RuntimeError, AttributeError) as error:
+        raise ValueError(f'{os.path.basename(path)} is no CandyCrunch model for {len(glycans)} structures: {" ".join(str(error).split())[:300]}') from error
+    return model.to('cuda:0' if torch.cuda.is_available() else 'cpu').eval(), list(glycans)
+
+
+def _check_model(path):
+    """Loads a model file in a process of its own (the window never imports torch): the number of structures it predicts, or why it cannot be used"""
+    return len(_load_model(path)[1])
+
+
 def _worker_main(jobs, messages, warm_up = False):
     """Runs CandyCrunch in its own process: the window stays responsive, a run is canceled by ending the process, and the model loads once for all runs"""
     class Pipe(io.TextIOBase):
@@ -189,7 +225,8 @@ def _worker_main(jobs, messages, warm_up = False):
         except Exception:
             pass
     messages.put(('ready', None))
-    parent = mp.parent_process()
+    # Imported models, loaded once per worker
+    parent, models = mp.parent_process(), {}
     while True:
         try:
             job = jobs.get(timeout = 1)
@@ -205,7 +242,11 @@ def _worker_main(jobs, messages, warm_up = False):
             # Experiments one after the other, each with its own settings; only the runs of one experiment are harmonized into a feature table
             for name, files, settings in experiments:
                 _install_progress(messages, weights, len(files))
-                kwargs = {k: v for k, v in settings.items() if k not in BATCH_KEYS}
+                kwargs = {k: v for k, v in settings.items() if k not in BATCH_KEYS and k != 'model_file'}
+                if settings.get('model_file'):
+                    if settings['model_file'] not in models:
+                        models[settings['model_file']] = _load_model(settings['model_file'])
+                    kwargs['model'], kwargs['glycans'] = models[settings['model_file']]
                 if len(files) == 1:
                     # n_jobs processes score fragments and find supporting peaks, the pure-Python half of a run (the model already uses every core)
                     df, spectra = cp.wrap_inference(files[0], spectra = True, n_jobs = settings['n_jobs'], **kwargs)
@@ -531,7 +572,11 @@ class GlycanImages(QObject):
                     old = self.large.pop(0)
                     self.images.pop(old, None)
                     self.pending.discard(old)
-            self.ready.emit(key)
+            try:
+                self.ready.emit(key)
+            except RuntimeError:
+                # Deleted while this drew (a closed results view, a test ending): nobody waits for drawings any more
+                return
 
 
 class Annotator(QObject):
@@ -1205,6 +1250,8 @@ class SpectrumPanel(QWidget):
 class SettingsPanel(QScrollArea):
     """Input files and every wrap_inference / wrap_inference_batch setting"""
     files_changed = Signal()
+    # (model file, number of structures it predicts, why it cannot be used), from the process that checked an imported model
+    model_checked = Signal(str, object, str)
 
     def __init__(self):
         super().__init__()
@@ -1258,6 +1305,19 @@ class SettingsPanel(QScrollArea):
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
         self.inputs['trap'].setToolTip('Overridden by the instrument stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
+        # Imported models are copies in the app's data folder, so they stay available wherever their file was; each experiment keeps its model
+        self.model_dir = os.path.join(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation), 'models')
+        self.model = _combo([('CandyCrunch (built-in)', None)] + [(os.path.splitext(os.path.basename(p))[0], p) for p in
+                                                                   sorted(glob.glob(os.path.join(self.model_dir, '*.pt')), key = str.lower)])
+        self.model.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.model.setToolTip('Model that predicts the structures. Import… adds a CandyCrunch model file (.pt): weights for the built-in vocabulary, or '
+                              'weights saved with their own vocabulary ({"state_dict": ..., "glycans": [...]})')
+        self.import_model_button = QPushButton('Import…')
+        self.import_model_button.setToolTip('Adds a CandyCrunch model file (.pt) to the models to choose from')
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.addWidget(self.model, 1)
+        model_row.addWidget(self.import_model_button)
         form.addRow('Glycans', self.inputs['glycan_class'])
         form.addRow('Ion mode', self.mode)
         form.addRow('Max. charge', self.charge)
@@ -1267,6 +1327,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('Sialic acid linkage', self.sialic)
         form.addRow('Chromatography', self.inputs['lc'])
         form.addRow('Mass analyzer', self.inputs['trap'])
+        form.addRow('Model', model_row)
         layout.addLayout(form)
         self.sample_form = form
         # What the first run of the experiment shown set (_detect_run)
@@ -1370,6 +1431,8 @@ class SettingsPanel(QScrollArea):
         self.inputs['modification'].currentIndexChanged.connect(lambda: self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom'))
         self.inputs['experimental'].toggled.connect(lambda on: (self.inputs['taxonomy_level'].setEnabled(on), self.inputs['taxonomy_filter'].setEnabled(on)))
         self.reset.clicked.connect(lambda: self.set_values(DEFAULTS))
+        self.import_model_button.clicked.connect(self.import_model)
+        self.model_checked.connect(self.model_imported)
         self.remove.clicked.connect(self.remove_selected)
         self.experiment_button.clicked.connect(lambda: self.move_runs([item for item in self.files.selectedItems() if item.parent() is not None],
                                                                       self.add_experiment(self.values()), rename = True))
@@ -1381,7 +1444,7 @@ class SettingsPanel(QScrollArea):
         self.files_changed.connect(lambda: self.show_experiment(self.current_experiment()))
         self.files_changed.connect(lambda: self.files.setFixedHeight(min(240, max(110, 6 + max(self.files.sizeHintForRow(0), self.files.fontMetrics().height() + 4) * sum(
             self.files.topLevelItem(i).childCount() + 1 for i in range(self.files.topLevelItemCount()))))))
-        for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic]:
+        for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic, self.model]:
             getattr(widget, {QComboBox: 'currentIndexChanged', QCheckBox: 'toggled', QLineEdit: 'textChanged'}.get(type(widget), 'valueChanged')).connect(
                 lambda *_: self.reset.setEnabled(any(v != DEFAULTS.get(k, v) for k, v in self.values().items())))
         self.set_values(DEFAULTS)
@@ -1538,6 +1601,36 @@ class SettingsPanel(QScrollArea):
             self.files.setCurrentItem(self.add_experiment({'glycan_class': 'O'}, 'Example'))
             self.add_paths([EXAMPLE_RUN])
 
+    def import_model(self):
+        """Checks a model file in a process of its own (the window never imports torch, which takes a few seconds), then adds it (model_imported)"""
+        path, _ = QFileDialog.getOpenFileName(self, 'Import a CandyCrunch model', '', 'CandyCrunch models (*.pt *.pth);;All files (*)')
+        if not path:
+            return
+        self.import_model_button.setEnabled(False)
+        self.import_model_button.setText('Checking…')
+        self.checker = ProcessPoolExecutor(1, mp_context = mp.get_context('spawn'))
+        self.checker.submit(_check_model, path).add_done_callback(
+            lambda future: self.model_checked.emit(path, None if future.exception() else future.result(), str(future.exception() or '')))
+
+    def model_imported(self, path, structures, error):
+        """Copies a checked model file into the app's model folder (under a new name if one is taken) and makes it the shown experiment's model"""
+        self.checker.shutdown(wait = False)
+        self.import_model_button.setEnabled(True)
+        self.import_model_button.setText('Import…')
+        if error:
+            QMessageBox.warning(self, 'CandyCrunch', f'{os.path.basename(path)} cannot be used: {error}')
+            return
+        os.makedirs(self.model_dir, exist_ok = True)
+        stem, n = os.path.splitext(os.path.basename(path))[0], 1
+        target = os.path.join(self.model_dir, f'{stem}.pt')
+        while os.path.exists(target):
+            n += 1
+            target = os.path.join(self.model_dir, f'{stem}_{n}.pt')
+        shutil.copyfile(path, target)
+        self.model.addItem(os.path.splitext(os.path.basename(target))[0], target)
+        self.model.setItemData(self.model.count() - 1, f'{structures} structures; {target}', Qt.ToolTipRole)
+        _set_combo(self.model, target)
+
     def remove_selected(self):
         for item in self.files.selectedItems():
             if item.parent() is None:
@@ -1571,6 +1664,7 @@ class SettingsPanel(QScrollArea):
         values['filter_out'] = {name for name, box in self.filter_boxes.items() if box.isChecked()}
         values['modification'], values['mass_tag'] = ('custom', None) if values['modification'] == 'unreduced' else (values['modification'], values['mass_tag'] if values['modification'] == 'custom' else None)
         values['sialic_derivatization'] = self.sialic.currentData()
+        values['model_file'] = self.model.currentData()
         return values
 
     def set_values(self, values):
@@ -1596,6 +1690,11 @@ class SettingsPanel(QScrollArea):
             _set_combo(self.inputs['modification'], 'unreduced')
         self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom')
         self.sialic.setCurrentIndex(max(self.sialic.findData(values.get('sialic_derivatization')), 0) if values.get('sialic_derivatization') else 0)
+        # A model from a session or the last run that is not in the list is added if its file still exists, else the built-in model is shown
+        model = values.get('model_file')
+        if model and self.model.findData(model) < 0 and os.path.exists(model):
+            self.model.addItem(os.path.splitext(os.path.basename(model))[0], model)
+        self.model.setCurrentIndex(max(self.model.findData(model), 0) if model else 0)
 
 
 class ResultsView(QWidget):
@@ -1603,6 +1702,8 @@ class ResultsView(QWidget):
     open_in_crumbs = Signal(object)
     status = Signal(str)
     experiment_shown = Signal(str)
+    # What a misprediction report sends about the peak shown (peak_report)
+    report_peak = Signal(object)
 
     def __init__(self, images):
         super().__init__()
@@ -1709,6 +1810,11 @@ class ResultsView(QWidget):
         # It may shrink below its longest run name (the list shows them in full): 50-character names made the window at least 1430 px wide
         self.spectrum_file.setMinimumWidth(80)
         self.spectrum.controls.insertWidget(1, self.spectrum_file)
+        self.report_button = QPushButton('Report misprediction…')
+        self.report_button.setToolTip('Sends this peak (its MS2 and MS3 spectra, CandyCrunch\'s predictions and scores, and the settings) to the CandyCrunch '
+                                      'developers, with what is wrong about it, so that CandyCrunch can learn from it')
+        self.report_button.setEnabled(False)
+        self.spectrum.controls.addWidget(self.report_button)
         # MS3 spectra of the selected peak, pooled per isolated MS2 fragment, annotated as fragments of that fragment
         self.ms3_panel, self.ms3_fragment, self.ms3_tab = SpectrumPanel(), QComboBox(), QSplitter(Qt.Vertical)
         self.ms3_fragment.setToolTip('MS2 fragment whose MS3 spectra are shown (pooled)')
@@ -1755,6 +1861,7 @@ class ResultsView(QWidget):
         self.custom.clicked.connect(self.enter_structure)
         self.exclude.clicked.connect(self.toggle_excluded)
         self.crumbs.clicked.connect(self.send_to_crumbs)
+        self.report_button.clicked.connect(lambda: self.report_peak.emit(self.peak_report()))
         self.spectrum_file.currentIndexChanged.connect(self.show_source)
         self.spectrum.ms3_clicked.connect(self.open_ms3)
         self.spectrum.support_hovered.connect(lambda highlight: (setattr(self, 'support_highlight', highlight), self.row is not None and self.update_drawing()))
@@ -1904,6 +2011,7 @@ class ResultsView(QWidget):
         if row is None:
             # An empty table (a run without glycan peaks) leaves nothing of the previous table's peak in the detail pane
             self.row, self.source, self.alternative, self.ms3_groups = None, None, None, []
+            self.report_button.setEnabled(False)
             for widget in (self.structure, self.composition, self.facts, self.drawing, self.alternatives, self.ms3_fragment):
                 widget.clear()
             self.spectrum_file.setVisible(False)
@@ -2022,6 +2130,7 @@ class ResultsView(QWidget):
             self.source = self.spectrum_file.currentData()
         else:
             self.source = (self.dataset.currentData(), self.row)
+        self.report_button.setEnabled(self.source is not None)
         self.alternatives.clear()
         if self.source is None:
             self.spectrum.show_message('This feature has MS2 evidence in no run, only MS1 signal')
@@ -2035,6 +2144,19 @@ class ResultsView(QWidget):
             self.alternatives.addItem(item)
         self.update_alternative_icons()
         self.annotate()
+
+    def peak_report(self):
+        """What a misprediction report sends about the peak shown: its row (for a feature also the feature's, without the other runs' values), its MS2 and
+        MS3 spectra, the structure the pipeline gave it and the one shown, and the experiment's settings; not the run's name"""
+        table, spectra = self.payload['tables'][self.source[0]]
+        r = self.source[1]
+        report = {'peak': {k: v for k, v in table.iloc[r].items() if k not in ('ms3', 'excluded', '_top1')}, 'predicted': table['_top1'].iat[r],
+                  'shown': self.alternative or table['top1_pred'].iat[r], 'ms2': spectra[r], 'ms3': table['ms3'].iat[r] if 'ms3' in table.columns else None,
+                  'run_format': next((os.path.splitext(f)[1].lower() for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None),
+                  'settings': {k: sorted(v) if isinstance(v, set) else v for k, v in self.payload['settings'].items()}, 'tolerance': self.spectrum.tolerance.value()}
+        if self.dataset.currentData() == FEATURES:
+            report['feature'] = {k: v for k, v in self.frame.iloc[self.row].items() if k not in self.payload['tables'] and not k.startswith('evidence_') and k not in ('excluded', '_top1')}
+        return report
 
     def update_alternative_icons(self):
         for i in range(self.alternatives.count()):
@@ -2488,27 +2610,39 @@ class CrumbsTab(QWidget):
 
 
 class ReportDialog(QDialog):
-    """The report form, for bug reports and, given an error, crash reports: what happened in the user's words, an address for a reply, and everything that
-    would be sent, readable before sending"""
+    """The report form, for bug reports, given an error, crash reports, and given a peak (ResultsView.peak_report), misprediction reports: what happened in the
+    user's words, an address for a reply, and everything that would be sent, readable before sending"""
 
-    def __init__(self, parent, event, files, summary = None):
+    def __init__(self, parent, event, files, summary = None, peak = None):
         super().__init__(parent)
-        self.setWindowTitle('Send a crash report' if summary else 'Report a bug')
+        self.setWindowTitle('Send a crash report' if summary else 'Report a misprediction' if peak else 'Report a bug')
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
-        layout.addWidget(_label('CandyCrunch ran into an error' if summary else 'Report a bug or suggest an improvement'))
+        layout.addWidget(_label('CandyCrunch ran into an error' if summary else 'What is wrong with the prediction for this peak?' if peak else
+                                'Report a bug or suggest an improvement'))
         if summary:
             error = _label(summary, 'hint')
             error.setTextInteractionFlags(Qt.TextSelectableByMouse)
             layout.addWidget(error)
+        if peak:
+            self.problem, self.correct = _combo(MISPREDICTIONS), QLineEdit()
+            # A structure the user already assigned to this peak is the likely answer
+            self.correct.setText(peak['peak'].get('top1_pred') if peak['peak'].get('curation') and isinstance(peak['peak'].get('top1_pred'), str) else '')
+            self.correct.setPlaceholderText('The right structure or composition, if you know it (e.g., Neu5Ac(a2-3)Gal(b1-3)GalNAc or Hex1HexNAc1NeuAc1)')
+            layout.addWidget(self.problem)
+            layout.addWidget(self.correct)
         self.text, self.email = QPlainTextEdit(), QLineEdit()
         self.text.setPlaceholderText('What were you doing when it happened? (optional)' if summary else
+                                     'Anything else that helps, e.g., which fragments point to the right structure (optional)' if peak else
                                      'What went wrong, and what did you expect instead? Or what would you like CandyCrunch to do?')
         self.text.setMaximumHeight(140)
         self.email.setPlaceholderText('Your email address, if you would like a reply (optional)')
         layout.addWidget(self.text)
         layout.addWidget(self.email)
-        layout.addWidget(_label(f'The report holds {"the error and where in CandyCrunch it happened, " if summary else ""}the log of this session, the settings and '
+        layout.addWidget(_label('The report holds this peak: its MS2 and MS3 spectra, CandyCrunch\'s predictions and scores for it, and the settings of its '
+                                'experiment, plus the log of this session and the versions of CandyCrunch, its packages, and your operating system; not the '
+                                'name of the run or any other peak. Paths in your home folder are shortened to ~.' if peak else
+                                f'The report holds {"the error and where in CandyCrunch it happened, " if summary else ""}the log of this session, the settings and '
                                 'file types of your runs, and the versions of CandyCrunch, its packages, and your operating system, but none of your data. Paths '
                                 'in your home folder are shortened to ~.', 'hint'))
         details = QPlainTextEdit(_scrub(json.dumps(event, indent = 1, default = str) + ''.join(f'\n\n{name}:\n{text}' for name, text in files.items() if text)))
@@ -2531,7 +2665,11 @@ class ReportDialog(QDialog):
         buttons.addButton("Don't send" if summary else 'Cancel', QDialogButtonBox.RejectRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        if not summary:
+        # A misprediction report needs what is wrong, a bug report a description
+        if peak:
+            send.setEnabled(False)
+            self.problem.currentIndexChanged.connect(lambda: send.setEnabled(self.problem.currentData() is not None))
+        elif not summary:
             send.setEnabled(False)
             self.text.textChanged.connect(lambda: send.setEnabled(bool(self.text.toPlainText().strip())))
         layout.addWidget(buttons)
@@ -2637,6 +2775,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction('Add runs…', self.choose_files, QKeySequence.Open)
         file_menu.addAction('Add folder…', self.choose_folder)
         file_menu.addAction('Add example run', lambda: (self.settings.add_example(), self.tabs.setCurrentWidget(self.split)))
+        file_menu.addAction('Import model…', self.settings.import_model)
         file_menu.addSeparator()
         file_menu.addAction('Open results…', self.open_session)
         self.save_action = file_menu.addAction('Save results…', self.save_session, QKeySequence.Save)
@@ -2668,6 +2807,7 @@ class MainWindow(QMainWindow):
         self.runner.failed.connect(self.failed)
         self.results.status.connect(lambda text: self.statusBar().showMessage(text, 6000))
         self.results.experiment_shown.connect(self.settings.select_experiment)
+        self.results.report_peak.connect(lambda peak: self.open_report(peak = peak))
         self.results.open_in_crumbs.connect(lambda request: (self.tabs.setCurrentWidget(self.crumbs), self.crumbs.load(request)))
         self.settings.inputs['taxonomy_level'].currentTextChanged.connect(self.load_taxa)
         self.taxa_ready.connect(lambda taxa: self.settings.taxa.setModel(QStringListModel(taxa, self.settings.taxa)))
@@ -2788,14 +2928,15 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f'Something went wrong ({summary}). {note} Details are in the log (View > Log).'.replace('  ', ' '), 10000)
 
-    def open_report(self, summary = None, values = None, files = None):
-        """The report form: a bug report (Help > Report a bug), or for an error (summary), the offer to send a crash report"""
+    def open_report(self, summary = None, values = None, files = None, peak = None):
+        """The report form: a bug report (Help > Report a bug), for an error (summary) the offer to send a crash report, or for a peak of the results (peak,
+        from ResultsView.peak_report) a misprediction report"""
         event = self.report_event('error', values, summary) if summary else None
-        files = {**(files or {}), 'log.txt': self.log.toPlainText()[-300000:]}
+        files = {**({'misprediction.json': json.dumps(peak, indent = 1, default = str)} if peak else {}), **(files or {}), 'log.txt': self.log.toPlainText()[-300000:]}
         # A bug report is user feedback; with a crash report, a description goes with the error as feedback on it
         feedback = self.report_event('info')
         feedback['type'] = 'feedback'
-        dialog, self.reporting = ReportDialog(self, event or feedback, files, summary), True
+        dialog, self.reporting = ReportDialog(self, event or feedback, files, summary, peak), True
         accepted, self.reporting = dialog.exec() == QDialog.Accepted, False
         message, email = dialog.text.toPlainText().strip(), dialog.email.text().strip()
         if summary and dialog.automatic.isChecked():
@@ -2804,6 +2945,13 @@ class MainWindow(QMainWindow):
         dialog.deleteLater()
         if not accepted:
             return
+        if peak:
+            # Tagged, so that mispredictions can be filtered and grouped by what is wrong; the first line is also the GitHub issue's title
+            feedback['tags'].update(report = 'misprediction', problem = dialog.problem.currentData())
+            row, predicted = peak['peak'], peak['predicted']
+            message = '\n'.join(filter(None, [f'Misprediction: {dialog.problem.currentText()} (m/z {_fmt(row.get("m/z"), 4)}, z = {_fmt(row.get("charge"), 0)}, RT '
+                                               f'{_fmt(row.get("RT"), 2)} min)', f'CandyCrunch: {predicted if isinstance(predicted, str) else "no structure"}',
+                                               dialog.correct.text().strip() and f'Correct: {dialog.correct.text().strip()}', message]))
         feedback['contexts']['feedback'] = {k: v for k, v in {'message': message, 'contact_email': email, 'source': 'app',
                                                               'associated_event_id': event and event['event_id']}.items() if v}
         self.send_report(event, files, feedback if message else None, quiet = False)
