@@ -419,6 +419,9 @@ def _detect_run(path, results):
             elif 'trap' not in found and ext == '.mzxml':
                 instrument = b' '.join(re.findall(rb'<(?:msModel|msMassAnalyzer)[^>]*value="([^"]*)"', header)).decode(errors = 'replace').lower()
                 found['trap'] = next((t for a, t in MZXML_ANALYZER_TRAPS.items() if a in instrument), None)
+            elif 'trap' not in found and ext == '.mgf' and b'NativeID:"scanId=' in header:
+                # Agilent MassHunter native IDs (in msconvert's titles): a Q-TOF, read as TOF by the loader
+                found['trap'] = 'other'
         elif ext == '.xlsx':
             # Files written by extract_spectra carry the ion mode and analyzer of their raw file
             df = pd.read_excel(path, usecols = lambda c: c in ('mode', 'trap', 'precursor_charge'))
@@ -1281,6 +1284,8 @@ class SpectrumPanel(QWidget):
 class SettingsPanel(QScrollArea):
     """Input files and every wrap_inference / wrap_inference_batch setting"""
     files_changed = Signal()
+    # Every settings check of a run just added (_detect_run) has answered or was given up
+    detections_done = Signal()
     # (model file, number of structures it predicts, why it cannot be used), from the process that checked an imported model
     model_checked = Signal(str, object, str)
 
@@ -1364,7 +1369,7 @@ class SettingsPanel(QScrollArea):
         self.detected = _label('', 'hint')
         self.detected.hide()
         layout.addWidget(self.detected)
-        self.detections, self.detecting, self.detect_timer = mp.get_context('spawn').Queue(), 0, QTimer(self)
+        self.detections, self.detect_timer = mp.get_context('spawn').Queue(), QTimer(self)
         self.detect_timer.setInterval(200)
         self.detect_timer.timeout.connect(self.receive_detections)
         self.batch = QWidget()
@@ -1586,9 +1591,13 @@ class SettingsPanel(QScrollArea):
         path = target.child(0).data(0, Qt.UserRole) if detect and empty and target is not None and target.childCount() else None
         if path is not None and os.path.exists(path):
             # Read in a process of its own (seconds for a large file); a setting changed in the meantime is kept
-            target.detecting = (path, self.values() if target is self.shown else dict(target.settings))
+            target.detecting = (path, self.values() if target is self.shown else dict(target.settings), time.time())
             mp.get_context('spawn').Process(target = _detect_run, args = (path, self.detections), daemon = True, name = 'CandyCrunch file check').start()
-            self.detecting += 1
+            # Until it answers, the note says that the run is being read (it gave no sign before, and a run started meanwhile used the old settings)
+            target.note = f'Reading {os.path.basename(path)} for its ion mode, mass analyzer, and charge states…'
+            if target is self.shown:
+                self.detected.setText(target.note)
+                self.detected.show()
             self.detect_timer.start()
 
     def receive_detections(self):
@@ -1600,10 +1609,7 @@ class SettingsPanel(QScrollArea):
             try:
                 path, found, charges, n_ms2 = self.detections.get_nowait()
             except (queue.Empty, EOFError, OSError):
-                return
-            self.detecting -= 1
-            if not self.detecting:
-                self.detect_timer.stop()
+                break
             experiment = next((e for e in map(self.files.topLevelItem, range(self.files.topLevelItemCount())) if getattr(e, 'detecting', (None,))[0] == path), None)
             if experiment is None:
                 continue
@@ -1627,6 +1633,20 @@ class SettingsPanel(QScrollArea):
             if experiment is self.shown:
                 self.detected.setText(experiment.note)
                 self.detected.setVisible(bool(experiment.note))
+        # A check whose process died never answers; after 2 min it is given up, so that a run waiting for it (MainWindow.run) starts
+        for experiment in self.waiting():
+            if time.time() - experiment.detecting[2] > 120:
+                del experiment.detecting
+                experiment.note = ''
+                if experiment is self.shown:
+                    self.detected.hide()
+        if not self.waiting():
+            self.detect_timer.stop()
+            self.detections_done.emit()
+
+    def waiting(self):
+        """Experiments whose first run is still being read for its settings (add_paths)"""
+        return [e for e in map(self.files.topLevelItem, range(self.files.topLevelItemCount())) if hasattr(e, 'detecting')]
 
     def add_example(self):
         """Adds the bundled example run once, as an experiment of its own with the default settings for its O-glycans"""
@@ -2701,7 +2721,7 @@ class ReportDialog(QDialog):
         toggle = QToolButton()
         toggle.setText('Show what is sent')
         toggle.setCheckable(True)
-        toggle.toggled.connect(lambda shown: (details.setVisible(shown), toggle.setText('Hide what is sent' if shown else 'Show what is sent'), self.adjustSize()))
+        toggle.toggled.connect(lambda shown: (details.setVisible(shown), toggle.setText('Hide what is sent' if shown else 'Show what is sent'), self.fit(320 if shown else 0)))
         layout.addWidget(toggle, 0, Qt.AlignLeft)
         layout.addWidget(details, 1)
         # Only a report Sentry can take can go out without asking
@@ -2721,6 +2741,17 @@ class ReportDialog(QDialog):
             send.setEnabled(False)
             self.text.textChanged.connect(lambda: send.setEnabled(bool(self.text.toPlainText().strip())))
         layout.addWidget(buttons)
+        # Styled first, so that the wrapped hint text is measured in the font it is shown in
+        self.ensurePolished()
+        self.fit(0, 720)
+
+    def fit(self, extra, width = None):
+        """Sizes the dialog to the height its wrapped text needs at its width, plus extra for the details, within the screen. Qt's own first size and
+        adjustSize took the layout's minimum height (566 px at the 560 px minimum width), less than the word-wrapped hints need, so Windows made the
+        window taller than asked and Qt warned 'QWindowsWindow::setGeometry: Unable to set geometry'"""
+        width = width or self.width()
+        screen = (self.parentWidget() or self).screen().availableGeometry()
+        self.resize(min(width, screen.width()), min(max(self.heightForWidth(width), self.minimumSizeHint().height()) + extra, int(0.9 * screen.height())))
 
 
 class MainWindow(QMainWindow):
@@ -2737,7 +2768,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('CandyCrunch')
         self.setAcceptDrops(True)
         self.images, self.runner, self.started, self.stage_text = GlycanImages(), InferenceRunner(), None, ''
-        self.first_report, self.fraction = None, 0.0
+        self.first_report, self.fraction, self.run_pending = None, 0.0, False
         self.settings = SettingsPanel()
         self.run_button, self.cancel_button = QPushButton('Run CandyCrunch'), QPushButton('Cancel')
         self.run_button.setObjectName('run')
@@ -2846,6 +2877,7 @@ class MainWindow(QMainWindow):
         self.settings.add_files.clicked.connect(self.choose_files)
         self.settings.add_folder.clicked.connect(self.choose_folder)
         self.run_button.clicked.connect(self.run)
+        self.settings.detections_done.connect(self.run_waiting)
         self.cancel_button.clicked.connect(self.cancel)
         self.runner.ready.connect(lambda: self.runner.busy or self.status_text.setText('Ready'))
         self.runner.stage.connect(self.show_stage)
@@ -3142,7 +3174,21 @@ class MainWindow(QMainWindow):
         if len(paths) > len(sessions) and len(self.settings.paths()) == count:
             self.statusBar().showMessage('No new runs added (CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mgf, and .cc or .xlsx made by extract_spectra)', 10000)
 
+    def run_waiting(self):
+        """Starts the run asked for while a run's settings check was still reading it"""
+        if self.run_pending:
+            self.run_pending = False
+            self.run_button.setText('Run CandyCrunch')
+            self.run_button.setEnabled(True)
+            self.run()
+
     def run(self):
+        # The settings check of a run just added (SettingsPanel.add_paths) can still change its experiment's settings, so the run waits for it
+        if self.settings.waiting():
+            self.run_pending = True
+            self.run_button.setEnabled(False)
+            self.run_button.setText('Reading the run settings…')
+            return
         # The results shown are replaced once this run is done
         if not self.keep_curation():
             return
@@ -3179,6 +3225,12 @@ class MainWindow(QMainWindow):
             bar.setRange(0, 0)
             bar.show()
         self.clock.start()
+        # A long run would otherwise end with the computer asleep: Windows stays awake while this thread asks it to, macOS while caffeinate runs
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
+        elif sys.platform == 'darwin' and shutil.which('caffeinate'):
+            self.awake = subprocess.Popen(['caffeinate', '-i', '-w', str(os.getpid())])
         self.log.clear()
         self.welcome_text.hide()
         # The progress lives on the start page, so earlier results make way for it until this run is done
@@ -3196,15 +3248,22 @@ class MainWindow(QMainWindow):
             # run's pace changes with how many cores it shares, so recent pace beats the average since the start
             now, lefts = time.time(), []
             for series in self.history.values():
-                old = next(((t, v) for t, v in series if now - t <= 30), series[0])
-                if series[-1][1] < 1 and series[-1][1] - old[1] > 0.01 and now - old[0] > 3:
-                    lefts.append((1 - series[-1][1]) * (now - old[0]) / (series[-1][1] - old[1]))
-            # The first steps go faster than the prediction that dominates, so the estimate waits until the prediction is under way
-            if now - self.first_report[0] > 10 and self.fraction > 0.1 and lefts:
+                # The pace of the 30 s up to the latest report, counted down since. Measured up to now instead, a step reporting nothing within it
+                # shrank the window's progress while its length stayed 30 s, so the estimate rose to many minutes right before the end
+                last = series[-1]
+                old = next((t, v) for t, v in series if last[0] - t <= 30)
+                if last[1] < 1 and last[1] - old[1] > 0.01 and last[0] - old[0] > 3:
+                    lefts.append((1 - last[1]) * (last[0] - old[0]) / (last[1] - old[1]) - (now - last[0]))
+            # The first steps go faster than the prediction that dominates, so the estimate waits until the prediction is under way. The last steps
+            # report no progress within them and take seconds (xlsx) to minutes (MS1 quantification), so they get none
+            last_steps = self.stage_times and self.stage_times[-1][0] in ('assign_categories', 'augment_predictions', 'finalise_predictions')
+            if now - self.first_report[0] > 10 and self.fraction > 0.1 and lefts and max(lefts) > 0 and not last_steps:
                 left = max(lefts)
                 text += f', about {max(10, round(left / 10) * 10)} s left' if left < 175 else f', about {round(left / 60)} min left'
         self.status_text.setText(text)
         self.stage_label.setText(text)
+        # Seen in the taskbar while the window is minimized or behind others
+        self.setWindowTitle(f'CandyCrunch ({self.fraction:.0%})' if self.first_report is not None and self.clock.isActive() else 'CandyCrunch')
 
     def show_stage(self, update):
         name, self.stage_text = update
@@ -3220,6 +3279,9 @@ class MainWindow(QMainWindow):
         elif key in self.file_progress:
             self.active = next(n for n, group in enumerate(self.groups) if key in group)
             self.file_progress[key] = value
+            # The reducing-end and glycan-class checks run a file's steps again, which starts its progress over: the pace before does not count
+            if value < self.history.get(key, [(0, 0.0)])[-1][1]:
+                self.history[key] = []
             self.history.setdefault(key, []).append((time.time(), value))
         # Every experiment counts by the size of its files, of which a batch spends TAIL_WEIGHT on harmonization
         done = sum(sum(self.file_progress[k] * self.file_sizes[k] for k in group) if len(group) == 1 else
@@ -3241,6 +3303,12 @@ class MainWindow(QMainWindow):
 
     def stop(self, message):
         self.clock.stop()
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+        elif getattr(self, 'awake', None) is not None:
+            self.awake.terminate()
+            self.awake = None
         self.progress.hide()
         self.big_progress.hide()
         self.run_button.setEnabled(True)
@@ -3248,6 +3316,7 @@ class MainWindow(QMainWindow):
         self.stage_label.setText('')
         self.welcome_text.show()
         self.elapsed.setText('')
+        self.setWindowTitle('CandyCrunch')
         self.status_text.setText(message)
         if self.results.payload is not None:
             self.pages.setCurrentWidget(self.results)

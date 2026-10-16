@@ -76,6 +76,13 @@ TEST_DICTS = [
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000461/") if x.startswith('MilkOglycan')]},
     {'name': 'GPST000461_free', 'folder': 'GPST000461', 'args': {'glycan_class': 'free', 'sample_prep': 'permethylated', 'rt_min': 21, 'taxonomy_level': 'Species', 'taxonomy_filter': 'Homo_sapiens'},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000461/") if x.startswith('MilkOligos')]},
+    # Tear-film N-glycans (unreduced, a 'custom' label without mass) and reduced O-glycans of the hawk/caiman/sea turtle project, sample Ana_05 (Lebrilla lab,
+    # PGC chip, Agilent Q-TOF CID, positive), one run each as Agilent mgf (MS2 only) with its extract_spectra .xlsx; open-peak ground truths audited from the
+    # runs' MassHunter compound lists
+    {'name': 'GPST000570_N', 'folder': 'GPST000570', 'args': {'glycan_class': 'N', 'modification': 'custom', 'max_charge': 3},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000570/") if x.startswith('Ana_05_N-gly') and x.endswith('.xlsx')]},
+    {'name': 'GPST000570_O', 'folder': 'GPST000570', 'args': {'glycan_class': 'O', 'max_charge': 3},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000570/") if x.startswith('Ana_05_O-gly') and x.endswith('.xlsx')]},
 ]
 # timsTOF Pro serum N-glycans (negative, reduced, PGC, DDA-PASEF .d with --input-format mzml, its extract_spectra .xlsx otherwise) live in tests/untracked,
 # which git does not track, so the set is only added where its (preliminary, open-peak) ground truth is present; 'folder' is relative to TEST_DATA_DIR
@@ -577,6 +584,18 @@ def test_qtof_mzml(tmp_path):
     # TOF MS2 keep their 100 most intense peaks, and the unfragmented envelope of a precursor with a charge state goes
     assert [len(p) for p in df['peak_d']] == [100, 100] and not any(608.2 < m < 609.5 for m in df['peak_d'][1])
     assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof'
+
+
+def test_agilent_mgf(tmp_path):
+    # An Agilent MassHunter Q-TOF run as msconvert writes its mgf (GPST000570): native IDs scanId=, no survey scans, and precursor intensities from the
+    # moment DDA triggered, which are dropped; without intensities, two stretches of spectra 0.65 min apart (anomers of an unreduced N-glycan) are two clusters
+    path = tmp_path / 'run.mgf'
+    path.write_text(''.join(f'BEGIN IONS\nTITLE=run.{i}.{i}. File:"run.d", NativeID:"scanId={i}"\nRTINSECONDS={rt * 60}\nPEPMASS=642.9155 {2e4 + i}\nCHARGE=3+\n'
+                            '204.0867 500\n366.1395 300\n528.1923 100\nEND IONS\n' for i, rt in enumerate([15.28, 15.39, 16.04, 16.16])))
+    df = load_spectra_filepath(str(path))
+    assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof' and df['intensity'].isna().all()
+    # wrap_inference sets missing intensities to 0 before condensing
+    assert condense_dataframe(df.assign(intensity = 0))['num_spectra'].tolist() == [2, 2]
 
 
 def test_spectra_scan_activation(tmp_path):

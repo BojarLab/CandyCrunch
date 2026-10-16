@@ -1239,6 +1239,11 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     return [m for ion, ms in ions.items() if int(ion.rsplit(']', 1)[1][:-1] or 1) in permitted_charges for m in np.atleast_1d(ms) if abs(mass - m) < mass_tolerance]
 
 
+# Smallest half-width (ppm) of accurate_ms1_window per survey scan analyzer: TOF precursors are less accurate than orbitrap ones (Agilent Q-TOF mgf of GPST000570
+# without survey scans to refine them: +-7 ppm; timsTOF after refine_tof_precursors: robust SD 1.6 ppm)
+MS1_PPM_FLOORS = {'orbitrap': 3.0, 'tof': 5.0}
+
+
 def accurate_ms1_window(ppm, scores, ppm_thresh, floor = 3.0, groups = None):
     """center and half-width (ppm) of the composition errors of a run with accurate (orbitrap, timsTOF) survey scans: real glycans pile up within a few ppm,
     while matches of other compositions spread over the whole ppm_thresh and swamp a plain median and MAD (permethylated serum on a Q Exactive: 3 robust SD
@@ -1464,6 +1469,23 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             h['apex_int'], h['apex_mz'], h['apex_rt'] = h['intensity'][k], h['m/z'][k], h['RT'][k]
             h['ms3'] = c['ms3'] if c['apex_rt'] in h['RT'] else []
             stack.append(h)
+    # Without precursor intensities there is no valley to split at, and spectra chain into one cluster as each one only has to lie within rt_diff of the
+    # last: a stretch without spectra longer than 0.55 min splits it
+    split_clusters = []
+    for c in clusters:
+        order = np.argsort(c['RT'], kind = 'stable')
+        parts = np.split(order, np.flatnonzero(np.diff(np.array(c['RT'], dtype = float)[order]) > 0.55) + 1)
+        if len(parts) == 1 or any(x > 0 for x in c['intensity']):
+            split_clusters.append(c)
+            continue
+        largest = max(range(len(parts)), key = lambda k: len(parts[k]))
+        for k, ix in enumerate(parts):
+            h = {key: [c[key][x] for x in ix] for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge')}
+            h['apex_int'], h['apex_mz'], h['apex_rt'] = np.nan, h['m/z'][0], h['RT'][0]
+            # The MS3 spectra stay with the part holding most MS2 spectra
+            h['ms3'] = c['ms3'] if k == largest else []
+            split_clusters.append(h)
+    clusters = split_clusters
     # Create a condensed dataframe
     condensed_data = []
     for cluster in clusters:
@@ -2346,9 +2368,11 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     if ext == ".raw":
         return process_raw_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".mgf":
-        rows = []
+        rows, agilent = [], []
         for spectrum in read_mgf(spectra_filepath):
             params = spectrum['params']
+            # msconvert writes the native ID into TITLE; scanId= is Agilent MassHunter's format (PSI-MS MS:1001508), whose MS/MS instruments are Q-TOFs
+            agilent.append('NativeID:"scanId=' in str(params.get('title', '')))
             # Like MS1 scans of mzML files, spectra without a precursor m/z (no or an empty PEPMASS) are not predicted
             if not len(spectrum['m/z array']) or params.get('pepmass', (None,))[0] is None:
                 continue
@@ -2361,7 +2385,14 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
             rows.append([float(params['pepmass'][0]), peak_d, float(params['rtinseconds']) / 60,
                          charge if charge != 1 else None, params['pepmass'][1] if params['pepmass'][1] is not None else np.nan,
                          int(params['scans']) if str(params.get('scans')).isdigit() else params.get('scans'), None])
-        return pd.DataFrame(rows, columns = ['m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity', 'scan', 'activation'])
+        df_out = pd.DataFrame(rows, columns = ['m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity', 'scan', 'activation'])
+        # An mgf names no analyzer; Agilent Q-TOF precursors and fragments are accurate to a few ppm (MS1 'tof', MS2 'other', as for timsTOF). Its precursor
+        # intensities are the survey abundance when DDA triggered, not a trace (Spearman 0.15/0.18 with MassHunter feature heights in GPST000570, spectrum
+        # counts 0.70/0.56), so they are dropped, as no valley or apex can be read from them
+        if agilent and all(agilent):
+            df_out.attrs.update(detected_trap = 'other', detected_ms1_trap = 'tof')
+            df_out['intensity'] = np.nan
+        return df_out
     if ext == ".cc":
         # extract_spectra's binary file: numpy arrays stored as byte planes, numbers that are not peaks as loaded, a JSON header with the rest
         with np.load(spectra_filepath) as f:
@@ -2789,7 +2820,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
 
 def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_thresh, rt_diff,
                          sample_prep = 'underivatized', glycan_class = 'O', mass_tolerance = 0.5, ms1 = None, accurate_ms1 = False,
-                         sialic_derivatization = None, n_jobs = 1):
+                         sialic_derivatization = None, n_jobs = 1, ms1_ppm_floor = 3.0):
     """Cleans up incorrect structure predictions, quantifies, and formats dataframe\n
     | Arguments:
     | :-
@@ -2807,7 +2838,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     | accurate_ms1 (bool): whether precursor m/z come from accurate (orbitrap or timsTOF) survey scans; if not, mass errors are judged against the file's own m/z calibration; default:False
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization (glycowork's SIALIC_DERIVATIZATIONS); compositions then give each
     |                                          sialic acid's linkage, as the precursor mass tells it; default:None
-    | n_jobs (int): number of processes for the supporting peaks of the rows (see run_jobs); default:1\n
+    | n_jobs (int): number of processes for the supporting peaks of the rows (see run_jobs); default:1
+    | ms1_ppm_floor (float): smallest half-width (ppm) of the composition-error window with accurate survey scans (MS1_PPM_FLOORS); default:3.0\n
     | Returns:
     | :-
     | Returns a tuple of (dataframe of corrected predictions with unnormalized rel_abundance, list of spectra)
@@ -2847,7 +2879,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     signed = (df_out.index.values - df_out['theo_mz'].values) / df_out['theo_mz'].values * 1e6
     known = regular & df_out['ppm_error'].notna().values
     # With accurate survey scans the errors center on the run's calibration, which the composition matches of junk spectra hide from a median and MAD
-    window = accurate_ms1_window(signed[known], df_out['annotation_score'].values[known], ppm_thresh) if accurate_ms1 else None
+    window = accurate_ms1_window(signed[known], df_out['annotation_score'].values[known], ppm_thresh, floor = ms1_ppm_floor) if accurate_ms1 else None
     if window is not None:
         keep = (df_out['ppm_error'].isna() | (np.abs(signed - window[0]) <= window[1])).values
     else:
@@ -3302,7 +3334,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         print(f"WARNING: File was acquired on {detected_trap} but trap='{trap}' was specified. Overriding to '{detected_trap}'.")
         trap = detected_trap
     # An orbitrap or timsTOF survey scan pins a precursor's composition to a few ppm, so fewer annotated fragments need to back it up; a lower threshold loses on ion-trap MS1 files
-    accurate_ms1 = loaded_file.attrs.get('detected_ms1_trap') in ('orbitrap', 'tof')
+    ms1_ppm_floor = MS1_PPM_FLOORS.get(loaded_file.attrs.get('detected_ms1_trap'), 0.0)
+    accurate_ms1 = ms1_ppm_floor > 0
     # The accurate mass only makes up for fragment evidence within glycan_class; a composition of another class keeps the full threshold
     cross_crumbs_thresh = crumbs_thresh
     if accurate_ms1:
@@ -3546,7 +3579,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         ppm = (df_out.index.values - theo) / theo * 1e6
         has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
         # ppm is to the (de)protonated ion, so rows matched as adducts sit thousands of ppm off; they never pass and must not set the calibration either
-        window = accurate_ms1_window(ppm[has_pred], df_out['annotation_score'].values[has_pred], ppm_thresh,
+        window = accurate_ms1_window(ppm[has_pred], df_out['annotation_score'].values[has_pred], ppm_thresh, floor = ms1_ppm_floor,
                                      groups = [f'{i} {c}' for i, c in zip(df_out['spec_id'].values[has_pred], df_out['composition'].values[has_pred])])
         if window is not None:
             center, width = window
@@ -3795,7 +3828,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 glycan_class, df_out, df_use, mass_dic = other, df_other, df_other.attrs['df_use'], None
             df_other.attrs.clear()
     if _return_intermediate:
-        df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1, df_use = df_use, accurate_ms2 = trap == 'orbitrap')
+        df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1, df_use = df_use, accurate_ms2 = trap == 'orbitrap', ms1_ppm_floor = ms1_ppm_floor)
         return df_out
     if df_out.empty:
         df_out.insert(0, 'top1_pred', [])
@@ -3811,7 +3844,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out, spectra_out = finalise_predictions(df_out, get_missing, mode, modification, mass_tag,
                                                ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1,
-                                               accurate_ms1 = accurate_ms1, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs)
+                                               accurate_ms1 = accurate_ms1, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
+                                               ms1_ppm_floor = ms1_ppm_floor)
     if 'rel_abundance' in df_out.columns:
         df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
     if plot_glycans:
@@ -3947,10 +3981,11 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Built once here instead of once per file inside augment_predictions
     if experimental and not mass_dic:
         mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
-    inference_dfs, file_modes, ms1_paths, accurate_ms1s, accurate_ms2s = {}, {}, {}, {}, {}
-    for file_label, (df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2) in zip(file_labels, results):
+    inference_dfs, file_modes, ms1_paths, accurate_ms1s, accurate_ms2s, ms1_ppm_floors = {}, {}, {}, {}, {}, {}
+    for file_label, (df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor) in zip(file_labels, results):
         # wrap_inference overrides the ion mode if the file says otherwise, so downstream steps have to follow it
         file_modes[file_label], ms1_paths[file_label], accurate_ms1s[file_label], accurate_ms2s[file_label] = file_mode, ms1_path, accurate_ms1, accurate_ms2
+        ms1_ppm_floors[file_label] = ms1_ppm_floor
         inference_dfs[file_label] = df_out.assign(condition_label = file_label) if not df_out.empty else df_out
     # The table of a file without any glycan peak
     empty_table = pd.DataFrame(columns = ['top1_pred', 'predictions', 'composition', 'num_spectra', 'charge', 'RT', 'rel_abundance'],
@@ -4043,7 +4078,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                                            mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                            glycan_class = glycan_class, mass_tolerance = mass_tolerance,
                                                            ms1 = ms1, accurate_ms1 = accurate_ms1s[file_label],
-                                                           sialic_derivatization = sialic_derivatization, n_jobs = n_jobs)
+                                                           sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
+                                                           ms1_ppm_floor = ms1_ppm_floors[file_label])
         inference_dfs[file_label] = (df_out, spectra_out)
     # Consensus of each isomer group that survived clean-up in at least one file, for MS1 gap filling in the others
     finalized = [v[0] for v in inference_dfs.values() if not v[0].empty]
@@ -4175,16 +4211,16 @@ def _batch_inference_file(spectra_filepath, ms1_path, inference_kwargs):
    | Returns:
    | :-
    | Returns a tuple of (intermediate prediction dataframe, ion mode used, path to the MS1 .npz or None, whether the survey scans are accurate (orbitrap,
-   | TOF), whether the MS2 spectra are orbitrap spectra)
+   | TOF), whether the MS2 spectra are orbitrap spectra, the survey scans' ppm floor of MS1_PPM_FLOORS)
    """
     df_out = wrap_inference(spectra_filepath, **inference_kwargs)
     ms1, file_mode, accurate_ms1 = df_out.attrs.pop('ms1', None), df_out.attrs.pop('mode'), df_out.attrs.pop('accurate_ms1', False)
-    accurate_ms2 = df_out.attrs.pop('accurate_ms2', False)
+    accurate_ms2, ms1_ppm_floor = df_out.attrs.pop('accurate_ms2', False), df_out.attrs.pop('ms1_ppm_floor', 3.0)
     df_out.attrs.clear()
     if ms1 is None or len(ms1[0]) == 0:
-        return df_out, file_mode, None, accurate_ms1, accurate_ms2
+        return df_out, file_mode, None, accurate_ms1, accurate_ms2, ms1_ppm_floor
     np.savez(ms1_path, rts = ms1[0], mzs = ms1[1], ints = ms1[2], offsets = ms1[3])
-    return df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2
+    return df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor
 
 
 def filter_top_n_isomers(df_in, top_n = 5):
