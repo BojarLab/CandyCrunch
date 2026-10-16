@@ -667,7 +667,7 @@ class Annotator(QObject):
                     # CandyCrumbs needs no matplotlib and can take long, so it runs before MPL_LOCK is taken: inside it, a slow MS3 annotation stalled the
                     # other panel's spectrum and every redraw in the window. Its results (and those of supporting_ions) are kept for the last spectra, which
                     # are drawn again at another panel size, or after a prefetch was cut short
-                    key = repr([request[k] for k in ('structure', 'mzs', 'intensities', 'charge', 'mass_tag', 'sample_prep', 'tolerance')] + sorted(request['kwargs'].items()))
+                    key = repr([request[k] for k in ('structure', 'mzs', 'intensities', 'charge', 'mass_tag', 'sample_prep', 'tolerance', 'ppm')] + sorted(request['kwargs'].items()))
                     if len(self.results) > 200:
                         self.results.clear()
                     if key not in self.results:
@@ -678,7 +678,9 @@ class Annotator(QObject):
                         peaks = dict(zip(request['mzs'], request['intensities']))
                         mono = sorted({m for relabel in (False, True) for m in deisotope_ms2(peaks, max(abs(request['charge']), 1), min(request['tolerance'], 0.05),
                                                                                               relabel = relabel)})
-                        self.results[key] = CandyCrumbs(request['structure'], mono, request['tolerance'], max_cleavages = request['kwargs'].get('max_cleavages', 3),
+                        # A ppm tolerance alone bounds the matches (CandyCrumbs' Da window, 0.5 by default, is then wider at any fragment m/z)
+                        self.results[key] = CandyCrumbs(request['structure'], mono, request['tolerance'] if request['ppm'] is None else None, mass_threshold_ppm = request['ppm'],
+                                                        max_cleavages = request['kwargs'].get('max_cleavages', 3),
                                                         simplify = True, charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
                                                         intensities = [peaks[m] for m in mono], **{k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'})
                     hit_dict = self.results[key]
@@ -992,9 +994,12 @@ class SpectrumPanel(QWidget):
         self.summary.setWordWrap(False)
         # Ignored: the summary's length changes with every annotation, and as a minimum width it resized the panel, which re-annotated it, endlessly
         self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.tolerance = _spin(0.001, 2.0, 0.05, 3, ' Da')
+        self.tolerance = _spin(0.001, 2.0, 0.05, 3)
         self.tolerance.setValue(DEFAULTS['ppm_thresh'] * MZ_REF / 1e6)
         self.tolerance.setToolTip('Maximum difference between an observed peak and a theoretical fragment mass')
+        # A flat window for ion-trap MS2, ppm of each theoretical fragment m/z for accurate MS2 (orbitrap), whose errors scale with m/z
+        self.unit = _combo([('Da', 'Da'), ('ppm', 'ppm')])
+        self.unit.setToolTip('Unit of the tolerance: a flat window in Da, or ppm of each theoretical fragment m/z (accurate MS2, e.g., orbitrap). Switching converts the value at m/z 1000')
         self.cartoons = QCheckBox('Fragment cartoons')
         self.cartoons.setChecked(True)
         self.fragment_types = _combo(FRAGMENT_TYPES)
@@ -1010,6 +1015,7 @@ class SpectrumPanel(QWidget):
         self.controls.addStretch(1)
         self.controls.addWidget(QLabel('Tolerance'))
         self.controls.addWidget(self.tolerance)
+        self.controls.addWidget(self.unit)
         self.controls.addWidget(QLabel('Fragments'))
         self.controls.addWidget(self.fragment_types)
         self.controls.addWidget(self.cartoons)
@@ -1034,6 +1040,8 @@ class SpectrumPanel(QWidget):
         self.fragments = QTextBrowser()
         self.fragments.setOpenLinks(False)
         self.tolerance.valueChanged.connect(self.resubmit)
+        self.unit.currentIndexChanged.connect(lambda: self.set_tolerance(self.tolerance.value() * (1000 if self.unit.currentData() == 'ppm' else 1e-3), self.unit.currentData()))
+        self.unit.currentIndexChanged.connect(self.resubmit)
         self.cartoons.toggled.connect(self.resubmit)
         self.fragment_types.currentIndexChanged.connect(self.resubmit)
         # Labels and cartoons are placed for one figure size, so a resized panel gets a freshly laid out spectrum once resizing stops
@@ -1041,6 +1049,18 @@ class SpectrumPanel(QWidget):
         self.relayout.setSingleShot(True)
         self.relayout.setInterval(400)
         self.relayout.timeout.connect(self.resubmit)
+
+    def set_tolerance(self, value, unit):
+        """Shows value in unit ('Da' or 'ppm') in the tolerance box, without annotating again"""
+        self.tolerance.blockSignals(True)
+        self.unit.blockSignals(True)
+        self.unit.setCurrentIndex(self.unit.findData(unit))
+        self.tolerance.setDecimals(3 if unit == 'Da' else 1)
+        self.tolerance.setRange(*((0.001, 2.0) if unit == 'Da' else (1.0, 2000.0)))
+        self.tolerance.setSingleStep(0.05 if unit == 'Da' else 1.0)
+        self.tolerance.setValue(value)
+        self.tolerance.blockSignals(False)
+        self.unit.blockSignals(False)
 
     def annotate(self, *args, prefetch = (), **kwargs):
         """args and kwargs as make_request takes them; prefetch: (args, kwargs) of the spectra likely shown next (e.g., the neighboring table rows),
@@ -1057,9 +1077,12 @@ class SpectrumPanel(QWidget):
             kwargs = {'disable_X_cross_rings': True, 'disable_A_cross_rings': True} | kwargs
         elif choice == 'cross_rings':
             kwargs = {'disable_X_cross_rings': False, 'disable_A_cross_rings': False} | kwargs
+        # With a ppm tolerance, 'tolerance' is its Da value at m/z 1000, the flat window of deisotoping and of the MS3 markers
+        ppm = self.tolerance.value() if self.unit.currentData() == 'ppm' else None
         request = {'structure': structure, 'mzs': [float(x) for x in mzs], 'intensities': [float(x) for x in intensities], 'charge': int(charge),
                    'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
-                   'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value(), 'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}),
+                   'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value() if ppm is None else ppm * 1e-3, 'ppm': ppm,
+                   'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}),
                    'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100)}
         request['key'] = repr(sorted((k, sorted(v.items()) if isinstance(v, dict) else v) for k, v in request.items()))
         return request
@@ -1177,11 +1200,11 @@ class SpectrumPanel(QWidget):
                 theo = (theo + np.sign(z) * (abs(z) - 1) * PROTON_MASS) / abs(z)
                 flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
                 first = f'<td>{mz:.4f}</td><td align="right">{peaks.get(mz, 0) / top * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
-                rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{theo - mz:+.3f}</td><td align="right">{z}</td></tr>')
+                rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{theo - mz:+.3f}</td><td align="right">{(theo - mz) / theo * 1e6:+.1f}</td><td align="right">{z}</td></tr>')
                 tips[mz] = tips.get(mz, f'Observed m/z <b>{mz:.4f}</b>') + f'<br>{domon_costello_to_html(flat)}: theoretical m/z <b>{theo:.4f}</b> (error {theo - mz:+.4f} Da' + (f', z = {z}' if abs(z) > 1 else '') + ')'
         self.fragment_html = (f'<table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Observed m/z</th>'
                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
-                              f'<th align="right">z</th></tr>{"".join(rows)}</table>')
+                              f'<th align="right">Error (ppm)</th><th align="right">z</th></tr>{"".join(rows)}</table>')
         self.fragments.setHtml(self.fragment_html)
         # Hovering a fragment label shows the observed and theoretical m/z of its peak
         fragments = getattr(figure.axes[0], 'cartoon_fragments', {})
@@ -1988,12 +2011,13 @@ class ResultsView(QWidget):
     def show_experiment(self):
         """self.payload is the experiment shown: its files, settings, tables, and feature table"""
         payload = self.payload = self.session['experiments'][max(self.experiment.currentIndex(), 0)]
-        # Spectra are annotated with the fragment tolerance the pipeline scored them with: that of accurate MS2 (orbitrap, TOF), else the precursor tolerance
-        tolerance = {'orbitrap': 0.02, 'other': 0.05}.get(payload['settings'].get('trap'), payload['settings'].get('ppm_thresh', DEFAULTS['ppm_thresh']) * MZ_REF / 1e6)
+        # Orbitrap MS2 are annotated at 15 ppm, as their fragment errors scale with m/z. In GPST000548 (Q Exactive HF, fragments at -2 ppm median) it labeled
+        # as many real fragments (labels minus those of m/z-shifted decoy spectra) as the pipeline's 0.02 Da, which CandyCrumbs applies to the singly charged
+        # mass (0.01 m/z at z = 2), and 10% more with the peaks moved to -9 ppm (calibration offsets seen in orbitrap runs), where 0.01 Da or 10 ppm lost 30-50%
+        # and 20 ppm added mostly decoy labels. TOF MS2 (fragments 10-40 ppm off) keep 0.05 Da until audited, ion traps the precursor window until audited
+        tolerance = {'orbitrap': (15.0, 'ppm'), 'other': (0.05, 'Da')}.get(payload['settings'].get('trap'), (payload['settings'].get('ppm_thresh', DEFAULTS['ppm_thresh']) * MZ_REF / 1e6, 'Da'))
         for panel in (self.spectrum, self.ms3_panel):
-            panel.tolerance.blockSignals(True)
-            panel.tolerance.setValue(tolerance)
-            panel.tolerance.blockSignals(False)
+            panel.set_tolerance(*tolerance)
         self.dataset.blockSignals(True)
         self.dataset.clear()
         if payload['features'] is not None and not payload['features'].empty:
@@ -2257,7 +2281,8 @@ class ResultsView(QWidget):
         report = {'peak': {k: v for k, v in table.iloc[r].items() if k not in ('ms3', 'excluded', '_top1')}, 'predicted': table['_top1'].iat[r],
                   'shown': self.alternative or table['top1_pred'].iat[r], 'ms2': spectra[r], 'ms3': table['ms3'].iat[r] if 'ms3' in table.columns else None,
                   'run_format': next((os.path.splitext(f)[1].lower() for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None),
-                  'settings': {k: sorted(v) if isinstance(v, set) else v for k, v in self.payload['settings'].items()}, 'tolerance': self.spectrum.tolerance.value()}
+                  'settings': {k: sorted(v) if isinstance(v, set) else v for k, v in self.payload['settings'].items()}, 'tolerance': self.spectrum.tolerance.value(),
+                  'tolerance_unit': self.spectrum.unit.currentData()}
         if self.dataset.currentData() == FEATURES:
             report['feature'] = {k: v for k, v in self.frame.iloc[self.row].items() if k not in self.payload['tables'] and not k.startswith('evidence_') and k not in ('excluded', '_top1')}
         # What the report can add if the user agrees, kept out of the report itself as the path names the run: the run's file (to cut out the peak's
