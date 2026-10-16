@@ -2674,7 +2674,7 @@ class ReportDialog(QDialog):
             self.correct.setPlaceholderText('The right structure or composition, if you know it (e.g., Neu5Ac(a2-3)Gal(b1-3)GalNAc or Hex1HexNAc1NeuAc1)')
             layout.addWidget(self.problem)
             layout.addWidget(self.correct)
-            self.include_data = QCheckBox('Include the measured data around this peak')
+            self.include_data = QCheckBox('Include the full peak')
             self.include_data.setChecked(True)
             self.include_data.setToolTip('Sending the full information for this peak. This lets the developers rerun '
                                          'CandyCrunch on exactly this peak; without it, they only have the pooled MS2 spectrum')

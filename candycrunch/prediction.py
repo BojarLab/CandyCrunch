@@ -3963,7 +3963,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # pandas; it takes the dtype that the files with values give it, which is what pandas does so far
     dtypes = {c: pd.concat([v[c] for v in non_empty.values() if c in v.columns and v[c].notna().any()]).dtype for c in {c for v in non_empty.values() for c in v.columns}
               if any(c in v.columns and v[c].notna().any() for v in non_empty.values())}
-    all_ms2 = pd.concat([v.astype({c: dtypes[c] for c in v.columns if c in dtypes and v[c].isna().all()}) for v in non_empty.values()])
+    all_ms2 = pd.concat([v.astype({c: np.float64 if dtypes[c].kind in 'iu' else object if dtypes[c].kind == 'b' else dtypes[c] for c in v.columns if c in dtypes and v[c].isna().all()}) for v in non_empty.values()])
     # Cluster precursor m/z across files: split at gaps above the mass tolerance, then split clusters wider than it at their largest gap
     mz_sorted = np.unique(all_ms2.index.values)
     to_split, mz_clusters = np.split(mz_sorted, np.where(np.diff(mz_sorted) > mass_tolerance)[0] + 1), []
