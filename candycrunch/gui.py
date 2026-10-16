@@ -1768,11 +1768,14 @@ class ResultsView(QWidget):
         self.alternative, self.ms3_groups, self.ms3_args, self.support_highlight, self.dirty, self.drawing_of = None, [], None, None, False, None
         top = QHBoxLayout()
         top.setContentsMargins(8, 6, 8, 4)
-        self.experiment = QComboBox()
-        self.experiment.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        # About 16 and 24 characters wide, not as wide as their longest name: run names of 50 characters squeezed the filter box next to them to a few pixels
+        # in a 1280 px window; their lists still show every name in full, and the run shown is the tooltip
+        self.experiment, self.dataset = QComboBox(), QComboBox()
+        for box, length in ((self.experiment, 16), (self.dataset, 24)):
+            box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            box.setMinimumContentsLength(length)
         self.experiment.setToolTip('Experiments are predicted and harmonized separately')
-        self.dataset = QComboBox()
-        self.dataset.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.dataset.currentTextChanged.connect(self.dataset.setToolTip)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Filter by structure, composition, m/z, GlyTouCan ID, or notes')
         self.search.setClearButtonEnabled(True)
@@ -1804,6 +1807,8 @@ class ResultsView(QWidget):
         self.structure_delegate, self.bar_delegate = StructureDelegate(images, self.table), BarDelegate(self.table)
         # Only while the table has focus, so Ctrl+C in the structure box still copies its text
         QShortcut(QKeySequence.Copy, self.table, self.copy_rows).setContext(Qt.WidgetShortcut)
+        # Ctrl+F (Cmd+F) goes to the filter box, its text selected to type over
+        QShortcut(QKeySequence.Find, self, lambda: (self.search.setFocus(), self.search.selectAll()))
         # Detail pane: drawing, facts, alternatives, and curation of the selected peak
         info = QWidget()
         info_layout = QVBoxLayout(info)
@@ -1912,7 +1917,10 @@ class ResultsView(QWidget):
             self.proxy.mapToSource(self.proxy.index(0, 0)).row() if self.proxy.rowCount() else None))
         self.table.selectionModel().selectionChanged.connect(self.selection_changed)
         self.table.customContextMenuRequested.connect(self.context_menu)
-        self.alternatives.itemClicked.connect(self.pick_alternative)
+        # A candidate chosen by click or arrow key is annotated, and Assign candidate assigns it; without one chosen, Assign candidate is disabled (it did
+        # nothing, and after arrow keys it assigned a candidate other than the one the spectrum showed)
+        self.assign.setEnabled(False)
+        self.alternatives.currentItemChanged.connect(lambda item: (self.assign.setEnabled(item is not None), item is not None and self.pick_alternative(item)))
         self.alternatives.itemDoubleClicked.connect(lambda item: self.curate(item.data(Qt.UserRole), 'reassigned'))
         self.assign.clicked.connect(lambda: self.alternatives.currentItem() and self.curate(self.alternatives.currentItem().data(Qt.UserRole), 'reassigned'))
         self.custom.clicked.connect(self.enter_structure)
@@ -2040,6 +2048,7 @@ class ResultsView(QWidget):
         columns.append({'title': 'GlyTouCan', 'kind': 'text', 'raw': ids, 'text': ids})
         columns.append({'title': 'Notes', 'kind': 'text', 'raw': notes, 'text': notes, 'tip': notes_tip})
         sort_column, sort_order = self.table.horizontalHeader().sortIndicatorSection(), self.table.horizontalHeader().sortIndicatorOrder()
+        sort_title = self.model.columns[sort_column]['title'] if 0 <= sort_column < len(self.model.columns) else None
         self.model.set_table(df, columns)
         for c, column in enumerate(columns):
             self.table.setItemDelegateForColumn(c, self.structure_delegate if column['kind'] == 'structure' else self.bar_delegate if column['kind'] == 'bar' else None)
@@ -2052,7 +2061,9 @@ class ResultsView(QWidget):
                     self.table.setColumnWidth(c, max(90, self.table.columnWidth(c)))
                 elif column['title'] == 'Composition':
                     self.table.setColumnWidth(c, min(self.table.columnWidth(c), 210))
-            self.table.sortByColumn(2, Qt.AscendingOrder)
+            # Another run or the feature table keeps the sort chosen before if it has that column (every switch sorted by m/z again), else by m/z
+            titles = [c['title'] for c in columns]
+            self.table.sortByColumn(titles.index(sort_title), sort_order) if sort_title in titles else self.table.sortByColumn(2, Qt.AscendingOrder)
         else:
             self.table.sortByColumn(sort_column, sort_order)
         self.filter(self.search.text())
@@ -2062,20 +2073,24 @@ class ResultsView(QWidget):
     def filter(self, text):
         self.proxy.set_needle(text)
         shown, total = self.proxy.rowCount(), self.model.rowCount()
-        self.counter.setText(f'{total} glycan peaks' if shown == total else f'{shown} of {total} glycan peaks')
+        excluded = sum(e for e, _ in self.model.marks)
+        # Excluded peaks are left out of every export, so how many there are stays in view
+        self.counter.setText((f'{total} glycan peaks' if shown == total else f'{shown} of {total} glycan peaks') + (f', {excluded} excluded' if excluded else ''))
 
     def select_row(self, row):
         if row is None:
             # An empty table (a run without glycan peaks) leaves nothing of the previous table's peak in the detail pane
             self.row, self.source, self.alternative, self.ms3_groups = None, None, None, []
-            self.report_button.setEnabled(False)
+            for button in (self.report_button, self.custom, self.exclude, self.crumbs):
+                button.setEnabled(False)
             for widget in (self.structure, self.composition, self.facts, self.drawing, self.alternatives, self.ms3_fragment):
                 widget.clear()
             self.spectrum_file.setVisible(False)
             if self.tabs.currentWidget() is self.ms3_tab:
                 self.tabs.setCurrentIndex(0)
             self.tabs.setTabVisible(self.tabs.indexOf(self.ms3_tab), False)
-            self.spectrum.show_message('No glycan peaks to show')
+            # A filter that matches nothing is told apart from a run without glycan peaks
+            self.spectrum.show_message('No glycan peaks match the filter' if self.model.rowCount() else 'No glycan peaks to show')
             return
         index = self.proxy.mapFromSource(self.model.index(row, 0))
         if not index.isValid():
@@ -2187,7 +2202,12 @@ class ResultsView(QWidget):
             self.source = self.spectrum_file.currentData()
         else:
             self.source = (self.dataset.currentData(), self.row)
-        self.report_button.setEnabled(self.source is not None)
+        # Without a peak (an empty table) the curation buttons are disabled, and without an MS2 spectrum (a feature with MS1 signal only) Open in CandyCrumbs
+        # too, as they did nothing when clicked
+        self.custom.setEnabled(True)
+        self.exclude.setEnabled(True)
+        for button in (self.report_button, self.crumbs):
+            button.setEnabled(self.source is not None)
         self.alternatives.clear()
         if self.source is None:
             self.spectrum.show_message('This feature has MS2 evidence in no run, only MS1 signal')
@@ -2614,6 +2634,9 @@ class CrumbsTab(QWidget):
         self.structure.returnPressed.connect(self.annotate)
         self.modification.currentIndexChanged.connect(lambda: form.setRowVisible(self.mass_tag, self.modification.currentData() == 'custom'))
         self.go.clicked.connect(self.annotate)
+        # Ctrl+Enter annotates from anywhere in the tab, also from the peak list, where Enter starts a new line
+        QShortcut(QKeySequence('Ctrl+Return'), self, self.annotate).setContext(Qt.WidgetWithChildrenShortcut)
+        self.go.setToolTip(f'Annotates the peaks with the structure ({QKeySequence("Ctrl+Return").toString(QKeySequence.NativeText)})')
         images.ready.connect(lambda key: key[:2] == (self.structure.text().strip(), False) and self.update_preview())
         self.support_highlight = None
         self.spectrum.support_hovered.connect(lambda highlight: (setattr(self, 'support_highlight', highlight), self.update_preview()))
@@ -2856,6 +2879,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction('Add example run', lambda: (self.settings.add_example(), self.tabs.setCurrentWidget(self.split)))
         file_menu.addAction('Import model…', self.settings.import_model)
         file_menu.addSeparator()
+        # Through the button, which is disabled while a run goes on (or waits for a run's settings check), from any tab to the Predict tab's progress
+        file_menu.addAction('Run CandyCrunch', lambda: (self.tabs.setCurrentWidget(self.split), self.run_button.click()), QKeySequence('Ctrl+R'))
+        self.run_button.setToolTip(f'Predicts the glycan structures of every run in the list ({QKeySequence("Ctrl+R").toString(QKeySequence.NativeText)})')
+        file_menu.addSeparator()
         file_menu.addAction('Open results…', self.open_session)
         self.save_action = file_menu.addAction('Save results…', self.save_session, QKeySequence.Save)
         self.save_action.setEnabled(False)
@@ -2945,9 +2972,14 @@ class MainWindow(QMainWindow):
         if self.store.value('settings'):
             stored = json.loads(self.store.value('settings'))
             self.settings.set_values({**DEFAULTS, **stored, 'filter_out': set(stored.get('filter_out', DEFAULTS['filter_out']))})
+        # The panes as the user left them: settings and results, table and details, details and spectrum, MS3 spectrum and fragments, CandyCrumbs
+        # form and spectrum (restoreState only holds the log dock, so every start reset them)
+        self.splitters = (self.split, self.results.splitter, self.results.splitter.widget(1), self.results.ms3_tab, self.crumbs.findChild(QSplitter))
         if self.store.value('geometry'):
             self.restoreGeometry(self.store.value('geometry'))
             self.restoreState(self.store.value('state'))
+            for splitter, state in zip(self.splitters, self.store.value('splitters') or []):
+                splitter.restoreState(state)
         else:
             self.resize(1440, 900)
         sessions = [p for p in paths if p.lower().endswith('.candycrunch')]
@@ -3145,18 +3177,28 @@ class MainWindow(QMainWindow):
             pixmap.setDevicePixelRatio(2.8)
             self.emblem.setPixmap(pixmap)
 
+    def add_runs(self, paths):
+        """Adds files and folders as runs and says so if none of them was a new run: files CandyCrunch cannot read (e.g., .wiff, .pdf), runs already in the
+        list, and folders without runs (a folder's .xlsx are not taken, as CandyCrunch writes its results next to the runs as .xlsx) were passed over
+        without a word by Add files and Add folder"""
+        count = len(self.settings.paths())
+        self.settings.add_paths(paths)
+        if paths and len(self.settings.paths()) == count:
+            self.statusBar().showMessage('No new runs added. CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mgf, and .cc or .xlsx made by extract_spectra; '
+                                         'a folder adds its runs but not its .xlsx files, which are added one by one', 10000)
+
     def choose_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Add LC-MS/MS runs', self.store.value('folder', os.path.expanduser('~')),
                                                 'Spectra (*.raw *.RAW *.mzML *.mzXML *.mgf *.cc *.xlsx);;All files (*)')
         if paths:
             self.store.setValue('folder', os.path.dirname(paths[0]))
-            self.settings.add_paths(paths)
+            self.add_runs(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add a timsTOF .d folder, or every .raw, .d, mzML, mzXML, and mgf run of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add a timsTOF .d folder, or every .raw, .d, mzML, mzXML, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
             self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith('.d') else path)
-            self.settings.add_paths([path])
+            self.add_runs([path])
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -3167,12 +3209,8 @@ class MainWindow(QMainWindow):
         sessions = [p for p in paths if p.lower().endswith('.candycrunch')]
         if sessions:
             self.open_session(sessions[0])
-        count = len(self.settings.paths())
-        self.settings.add_paths([p for p in paths if p not in sessions])
+        self.add_runs([p for p in paths if p not in sessions])
         self.tabs.setCurrentWidget(self.split)
-        # Files CandyCrunch cannot read (e.g., .wiff, .pdf) and folders without runs used to be dropped without a word
-        if len(paths) > len(sessions) and len(self.settings.paths()) == count:
-            self.statusBar().showMessage('No new runs added (CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mgf, and .cc or .xlsx made by extract_spectra)', 10000)
 
     def run_waiting(self):
         """Starts the run asked for while a run's settings check was still reading it"""
@@ -3340,6 +3378,7 @@ class MainWindow(QMainWindow):
                                     'or open the log (View > Log) for details.')
             return
         self.results.set_results(payload)
+        self.session_path = None
         self.pages.setCurrentWidget(self.results)
         self.save_action.setEnabled(True)
         # wrap_inference(_batch) processes files as another glycan class or with another reducing end if their predictions say so, which the user has to know
@@ -3361,8 +3400,11 @@ class MainWindow(QMainWindow):
         self.append_log('Run cancelled\n')
 
     def save_session(self):
-        path, _ = QFileDialog.getSaveFileName(self, 'Save results', os.path.join(self.store.value('folder', os.path.expanduser('~')), 'results.candycrunch'),
-                                              'CandyCrunch results (*.candycrunch)')
+        # Offered where these results were opened from or last saved, else named after their first run: every save offered results.candycrunch in the
+        # runs' folder, so saving other results meant renaming them or overwriting the earlier ones
+        first = os.path.splitext(os.path.basename(os.path.normpath(self.results.session['experiments'][0]['files'][0])))[0]
+        path, _ = QFileDialog.getSaveFileName(self, 'Save results', getattr(self, 'session_path', None) or os.path.join(self.store.value('folder', os.path.expanduser('~')),
+                                                                                                                     f'{first}.candycrunch'), 'CandyCrunch results (*.candycrunch)')
         if not path:
             return False
         try:
@@ -3372,7 +3414,7 @@ class MainWindow(QMainWindow):
             # A folder without write access or a full disk is no crash; returning False keeps the window (and the curation) open
             QMessageBox.critical(self, 'Save results', f'Could not write {path}:\n{error}')
             return False
-        self.results.dirty = False
+        self.results.dirty, self.session_path = False, path
         self.statusBar().showMessage(f'Saved {os.path.basename(path)}', 6000)
         return True
 
@@ -3402,6 +3444,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'Open results', f'Could not read {path}:\n{error}')
             return
         self.results.set_results(payload)
+        self.session_path = path
         self.settings.set_experiments(self.results.session['experiments'])
         self.pages.setCurrentWidget(self.results)
         self.save_action.setEnabled(True)
@@ -3448,6 +3491,7 @@ class MainWindow(QMainWindow):
             return
         self.store.setValue('geometry', self.saveGeometry())
         self.store.setValue('state', self.saveState())
+        self.store.setValue('splitters', [splitter.saveState() for splitter in self.splitters])
         self.runner.shutdown()
         if self.session:
             # Waits a little for the session's end to reach Sentry, as the process ends right after; nothing counts for the session after this

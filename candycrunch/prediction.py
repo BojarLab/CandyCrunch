@@ -19,11 +19,12 @@ import json
 from typing import Dict
 import numpy as np
 import pandas as pd
+from networkx import descendants
 import torch
 import torch.nn.functional as F
 from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
 from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, graph_to_string
-from glycowork.motif.processing import enforce_class, canonicalize_iupac
+from glycowork.motif.processing import enforce_class, canonicalize_iupac, get_class
 from glycowork.motif.annotate import get_molecular_properties
 from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           glycan_to_composition, PROTON_MASS,
@@ -2853,7 +2854,6 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # Keep or remove spectra that still lack a prediction after all this (canonicalize_biosynthesis drops confidence-less database guesses)
     if not get_missing:
         df_out = df_out[df_out['predictions'].str.len() > 0]
-    df_out = flag_coeluting_substructures(df_out, glycan_class)
     # Calculate ppm error
     valid_indices, ppm_errors, theo_mzs = [], [], []
     for preds, obs_mass in zip(df_out['predictions'], df_out.index):
@@ -3079,6 +3079,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 df_out.iloc[target[top1[i]], df_out.columns.get_loc(col)] += df_out[col].iloc[i]
         df_out.index = pd.Index(df_out.index.values + df_out['re_offset'].values / np.abs(df_out['charge'].values), name = df_out.index.name)
         df_out = df_out[~unlabelled]
+    df_out = flag_coeluting_substructures(df_out, glycan_class, sample_prep = sample_prep, unreduced = modification is None and not mass_tag,
+                                          ms1 = ms1 if ms1 is not None and len(ms1[0]) > 0 else None, mz_tolerance = mass_tolerance)
     # Map GlyTouCan IDs of the structure reported, which can differ from the first candidate
     df_out["GlyTouCan_ID"] = [glytoucan_mapping.get(g, '') if isinstance(g, str) else '' for g in df_out['top1_pred']]
     if 'reducing_end' in df_out.columns:
@@ -3110,70 +3112,108 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     return df_out, spectra_out
 
 
-def flag_coeluting_substructures(df_out, glycan_class, rt_tolerance = 0.25):
-    """Flag potential in-source fragments and O-glycan peeling products"""
-    df_out['notes'] = ''
-    top1_data = [(idx, row['predictions'][0][0], row['RT'])
-                 for idx, row in df_out.iterrows()
-                 if row['predictions']]
-    if len(top1_data) < 2:
-        return df_out
-    pred_graphs = {}
-    for _, pred, _ in top1_data:
-        if pred not in pred_graphs:
-            try:
-                pred_graphs[pred] = glycan_to_nxGraph(pred)
-            except Exception:
-                pass
-    # In-source fragments: substructure co-elutes with superstructure
-    for i, (idx_a, pred_a, rt_a) in enumerate(top1_data):
-        if pred_a not in pred_graphs:
-            continue
-        notes = []
-        for j, (idx_b, pred_b, rt_b) in enumerate(top1_data):
-            if i == j or pred_b not in pred_graphs:
-                continue
-            if pred_b.count('(') - pred_a.count('(') != 1:
-                continue
-            if abs(rt_a - rt_b) > rt_tolerance:
-                continue
-            if subgraph_isomorphism(pred_graphs[pred_b], pred_graphs[pred_a]):
-                notes.append(f"Possible in-source fragment of {pred_b}")
-        if notes:
-            df_out.at[idx_a, 'notes'] = '; '.join(notes)
-    # Peeling products: O-glycan minus reducing-end mono, independent RT
-    if glycan_class == 'O':
-        peeled_strings = {}
-        for pred, g in pred_graphs.items():
-            if len(g.nodes()) < 3:
-                continue
-            root = max(g.nodes())
-            link_children = list(g.successors(root))
-            if len(link_children) != 1:
-                continue
-            peeled = g.copy()
-            peeled.remove_nodes_from([root, link_children[0]])
-            if len(peeled.nodes()) > 0:
-                try:
-                    peeled_strings[pred] = graph_to_string(peeled)
-                except Exception:
-                    pass
-        for i, (idx_a, pred_a, rt_a) in enumerate(top1_data):
-            if pred_a not in pred_graphs:
-                continue
-            peeling_notes = []
-            for j, (idx_b, pred_b, rt_b) in enumerate(top1_data):
-                if i == j or pred_b not in peeled_strings:
+def flag_coeluting_substructures(df_out, glycan_class, sample_prep = 'underivatized', unreduced = False, ms1 = None, mz_tolerance = 0.5,
+                                 rt_tolerance = 0.1, min_ratio = 3.0):
+    """Notes on rows to check before trusting them: possible in-source fragments and O-glycan peeling products, structures reported at more than one
+    peak, and structures outside the run's glycan class\n
+    | Arguments:
+    | :-
+    | df_out (dataframe): finalised predictions (index m/z; top1_pred, RT, charge, rel_abundance)
+    | glycan_class (string): glycan class of the run, options are "O", "N", "lipid", "free"
+    | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
+    | unreduced (bool): whether the glycans have a free reducing end, whose anomers make two peaks of one structure; default:False
+    | ms1 (tuple): flat MS1 data from process_mzML_stack; with it, an in-source fragment also needs the apex and peak shape of its parent; default:None
+    | mz_tolerance (float): largest m/z half-width of an isotope window; default:0.5
+    | rt_tolerance (float): largest retention time difference (min) of an in-source fragment and its parent; default:0.1
+    | min_ratio (float): how many times more abundant than the row its parent (in-source fragment) or source (peeling product) must be; default:3.0\n
+    | Returns:
+    | :-
+    | Returns df_out with a 'notes' column
+    """
+    notes = [[] for _ in range(len(df_out))]
+    tops, rts, zs, mzs = df_out['top1_pred'].values, df_out['RT'].values, df_out['charge'].values, df_out.index.values
+    # Without precursor intensities nothing tells a fragment from its parent
+    abundance = df_out['rel_abundance'].values.astype(float) if 'rel_abundance' in df_out.columns and (df_out['rel_abundance'] > 0).any() else None
+    graphs = {}
+    for g in {t for t in tops if isinstance(t, str) and '{' not in t}:
+        try:
+            graphs[g] = glycan_to_nxGraph(g)
+        except Exception:
+            pass
+    # In-source fragments: only a fragment that keeps the reducing end (Y-type: the parent minus a non-reducing part) has the mass of a reducing-end-
+    # intact glycan, and only without derivatization (a permethylated Y ion has a free hydroxyl where it lost a residue, 14 Da below the permethylated
+    # smaller glycan). It co-elutes with its parent and is a small share of it; with MS1 it has the parent's apex and peak shape too. The old rule (any
+    # substructure of the first prediction within 0.25 min, whatever its abundance) put the note on curated ground-truth peaks in four of five cases
+    if sample_prep == 'underivatized' and abundance is not None:
+        half_width = None
+        for a in range(len(df_out)):
+            parents = {}
+            for b in range(len(df_out)):
+                # (with MS1, the trace heights decide the ratio, as a row's abundance also holds its adducts and charge states)
+                if (a == b or abundance[a] <= 0 or (ms1 is None and abundance[b] < min_ratio * abundance[a]) or abs(rts[a] - rts[b]) > (0.25 if ms1 is not None else rt_tolerance)
+                        or tops[a] not in graphs or tops[b] not in graphs or len(graphs[tops[a]]) >= len(graphs[tops[b]])):
                     continue
-                try:
-                    if compare_glycans(pred_a, peeled_strings[pred_b]):
-                        peeling_notes.append(f"Possible peeling product of {pred_b}")
-                except Exception:
-                    pass
-            if peeling_notes:
-                existing = df_out.at[idx_a, 'notes']
-                combined = '; '.join([existing, '; '.join(peeling_notes)]) if existing else '; '.join(peeling_notes)
-                df_out.at[idx_a, 'notes'] = combined
+                # ... from one cleavage: the parent's reducing end and all but one of its non-reducing parts, as two cleavages in the source are rare
+                n, matches = subgraph_isomorphism(graphs[tops[b]], graphs[tops[a]], return_matches = True)
+                if not n or not any(max(graphs[tops[b]].nodes()) in m and sum(v not in m for u, v in graphs[tops[b]].edges(m)) == 1 for m in matches):
+                    continue
+                if ms1 is not None:
+                    # Both isotope envelopes within 0.5 min of the parent: the fragment's highest point must be the parent's apex (within a scan), its
+                    # trace a scaled copy of the parent's (r >= 0.9; ion-trap survey scans give only 10-12 points there), and the parent min_ratio times higher
+                    ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
+                    half_width = ms1_mz_calibration(ms1, mzs, rts, zs, mz_tolerance = mz_tolerance)[1] if half_width is None else half_width
+                    s0, s1 = np.searchsorted(ms1_rts, rts[b] - 0.5), np.searchsorted(ms1_rts, rts[b] + 0.5, side = 'right')
+                    traces = np.zeros((2, max(s1 - s0, 0)))
+                    for k, t in enumerate((a, b)):
+                        spacing = ISOTOPE_SPACING / max(abs(zs[t]), 1)
+                        width = 0.5 * spacing if half_width >= 0.2 * spacing else max(half_width, 5e-6 * mzs[t])
+                        centers = mzs[t] + spacing * np.arange(3)
+                        for j, si in enumerate(range(s0, s1)):
+                            scan_mzs, cum = ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]], np.concatenate([[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)])
+                            traces[k, j] = np.sum(cum[np.searchsorted(scan_mzs, centers + width)] - cum[np.searchsorted(scan_mzs, centers - width)])
+                    if (s1 - s0 < 5 or traces[0].std() == 0 or traces[1].std() == 0 or abs(np.argmax(traces[0]) - np.argmax(traces[1])) > 1
+                            or np.corrcoef(traces[0], traces[1])[0, 1] < 0.9 or traces[1].max() < min_ratio * traces[0].max()):
+                        continue
+                parents[b] = traces[0].max() / traces[1].max() if ms1 is not None else abundance[a] / abundance[b]
+            if parents:
+                b = min(parents, key = parents.get)
+                notes[a].append(f"Possible in-source fragment of {tops[b]} (co-elutes at {100 * parents[b]:.0f}% of its intensity" + (', same peak shape)' if ms1 is not None else ')'))
+    # Peeling products: during release by beta-elimination, the reducing-end GalNAc can lose its 3-linked arm, which then elutes as a glycan of its own
+    # (6-linked arms stay); a product is a small share of its source
+    if glycan_class == 'O' and abundance is not None:
+        arms = {}
+        for g, graph in graphs.items():
+            root = max(graph.nodes())
+            link = next((n for n in graph.successors(root) if graph.nodes[n]['string_labels'].endswith('-3')), None)
+            if graph.nodes[root]['string_labels'] == 'GalNAc' and link is not None:
+                child = next(graph.successors(link))
+                arms[g] = graph_to_string(graph.subgraph(descendants(graph, child) | {child}))
+        for a in range(len(df_out)):
+            sources = [b for b in range(len(df_out)) if b != a and abundance[a] > 0 and abundance[b] >= min_ratio * abundance[a] and tops[b] in arms and isinstance(tops[a], str)
+                       and tops[a].count('(') == arms[tops[b]].count('(') and compare_glycans(tops[a], arms[tops[b]])]
+            if sources:
+                b = max(sources, key = lambda b: abundance[b])
+                notes[a].append(f"Possible peeling product of {tops[b]} (its 3-linked arm, at {100 * abundance[a] / abundance[b]:.0f}% of its abundance)")
+    # A fully specified structure elutes as one peak (two anomers if unreduced), so of several peaks with it at most one is likely that isomer (on the
+    # test sets, 45% of such rows had the ground-truth structure, against 72% of the other rows)
+    if not unreduced:
+        same = defaultdict(list)
+        for i, t in enumerate(tops):
+            if isinstance(t, str) and not re.search(r'\?|/|\{|\b(Hex|HexNAc|HexN|HexA|dHex|Pen|Sia)\b', t):
+                same[t].append(i)
+        for rows in same.values():
+            for i in rows:
+                others = ', '.join(f'{rts[j]:.2f}' for j in sorted(rows, key = lambda j: rts[j]) if j != i)
+                if others:
+                    notes[i].append(f"Same structure as the peak at {others} min; one of the two is likely another isomer" if len(rows) == 2 else
+                                    f"Same structure as the peaks at {others} min; all but one of these {len(rows)} are likely other isomers")
+    # Structures of another class (an N-glycan in an O-glycan run) are real glycans in most cases, but outside what the run was set up for
+    names = {'N': 'an N-glycan', 'O': 'an O-glycan', 'free': 'a free glycan', 'lipid': 'a glycolipid glycan', 'lipid/free': 'a free or glycolipid glycan'}
+    for i, t in enumerate(tops):
+        if isinstance(t, str) and not enforce_class(t, glycan_class):
+            name = names.get(get_class(t), 'a glycan of another class')
+            notes[i].append(f"{name[0].upper() + name[1:]} by structure, in {names[glycan_class]} run")
+    df_out['notes'] = ['; '.join(n) for n in notes]
     return df_out
 
 
