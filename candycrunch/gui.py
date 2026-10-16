@@ -362,14 +362,16 @@ def _pool_initializer(messages, weights, n_files, initializer, initargs):
 
 def _detect_run(path, results):
     """Runs in a process of its own, as reading a large file takes seconds: what a run's file says about its settings, as the pipeline reads it (ion mode, MS2
-    analyzer, and how many MS2 spectra carry each precursor charge), and what its name says (NAME_HINTS); puts (path, found, charges) on results"""
-    found, charges, ext = {}, {}, os.path.splitext(os.path.normpath(path))[1].lower()
+    analyzer, how many MS2 spectra carry each precursor charge, and how many MS2 spectra there are), and what its name says (NAME_HINTS); puts (path, found,
+    charges, number of MS2 spectra) on results"""
+    found, charges, n_ms2, ext = {}, {}, 0, os.path.splitext(os.path.normpath(path))[1].lower()
     try:
         if ext in ('.mzml', '.mzxml', '.mgf'):
             # Only tags and their attributes are read, never the binary data, in chunks cut after a tag (mgf: a line); the first chunk holds the instruments
-            mode_re, filter_re, charge_re = [re.compile(x) if x else None for x in {'.mzml': (rb'"MS:10001(29|30)"', rb'"MS:1000512"[^>]*?value="(ITMS|FTMS)[^"]* ms2 ', rb'"MS:1000041"[^>]*?value="(\d+)"'),
-                                                                                  '.mzxml': (rb'polarity="([+-])"', rb'filterLine="(ITMS|FTMS)[^"]* ms2 ', rb'precursorCharge="(\d+)"'),
-                                                                                  '.mgf': (rb'(?m)^CHARGE=\d+([+-])', None, rb'(?m)^CHARGE=(\d+)')}[ext]]
+            mode_re, filter_re, charge_re, ms2_re = [re.compile(x) if x else None for x in {
+                '.mzml': (rb'"MS:10001(29|30)"', rb'"MS:1000512"[^>]*?value="(ITMS|FTMS)[^"]* ms2 ', rb'"MS:1000041"[^>]*?value="(\d+)"', rb'"MS:1000511"[^>]*?value="2"'),
+                '.mzxml': (rb'polarity="([+-])"', rb'filterLine="(ITMS|FTMS)[^"]* ms2 ', rb'precursorCharge="(\d+)"', rb'msLevel="2"'),
+                '.mgf': (rb'(?m)^CHARGE=\d+([+-])', None, rb'(?m)^CHARGE=(\d+)', rb'(?m)^BEGIN IONS')}[ext]]
             cut, tail, header = b'\n' if ext == '.mgf' else b'>', b'', None
             with open(path, 'rb') as file:
                 while True:
@@ -383,6 +385,7 @@ def _detect_run(path, results):
                         found['trap'] = {b'ITMS': 'linear', b'FTMS': 'orbitrap'}[match.group(1)]
                     for z in charge_re.findall(text):
                         charges[int(z)] = charges.get(int(z), 0) + 1
+                    n_ms2 += len(ms2_re.findall(text))
                     if not chunk:
                         break
             # Without a Thermo filter string, the analyzer (or Bruker amaZon model) of the instrument configuration
@@ -396,10 +399,11 @@ def _detect_run(path, results):
             df = pd.read_excel(path, usecols = lambda c: c in ('mode', 'trap', 'precursor_charge'))
             found.update({k: df[k].dropna().iloc[0] for k in ('mode', 'trap') if k in df.columns and df[k].notna().any()})
             charges = {int(z): int(n) for z, n in df['precursor_charge'].dropna().abs().value_counts().items()} if 'precursor_charge' in df.columns else {}
+            n_ms2 = len(df)
         elif ext == '.cc':
             # extract_spectra's binary files carry the ion mode and analyzer in their JSON header, and precursor charges as a column of byte planes
             with np.load(path) as f:
-                meta = json.loads(f['meta'].tobytes())
+                meta, n_ms2 = json.loads(f['meta'].tobytes()), f['peak_n'].shape[-1]
                 found.update(mode = meta['attrs'].get('detected_mode'), trap = meta['attrs'].get('detected_trap'))
                 key = f"col{meta['columns'].index('precursor_charge')}" if 'precursor_charge' in meta['columns'] else None
                 if key in f.files:
@@ -409,6 +413,7 @@ def _detect_run(path, results):
             from candycrunch.utils import read_raw_scan_table
             _, table, _, _ = read_raw_scan_table(path)
             ms2 = [i for i, level in enumerate(table['ms_level']) if level == 2]
+            n_ms2 = len(ms2)
             if ms2:
                 found.update(mode = {'-': 'negative', '+': 'positive'}.get(table['polarity'][ms2[0]]), trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(table['analyzer'][ms2[0]]))
             for i in ms2:
@@ -421,6 +426,7 @@ def _detect_run(path, results):
             try:
                 polarity = db.execute('SELECT Polarity FROM Frames WHERE Polarity IS NOT NULL LIMIT 1').fetchone()
                 charges = dict(db.execute('SELECT Charge, COUNT(*) FROM Precursors WHERE Charge > 0 GROUP BY Charge').fetchall())
+                n_ms2 = db.execute('SELECT COUNT(*) FROM Precursors').fetchone()[0]
             finally:
                 db.close()
             found.update(mode = {'+': 'positive', '-': 'negative'}.get(polarity[0] if polarity else None), trap = 'other')
@@ -432,7 +438,7 @@ def _detect_run(path, results):
         named = [value for value, pattern in choices.items() if re.search(rf'(?<![a-z0-9])(?:{pattern})(?![a-z])', name)]
         if len(named) == 1:
             found[key] = named[0]
-    results.put((path, {k: v for k, v in found.items() if v is not None}, charges))
+    results.put((path, {k: v for k, v in found.items() if v is not None}, charges, n_ms2))
 
 
 class InferenceRunner(QObject):
@@ -1562,10 +1568,12 @@ class SettingsPanel(QScrollArea):
 
     def receive_detections(self):
         """Sets what the first run of an experiment tells (_detect_run) on the experiment's settings the user has not changed since adding it: the ion mode,
-        the analyzer, the highest precursor charge of at least 1% of the MS2 spectra (never below the default), and what the run's name names"""
+        the analyzer, the highest precursor charge of at least 8% of all MS2 spectra (never below the default), and what the run's name names. Instrument
+        charge calls on non-glycan ions spread thin over high charges: Bruker ion traps put 3-6 on 1-6% of the MS2 spectra of GSL glycan runs (z 1-2),
+        while runs of glycans at z 4 have them on 11-15%"""
         while True:
             try:
-                path, found, charges = self.detections.get_nowait()
+                path, found, charges, n_ms2 = self.detections.get_nowait()
             except (queue.Empty, EOFError, OSError):
                 return
             self.detecting -= 1
@@ -1577,7 +1585,7 @@ class SettingsPanel(QScrollArea):
             before, current = experiment.detecting[1], self.values() if experiment is self.shown else dict(experiment.settings)
             del experiment.detecting
             mode = found.pop('mode', None)
-            top = max([z for z, n in charges.items() if n >= max(3, 0.01 * sum(charges.values()))] or [0])
+            top = max([z for z, n in charges.items() if n >= max(3, 0.08 * n_ms2)] or [0])
             if mode or top:
                 found['max_charge'] = (max(abs(DEFAULTS['max_charge']), min(top, 8)) if top else abs(current['max_charge'])) * (
                     -1 if (mode or ('negative' if current['max_charge'] < 0 else 'positive')) == 'negative' else 1)

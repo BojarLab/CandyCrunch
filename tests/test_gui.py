@@ -282,17 +282,25 @@ def test_gui_unreduced_and_detection(app):
     assert panel.inputs['modification'].currentData() == 'unreduced'
     results = mp.get_context('spawn').Queue()
     gui._detect_run(gui.EXAMPLE_RUN, results)
-    path, found, charges = results.get(timeout = 10)
-    assert found == {'mode': 'negative', 'trap': 'linear', 'glycan_class': 'O'} and max(charges) == 2
+    path, found, charges, n_ms2 = results.get(timeout = 10)
+    assert found == {'mode': 'negative', 'trap': 'linear', 'glycan_class': 'O'} and max(charges) == 2 and n_ms2 == 275
     # Found settings are set where the user has not changed them since adding the run (here the chromatography)
     experiment = panel.add_experiment({**panel.values(), 'glycan_class': 'N', 'max_charge': 4, 'lc': 'C18'})
     experiment.detecting, panel.detecting = (path, {**experiment.settings, 'lc': 'PGC'}), 1
-    panel.detections.put((path, {**found, 'lc': 'PGC'}, charges))
+    panel.detections.put((path, {**found, 'lc': 'PGC'}, charges, n_ms2))
     end = time.time() + 10
     while panel.detecting and time.time() < end:
         panel.receive_detections()
         time.sleep(0.05)
     assert (experiment.settings['glycan_class'], experiment.settings['max_charge'], experiment.settings['lc']) == ('O', -3, 'C18') and 'O-glycans' in experiment.note
+    experiment = panel.add_experiment({**panel.values(), 'max_charge': -3})
+    experiment.detecting, panel.detecting = (path, dict(experiment.settings)), 1
+    panel.detections.put((path, {'mode': 'negative'}, {2: 300, 4: 60, 6: 70}, 1000))
+    end = time.time() + 10
+    while panel.detecting and time.time() < end:
+        panel.receive_detections()
+        time.sleep(0.05)
+    assert experiment.settings['max_charge'] == -3
 
 
 def test_gui_reports(app, monkeypatch):

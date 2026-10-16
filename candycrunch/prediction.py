@@ -3759,14 +3759,15 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         # its own class.
         # (rows of another reducing end repeat structures of the run's own rows, so they do not count)
         tops = [p[0][0] for p in (df_out.loc[df_out['re_offset'] == 0, 'predictions'] if 're_offset' in df_out.columns else df_out['predictions']) if p]
-        counts = {c: sum(enforce_class(g, c) for g in tops) for c in ['N', 'O', 'free', glycan_class]}
+        # Another class only counts structures glycan_class cannot hold: free and lipid glycans share every reducing end, and O and free share Gal and GlcNAc
+        counts = {c: sum(enforce_class(g, c) and (c == glycan_class or not enforce_class(g, glycan_class)) for g in tops) for c in ['N', 'O', 'free', glycan_class]}
         other = max([c for c in ['N', 'O', 'free'] if c != glycan_class], key = counts.get)
         if counts[other] >= max(5, counts[glycan_class]):
             df_other = wrap_inference(spectra_filepath, other, **run_args, _return_intermediate = True)
             found = sum(bool(p) and enforce_class(p[0][0], other) for p in (
                 df_other.loc[df_other['re_offset'] == 0, 'predictions'] if 're_offset' in df_other.columns else df_other['predictions']))
-            print(f"WARNING: As {glycan_class} glycans, {os.path.basename(spectra_filepath)} gave {counts[other]} {other} and {counts[glycan_class]} "
-                  f"{glycan_class} structures; as {other} glycans, it gives {found} {other} structures. " + (
+            print(f"WARNING: As {glycan_class} glycans, {os.path.basename(spectra_filepath)} gave {counts[glycan_class]} {glycan_class} structures and "
+                  f"{counts[other]} {other} structures that no {glycan_class} glycan has; as {other} glycans, it gives {found} {other} structures. " + (
                       f"Overriding the glycan class to '{other}'." if found >= 1.5 * counts[glycan_class] else f"Keeping '{glycan_class}', but check the glycan class."))
             if found >= 1.5 * counts[glycan_class]:
                 glycan_class, df_out, df_use, mass_dic = other, df_other, df_other.attrs['df_use'], None
@@ -3898,7 +3899,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         use_c = df_use
         if c is None:
             tops = [p[0][0] for r in runs[glycan_class][0] for p in (r[0].loc[r[0]['re_offset'] == 0, 'predictions'] if 're_offset' in r[0].columns else r[0]['predictions']) if p]
-            counts = {c: sum(enforce_class(g, c) for g in tops) for c in ['N', 'O', 'free', glycan_class]}
+            counts = {c: sum(enforce_class(g, c) and (c == glycan_class or not enforce_class(g, glycan_class)) for g in tops) for c in ['N', 'O', 'free', glycan_class]}
             c = max([c for c in ['N', 'O', 'free'] if c != glycan_class], key = counts.get)
             if counts[c] < max(5, counts[glycan_class]):
                 break
@@ -3916,8 +3917,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if len(runs) > 1:
         found = sum(bool(p) and enforce_class(p[0][0], c) for r in runs[c][0] for p in (
             r[0].loc[r[0]['re_offset'] == 0, 'predictions'] if 're_offset' in r[0].columns else r[0]['predictions']))
-        print(f"WARNING: As {glycan_class} glycans, these files gave {counts[c]} {c} and {counts[glycan_class]} {glycan_class} structures; as {c} glycans, "
-              f"they give {found} {c} structures. " + (f"Overriding the glycan class to '{c}'." if found >= 1.5 * counts[glycan_class] else f"Keeping '{glycan_class}', but check the glycan class."))
+        print(f"WARNING: As {glycan_class} glycans, these files gave {counts[glycan_class]} {glycan_class} structures and {counts[c]} {c} structures that no "
+              f"{glycan_class} glycan has; as {c} glycans, they give {found} {c} structures. " + (f"Overriding the glycan class to '{c}'." if found >= 1.5 * counts[glycan_class] else f"Keeping '{glycan_class}', but check the glycan class."))
         if found >= 1.5 * counts[glycan_class]:
             glycan_class, mass_dic = c, None
     results, df_use = runs[glycan_class]
