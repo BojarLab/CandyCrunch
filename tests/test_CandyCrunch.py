@@ -53,6 +53,9 @@ TEST_DICTS = [
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000134/") if 'glycans_1' in x]},
     # N-glycans with Neu5Gc (Thermo LTQ Velos .raw, ion-trap MS1 and MS2 at ~1000x lower intensities), one run; the .raw runs with --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000596', 'args': {'glycan_class': 'N'}},
+    # Human serum N-glycans of the septic shock study (Thermo LTQ Velos .raw, ion-trap MS1 and MS2 at low intensities, header charges), one run; the .raw runs
+    # with --input-format mzml, the .xlsx otherwise
+    {'name': 'GPST000503', 'args': {'glycan_class': 'N'}},
     # O-glycans from slide-fixed tissue (Bruker amaZon speed .d, read from its Analysis.yep); the .d runs with --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000316', 'args': {'glycan_class': 'O'}},
     # Milk oligosaccharides up to Hex8HexNAc6dHex4, the larger ones as [M-2H]2- (Thermo LTQ .raw, ion-trap MS1 and MS2), one run; the .raw runs with

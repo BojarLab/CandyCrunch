@@ -7,15 +7,19 @@ Usage (from the repo root):
     python tests/harness.py --sets GPST000029,milk --trace_rows
 Options: --format xlsx|mzml (mzml: .mzML/.mzXML/.raw/.d where a dataset has one, else its .xlsx), --n_jobs (parallel files; default: half the CPUs),
 --private_spectra / --private_gt (folders with <run>.xlsx and <run>_solution.csv; default: GlycoGauntlet next to this repo), --cache (default:
-~/.cache/candycrunch_harness), --no_cache, --seeds 0,1,2 (only needed for code from before content-seeded test-time augmentation).
+~/.cache/candycrunch_harness), --no_cache, --stage_cache_gb (default 20), --files_per_process (default 4), --seeds 0,1,2 (only needed for code from before
+content-seeded test-time augmentation).
 
 Tune on DEV (the test sets); HELD-OUT (the private files) is only for confirming that a change generalizes. Each run is computed once: since test-time
 augmentation is seeded per input, a code change only alters the inputs it touches, so seeds no longer need averaging.
 
 Caches (keyed by the content of what goes in, plus the source of the code that computes it, so a stale entry is never hit): the loaded spectra of each
-file (loader source), each CandyCrumbs and supporting_ions call (analysis.py and glycowork), and the model's top-k for each model input (model.py,
-weights, vocabulary). A change in prediction.py's downstream steps therefore reruns in a fraction of the time; a change in analysis.py or the model reruns
-those calls once.
+file (loader source), each CandyCrumbs and supporting_ions call (analysis.py and glycowork), the model's top-k for each model input (model.py,
+weights, vocabulary), the outputs of condense_dataframe and assign_annotation_scores_pooled (the candycrunch code they reach, without comments, plus
+candycrunch's module-level code and data, glycowork and the library versions), and the metric's and trace's glycowork calls. A change in prediction.py's
+downstream steps therefore reruns in a fraction of the time; a change in analysis.py, the model or a cached step reruns those calls once. Caching the
+steps after the model was measured and is not worth it: they take seconds, while hashing and storing their inputs and outputs took as long (2026-10-17;
+42 files on 11 processes, warm: 286 s before, 150 s with the cached steps, chunked processes and glycowork memo, outputs identical).
 
 Trace (stage where each ground-truth peak was lost, in pipeline order): no_ms2 (no MS2 spectrum within 0.5 m/z and 1 min), no_cluster, composition_not_candidate,
 model_no_composition (no structure of the composition in the model's raw top 25), below_pred_thresh (in the top 25, but no prediction survives
@@ -111,6 +115,171 @@ def glycowork_fingerprint():
     return digest(glycowork.__version__, [(str(p.relative_to(root)), p.stat().st_size, int(p.stat().st_mtime)) for p in sorted(root.rglob('*.py'))])
 
 
+class Hasher:
+    def __init__(self):
+        self.sha = hashlib.sha1()
+
+    def write(self, b):
+        self.sha.update(b)
+
+
+def content_digest(*parts):
+    # A pickle without memo, so equal values give equal digests whatever objects they share (DataFrames with dict cells, attrs included)
+    hasher = Hasher()
+    pickler = pickle.Pickler(hasher, protocol = 5)
+    pickler.fast = True
+    pickler.dump(parts)
+    return hasher.sha.hexdigest()
+
+
+def code_names(code):
+    return set(code.co_names).union(*[code_names(c) for c in code.co_consts if inspect.iscode(c)])
+
+
+def normalized_source(obj):
+    # Comments and formatting do not count
+    import ast
+    import textwrap
+    return ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(obj))))
+
+
+def source_closure(fn, orig):
+    # The candycrunch functions and classes a function reaches through the names its code uses (the harness's wrappers stand for the functions they wrap)
+    seen, sources, todo = set(), [], [fn]
+    while todo:
+        f = todo.pop()
+        if id(f) in seen:
+            continue
+        seen.add(id(f))
+        sources.append(f'{f.__module__}.{f.__qualname__}\n{normalized_source(f)}')
+        codes = [f.__code__] if inspect.isfunction(f) else [m.__code__ for m in vars(f).values() if inspect.isfunction(m)]
+        scope = f.__globals__ if inspect.isfunction(f) else vars(sys.modules[f.__module__])
+        for name in set().union(*map(code_names, codes)):
+            v = scope.get(name)
+            if name in orig and v is not None and not (getattr(v, '__module__', None) or '').startswith('candycrunch'):
+                v = orig[name]
+            v = inspect.unwrap(v) if callable(v) else v
+            if (inspect.isfunction(v) or inspect.isclass(v)) and (v.__module__ or '').startswith('candycrunch'):
+                todo.append(v)
+    return sorted(sources)
+
+
+def environment_fingerprint():
+    # Everything a pipeline step depends on besides its own code: the module-level code of candycrunch (constants), the package data (vocabulary, weights,
+    # mappings), glycowork's code and data, the library versions and Python (whose float sum differs from 3.12)
+    import ast
+    import candycrunch
+    import glycowork
+    import networkx
+    import scipy
+    import torch
+    mods = ['candycrunch.prediction', 'candycrunch.analysis', 'candycrunch.utils', 'candycrunch.model']
+    top = [ast.unparse(ast.Module(body = [n for n in ast.parse(inspect.getsource(sys.modules[m])).body
+                                          if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))], type_ignores = [])) for m in mods]
+    files = lambda root, keep: [(str(p.relative_to(root)), p.stat().st_size, int(p.stat().st_mtime)) for p in sorted(root.rglob('*'))
+                                if p.is_file() and '__pycache__' not in p.parts and keep(p)]
+    return digest(top, files(pathlib.Path(candycrunch.__file__).parent, lambda p: p.suffix != '.py'), files(pathlib.Path(glycowork.__file__).parent, lambda p: True),
+                  sys.version, np.__version__, pd.__version__, scipy.__version__, networkx.__version__, torch.__version__)
+
+
+# Pipeline steps whose outputs are cached (keyed by their inputs and the code they reach): the slow steps before the model, which the reducing end and glycan
+# class checks repeat (condense_dataframe ran 5 times at ~40 s on GPST000403); deisotoped (a cache keyed by object ids) and n_jobs do not change outputs
+STAGES = ['condense_dataframe', 'assign_annotation_scores_pooled']
+STAGE_IGNORED = {'deisotoped', 'n_jobs'}
+
+
+def restore(obj, new):
+    # Puts an argument's state after the call into the caller's object, as the call changed it in place; False if that cannot be done
+    if isinstance(obj, (pd.DataFrame, pd.Series)) and type(new) is type(obj):
+        object.__setattr__(obj, '_mgr', new._mgr)
+        object.__setattr__(obj, '_attrs', new._attrs)
+        if getattr(obj, '_item_cache', None) is not None:
+            obj._item_cache.clear()
+    elif isinstance(obj, dict) and isinstance(new, dict):
+        obj.clear()
+        obj.update(new)
+    elif isinstance(obj, (list, set)) and type(new) is type(obj):
+        obj.clear()
+        obj.update(new) if isinstance(obj, set) else obj.extend(new)
+    elif isinstance(obj, np.ndarray) and isinstance(new, np.ndarray) and new.shape == obj.shape and new.dtype == obj.dtype:
+        obj[...] = new
+    else:
+        return False
+    return True
+
+
+class StageCache:
+    # One pickle per (step, inputs, code), so outputs are only read when hit and old ones can be pruned by age. Arguments a step changes in place are
+    # stored with its output and put back into the caller's objects on a hit; a step changing anything it cannot put back is not cached
+
+    def __init__(self, folder, enabled):
+        self.folder = pathlib.Path(folder) / 'stage'
+        self.enabled = enabled
+        self.hits = 0
+        self.misses = 0
+        self.mutating = set()
+
+    def wrap(self, name, fn, env, orig, codes):
+        sig = inspect.signature(fn)
+        def wrapped(*args, **kwargs):
+            if not self.enabled or name in self.mutating:
+                return fn(*args, **kwargs)
+            if name not in codes:
+                codes[name] = digest(env, source_closure(fn, orig))
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            inputs = {k: v for k, v in bound.arguments.items() if k not in STAGE_IGNORED}
+            try:
+                before = {k: content_digest(v) for k, v in inputs.items()}
+            except Exception:
+                return fn(*args, **kwargs)
+            key = digest(name, codes[name], before)
+            path = self.folder / f'{name}_{key}.pkl'
+            if path.exists():
+                try:
+                    with open(path, 'rb') as f:
+                        out, changed = pickle.load(f)
+                    for k, v in changed.items():
+                        restore(inputs[k], v)
+                        # a step returning the argument it changed returns the caller's object
+                        out = inputs[k] if out is v else out
+                    os.utime(path)
+                    self.hits += 1
+                    return out
+                except Exception:
+                    pass
+            self.misses += 1
+            out = fn(*args, **kwargs)
+            changed = {k: v for k, v in inputs.items() if content_digest(v) != before[k]}
+            if not all(isinstance(v, (pd.DataFrame, pd.Series, dict, list, set, np.ndarray)) for v in changed.values()):
+                self.mutating.add(name)
+                return out
+            try:
+                self.folder.mkdir(parents = True, exist_ok = True)
+                tmp = path.with_suffix(f'.{os.getpid()}.tmp')
+                with open(tmp, 'wb') as f:
+                    pickle.dump((out, changed), f, protocol = 5)
+                os.replace(tmp, path)
+            except Exception:
+                pass
+            return out
+        wrapped.__name__ = name
+        return wrapped
+
+    def save(self):
+        pass
+
+
+def prune_stage_cache(cache_dir, max_gb):
+    # Least recently used step outputs go first (a hit touches its file)
+    files = sorted(((p.stat().st_mtime, p.stat().st_size, p) for p in pathlib.Path(cache_dir).glob('*/stage/*.pkl')), reverse = True)
+    total = 0
+    for _, size, p in files:
+        total += size
+        if total > max_gb * 1e9:
+            p.unlink(missing_ok = True)
+
+
 def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None):
     # Wraps the module globals wrap_inference looks up at call time: memoized loading, CandyCrumbs, supporting_ions and model top-k, and captures of the
     # intermediate tables of the first (main) call of each stage for the trace
@@ -123,12 +292,17 @@ def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None)
     model, vocab = (cp.candycrunch if model is None else model), (cp.glycans if vocab is None else vocab)
     model_src = digest(pathlib.Path(cm.__file__).read_text(), [p.detach().numpy() for p in model.state_dict().values()], list(vocab))
     caches = {k: Cache(cache_dir, k, enabled) for k in ['load', 'crumbs', 'topk']}
+    caches['stage'] = StageCache(cache_dir, enabled)
     # The unwrapped functions, kept on the module, so installing again (the next file in one process) wraps the originals and not the last wrappers
     if not hasattr(cp, '_harness_orig'):
         cp._harness_orig = {n: getattr(cp, n) for n in ['load_spectra_filepath', 'CandyCrumbs', 'supporting_ions', 'get_topk', 'condense_dataframe',
                                                         'assign_candidate_structures', 'assign_annotation_scores_pooled', 'process_for_inference', 'domain_filter',
                                                         'deduplicate_predictions', 'finalise_predictions']}
+        cp._harness_env = environment_fingerprint()
     orig = cp._harness_orig
+    inner = {n: caches['stage'].wrap(n, orig[n], cp._harness_env, orig, cp.__dict__.setdefault('_harness_codes', {})) for n in STAGES}
+    for n in STAGES:
+        setattr(cp, n, inner[n])
     loader_src = digest(pathlib.Path(cu.__file__).read_text(), [inspect.getsource(getattr(cp, n)) for n in ['load_spectra_filepath', 'process_mzML_stack', 'process_mzXML_stack',
                         'process_raw_stack', 'process_tdf_stack', 'process_yep_stack', 'refine_precursor_mz', 'refine_tof_precursors'] if n != 'load_spectra_filepath' and hasattr(cp, n)]
                         + [inspect.getsource(orig['load_spectra_filepath'])], gw)
@@ -183,7 +357,7 @@ def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None)
         def wrapped(*args, **kwargs):
             # the input before the call, as some steps change it in place
             snapshot = args[0].copy() if copy_input or name == 'domain_filter' else None
-            out = orig[name](*args, **kwargs)
+            out = inner.get(name, orig[name])(*args, **kwargs)
             first(name, snapshot if copy_input else (out[out_index] if out_index is not None else out).copy())
             if name == 'domain_filter':
                 first('domain_filter_in', snapshot)
@@ -204,7 +378,50 @@ def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None)
     return caches
 
 
+class GlycoworkMemo:
+    # The metric's and the trace's glycowork calls (canonicalize_iupac of the whole vocabulary, glycan similarities), shared by all files and kept on disk
+    def __init__(self, cache_dir, enabled):
+        self.path = pathlib.Path(cache_dir) / '_glycowork' / f'{glycowork_fingerprint()}.pkl'
+        self.enabled = enabled
+        self.data, self.new = {}, {}
+        if enabled and self.path.exists():
+            try:
+                with open(self.path, 'rb') as f:
+                    self.data = pickle.load(f)
+            except Exception:
+                pass
+
+    def wrap(self, fn):
+        def wrapped(*args, **kwargs):
+            key = (fn.__name__, args, tuple(sorted(kwargs.items())))
+            try:
+                hash(key)
+            except TypeError:
+                return fn(*args, **kwargs)
+            if key not in self.data:
+                self.data[key] = self.new[key] = fn(*args, **kwargs)
+            return self.data[key]
+        return wrapped if self.enabled else fn
+
+    def save(self):
+        # merged with what other processes saved meanwhile
+        if self.new:
+            try:
+                with open(self.path, 'rb') as f:
+                    self.data.update(pickle.load(f))
+            except Exception:
+                pass
+            self.data.update(self.new)
+            self.path.parent.mkdir(parents = True, exist_ok = True)
+            tmp = self.path.with_suffix(f'.{os.getpid()}.tmp')
+            with open(tmp, 'wb') as f:
+                pickle.dump(self.data, f, protocol = 5)
+            os.replace(tmp, self.path)
+            self.new = {}
+
+
 def z1(mz, z, sign = -1):
+    # Singly charged equivalent, as the metric compares masses (an unknown charge counts as singly charged in the run's ion mode)
     # Singly charged equivalent, as the metric compares masses (an unknown charge counts as singly charged in the run's ion mode)
     from candycrunch.prediction import PROTON_MASS
     z = np.where(np.isnan(z) | (z == 0), sign, z)
@@ -220,9 +437,8 @@ def near(mz, rt, z, gt_mz, gt_rt, gt_z, mass_tol = 0.5, rt_tol = 1.0, sign = -1)
 
 def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
     # Where each ground-truth peak was lost, what is wrong about each wrong structure, and what each false positive is
-    from glycowork.motif.graph import compare_glycans
-    from glycowork.motif.processing import canonicalize_iupac
-    from tests.test_CandyCrunch import match_spectra, MASS_TOLERANCE, RT_TOLERANCE
+    # the test module's glycowork functions, which run_file memoizes
+    from tests.test_CandyCrunch import match_spectra, MASS_TOLERANCE, RT_TOLERANCE, compare_glycans, canonicalize_iupac
     from candycrunch.prediction import get_comp, glycans
     vocabulary = glycans if vocabulary is None else vocabulary
     comp_key = lambda c: tuple(sorted((k, v) for k, v in c.items() if v)) if isinstance(c, dict) else None
@@ -349,7 +565,12 @@ def run_file(task):
     import torch
     torch.set_num_threads(1)
     import candycrunch.prediction as cp
+    import tests.test_CandyCrunch as tc
     from tests.test_CandyCrunch import evaluate_predictions, MASS_TOLERANCE, RT_TOLERANCE
+    if not hasattr(tc, '_harness_memo'):
+        tc._harness_memo = GlycoworkMemo(task['cache'], task['use_cache'])
+        for n in ['canonicalize_iupac', 'compare_glycans', 'get_glycan_similarity']:
+            setattr(tc, n, tc._harness_memo.wrap(getattr(tc, n)))
     out = []
     model, vocab = cp.candycrunch, cp.glycans
     if task['model']:
@@ -390,10 +611,16 @@ def run_file(task):
         except Exception:
             import traceback
             trace = [dict(kind = 'error', stage = traceback.format_exc(), mass = None, rt = None, gt = None, pred = None)]
+        tc._harness_memo.save()
         out.append(dict(label = task['label'], set = task['set'], held_out = task['held_out'], seed = seed, f1 = float(f1), precision = float(precision),
                         recall = float(recall), tp = float(tp), fp = float(fp), fn = float(fn), not_picked = int(not_picked), wrong = int(wrong), time = elapsed,
-                        cache = {k: (c.hits, c.misses) for k, c in caches.items()}, trace = trace, error = error))
+                        cache = {k: (c.hits, c.misses) for k, c in caches.items()}, uncached = sorted(caches['stage'].mutating), trace = trace, error = error))
     return out
+
+
+def run_files(tasks):
+    # Several files in one process, so its imports (~20 s) are paid once
+    return [r for t in tasks for r in run_file(t)]
 
 
 def collect_tasks(args):
@@ -482,6 +709,8 @@ if __name__ == '__main__':
     parser.add_argument('--no_private', action = 'store_true')
     parser.add_argument('--cache', default = str(pathlib.Path.home() / '.cache' / 'candycrunch_harness'))
     parser.add_argument('--no_cache', action = 'store_true')
+    parser.add_argument('--stage_cache_gb', type = float, default = 20, help = 'size of the cached step outputs, least recently used pruned first')
+    parser.add_argument('--files_per_process', type = int, default = 4, help = 'files per process beyond the n_jobs largest (its imports take ~20 s)')
     parser.add_argument('--out', default = None, help = 'JSON with every score and trace row')
     parser.add_argument('--compare', default = None, help = 'an earlier --out JSON; per-set F1 differences are printed')
     parser.add_argument('--trace_rows', action = 'store_true', help = 'also print every traced row')
@@ -504,10 +733,12 @@ if __name__ == '__main__':
     tasks = [t for t in tasks if any((t['label'], s) not in done for s in t['seeds'])]
     start, n_jobs = time.time(), max(args.n_jobs, 1)
     while tasks:
-        # Each file in a fresh process (its memory is returned when it ends); if a process dies, the files it did not finish are retried with one process fewer
+        # The largest files each in a process of their own, the rest a few per process (its memory is returned when it ends; reusing processes through
+        # max_tasks_per_child > 1 broke the pool on Windows); if a process dies, the files it did not finish are retried with one process fewer
+        chunks = [[t] for t in tasks[:n_jobs]] + [tasks[i:i + args.files_per_process] for i in range(n_jobs, len(tasks), args.files_per_process)]
         try:
             with ProcessPoolExecutor(max_workers = n_jobs, mp_context = multiprocessing.get_context('spawn'), max_tasks_per_child = 1) as pool:
-                futures = {pool.submit(run_file, t): t for t in tasks}
+                futures = {pool.submit(run_files, c): c for c in chunks}
                 for fut in as_completed(futures):
                     for r in fut.result():
                         results.append(r)
@@ -515,13 +746,15 @@ if __name__ == '__main__':
                             partial.parent.mkdir(parents = True, exist_ok = True)
                             with open(partial, 'a') as f:
                                 f.write(json.dumps(r, default = str) + '\n')
-                        print(f"  {r['label']:<70} seed {r['seed']}  F1 {r['f1']:.4f}  {r['time']:5.0f} s  cache {r['cache']}" + ('  ERROR' if r['error'] else ''), flush = True)
-                    tasks = [t for t in tasks if t is not futures[fut]]
+                        print(f"  {r['label']:<70} seed {r['seed']}  F1 {r['f1']:.4f}  {r['time']:5.0f} s  cache {r['cache']}" + ('  ERROR' if r['error'] else '')
+                              + (f"  uncached (change inputs in a way that cannot be stored): {', '.join(r['uncached'])}" if r.get('uncached') else ''), flush = True)
+                    tasks = [t for t in tasks if all(t is not u for u in futures[fut])]
         except BrokenProcessPool:
             if n_jobs == 1:
                 raise
             n_jobs -= 1
             print(f'A process died (out of memory?); retrying {len(tasks)} files with {n_jobs} processes', flush = True)
+    prune_stage_cache(args.cache, args.stage_cache_gb)
     prev = json.load(open(args.compare)) if args.compare else None
     text, summary = summarize(results, prev)
     print(f'\n{text}\n\nTotal {time.time() - start:.0f} s')

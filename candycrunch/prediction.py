@@ -1301,7 +1301,15 @@ def median3(x):
     return np.concatenate([[(x[0] + x[1]) / 2], np.maximum(np.minimum(a, b), np.minimum(np.maximum(a, b), c)), [(x[-2] + x[-1]) / 2]])
 
 
-def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None):
+def ms2_vector(peak_ds, max_mz):
+    # Square-root intensities of pooled MS2 spectra in 1 Da bins, scaled to unit length; np.add.at adds the peaks in their order, as a loop over them does
+    v = np.zeros(int(max_mz) + 1)
+    mzs = np.array([m for spec in peak_ds for m in spec], dtype = float)
+    np.add.at(v, np.rint(np.clip(mzs, 0, max_mz)).astype(int), np.array([i for spec in peak_ds for i in spec.values()], dtype = float))
+    return np.sqrt(v) / (np.linalg.norm(np.sqrt(v)) + 1e-12)
+
+
+def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None, merged = None):
     """groups spectra and combines the clusters into averaged and binned spectra\n
     | Arguments:
     | :-
@@ -1311,7 +1319,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     | min_mz (float): minimal m/z used for binning; don't change; default:39.714
     | max_mz (float): maximal m/z used for binning; don't change; default:3000
     | bin_num (int): number of bins for binning; don't change; default: 2048
-    | mz_ppm (float): relative mass tolerance (ppm) for assigning spectra to the same peak, used instead of mz_diff; default:None\n
+    | mz_ppm (float): relative mass tolerance (ppm) for assigning spectra to the same peak, used instead of mz_diff; default:None
+    | merged (dict): pooled spectra of clusters and binned spectra, kept by the caller across calls on the same spectra (the reducing end and glycan class
+    |                checks condense a file up to 5 times, nearly always into the same clusters); default:None\n
     | Returns:
     | :-
     | Returns a dataframe that has one row per RT-Mass cluster
@@ -1390,6 +1400,12 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     # >= 0.75 of square-root intensities in 1 Da bins), is that peak's PGC tail, which can outlast rt_diff from the apex: it joins the peak instead of
     # becoming a glycan peak of its own (co-eluting isomers fragment differently)
     mz_diff_use = mz_ppm / 1e6 if mz_ppm else mz_diff
+    # Each cluster's MS2 vector is made once, and again only after it took up more spectra
+    vectors = {}
+    def vector(cl):
+        if vectors.get(id(cl), (0, None))[0] != len(cl['peak_d']):
+            vectors[id(cl)] = (len(cl['peak_d']), ms2_vector(cl['peak_d'], max_mz))
+        return vectors[id(cl)][1]
     by_apex = sorted(clusters, key = lambda c: -c['apex_int'])
     # Only the clusters before the first one less than ten times as intense (by_apex order) and within mz_diff_use are looked at, found with numpy: looping over
     # every stronger cluster made this quadratic (10 million iterations, 40% of condensing a 16,000-cluster run)
@@ -1403,13 +1419,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         for k in np.flatnonzero(np.abs(by_mz[:n] - w['apex_mz']) <= mz_diff_use):
             c = by_apex[k]
             if np.min(np.abs(np.subtract.outer(c['RT'], w['RT']))) <= 0.25:
-                vecs = [np.zeros(int(max_mz) + 1), np.zeros(int(max_mz) + 1)]
-                for v, cl in zip(vecs, (c, w)):
-                    for spec in cl['peak_d']:
-                        for m, i in spec.items():
-                            v[int(round(min(max(m, 0), max_mz)))] += i
-                vecs = [np.sqrt(v) / (np.linalg.norm(np.sqrt(v)) + 1e-12) for v in vecs]
-                if vecs[0] @ vecs[1] >= 0.75:
+                if vector(c) @ vector(w) >= 0.75:
                     tail_of[id(w)] = c
                     break
     for w in by_apex[::-1]:
@@ -1453,13 +1463,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             if gap > max(2, max_gap) or depth < 0.5 or (gap > max_gap and depth < 0.7):
                 continue
             if depth < 0.7 or gap > max_gap:
-                vecs = [np.zeros(int(max_mz) + 1), np.zeros(int(max_mz) + 1)]
-                for v, cl in zip(vecs, (c, w)):
-                    for spec in cl['peak_d']:
-                        for m, x in spec.items():
-                            v[int(round(min(max(m, 0), max_mz)))] += x
-                vecs = [np.sqrt(v) / (np.linalg.norm(np.sqrt(v)) + 1e-12) for v in vecs]
-                if vecs[0] @ vecs[1] < 0.9:
+                if vector(c) @ vector(w) < 0.9:
                     continue
             for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3'):
                 c[key].extend(w[key])
@@ -1516,6 +1520,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     clusters = split_clusters
     # Create a condensed dataframe
     condensed_data = []
+    merged = {} if merged is None else merged
     for cluster in clusters:
         highest_intensity_index = np.argmax(cluster['intensity'])
         highest_intensity = cluster['intensity'][highest_intensity_index]
@@ -1525,6 +1530,13 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         else:
             rep_mz = min(cluster['m/z'])
             mean_rt = np.mean(cluster['RT'])
+        # The same spectra in the same order pool to the same spectrum (the cached entry keeps them, so their ids stay theirs)
+        key = (tuple(map(id, cluster['peak_d'])), mz_diff, min_mz, max_mz, bin_num)
+        if key in merged:
+            _, peaks, binned_intensities, mz_remainder = merged[key]
+            condensed_data.append([rep_mz, mean_rt, highest_intensity, peaks, binned_intensities.copy(), mz_remainder.copy(), len(cluster['RT']),
+                                   cluster['precursor_charge'][highest_intensity_index]])
+            continue
         # Cluster fragment peaks across spectra by mass proximity, then weight-average mass and sum intensity
         mi_pairs = sorted([(m, i) for spec in cluster['peak_d'] for m, i in spec.items()], key = lambda x: x[0])
         starts, grp_start = [], None
@@ -1548,11 +1560,18 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             else:
                 pk[np.average(ms, weights = ints)] = sum(ints)
         peaks = dict(sorted(pk.items(), key = lambda x: x[1], reverse = True))
-        binned_intensities, mz_remainder = zip(*[bin_intensities(c, frames) for c in cluster['peak_d']])
+        binned = []
+        for spec in cluster['peak_d']:
+            k = ('bin', id(spec), min_mz, max_mz, bin_num)
+            if k not in merged:
+                merged[k] = (spec, *bin_intensities(spec, frames))
+            binned.append(merged[k][1:])
+        binned_intensities, mz_remainder = zip(*binned)
         binned_intensities = np.mean(np.array(binned_intensities), axis = 0)
         mz_remainder = np.mean(np.array(mz_remainder), axis = 0)
         # Bin intensity normalization
         binned_intensities = binned_intensities / binned_intensities.sum()
+        merged[key] = (cluster['peak_d'], peaks, binned_intensities.copy(), mz_remainder.copy())
         num_spectra = len(cluster['RT'])
         rep_charge = cluster['precursor_charge'][highest_intensity_index]
         # Without MS1, the apex precursor intensity is the abundance: it tracks MS1 peak areas far better than summing or integrating
@@ -2031,11 +2050,14 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                     # A sialylated LacNAc antenna also shows as its B and C ions (Neu5Ac-Hex-HexNAc 655.2 / 673.2), e.g., in ion traps whose low-mass cutoff
                     # hides the sialic acid ion of a large precursor: among the 5 most intense fragments, or anywhere with at least 15% of the base peak
                     # (z = 2 sialylated bi- and triantennary N-glycans, whose doubly charged losses outrank it, carried it at 16-39% of the base peak, ranks 10-33)
-                    lacnac = re.search(sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)GlcNAc', m) is not None
+                    # A floating sialic acid ({Neu5Ac(a2-6)}Gal(b1-4)GlcNAc...) sits on one of the structure's Gal(b1-4)GlcNAc antennas, which the attached form
+                    # cannot match: every floating monosialylated tri- and tetraantennary N-glycan was emptied (GPST000503 1148.41, base peak 835.3, 655.2 at 87%)
+                    floating = re.search(r'\{' + sia + r'\(a2-', m) is not None
+                    lacnac = re.search(sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)GlcNAc', m) is not None or (floating and 'Gal(b1-4)GlcNAc' in m)
                     # ... and, on an N-glycan antenna, together with the mannose it sits on (Neu5Ac-Hex-HexNAc-Hex C ion 835.3, the base peak of many z = 2
                     # monosialylated N-glycans in ion traps, whose 290 ion lies below the low-mass cutoff and which lose no sialic acid as a charged fragment)
                     antenna = [res_mass['Hex'] + res_mass['HexNAc']] + ([2 * res_mass['Hex'] + res_mass['HexNAc']] if re.search(
-                        sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)GlcNAc\(b1-[^)]*\)Man', m) else [])
+                        sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)GlcNAc\(b1-[^)]*\)Man', m) or (floating and re.search(r'Gal\(b1-4\)GlcNAc\(b1-[^)]*\)Man', m)) else [])
                     truth.append(any(
                         any(abs(sm + PROTON_MASS * multiplier - j) < double_mass_tolerance for sm in sia_masses[sia]) or
                         (lacnac and j in float_frags[:5] and any(
@@ -3418,7 +3440,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     condensed = {} if _condensed is None else _condensed
     key = (loaded_file[idx_col].values.tobytes(), loaded_file['RT'].values.tobytes(), mass_tolerance, rt_diff, bin_num)
     if key not in condensed:
-        condensed[key] = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num, mz_ppm = mz_ppm)
+        condensed[key] = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num, mz_ppm = mz_ppm,
+                                            merged = condensed.setdefault('merged', {}))
     df_out = condensed[key].copy()
     # The most intense clusters, which the reducing end check below looks at
     top_clusters = df_out.sort_values(['intensity', 'num_spectra'], ascending = False, kind = 'stable').iloc[:_top_clusters or 100]
