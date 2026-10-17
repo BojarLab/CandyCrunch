@@ -1997,6 +1997,15 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
         # A multiply charged precursor may carry only cations, e.g., [M+2Na]2+ (assign_candidate_structures matches these too)
         df_out.loc[(charges_abs > 1) & (np.abs(
             computed_masses + charges_abs * adduct_mass - raw_masses) < mass_tolerance), 'adduct'] = adduct
+    # In ion-trap CID an anion adduct ([M+Formate]-, [M+HCO3-H]2-, ...) mostly fragments as the glycan, without the (de)protonated ion its neutral loss
+    # would give (GPST000578: none of 91 such rows with a model prediction had it among its 10 most intense fragments), so an adduct reading also holds if
+    # the (de)protonated ion of its composition co-elutes (within 1 min), which confirms the composition behind it
+    keys = [stringify_dict(c) if isinstance(c, dict) else None for c in df_out['composition']]
+    plain_rts = defaultdict(list)
+    for key, a, rt, preds in zip(keys, df_out['adduct'], df_out['RT'], df_out['predictions']):
+        if key and not isinstance(a, str) and len(preds):
+            plain_rts[key].append(rt)
+    coeluting = [mode == 'negative' and isinstance(a, str) and any(abs(rt - r) <= 1.0 for r in plain_rts.get(key, [])) for key, a, rt in zip(keys, df_out['adduct'], df_out['RT'])]
     new_preds = []
     top_fragments_col = df_out['top_fragments'].tolist()
     peak_col = df_out['peak_d'].tolist()
@@ -2142,7 +2151,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             if isinstance(adduct_name, str) and (mode == 'negative' or adduct_name == 'NH4+'):
                 neutral_loss = mass_dict.get(adduct_name, 999) - (PROTON_MASS * multiplier)
                 expected_frag = precursor_mz - neutral_loss / c
-                truth.append(any(abs(expected_frag - j) < mass_tolerance for j in top_frags[:10]))
+                truth.append(coeluting[k] or any(abs(expected_frag - j) < mass_tolerance for j in top_frags[:10]))
             if all(truth):
                 keep.append(current_preds[i])
         new_preds.append(keep)
@@ -2603,17 +2612,21 @@ def combine_charge_states(df_out):
     return df_out
 
 
-def combine_adduct_species(df_out, rt_diff = 1.0):
+def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
     """combines abundances when the same glycan appears as different adduct forms (e.g., [M-H]⁻ and [M+Acetate]⁻)\n
     | Arguments:
     | :-
     | df_out (dataframe): prediction dataframe generated within wrap_inference
-    | rt_diff (float): retention time tolerance (in minutes) for considering two rows the same species; default:1.0\n
+    | rt_diff (float): retention time tolerance (in minutes) for considering two rows the same species; default:1.0
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default:'negative'\n
     | Returns:
     | :-
     | Returns prediction dataframe with adduct abundances consolidated into the primary ion form
     """
-    df_out['top_pred'] = [k[0][0] if len(k) > 0 else np.nan for k in df_out.predictions]
+    # In negative mode ion forms are grouped by the composition of their top prediction, as charge states are in combine_charge_states: the isomer chosen
+    # from an anion adduct's spectrum can differ from the one of its (de)protonated ion, which then left the adduct as a species of its own (positive-mode
+    # metal adducts are folded by composition in finalise_predictions, after the permethylated NH4+ check, which compares the rows' own abundances)
+    df_out['top_pred'] = [(stringify_dict(get_comp(k[0][0])) if mode == 'negative' else k[0][0]) if len(k) > 0 else np.nan for k in df_out.predictions]
     repeated = df_out['top_pred'].value_counts()
     repeated = repeated[repeated > 1].index.tolist()
     # Only act when multiple rows share a prediction but differ in m/z (i.e., different ionization forms)
@@ -2902,7 +2915,11 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # Retention-time outlier removal: drop predictions whose RT lies far outside the file's overall
     # elution distribution, scaled to the observed spread (tight cluster => strict, wide spread => permissive)
     has_pred = df_out['predictions'].apply(len) > 0
-    rts_pred = df_out.loc[has_pred & (~df_out['unlabelled'] if 're_offset' in df_out.columns else True), 'RT'].values
+    # Negative-mode adduct rows (folded into their (de)protonated ion below, or dropped) do not count either: anion adducts of one glycan family narrowed
+    # the window and cut early glycans (GPST000556 546.16 at 15.44)
+    side = (df_out['unlabelled'].values.astype(bool) if 're_offset' in df_out.columns else np.zeros(len(df_out), dtype = bool)) | (
+        df_out['adduct'].apply(lambda a: isinstance(a, str)).values.astype(bool) if mode == 'negative' and 'adduct' in df_out.columns else False)
+    rts_pred = df_out.loc[has_pred.values & ~side, 'RT'].values
     if len(rts_pred) >= 5:
         rt_med = np.median(rts_pred)
         rt_mad = np.median(np.abs(rts_pred - rt_med))
@@ -2991,7 +3008,13 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 folded.add(i)
         df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in folded]]
     df_out = combine_charge_states(df_out)
-    df_out = combine_adduct_species(df_out, rt_diff = rt_diff)
+    df_out = combine_adduct_species(df_out, rt_diff = rt_diff, mode = mode)
+    if mode == 'negative' and 'adduct' in df_out.columns:
+        # An anion adduct without a co-eluting (de)protonated ion of its composition is not reported: adduct readings only fill precursors that no
+        # (de)protonated composition explains, formate and bicarbonate are exact isobars with Hex and dHex (or Neu5Ac and Neu5Gc) swapped, and [M+2Acetate]2-
+        # sits on the bicarbonate reading of a composition one Hex + HexNAc heavier; each such row of the test sets was a false positive (GPST000054 832.84,
+        # GPST000302 617.31 and 860.26, GPST000374 N 779.27, GPST000596 941.38)
+        df_out = df_out[~df_out['adduct'].apply(lambda a: isinstance(a, str)).values.astype(bool)]
     if mode == 'positive' and sample_prep == 'permethylated' and len(df_out):
         # Permethylated, an NH4+ in place of a proton weighs exactly what Hex + dHex add in place of a Neu5Ac (NH3, 17.0265 Da, either way), so the
         # [M+NH4+2H]3+ of A2G2S2 (935.16, 60% of its [M+3H]3+ in serum) reads as Hex6HexNAc4dHex1Neu5Ac1 [M+3H]3+: a row whose composition is that of a
