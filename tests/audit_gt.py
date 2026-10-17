@@ -847,7 +847,7 @@ def main():
     parser.add_argument('gt')
     parser.add_argument('--glycan_class', required = True, choices = ['N', 'O', 'free', 'lipid'])
     parser.add_argument('--run', default = None, help = 'run column of the source GT (default: the spectra file stem)')
-    parser.add_argument('--modification', default = 'reduced', choices = ['reduced', '2AA', '2AB', 'procainamide', 'custom'])
+    parser.add_argument('--modification', default = 'reduced', choices = ['reduced', '2AA', '2AB', 'procainamide', 'PA', 'custom'])
     parser.add_argument('--mass_tag', type = float, default = 0.0)
     parser.add_argument('--sample_prep', default = 'underivatized', choices = ['underivatized', 'permethylated', 'peracetylated'])
     parser.add_argument('--output', default = None)

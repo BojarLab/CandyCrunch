@@ -98,6 +98,11 @@ TEST_DICTS = [
     # 178 N-glycan standards (Thermo ion-trap CID, orbitrap survey scans, negative, free reducing ends, infused): each standard's target-precursor MS2 as a
     # synthetic LC peak, isomers in different RT slots, over two files; ground truth from the GlyTouCan records
     {'name': 'GPST000578', 'args': {'glycan_class': 'N', 'modification': 'custom', 'lc': 'other'}},
+    # Trisialylated N-glycans of chicken colon labeled with 2-aminopyridine (PA), Table S1's DEAE fraction 8 on ODS (C18),
+    # Thermo LTQ .raw (ion-trap MS1 and CID MS2, positive, mostly [M+3H]3+), one run (.raw with --input-format mzml, its .xlsx otherwise); Aves as the sample is chicken
+    {'name': 'GPST000237', 'args': {'glycan_class': 'N', 'modification': 'PA', 'lc': 'C18', 'max_charge': 3, 'taxonomy_level': 'Class',
+                                    'taxonomy_filter': 'Aves'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000237/") if x.startswith('chicken_colon_fr5_exp2')]},
 ]
 # timsTOF Pro serum N-glycans (negative, reduced, PGC, DDA-PASEF .d with --input-format mzml, its extract_spectra .xlsx otherwise) live in tests/untracked,
 # which git does not track, so the set is only added where its (preliminary, open-peak) ground truth is present; 'folder' is relative to TEST_DATA_DIR

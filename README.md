@@ -56,7 +56,7 @@ If you would like to run our main inference function from the command line, you 
 --sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
 --sialic_derivatization, type=string: linkage-specific sialic acid derivatization of underivatized samples; options are 'EE' (ethyl esterification), 'EEA' (ethyl esterification and amidation), 'ME' (methyl esterification), 'DMA' (dimethylamidation), and 'SALSA'; precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
 --reducing_end_variants, type=string(s): other reducing ends the glycans may carry: 'free' (glycans that escaped reduction or labelling, counted for their glycan) and/or 'ethyl_glycoside' (rows of their own); give none of them to turn this off; default: free, plus ethyl_glycoside for lipid <br />
---modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
+--modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 --lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
@@ -117,7 +117,7 @@ glycans, type=list: ordered list of glycans used to train CandyCrunch which can 
 bin_num, type=int: number of bins to separate the ms2 spectrum into; default:2048 <br />
 frag_num, type=int: number of top fragments to show in df_out per spectrum; default:100 <br />
 max_charge, type=int: maximum signed charge to consider; the sign sets the mass spectrometry mode (negative or positive); default:-3 <br />
-modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
+modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />

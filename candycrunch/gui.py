@@ -62,14 +62,15 @@ ANALYZER_TRAPS, MZXML_ANALYZER_TRAPS = ast.literal_eval(_constants['ANALYZER_TRA
 # What a run's name may say about its settings; a setting is only taken from the name if it names exactly one of its choices
 NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?glycans?|og|o(?![a-z0-9])|mucins?', 'lipid': r'gsls?|glycosphingolipids?|glycolipids?|gangliosides?',
                                'free': r'milk|hmos?'},
-              'modification': {'reduced': r'(?<!non-)reduced|alditols?', 'unreduced': r'un-?reduced|non-?reduced', '2AB': r'2-?ab', '2AA': r'2-?aa', 'procainamide': r'procainamide'},
+              'modification': {'reduced': r'(?<!non-)reduced|alditols?', 'unreduced': r'un-?reduced|non-?reduced', '2AB': r'2-?ab', '2AA': r'2-?aa', 'procainamide': r'procainamide',
+                               'PA': r'pa-?label\w*|pyridylamin\w*|2-?aminopyridin\w*'},
               'sample_prep': {'permethylated': r'permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
 BATCH_KEYS = ('intra_cat_thresh', 'top_n_isomers', 'n_jobs')
 FEATURES = '\x00features'
 GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharides (e.g., milk)', 'free'), ('Glycolipid glycans', 'lipid')]
 # 'unreduced' exists only in the app: wrap_inference takes a free reducing end as a custom label without mass (its reducing end check calls that 'unreduced')
 REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('Unreduced (free reducing end)', 'unreduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'),
-                 ('Other label (enter its mass)', 'custom')]
+                 ('PA (2-aminopyridine)', 'PA'), ('Other label (enter its mass)', 'custom')]
 SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethylated'), ('Peracetylated', 'peracetylated')]
 # Linkage-specific sialic acid derivatizations of underivatized samples, as wrap_inference's sialic_derivatization
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),

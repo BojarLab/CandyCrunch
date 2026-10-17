@@ -18,7 +18,7 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "glycowork>=1.11.0",
+    "glycowork>=1.11.1",
     "networkx",
     "scipy",
     "torch>=2.3,<3; platform_system != 'Darwin' or platform_machine != 'x86_64'",
@@ -37,7 +37,7 @@ Homepage = "https://github.com/BojarLab/CandyCrunch"
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.7", "matplotlib<3.11"]
-train = ["glycowork[ml]>=1.11.0", "torchmetrics"]
+train = ["glycowork[ml]>=1.11.1", "torchmetrics"]
 
 [project.scripts]
 candycrunch_predict = "candycrunch.cli:main"

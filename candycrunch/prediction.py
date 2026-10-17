@@ -1225,7 +1225,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
    | mass (float): observed m/z
    | glycan (string): glycan in IUPAC-condensed nomenclature
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
    | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
    | mass_tag (float): label mass to add when calculating possible m/z (the mass of a 'custom' label); default:None
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
@@ -1618,6 +1618,13 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
     return common_struct_map, processed_df_use, topology_map
 
 
+def complementary_pairs(mz, peaks, charge, tolerance, n = 15):
+    """count pairs among the n most intense fragments that add up to the precursor at a charge state: a singly charged B/C ion and the
+    (charge - 1)-fold charged rest of the glycan (b + (charge - 1) * y = charge * mz, the charge carriers cancel)"""
+    top = [m for m, _ in sorted(peaks.items(), key = lambda x: x[1], reverse = True)[:n]]
+    return sum(abs(b + (charge - 1) * y - charge * mz) < charge * tolerance for b in top for y in top if y > b)
+
+
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag,
                                 modification = 'reduced', sample_prep = 'underivatized', max_charge = -3, cross_class = None, ms1_ppm = None,
                                 sialic_derivatization = None):
@@ -1641,6 +1648,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     # (ms1_ppm), within ms1_ppm, so they never compete with an in-class explanation
     pools = [(df_glycan_in, comp_struct_map, topo_struct_map, False)] + ([cross_class + (True,)] if cross_class else [])
     multi = [None] * len(red_masses)
+    multi_all = [{} for _ in red_masses]
     for pool_df, pool_comp_map, pool_topo_map, fallback in pools:
         pool_comps = pool_df.groupby('comp_str').first()['Composition']
         comps_in = [x for c, x in pool_comps.items() if not fallback or c not in comp_struct_map]
@@ -1686,6 +1694,9 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             comps_out = _update(matches, charge, replace = True)
             if charge > 1 and not fallback:
                 multi = [x if x is not None else ((y, charge) if y else None) for x, y in zip(multi, matches)]
+                for m_all, y in zip(multi_all, matches):
+                    if y:
+                        m_all[charge] = y
         valid_adducts = [(a, mass_dict[a]) for a in get_adduct_list(mode) if mass_dict.get(a, 999) != 999]
         for adduct, adduct_mass in valid_adducts:
             comps_out = _update(_match_chunked(comp_masses + adduct_mass), 1)
@@ -1715,10 +1726,18 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     # Hex5HexNAc3dHex1), whose singly charged fragments lie above the scan range
     doublets = [any(0.4 <= q - j <= 0.62 and 0.3 * y <= w <= 1.5 * y for j, y in top[:5] for q, w in top)
                 for top in (sorted(peaks.items(), key = lambda x: x[1], reverse = True)[:10] for peaks in df_in['peak_d'])]
-    extra = [m if m and x[0] and x[1] == 1 and d and kc is None else None for m, x, d, kc in zip(multi, comps_out, doublets, known_charges)]
+    extra = [[m] if m and x[0] and x[1] == 1 and d and kc is None else [] for m, x, d, kc in zip(multi, comps_out, doublets, known_charges)]
+    # Without an instrument charge, a multiply charged match also gets the in-class compositions of another multiply charged state at its m/z if more of
+    # its 15 most intense fragments pair up into a B/C ion and its complement at that charge, and the annotation scores decide: ion traps do not resolve
+    # z = 3 isotopes, so the lower charge, tried first, took every [M+3H]3+ of the trisialylated N-glycans of GPST000237 (Hex7HexNAc6Neu5Ac3dHex1 1157.09 as
+    # Hex4HexNAc7dHex1 [M+2H]2+, its 657.2 B ion and the [M+3H-657]2+ complement 1407.0 aside). Such pairs favor z = 3 in 77% of its GT spectra and in
+    # 0-2.8% of the z = 2 GT spectra of GPST000153 N, 374 N, 503, 596 and 134; without that condition GPST000153 N lost 0.064, GPST000487 0.026
+    extra = [e + [(y, z) for z, y in m_all.items() if z != x[1] and complementary_pairs(mz, peaks, z, 0.75 * mass_tolerance) > complementary_pairs(
+        mz, peaks, x[1], 0.75 * mass_tolerance)] if x[0] and x[1] >= 2 and kc is None and x[0][0][0][1] is comp_struct_map else e
+             for e, x, m_all, kc, mz, peaks in zip(extra, comps_out, multi_all, known_charges, red_masses, df_in['peak_d'])]
     candidate_data = []
     for x, e in zip(comps_out, extra):
-        matched = ([(c, x[1]) for c in x[0][0]] + ([(c, e[1]) for c in e[0][0]] if e else [])) if x[0] else None
+        matched = ([(c, x[1]) for c in x[0][0]] + [(c, z) for y, z in e for c in y[0]]) if x[0] else None
         if not matched:
             candidate_data.append(([None], [None], [None]))
         else:
@@ -1942,7 +1961,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
    | df_out (dataframe): df_out generated within wrap_inference
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
    | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
@@ -2167,7 +2186,7 @@ def impute(df_out, pred_thresh, mode = 'negative', modification = 'reduced', sam
     | df_out (dataframe): prediction dataframe generated within wrap_inference
     | pred_thresh (float): confidence given to an imputed prediction
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default:'negative'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
+    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
     | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:0.0
     | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"; default:"O"
@@ -2760,7 +2779,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
     | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or None (a custom label described by mass_tag)
+    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or None (a custom label described by mass_tag)
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
     | mass_tolerance (float): the general mass tolerance (in Da) that is used for composition matching
@@ -2834,7 +2853,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     | df_out (dataframe): a dataframe of augmented predictions
     | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'
+    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | ppm_thresh (float): ppm error threshold; the file's own robust ppm error spread can only make it stricter
     | rt_diff (float): maximum retention time difference (in minutes) for combining adduct species of one glycan
@@ -3328,7 +3347,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
@@ -3688,12 +3707,18 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         # The model knows few Neu5Gc glycans: in ion-trap runs it mostly has no structure of their composition in its top 25 and prefers the composition
         # with Hex + dHex instead (1 Da heavier, inside the precursor tolerance), so a spectrum without any model prediction whose candidate composition with
         # Neu5Gc, at a charge of at most 2, is backed up by more than 10 fragment annotations takes that composition's database structure. The same holds for
-        # free glycans, as the model knows few of the large milk oligosaccharides. Not for other compositions: there
-        # it filled O-glycans into N runs and junk into O runs
+        # free glycans, as the model knows few of the large milk oligosaccharides, and for [M+3H]3+ and higher with at least 20 annotations whose fragments
+        # pair up into B/C ions and their complements at that charge more often than at z = 2 (complementary_pairs), as the model rarely has a structure of
+        # the composition of a large multiply sialylated N-glycan (GPST000237: 10 of its 12 trisialylated compositions); without the pairs it lost GPST000302
+        # 0.030, GPST000487 0.028,  at 15 annotations GPST000237 0.515 instead of 0.530. Not for other compositions: there it filled O-glycans into
+        # N runs and junk into O runs
         has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
-        ok = (~has_pred & ~df_out['cross_class'].values & (df_out['annotation_score'].values >= 10) & (df_out['charge'].values <= 2)
+        z3 = (df_out['charge'].values >= 3) & (df_out['annotation_score'].values >= 20) & np.array([
+            c >= 3 and complementary_pairs(mz, peaks, int(c), 0.75 * mass_tolerance) > complementary_pairs(mz, peaks, 2, 0.75 * mass_tolerance)
+            for mz, peaks, c in zip(df_out.index, df_out['peak_d'], df_out['charge'])], dtype = bool)
+        ok = (~has_pred & ~df_out['cross_class'].values & (df_out['annotation_score'].values >= 10) & ((df_out['charge'].values <= 2) | z3)
               & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']], dtype = bool)
-              & np.array([isinstance(c, dict) and ('Neu5Gc' in c or glycan_class == 'free') for c in df_out['composition']], dtype = bool))
+              & (np.array([isinstance(c, dict) and ('Neu5Gc' in c or glycan_class == 'free') for c in df_out['composition']], dtype = bool) | z3))
         for i in df_out.reset_index(drop = True)[ok].groupby('spec_id')['annotation_score'].idxmax().values if ok.any() else []:
             g = df_out['candidate_structure'].iloc[i]
             df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
@@ -3975,7 +4000,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'

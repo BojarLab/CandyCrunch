@@ -17,6 +17,7 @@ venv/
 ENV/
 .env/
 .venv/
+.stfolder/
 
 # IDE project files
 .idea/

@@ -16,7 +16,7 @@ def main():
     parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
-    parser.add_argument('--modification', help='Reducing-end modification; custom: a label of --mass_tag Da', type=str, choices=['reduced', '2AA', '2AB', 'procainamide', 'custom'], required=False)
+    parser.add_argument('--modification', help='Reducing-end modification; custom: a label of --mass_tag Da', type=str, choices=['reduced', '2AA', '2AB', 'procainamide', 'PA', 'custom'], required=False)
     parser.add_argument('--mass_tag', help='custom tag mass', type=float, required=False)
     parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'peracetylated'], required=False)
     parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples: EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA'], required=False)
