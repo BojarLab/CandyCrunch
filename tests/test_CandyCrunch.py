@@ -5,6 +5,8 @@ import base64
 import pathlib
 import struct
 import zlib
+import hashlib
+import inspect
 import sys
 import json
 from tabulate import tabulate
@@ -12,11 +14,13 @@ import numpy as np
 from collections import defaultdict
 
 from candycrunch.prediction import *
+import candycrunch.utils
 from glycowork.motif.graph import compare_glycans, get_possible_topologies, graph_to_string
 from glycowork.motif.annotate import get_glycan_similarity
 from itertools import product
 from scipy.optimize import linear_sum_assignment
-from glycowork.motif.processing import canonicalize_iupac
+from scipy.stats import exponnorm, spearmanr
+from glycowork.motif.processing import canonicalize_iupac, canonicalize_composition
 import time
 import random
 import torch
@@ -83,6 +87,9 @@ TEST_DICTS = [
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000570/") if x.startswith('Ana_05_N-gly') and x.endswith('.xlsx')]},
     {'name': 'GPST000570_O', 'folder': 'GPST000570', 'args': {'glycan_class': 'O', 'max_charge': 3},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000570/") if x.startswith('Ana_05_O-gly') and x.endswith('.xlsx')]},
+    # 178 N-glycan standards (Thermo ion-trap CID, orbitrap survey scans, negative, free reducing ends, infused): each standard's target-precursor MS2 as a
+    # synthetic LC peak, isomers in different RT slots, over two files; ground truth from the GlyTouCan records
+    {'name': 'GPST000578', 'args': {'glycan_class': 'N', 'modification': 'custom', 'lc': 'other'}},
 ]
 # timsTOF Pro serum N-glycans (negative, reduced, PGC, DDA-PASEF .d with --input-format mzml, its extract_spectra .xlsx otherwise) live in tests/untracked,
 # which git does not track, so the set is only added where its (preliminary, open-peak) ground truth is present; 'folder' is relative to TEST_DATA_DIR
@@ -108,6 +115,18 @@ BATCH_SETS = {'pgm': ('O', [('GPST000029', 'GPST000029', 'CA_PGMLAD_OG_051017.mz
 # Batch F1 on rows with MS2 evidence was 0.701-0.720 (GPST000029) and 0.705-0.713 (GPST000017) over seeds 0-2; the mean over the four replicates
 # 0.646 (GPST000169_O) and 0.741 (GPST000169_N) at seed 0
 BATCH_F1_THRESHOLDS = {'GPST000029': 0.65, 'GPST000017': 0.65, 'GPST000169_O': 0.59, 'GPST000169_N': 0.69}
+# Quantification against the abundances the authors published for a run: ground truth name: (folder, run file, column of the published abundances (of the
+# 'given' rows), column whose rows the authors quantified as one (Mechref's compositions) or None)
+QUANT_SETS = {'GPST000374_N': ('GPST000374', '20230623_SD_NG_SSSMuG_2.raw', '20230623_SD_NG_SSSMuG_2', None),
+              'GPST000374_O': ('GPST000374', '20230625_SD_OG_SSSMuG_3.raw', '20230625_SD_OG_SSSMuG_3', None),
+              'GPST000374_GSL': ('GPST000374', '20230622_SD_GSL_SSSMuG_5.raw', '20230622_SD_GSL_SSSMuG_5', None),
+              'GPST000596': ('GPST000596', '20240402_PVelos_KC_NG_PLT008_K2.raw', '20240402_PVelos_KC_NG_PLT008_K2', None),
+              'GPST000556': ('GPST000556', 'JC_231121MN16.raw', 'JC_231121MN16', None),
+              'GPST000239': ('GPST000239', '52-GSL glycans -SW1116 - technical replicate 2.mzXML', '52-GSL glycans -SW1116 - technical replicate 2', None),
+              'GPST000548': ('GPST000548', 'Serum_control_1.raw', 'Serum_control_1', 'source_code'),
+              'GPST000403': ('GPST000403', 'Rat_Glyphosate_Serum_Glycomics_SR1_100.raw', 'source_abundance', 'source_code')}
+# Loading a .raw or mzXML takes 10-60 s, quantifying its ground truth about a second, so the MS1 of each run is kept here, keyed by file and loader code
+QUANT_CACHE = pathlib.Path.home() / '.cache' / 'candycrunch_tests'
 
 
 def match_spectra(array1, array2, mass_threshold = MASS_TOLERANCE, rt_threshold = RT_TOLERANCE, array1_alt = None, array2_alt = None):
@@ -364,6 +383,103 @@ def test_xic_quantification():
     areas = extract_xic_areas(ms1, [p[0] for p in peaks], [8.05, 8.55, 12.1], charges = [p[1] for p in peaks], weights = [4, 1, 2])
     truth = np.array([p[3] for p in peaks]) * sigma * np.sqrt(2 * np.pi)
     assert np.allclose(areas, truth, rtol = 0.05)
+
+
+def test_quantification_synthetic(result_collector):
+    # Peaks of known area injected into the survey scans of packaging/self_test.mzML (GPST000029, ion-trap MS1, RT 25-29.5 min), over its real background:
+    # per seed 20 single peaks, 6 isomer pairs 0.25-1 min apart and 6 doubly charged glycans with 20-60% of their signal as [M-H]-, each with a tailing peak,
+    # its isotope envelope (merged pairwise for z = 2, as in an ion trap), m/z jitter and intensity noise, quantified as finalise_predictions does. The score
+    # is the share of peaks within 20% of their injected area (isotopes M..M+3, as measured), tracked like F1
+    if result_collector.param_names is None:
+        result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
+    rts, mzs, ints, offsets = load_spectra_filepath(str(BASE_DIR / 'packaging' / 'self_test.mzML'), extract_ms1 = True).attrs['ms1']
+    base = np.median([ints[offsets[i]:offsets[i + 1]].max() for i in range(len(rts))])
+    tol, designs, errors = 300 * MZ_REF / 1e6, [], []
+    for seed in range(3):
+        rng = np.random.default_rng(seed)
+        # (neutral mass, charge, share of the singly charged ion, apex, area, sigma, tau)
+        design = [(rng.uniform(500, 1800), 1, 1.0, rng.uniform(25.5, 29), base * 10 ** rng.uniform(-2.5, 0.5), rng.uniform(0.06, 0.15), rng.uniform(0, 0.15)) for _ in range(20)]
+        for _ in range(6):
+            m, apex, area = rng.uniform(500, 1800), rng.uniform(25.5, 28), base * 10 ** rng.uniform(-2, 0.5)
+            design += [(m, 1, 1.0, apex, area, 0.08, 0.08), (m, 1, 1.0, apex + rng.uniform(0.25, 1.0), area * rng.uniform(0.15, 1), 0.08, 0.08)]
+        design += [(rng.uniform(1200, 2800), 2, rng.uniform(0.2, 0.6), rng.uniform(25.5, 29), base * 10 ** rng.uniform(-2, 0.5), rng.uniform(0.06, 0.15), rng.uniform(0, 0.15)) for _ in range(6)]
+        design = pd.DataFrame(design, columns = ['mass', 'charge', 'z1_share', 'apex', 'area', 'sigma', 'tau'])
+        added, truth = [[] for _ in rts], np.zeros(len(design))
+        for k, (m, z, share, apex, area, sigma, tau) in enumerate(design.itertuples(index = False)):
+            envelope = np.exp(-4.4e-4 * m) * (4.4e-4 * m) ** np.arange(5) / np.array([1, 1, 2, 6, 24])
+            for zz, frac in ([(1, 1.0)] if z == 1 else [(2, 1 - share), (1, share)]):
+                profile = area * frac * exponnorm.pdf(rts, tau / sigma, loc = apex, scale = sigma)
+                truth[k] += np.sum((profile[1:] + profile[:-1]) * np.diff(rts)) / 2 * envelope[:4].sum()
+                for i in np.flatnonzero(profile > 1e-3 * profile.max()):
+                    peaks = [((m - zz * PROTON_MASS) / zz + j * ISOTOPE_SPACING / zz, profile[i] * p * rng.lognormal(0, 0.15)) for j, p in enumerate(envelope)]
+                    peaks = peaks if zz == 1 else [((a[0] * a[1] + b[0] * b[1]) / (a[1] + b[1]), a[1] + b[1]) for a, b in zip(peaks[0::2], peaks[1::2])] + [peaks[4]]
+                    added[i] += [(mz + rng.normal(0, 0.06), x) for mz, x in peaks]
+        scans = [sorted(list(zip(mzs[offsets[i]:offsets[i + 1]], ints[offsets[i]:offsets[i + 1]])) + added[i]) for i in range(len(rts))]
+        ms1 = (rts, np.array([m for s in scans for m, _ in s], dtype = np.float32), np.array([x for s in scans for _, x in s], dtype = np.float32),
+               np.cumsum([0] + [len(s) for s in scans]).astype(np.int64))
+        # MS2 near the apex, noisy precursor intensities as weights, every other charge state the neutral mass allows
+        target_mzs, ms2_rts = ((design['mass'] - design['charge'] * PROTON_MASS) / design['charge']).values, design['apex'].values + rng.uniform(-0.1, 0.1, len(design))
+        measured = extract_xic_areas(ms1, target_mzs, ms2_rts, charges = design['charge'].values, mz_tolerance = tol,
+                                     mz_calibration = ms1_mz_calibration(ms1, target_mzs, ms2_rts, design['charge'].values, mz_tolerance = tol),
+                                     weights = design['area'].values * rng.lognormal(0, 0.2, len(design)), mode = 'negative',
+                                     other_charges = [[x for x in (1, 2) if x != z and m >= {1: 0, 2: 900}[x]] for m, z in zip(design['mass'], design['charge'])])
+        designs.append(design)
+        errors.append(np.abs(np.log2(np.maximum(measured, 1e-9) / truth)))
+    errors = np.concatenate(errors)
+    score = float(np.mean(errors <= np.log2(1.2)))
+    groups = {g: float(np.mean(np.concatenate([e[sl] for e in np.split(errors, 3)]) <= np.log2(1.2))) for g, sl in [('single', slice(0, 20)), ('isomer pairs', slice(20, 32)), ('z = 2', slice(32, 38))]}
+    print(f'synthetic quantification: {score:.3f} within 20% (' + ', '.join(f'{g} {v:.2f}' for g, v in groups.items()) + f'), median |log2 error| {np.median(errors):.3f}')
+    result_collector.add_result({'test_dict': {'name': 'synthetic_quant'}, 'supplement': True, 'experimental': True, 'format': 'quant'}, score)
+    result_collector.check_performance('synthetic_quant', ('synthetic_quant', True, True, 'quant'), score, pd.concat(designs))
+    assert score > 0.6
+
+
+@pytest.mark.parametrize("quant_set", list(QUANT_SETS))
+def test_quantification_published(quant_set, result_collector):
+    # The abundances of a run's ground-truth peaks as the pipeline quantifies a row (calibration, envelope over its own peak, co-eluting charge states no other
+    # row reports), against the abundances its authors published; no model, so it tracks quantification alone. The score is the correlation of the log
+    # shares (a peak quantified as 0 at half the smallest measured share), tracked like F1
+    if result_collector.param_names is None:
+        result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
+    folder, run, column, by = QUANT_SETS[quant_set]
+    path = TEST_DATA_DIR / folder / run
+    if not path.exists():
+        pytest.skip(f"{quant_set}: no {run}")
+    key = hashlib.sha1((run + str(path.stat().st_size) + str(int(path.stat().st_mtime)) + pathlib.Path(candycrunch.utils.__file__).read_text() + ''.join(
+        inspect.getsource(f) for f in (load_spectra_filepath, process_mzML_stack, process_mzXML_stack, process_raw_stack, refine_precursor_mz))).encode()).hexdigest()[:16]
+    cache = QUANT_CACHE / f'{path.stem}_{key}.npz'
+    if not cache.exists():
+        df = load_spectra_filepath(str(path), extract_ms1 = True)
+        cache.parent.mkdir(parents = True, exist_ok = True)
+        with open(cache.with_suffix('.tmp'), 'wb') as file:
+            np.savez(file, *df.attrs['ms1'], mode = df.attrs.get('detected_mode') or 'negative', ms1_trap = str(df.attrs.get('detected_ms1_trap')))
+        os.replace(cache.with_suffix('.tmp'), cache)
+    with np.load(cache) as file:
+        ms1, mode, accurate = (file['arr_0'], file['arr_1'], file['arr_2'], file['arr_3']), str(file['mode']), str(file['ms1_trap']) in ('orbitrap', 'tof')
+    loaded_gt = pd.read_csv(TEST_DATA_DIR / folder / f'df_mz_{quant_set}.csv')
+    gt = loaded_gt.assign(**{column: pd.to_numeric(loaded_gt[column], errors = 'coerce')})
+    gt = gt[(gt['source'] == 'given') & (gt[column] > 0)].reset_index(drop = True)
+    zs, rts = np.abs(gt['charge'].values).astype(int), gt['RT'].values
+    comps = [frozenset((canonicalize_composition(c) if isinstance(c, str) and c else get_comp(g) if isinstance(g, str) and g else {}).items()) or None
+             for g, c in zip(gt['glycan'], gt['composition'] if 'composition' in gt.columns else [None] * len(gt))]
+    neutral = (gt['Mass'].values - (-1 if mode == 'negative' else 1) * PROTON_MASS) * zs
+    other_charges = [[] if comps[i] is None else [z for z in range(1, zs.max() + 1) if z != zs[i] and neutral[i] >= {1: 0, 2: 900, 3: 1500}.get(z, 3500)
+                      and not any(comps[j] == comps[i] and zs[j] == z and abs(rts[j] - rts[i]) < 1 for j in range(len(gt)))] for i in range(len(gt))]
+    tol = 300 * MZ_REF / 1e6
+    sample_prep = next((d['args'].get('sample_prep', 'underivatized') for d in TEST_DICTS if d['name'] == quant_set), 'underivatized')
+    gt['measured'] = extract_xic_areas(ms1, gt['Mass'].values, rts, charges = zs, mz_tolerance = tol, sample_prep = sample_prep, mode = mode,
+                                       mz_calibration = ms1_mz_calibration(ms1, gt['Mass'].values, rts, zs, mz_tolerance = tol, accurate = accurate),
+                                       glycans = [g if isinstance(g, str) and g else None for g in gt['glycan']], other_charges = other_charges)
+    if by:
+        gt = gt.groupby(by).agg(measured = ('measured', 'sum'), **{column: (column, 'first')}).reset_index()
+    measured, published = gt['measured'].values / gt['measured'].sum(), gt[column].values / gt[column].sum()
+    log_ratio = np.log2(np.maximum(measured, measured[measured > 0].min() / 2) / published)
+    score = float(np.corrcoef(np.log2(np.maximum(measured, measured[measured > 0].min() / 2)), np.log2(published))[0, 1])
+    print(f'{quant_set} quantification ({len(gt)} {"compositions" if by else "peaks"}): r of log shares {score:.3f}, Spearman {spearmanr(measured, published)[0]:.3f}, '
+          f'{np.mean(np.abs(log_ratio) <= 1):.2f} within 2x, median |log2 ratio| {np.median(np.abs(log_ratio)):.3f}, {(measured == 0).sum()} not found')
+    result_collector.add_result({'test_dict': {'name': f'{quant_set}_quant'}, 'supplement': True, 'experimental': True, 'format': 'quant'}, score)
+    result_collector.check_performance(f'{quant_set}_quant', (f'{quant_set}_quant', True, True, 'quant'), score, loaded_gt)
+    assert score > 0.5
 
 
 def test_precursor_refinement():
