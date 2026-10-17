@@ -798,8 +798,9 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         rt = struct.unpack_from('<i', header, 0)[0] * 64e-6 / 60
         # The body is a chain of blocks (16-bit length, 32-bit type, 16-bit signature A0-A2 BF; type 8 lists the parameters as number and 4-byte value),
         # and the line spectrum's (m/z, intensity) float32 pairs follow the last block
-        # The chain starts with a type 2 block, signed A2 BF in amaZon files and A1 BF in HCT files, whose bodies put 80 bytes with an A0 BF signature before it
-        start, values = re.search(rb'\x02\x00\x00\x00[\xa1\xa2]\xbf', body), {}
+        # The chain starts with a type 2 block, signed A2 BF in amaZon files and A1 BF in HCT files, whose bodies put 80 bytes with an A0 BF signature before it;
+        # Agilent's LC/MSD Trap XCT (a Bruker-built ion trap, GPST000153) starts it with a type 10 block signed A1 BF and has no type 2 block, so it read no spectra
+        start, values = re.search(rb'\x02\x00\x00\x00[\xa1\xa2]\xbf', body) or re.search(rb'\x0a\x00\x00\x00\xa1\xbf', body), {}
         j = start.start() - 2 if start else len(body)
         while j + 8 <= len(body):
             size, block, signature = struct.unpack_from('<HIH', body, j)
@@ -2689,7 +2690,7 @@ def Ac_follows_Gc(df_out):
 
 
 def filter_delayed_rts(df_out, mass_tolerance):
-    """drops rows more than 10 min after the first row with the same top1 prediction and m/z, unless they have the group's highest confidence x precursor intensity (x spectra without intensities)\n
+    """drops rows more than 10 min after the first row with the same top1 prediction and m/z, unless they have the group's highest confidence x precursor intensity (x spectra without intensities), or at least 3 spectra and a tenth of it\n
     | Arguments:
     | :-
     | df_out (dataframe): prediction dataframe generated within wrap_inference
@@ -2712,9 +2713,10 @@ def filter_delayed_rts(df_out, mass_tolerance):
             group_sorted = group.sort_values(by = "RT")
             first_rt = group_sorted.iloc[0]["RT"]
             max_cxn = group['_cxn'].max()
-            # Delayed rows that lose to the group maximum
-            rows_to_discard.extend(
-                group_sorted.index[(group_sorted["RT"] > first_rt + 10) & (group_sorted['_cxn'] < max_cxn)])
+            # Delayed rows that lose to the group maximum, unless at least 3 spectra and a tenth of it back them: long gradients elute isomers the model names
+            # alike more than 10 min apart (GPST000054 893.33 at 27.1 and 34.15, GPST000461 free 859.46, GPST000403 929.48 at 49.68)
+            rows_to_discard.extend(group_sorted.index[(group_sorted["RT"] > first_rt + 10) & (group_sorted['_cxn'] < max_cxn) & ~(
+                (group_sorted['_cxn'] >= 0.1 * max_cxn) & (group_sorted['num_spectra'] >= 3))])
     # Discard the marked rows
     df_out_filtered = df_out.drop(rows_to_discard)
     return df_out_filtered
@@ -2890,12 +2892,12 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         width = max(4 * 1.4826 * np.median(np.abs(errors[singly] - offset)), 0.2)
         keep = np.where(np.abs(df_out['charge'].values) == 1,
                         df_out['ppm_error'].isna().values | (np.abs(errors - offset) <= width), keep)
-        # ... unless the model and the fragments both back a multiply charged row (strong evidence, annotation score of at least 20): its merged centroid then
-        # counts anywhere between the monoisotopic and the 13C position above the file's offset, as large glycans, whose 13C peak outgrows the monoisotopic
-        # one, read half a spacing high
+        # ... unless fragments back a multiply charged row that the model or the database fallback named (annotation score of at least 10): its merged centroid
+        # then counts anywhere between the monoisotopic and the M+2 position above the file's offset, as large glycans, whose 13C peaks outgrow the
+        # monoisotopic one, read half a spacing high or more (GPST000556 [M-2H]2- milk oligosaccharides 0.23-0.38 m/z high, most of them database structures)
         z = np.abs(df_out['charge'].values)
-        strong = (df_out['evidence'].values == 'strong') & (df_out['annotation_score'].values >= 20)
-        keep |= strong & (z > 1) & (np.abs(errors - offset - ISOTOPE_SPACING / (2 * z)) <= ISOTOPE_SPACING / (2 * z))
+        backed = np.isin(df_out['evidence'].values, ['strong', 'composition']) & (df_out['annotation_score'].values >= 10)
+        keep |= backed & (z > 1) & (np.abs(errors - offset - ISOTOPE_SPACING / z) <= ISOTOPE_SPACING / z)
     df_out = df_out[keep]
     # Retention-time outlier removal: drop predictions whose RT lies far outside the file's overall
     # elution distribution, scaled to the observed spread (tight cluster => strict, wide spread => permissive)
@@ -3838,7 +3840,14 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             sparse = (df_var['fragments'] <= 6) & (df_var['annotated'] >= np.maximum(2, 0.6 * df_var['fragments'])) & (df_var['conf'] >= 0.5)
             own = df_out[df_out['predictions'].str.len() > 0]
             own = own.groupby([np.round(own.index.values, 5), own['RT']])['annotation_score'].max()
-            df_var = df_var[((df_var['annotation_score'] > crumbs_thresh) | sparse) & (df_var['annotation_score'] > np.array(
+            # A variant has to fit its precursor as a row of the run has to (the doomed rule below): with an ion-trap precursor, the unreduced form of a glycan with
+            # two dHex in place of a Neu5Ac lies 0.5 m/z (z = 2) below the reduced sialylated glycan, so it matched that glycan's precursor 0.46 off, outscored it
+            # by chance fragments and replaced it, and finalise_predictions then cut it by ppm (GPST000153 1038.87 [M-2H]2-, the run's main sialylated peak)
+            theo = [mass_check(mz, g, modification = modification, mass_tag = (mass_tag or 0) + o, mode = mode, sample_prep = sample_prep,
+                               mass_tolerance = mass_tolerance, sialic_derivatization = sialic_derivatization) if accurate_ms1 or abs(z) > 1 else None
+                    for mz, g, z, o in zip(df_var['m/z'], df_var['candidate_structure'], df_var['charge'], df_var['re_offset'])]
+            doomed = np.array([t is not None and (not t or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh) for t, mz in zip(theo, df_var['m/z'])], dtype = bool)
+            df_var = df_var[((df_var['annotation_score'] > crumbs_thresh) | sparse) & ~doomed & (df_var['annotation_score'] > np.array(
                 [own.get(key, -np.inf) for key in zip(np.round(df_var['m/z'].values, 5), np.round(df_var['RT'].values, 2))]) + 2)]
         if len(df_var):
             df_var = df_var.sort_values(['annotation_score', 'conf'], ascending = False, kind = 'stable')

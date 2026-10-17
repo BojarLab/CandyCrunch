@@ -58,6 +58,11 @@ TEST_DICTS = [
     {'name': 'GPST000503', 'args': {'glycan_class': 'N'}},
     # O-glycans from slide-fixed tissue (Bruker amaZon speed .d, read from its Analysis.yep); the .d runs with --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000316', 'args': {'glycan_class': 'O'}},
+    # Adipose-derived stem cell N- and O-glycans (Agilent LC/MSD Trap XCT Ultra II .D, a Bruker-built ion trap read from its Analysis.yep), one run each; the .D runs with --input-format mzml, the .xlsx otherwise
+    {'name': 'GPST000153_N', 'folder': 'GPST000153', 'args': {'glycan_class': 'N'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000153/") if 'ADSC_Passage3_NG' in x]},
+    {'name': 'GPST000153_O', 'folder': 'GPST000153', 'args': {'glycan_class': 'O'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000153/") if 'ADSC_Passage4_OG' in x]},
     # Milk oligosaccharides up to Hex8HexNAc6dHex4, the larger ones as [M-2H]2- (Thermo LTQ .raw, ion-trap MS1 and MS2), one run; the .raw runs with
     # --input-format mzml, the .xlsx otherwise
     {'name': 'GPST000556', 'args': {'glycan_class': 'free'}},
@@ -580,11 +585,13 @@ def test_bruker_ion_trap_mzml(tmp_path):
     assert df.attrs['detected_trap'] == df.attrs['detected_ms1_trap'] == 'amazon' and df.attrs['detected_mode'] == 'negative'
 
 
-@pytest.mark.parametrize('hct', [False, True])
-def test_bruker_yep(tmp_path, hct):
+@pytest.mark.parametrize('model', ['amaZon speed', 'HCTultra', 'LC/MSD Trap XCT ultra II'])
+def test_bruker_yep(tmp_path, model):
     # A Bruker ion trap .d folder (amaZon): Analysis.yep pages of zlib records, a spectrum header (type 316) and a line spectrum (type 315, kind 2000) per
     # spectrum, and the parameter definitions; MS2 headers give the isolation target (966.20 for a [M-2H]2- at 965.844) and the trigger charge. HCT files
-    # (pwiz's Sample_1-A,1_01_985.d) put 80 bytes with an A0 BF signature before the block chain and start it with an A1 BF block
+    # (pwiz's Sample_1-A,1_01_985.d) put 80 bytes with an A0 BF signature before the block chain and start it with an A1 BF block; Agilent's LC/MSD Trap XCT
+    # (GPST000153) starts it with A1 BF blocks of types 10, 11 and 12 and has no type 2 block
+    hct, xct = model.startswith('HCT'), model.startswith('LC/MSD')
     def record(kind, number, spectrum, body):
         packed = zlib.compress(body)
         key = (31, 0, 0, spectrum, 2000 if spectrum else 1000, 11)
@@ -594,12 +601,13 @@ def test_bruker_yep(tmp_path, hct):
         header = struct.pack('<ifIff3f5I', ticks, sum(i for _, i in peaks), number, 100, 2000, 0, max(i for _, i in peaks), 0, ticks, 0, 3,
                              0 if precursor is None else 4, 20)
         header = header if precursor is None else header[:48] + struct.pack('<f', precursor) + header[48:]
-        body = ((bytes(20) + struct.pack('<HH', 4, 0xbfa0) + bytes(56) if hct else b'') + struct.pack('<HIH4x', 12, 2, 0xbfa1 if hct else 0xbfa2) +
+        start = (struct.pack('<HIH48x', 56, 10, 0xbfa1) + struct.pack('<HIH24x', 32, 11, 0xbfa1) + struct.pack('<HIH12x', 20, 12, 0xbfa1) if xct else
+                 struct.pack('<HIH4x', 12, 2, 0xbfa1 if hct else 0xbfa2))
+        body = ((bytes(20) + struct.pack('<HH', 4, 0xbfa0) + bytes(56) if hct or xct else b'') + start +
                 struct.pack('<HIH', 8 + len(params), 8, 0xbfa0) + params + np.array(peaks, dtype = '<f4').tobytes())
         return record(316, 2 * number, number, header) + record(315, 2 * number + 1, number, body)
-    model = b'HCTultra' if hct else b'amaZon speed'
     definitions = b''.join(struct.pack('<II', pid, 2) + b"\x1d'\xab\xbf" + struct.pack('<I', len(name) + 1) + name + b'\x00' for pid, name in
-                           [(0x6b, b'iIonNeg'), (0x403, b'iTrgChrgAto02')]) + b"\x1d'\xab\xbf" + struct.pack('<I', len(model) + 1) + model + b'\x00'
+                           [(0x6b, b'iIonNeg'), (0x403, b'iTrgChrgAto02')]) + b"\x1d'\xab\xbf" + struct.pack('<I', len(model) + 1) + model.encode() + b'\x00'
     survey = [(675.36, 2e6), (965.844, 6e5), (965.844 + 1.003355 / 2, 9e5), (965.844 + 1.003355, 5.4e5), (966.47, 4e3)]
     fragments = [(290.09, 1e4), (675.3, 1e4), (800.3, 3e4)]
     records = (record(315, 1, 0, definitions) + spectrum(1, 2812500, survey) + spectrum(2, 2813000, fragments, 966.2045, 2) +
@@ -614,7 +622,7 @@ def test_bruker_yep(tmp_path, hct):
     # RT ticks are 64 us, and the MS2 peaks are the line spectrum's
     assert np.allclose(df['RT'], np.array([2813000, 2813500]) * 64e-6 / 60)
     assert len(df['peak_d'][0]) == 3 and max(df['peak_d'][0], key = df['peak_d'][0].get) == pytest.approx(800.3)
-    assert df.attrs['detected_trap'] == ('linear' if hct else 'amazon') and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
+    assert df.attrs['detected_trap'] == ('linear' if hct or xct else 'amazon') and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
 
 
 def test_tims_scans(tmp_path):
