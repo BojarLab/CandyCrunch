@@ -1330,7 +1330,7 @@ def ms2_vector(peak_ds, max_mz):
     return np.sqrt(v) / (np.linalg.norm(np.sqrt(v)) + 1e-12)
 
 
-def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None, merged = None):
+def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None, merged = None, ms1 = None):
     """groups spectra and combines the clusters into averaged and binned spectra\n
     | Arguments:
     | :-
@@ -1342,7 +1342,8 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     | bin_num (int): number of bins for binning; don't change; default: 2048
     | mz_ppm (float): relative mass tolerance (ppm) for assigning spectra to the same peak, used instead of mz_diff; default:None
     | merged (dict): pooled spectra of clusters and binned spectra, kept by the caller across calls on the same spectra (the reducing end and glycan class
-    |                checks condense a file up to 5 times, nearly always into the same clusters); default:None\n
+    |                checks condense a file up to 5 times, nearly always into the same clusters); default:None
+    | ms1 (tuple): accurate survey scans (rts, mzs, intensities, scan offsets), along whose precursor traces clusters are split and placed; default:None\n
     | Returns:
     | :-
     | Returns a dataframe that has one row per RT-Mass cluster
@@ -1539,6 +1540,74 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             h['ms3'] = c['ms3'] if k == largest else []
             split_clusters.append(h)
     clusters = split_clusters
+    # With accurate survey scans, the clusters of one precursor m/z (within mz_ppm, else mz_diff) are regrouped by the peaks of its MS1 trace (10 ppm,
+    # smoothed with a Gaussian of 0.05 min, at least 0.7 cycles; maxima without a valley below 0.7 of the lower one between them are one peak), and every
+    # group is reported at the apex of its MS1 peak: DDA fragments a peak on its flanks (dynamic exclusion), so anomers and isomers 0.3-1.5 min apart
+    # chained into one cluster reported between them, while a broad peak that kept triggering MS2 for minutes became a cluster every rt_diff
+    if ms1 is not None and len(ms1[0]) > 5:
+        rts1, mzs1, ints1, offs1 = ms1
+        keys1 = np.repeat(np.arange(len(rts1)) * 1e4, np.diff(offs1)) + mzs1.astype(np.float64)
+        order1 = np.argsort(keys1, kind = 'stable')
+        keys1, cum1, base1 = keys1[order1], np.concatenate([[0], np.cumsum(ints1[order1], dtype = np.float64)]), np.arange(len(rts1)) * 1e4
+        clusters.sort(key = lambda c: c['apex_mz'])
+        groups, placed = [], []
+        for c in clusters:
+            if groups and c['apex_mz'] - groups[-1][-1]['apex_mz'] <= (c['apex_mz'] * mz_ppm / 1e6 if mz_ppm else mz_diff):
+                groups[-1].append(c)
+            else:
+                groups.append([c])
+        for group in groups:
+            rts_g = np.concatenate([c['RT'] for c in group])
+            lo, hi = np.searchsorted(rts1, rts_g.min() - 2), np.searchsorted(rts1, rts_g.max() + 2, side = 'right')
+            mz0 = float(np.median([c['apex_mz'] for c in group]))
+            b = base1[lo:hi]
+            trace = cum1[np.searchsorted(keys1, b + mz0 * (1 + 1e-5), side = 'right')] - cum1[np.searchsorted(keys1, b + mz0 * (1 - 1e-5))]
+            if hi - lo < 5 or trace.max() <= 0:
+                placed += group
+                continue
+            # Smoothed in time, not in scans: survey scans came every 0.4 s overall but every 2.4 s around the RNase B high-mannose peaks of GPST000134, where
+            # 7 scans (0.05 min at the median cycle) blurred anomers 1 min apart into one peak
+            t = rts1[lo:hi]
+            steps = np.diff(t)
+            sigma = max(0.05, 0.7 * float(np.median(steps[steps > 0]))) if (steps > 0).any() else 0.05
+            half = int(min(200, np.max(np.searchsorted(t, t + 3 * sigma, side = 'right') - np.arange(len(t)))))
+            idx = np.arange(len(t))[:, None] + np.arange(-half, half + 1)[None, :]
+            w = np.where((idx >= 0) & (idx < len(t)), np.exp(-0.5 * ((t[np.clip(idx, 0, len(t) - 1)] - t[:, None]) / sigma) ** 2), 0)
+            sm = (trace[np.clip(idx, 0, len(t) - 1)] * w).sum(1) / w.sum(1)
+            # Maxima inside the window (one at its edge is the flank of a peak outside it)
+            tops = [k for k in range(1, len(sm) - 1) if sm[k] > 0 and sm[k] > sm[k - 1] and sm[k] >= sm[k + 1]] or [int(np.argmax(sm))]
+            merged_any = True
+            while merged_any and len(tops) > 1:
+                merged_any = False
+                for k in range(len(tops) - 1):
+                    if sm[tops[k]:tops[k + 1] + 1].min() >= 0.7 * min(sm[tops[k]], sm[tops[k + 1]]):
+                        tops.pop(k if sm[tops[k]] < sm[tops[k + 1]] else k + 1)
+                        merged_any = True
+                        break
+            bounds = rts1[[lo + tops[k] + int(np.argmin(sm[tops[k]:tops[k + 1] + 1])) for k in range(len(tops) - 1)]]
+            parts = {}
+            for c in group:
+                part = np.searchsorted(bounds, c['RT'])
+                for x, k in enumerate(part):
+                    h = parts.setdefault(int(k), {key: [] for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3')})
+                    for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge'):
+                        h[key].append(c[key][x])
+                    if c['RT'][x] == c['apex_rt']:
+                        h['ms3'] += c['ms3']
+            # A part needs 2 spectra and 5% of the highest MS1 apex of the group's parts, else its spectra join the part whose apex is nearest: on
+            # GPST000134, whose high-mannose glycans fly as [M+K+H]2+ with in-source fragments at every apex, single spectra on small maxima were rows the
+            # ground truth does not hold
+            keep = [k for k in parts if len(parts[k]['RT']) >= 2 and sm[tops[k]] >= 0.05 * max(sm[tops[j]] for j in parts)] or [max(parts, key = lambda k: sm[tops[k]])]
+            for k in [k for k in parts if k not in keep]:
+                into = parts[min(keep, key = lambda j: abs(rts1[lo + tops[j]] - rts1[lo + tops[k]]))]
+                for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3'):
+                    into[key] += parts[k][key]
+            parts = {k: parts[k] for k in keep}
+            for k, h in parts.items():
+                j = int(np.argmax(h['intensity']))
+                h['apex_int'], h['apex_mz'], h['apex_rt'], h['xic_rt'] = h['intensity'][j], h['m/z'][j], h['RT'][j], float(rts1[lo + tops[k]])
+                placed.append(h)
+        clusters = placed
     # Create a condensed dataframe
     condensed_data = []
     merged = {} if merged is None else merged
@@ -1551,6 +1620,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         else:
             rep_mz = min(cluster['m/z'])
             mean_rt = np.mean(cluster['RT'])
+        mean_rt = cluster.get('xic_rt', mean_rt)
         # The same spectra in the same order pool to the same spectrum (the cached entry keeps them, so their ids stay theirs)
         key = (tuple(map(id, cluster['peak_d'])), mz_diff, min_mz, max_mz, bin_num)
         if key in merged:
@@ -3145,6 +3215,11 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         df_out = df_out[~unlabelled]
     df_out = flag_coeluting_substructures(df_out, glycan_class, sample_prep = sample_prep, unreduced = modification is None and not mass_tag,
                                           ms1 = ms1 if ms1 is not None and len(ms1[0]) > 0 else None, mz_tolerance = mass_tolerance)
+    # With accurate survey scans, a row noted as an in-source fragment (a Y-type substructure whose trace is a scaled copy of its parent's, at the parent's
+    # apex, at most a third of it) is that fragment, not a glycan of the sample. Only if the scans were read: an xlsx is marked orbitrap without them, and
+    # its abundance-only note dropped real glycans (GPST000578 0.938 -> 0.885, GPST000651 0.761 -> 0.753)
+    if accurate_ms1 and ms1 is not None and len(ms1[0]) > 0 and 'notes' in df_out.columns:
+        df_out = df_out[~df_out['notes'].fillna('').str.contains('Possible in-source fragment', regex = False).values]
     # Map GlyTouCan IDs of the structure reported, which can differ from the first candidate
     df_out["GlyTouCan_ID"] = [glytoucan_mapping.get(g, '') if isinstance(g, str) else '' for g in df_out['top1_pred']]
     if 'reducing_end' in df_out.columns:
@@ -3506,10 +3581,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # timsTOF serum -0.006 (an open isomer peak), 10 and 50 ppm alike; matching compositions within 20 ppm as well lost (GPST000548 -0.047, 461_O -0.041)
     mz_ppm = 20 if accurate_ms1 else None
     condensed = {} if _condensed is None else _condensed
-    key = (loaded_file[idx_col].values.tobytes(), loaded_file['RT'].values.tobytes(), mass_tolerance, rt_diff, bin_num)
+    # Clusters follow the MS1 peaks of their precursor only for free reducing ends, whose anomers make two peaks 0.5-2 min apart
+    regroup = accurate_ms1 and modification is None and not mass_tag
+    key = (loaded_file[idx_col].values.tobytes(), loaded_file['RT'].values.tobytes(), mass_tolerance, rt_diff, bin_num, regroup)
     if key not in condensed:
         condensed[key] = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num, mz_ppm = mz_ppm,
-                                            merged = condensed.setdefault('merged', {}))
+                                            merged = condensed.setdefault('merged', {}), ms1 = ms1 if regroup else None)
     df_out = condensed[key].copy()
     # The most intense clusters, which the reducing end check below looks at
     top_clusters = df_out.sort_values(['intensity', 'num_spectra'], ascending = False, kind = 'stable').iloc[:_top_clusters or 100]

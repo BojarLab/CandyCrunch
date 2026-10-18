@@ -27,7 +27,8 @@ import torch
 import time
 
 BASE_DIR = pathlib.Path(__file__).parent.parent  # Go up one level from the test file
-TEST_DATA_DIR = BASE_DIR / "tests" / "data"
+# CC_TEST_DATA_DIR: an alternate data folder (e.g., hardlinks with regenerated .xlsx), for measuring regenerated inputs
+TEST_DATA_DIR = pathlib.Path(os.environ["CC_TEST_DATA_DIR"]) if os.environ.get("CC_TEST_DATA_DIR") else BASE_DIR / "tests" / "data"
 TEST_DICTS = [
     {'name':'milk','args': {'glycan_class':'free'}, 'mass_threshold':0.5, 'RT_threshold':1},
     {'name':'GPST000350','args': {'glycan_class':'O'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000350/") if 'O.' in x]},
@@ -511,6 +512,23 @@ def test_precursor_refinement():
     # fragmented itself, a header charge state is trusted, and an unrelated lighter peak is not mistaken for the monoisotopic one
     assert np.allclose(out[:2], mono, atol = 1e-3) and out[2] == 601.25 and abs(out[3] - 700.2) < 1e-3
     assert list(drop) == [False, True, False, False]
+
+
+def test_ms1_peak_regrouping():
+    # Unreduced anomers 1 min apart (1:3) fragmented on their flanks only, and a broad peak (sigma 1 min) whose MS2 every 1.2 min differ: with accurate survey
+    # scans each anomer is a cluster at its MS1 apex, and the broad peak one cluster at its apex
+    rts = np.arange(0, 20, 0.01)
+    peaks = [(900.3, 10.0, 0.1, 1e5), (900.3, 11.0, 0.1, 3e5), (1100.4, 15.0, 1.0, 2e5)]
+    trace = lambda mz, t: sum(h * np.exp(-0.5 * ((t - apex) / w) ** 2) for m, apex, w, h in peaks if m == mz) + 1
+    ms1 = (rts, np.repeat([[900.3, 1100.4]], len(rts), axis = 0).ravel().astype(np.float32),
+           np.array([[trace(900.3, t), trace(1100.4, t)] for t in rts]).ravel().astype(np.float32), np.arange(len(rts) + 1, dtype = np.int64) * 2)
+    spectra = [(900.3, t) for t in (9.95, 10.1, 10.9, 11.05)] + [(1100.4, t) for t in (12.6, 13.8, 15.0, 16.2, 17.4)]
+    df = pd.DataFrame({'m/z': [m for m, _ in spectra], 'RT': [t for _, t in spectra], 'intensity': [trace(m, t) for m, t in spectra],
+                       'peak_d': [{204.087: 100.0, 366.14: 50.0, 1000.0 + 37 * k: 80.0} for k in range(len(spectra))]})
+    out = condense_dataframe(df.copy(), mz_ppm = 20, ms1 = ms1).sort_values('RT')
+    assert np.allclose(out['RT'], [10.0, 11.0, 15.0], atol = 0.02) and out['num_spectra'].tolist() == [2, 2, 5]
+    # Without survey scans the anomers stay one cluster and the broad peak five
+    assert len(condense_dataframe(df.copy(), mz_ppm = 20)) == 6
 
 
 def test_ion_trap_header_charge():

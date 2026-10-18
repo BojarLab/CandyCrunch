@@ -3,7 +3,8 @@ import unittest
 import re
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, CHAIN_IONS, domon_costello_to_mpl
+    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, CHAIN_IONS, domon_costello_to_mpl, \
+    peptide_to_glycowork, infer_glycosites, AA_masses
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
@@ -225,6 +226,11 @@ def test_build_glycopeptide_input_modifications():
     assert CandyCrumbs(gp, [y0], charge = 2)[y0]['Domon-Costello nomenclatures'][0] == [['Peptide'], ['loss of glycan 1']]
     with pytest.raises(ValueError):
         build_glycopeptide_input('EMTSPGTPAR', 'S4(Phospho);T3(HexNAc(1)Hex(1))')
+    # CandyCrunch's residue tokens in glycowork's notation weigh what AA_masses weighs
+    assert peptide_to_glycowork('NcSmkj') == 'NC[Carbamidomethyl]SM[Oxidation]K[TMT6plex]K[Guanidinyl]'
+    assert abs(composition_to_mass('H5N4', peptide = peptide_to_glycowork('EmNcSK')) - composition_to_mass('H5N4') - sum(AA_masses[aa] for aa in 'EmNcSK')) < 1e-9
+    # N-X-C (also as c) and an N-X ending the peptide are sites too, after the canonical N-X-S/T
+    assert infer_glycosites('NGcK', 'N') == [0] and infer_glycosites('NGTKNGcR', 'N') == [0, 4] and infer_glycosites('AANK', 'N') == [2] and infer_glycosites('ANPK', 'N') == []
 
 
 def test_rank_glycopeptide_structures():

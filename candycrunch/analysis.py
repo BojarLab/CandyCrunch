@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
 from glycowork.motif.tokenization import map_to_basic as glycowork_map_to_basic, HYDROGEN_MASS, PROTON_MASS, ELECTRON_MASS, calculate_adduct_mass, \
-    composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS, \
+    composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS, PEPTIDE_MODIFICATIONS, \
     SIALIC_DERIVATIZATIONS, SIALIC_PRODUCTS, SIALIC_KEYS, _carboxyl_sites, modification_formula_dict
 from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
 from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
@@ -108,10 +108,11 @@ X_cross_rings = {c for c in cut_type_dict if c[-1] == 'X'}
 ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu']
 # Residue masses from glycowork's formulas (the old 4-decimal table was up to 0.1 mDa off), plus the modified residues CandyCrumbs encodes
 AA_masses = {aa: calculate_adduct_mass(f) for aa, f in AMINO_ACID_FORMULAS.items()}
-AA_masses['k'] = AA_masses['K'] + 229.162932  # TMT-labelled Lys
-AA_masses['c'] = AA_masses['C'] + calculate_adduct_mass('C2H3NO')  # Carbamidomethyl Cys
-AA_masses['j'] = AA_masses['K'] + calculate_adduct_mass('CH2N2')  # Guanidinyl Lys
-AA_masses['m'] = AA_masses['M'] + calculate_adduct_mass('O')  # Met sulfoxide, the variable modification of nearly every glycoproteomics search
+# the tokens of the modified residues, by residue and the modification's Unimod name in glycowork's PEPTIDE_MODIFICATIONS (TMT-labeled Lys, Carbamidomethyl Cys,
+# Guanidinyl Lys, and Met sulfoxide, the variable modification of nearly every glycoproteomics search), so that peptide_to_glycowork can write them as glycowork does
+TOKEN_MODIFICATIONS = {'k': ('K', 'TMT6plex'), 'c': ('C', 'Carbamidomethyl'), 'j': ('K', 'Guanidinyl'), 'm': ('M', 'Oxidation')}
+AA_masses |= {token: AA_masses[aa] + (float(PEPTIDE_MODIFICATIONS[name]) if re.fullmatch(r'[+-]\d*\.?\d+', PEPTIDE_MODIFICATIONS[name]) else calculate_adduct_mass(PEPTIDE_MODIFICATIONS[name]))
+              for token, (aa, name) in TOKEN_MODIFICATIONS.items()}
 MODIFICATION_TOKENS = {
     'Carbamidomethyl': {'C': 'c'},
     'Guanidinyl': {'K': 'j'},
@@ -2071,15 +2072,31 @@ def infer_glycosites(peptide_seq, glycan_class = None):
     | glycan_class (string): 'N', 'O', or None (both); default:None\n
     | Returns:
     | :-
-    | Returns a list of 0-indexed positions
+    | Returns a list of 0-indexed positions: N-X-S/T (X not P) and S/T in sequence order, then N-X-C and an N-X ending the peptide
     """
-    sites = []
+    sites, other_n = [], []
     for i, aa in enumerate(peptide_seq):
         if glycan_class != 'O' and aa == 'N' and i + 2 < len(peptide_seq) and peptide_seq[i + 1] != 'P' and peptide_seq[i + 2] in 'ST':
             sites.append(i)
         elif glycan_class != 'N' and aa in 'ST':
             sites.append(i)
-    return sites
+        # N-X-C sequons (also with Carbamidomethyl Cys, c) and an N-X at the C-terminus, whose S/T lies past the cleavage, come after these sites, so that callers
+        # taking the first ones still pick a canonical site where there is one
+        elif glycan_class != 'O' and aa == 'N' and peptide_seq[i + 1:i + 2] not in ('', 'P') and (peptide_seq[i + 2:i + 3] in ('', 'C', 'c')):
+            other_n.append(i)
+    return sites + other_n
+
+
+def peptide_to_glycowork(peptide):
+    """Writes a peptide in CandyCrunch's one-letter code (c, j, k, m for modified residues) in glycowork's notation, for glycowork's glycopeptide masses and formulas\n
+    | Arguments:
+    | :-
+    | peptide (string): amino acid sequence, e.g., 'NcSK'\n
+    | Returns:
+    | :-
+    | Returns the peptide with named modifications, e.g., 'NC[Carbamidomethyl]SK', for composition_to_mass, glycan_to_mass or get_formula(..., peptide = ...)
+    """
+    return ''.join(f'{TOKEN_MODIFICATIONS[aa][0]}[{TOKEN_MODIFICATIONS[aa][1]}]' if aa in TOKEN_MODIFICATIONS else aa for aa in peptide)
 
 
 def build_glycopeptide_input(peptide, modification_str, structures = None):
@@ -2370,8 +2387,30 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
     mode_mass = -PROTON_MASS if charge < 0 else PROTON_MASS
     modifier = np.sign(charge)
     frag_dict = {}
+    all_comps = ([composition] if isinstance(composition, dict) else list(composition)) if is_glycopeptide else [composition]
+    window_masses = extend_masses(fragment_masses, charge)
+    # Global modifications (shared), set up first, as a glycopeptide's backbone fragments are only made near an observed mass, also after one of them
+    if not disable_global_mods:
+        charge_exclude = {-1: ['+Na', '+K'], 1: ['+Acetate']}
+        excluded = set(charge_exclude.get(np.sign(charge), [])) | (set() if metal_cations else METAL_GLOBAL_MODS)
+        if not is_glycopeptide:
+            excluded.add('NH3')
+        global_mods_dict = {k: v for k, v in mono_attributes['Global']['mass'].items()
+                            if k not in ('CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS) and k not in excluded and (k != 'CH4O' or sample_prep == 'permethylated')}
+        if max_global_mods > 1:
+            repeatable = [x for x in global_mods_dict if x in REPEATABLE_GLOBAL_MODS or (x in METAL_GLOBAL_MODS and not is_glycopeptide)]
+            for n in range(2, max_global_mods + 1):
+                for combo in combinations_with_replacement(repeatable, n):
+                    global_mods_dict[combine_global_mods(combo)] = sum(global_mods_dict[x] for x in combo)
+        # per residue, as the joined labels of {'Hex': 2, 'Ac': 1} contain HexA; a sialic acid of known linkage (Neu5Ac_a2-6) too
+        if any(m.split('_')[0] in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn'] for comp in all_comps for m in comp):
+            global_mods_dict['CO2'] = mono_attributes['Global']['mass']['CO2']
+        if any('S' in comp for comp in all_comps):
+            global_mods_dict['SO4'] = mono_attributes['Global']['mass']['SO4']
+        if any(m == 'P' or m.endswith('P') for comp in all_comps for m in comp):
+            global_mods_dict['PO4'] = mono_attributes['Global']['mass']['PO4']
     if is_glycopeptide:
-        compositions = [composition] if isinstance(composition, dict) else list(composition)
+        compositions = all_comps
         if glycosites is None or not len(glycosites):
             glycosites = infer_glycosites(peptide_seq, glycan_class)[:len(compositions)]
         glycosites = list(glycosites)
@@ -2428,7 +2467,13 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
             if not 0 < nc <= max_cleavages:
                 continue
             add(full_pep + sum(c[1] for c in combo) + mode_mass, [['Peptide']] + [list(c[0]) for c in combo], nc)
-        # Peptide backbone fragments; glycans outside the fragment are lost without costing a cleavage
+        # Peptide backbone fragments; glycans outside the fragment are lost without costing a cleavage. They are most of the fragments (each backbone
+        # ion with each glycan state), and few come near an observed mass, so with one glycan the masses are summed in numpy and only those near an
+        # observed mass, as they are or after a global modification, are made (with a margin, a superset of what matching and the global modifications use)
+        offsets = [0.0] + ([global_mod_mass(g, mode_mass) for g in global_mods_dict] if not disable_global_mods else [])
+        targets = (np.asarray(window_masses, dtype = float)[:, None] - np.array(offsets)[None, :]).ravel()
+        opt_masses = np.array([c[1] for c in glycan_options[0]], dtype = float)
+        opt_cleavages = np.array([c[2] for c in glycan_options[0]])
         for ion_name, mass_fn, terminus in pep_ions:
             for i in range(first_i.get(ion_name, 1), n_aa):
                 pmass = mass_fn(i)
@@ -2437,6 +2482,11 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                 plabel = f'{ion_name}_{i}'
                 opts = [glycan_options[j] if (gs < i if terminus == 'n' else gs >= n_aa - i)
                         else [([f'loss of glycan {j + 1}'], 0.0, 0)] for j, gs in enumerate(glycosites)]
+                if n_glycans == 1 and len(targets) and opts[0] is glycan_options[0]:
+                    keys = np.round(pmass + opt_masses + mode_mass, 5)
+                    for k in np.flatnonzero((opt_cleavages < max_cleavages) & check_masses(targets, keys, mass_threshold + 2e-4)):
+                        frag_dict.setdefault(keys[k], []).append(([[plabel], list(glycan_options[0][k][0])], 1 + int(opt_cleavages[k])))
+                    continue
                 for combo in product(*opts):
                     nc = 1 + sum(c[2] for c in combo)
                     if nc > max_cleavages:
@@ -2472,31 +2522,10 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
             return {m: None for m in fragment_masses}
         for gm, gl, gc in glycan_frags:
             frag_dict.setdefault(round(gm + mode_mass, 5), []).append(([gl], gc))
-    all_comps = compositions if is_glycopeptide else [composition]
-    # Global modifications (shared)
     if not disable_global_mods:
-        charge_exclude = {-1: ['+Na', '+K'], 1: ['+Acetate']}
-        excluded = set(charge_exclude.get(np.sign(charge), [])) | (set() if metal_cations else METAL_GLOBAL_MODS)
-        if not is_glycopeptide:
-            excluded.add('NH3')
-        global_mods_dict = {k: v for k, v in mono_attributes['Global']['mass'].items()
-                            if k not in ('CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS) and k not in excluded and (k != 'CH4O' or sample_prep == 'permethylated')}
-        if max_global_mods > 1:
-            repeatable = [x for x in global_mods_dict if x in REPEATABLE_GLOBAL_MODS or (x in METAL_GLOBAL_MODS and not is_glycopeptide)]
-            for n in range(2, max_global_mods + 1):
-                for combo in combinations_with_replacement(repeatable, n):
-                    global_mods_dict[combine_global_mods(combo)] = sum(global_mods_dict[x] for x in combo)
-        # per residue, as the joined labels of {'Hex': 2, 'Ac': 1} contain HexA; a sialic acid of known linkage (Neu5Ac_a2-6) too
-        if any(m.split('_')[0] in ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn'] for comp in all_comps for m in comp):
-            global_mods_dict['CO2'] = mono_attributes['Global']['mass']['CO2']
-        if any('S' in comp for comp in all_comps):
-            global_mods_dict['SO4'] = mono_attributes['Global']['mass']['SO4']
-        if any(m == 'P' or m.endswith('P') for comp in all_comps for m in comp):
-            global_mods_dict['PO4'] = mono_attributes['Global']['mass']['PO4']
         # snapshot the label lists, else a variant landing on an existing mass is modified again by later global mods
         base_entries = [(base_mass, list(entries)) for base_mass, entries in frag_dict.items()]
         base_masses = np.array([base_mass for base_mass, _ in base_entries])
-        window_masses = extend_masses(fragment_masses, charge)
         for gmod in global_mods_dict:
             # every metal cation of a combination (2+Na) takes a charge carrier's place
             adj_mass = global_mod_mass(gmod, mode_mass)

@@ -10,6 +10,7 @@
 667.3,19.68,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,
 667.3,17.45,Gal(b1-3)[GlcNAc6S(b1-6)]GalNAc,1.985739972,
 675.4,16.34,Gal(b1-3)[Neu5Ac(a2-6)]GalNAc,1,
+675.2466,16.74,,1,1
 675.4,17.91,Neu5Ac(a2-3)Gal(b1-3)GalNAc,1.702041302,
 733.5,19.43,Fuc(a1-2)Gal(b1-3)GlcNAc(b1-3)GalNAc,1,
 733.5,26.96950833,Fuc(a1-2)Gal(b1-3)[GlcNAc(b1-6)]GalNAc,6.328633448,
@@ -33,9 +34,11 @@
 975.5,28.35,Fuc(a1-2)Gal(b1-3)[Gal(b1-4)GlcNAc6S(b1-6)]GalNAc,1,
 975.5,19.13,Fuc(a1-2)Gal(b1-3/4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,2.120423391,
 1032.477541,20.03,GlcNAc(a1-4)Gal(b1-4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,1,
+1040.3788,19.58,,1,1
 1040.4,20.55,{Neu5Ac(a2-3)}{Gal(?1-?)}Gal(b1-3)[GlcNAc(b1-6)]GalNAc,1,
 1040.4,22.03,{Neu5Ac(a2-3)}{Gal(?1-?)}Gal(b1-3)[GlcNAc(b1-6)]GalNAc,1,
 1040.4,23.63,Gal(b1-4)[Neu5Ac(a2-6)]GlcNAc(b1-6)[Gal(b1-3)]GalNAc,1,
+1040.3788,24.18,,1,1
 1041.5,27.16728333,Fuc(a1-2)Gal(b1-3)GlcNAc(b1-6)[Fuc(a1-2)Gal(b1-3)]GalNAc,2.737803426,
 1041.5,28.366675,Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Fuc(a1-2)Gal(b1-3)]GalNAc,10.49788056,
 1062.6,31.86178333,{Gal(b1-3/4)GlcNAc(b1-3/6)}{Gal(b1-3/4)GlcNAc(b1-3/6)}{Fuc(a1-2/3/4)}{Neu5Ac(a2-3)}{Neu5Ac(a2-3)}Gal(b1-3)[GlcNAc6S(b1-6)]GalNAc,1.013119287,
