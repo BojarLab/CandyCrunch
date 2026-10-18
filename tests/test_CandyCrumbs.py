@@ -3,8 +3,8 @@ import unittest
 import re
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes
-from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS
+    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, CHAIN_IONS, domon_costello_to_mpl
+from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
 'charge': -2,
@@ -312,3 +312,28 @@ def test_candycrumbs_alditol_cross_ring_alone():
     for g, a_ring in (('Gal(b1-3)[Neu5Ac(a2-6)]GalNAc', '15A_2_Alpha'), ('Neu5Ac(a2-3)Gal(b1-3)GalNAc', '13A_3_Alpha')):
         out = CandyCrumbs(g, [493.17], charge = -1, simplify = False)[493.17]
         assert not out or not any(a_ring in x for x in out['Domon-Costello nomenclatures'])
+
+
+@pytest.mark.parametrize('modification', ['reduced', 'unreduced', '2AA', '2AB', 'procainamide', 'PA'])
+def test_candycrumbs_label_chain_ions(modification):
+    # A reductively aminated reducing end gives X cross-rings of its open chain in negative mode (2AB N-glycans, GPST000651: 173.07 = 2AB + C3H2O - H+,
+    # ^{0,3}X_0 - C2H5NO - H2O, in 89% of the HCD spectra); an alditol or a free reducing end does not, nor positive mode, permethylation or disable_X_cross_rings
+    mass_tag = 0 if modification == 'unreduced' else calculate_adduct_mass(modification_formula_dict[modification])
+    aminated = modification in ('2AA', '2AB', 'procainamide', 'PA')
+    for glycan, pieces in (('Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc', {'I_02X0': 'C4H7NO2', 'I_03X0-C2H5NO-H2O': 'C3H2O', 'I_04X0': 'C6H11NO4'}),
+                           ('Fuc(a1-2)Gal(b1-4)Glc', {'I_02X0': 'C2H4O2', 'I_03X0-H2O': 'C3H4O2', 'I_04X0-2H2O': 'C4H4O2'})):
+        expected = {name: mass_tag + calculate_adduct_mass(formula) - PROTON_MASS for name, formula in pieces.items()}
+        out = CandyCrumbs(glycan, list(expected.values()), 0.003, charge = -1, mass_tag = mass_tag, simplify = False)
+        found = {name for v in out.values() if v for d in v['Domon-Costello nomenclatures'] for name in d if name[2:] in CHAIN_IONS}
+        assert found == (set(expected) if aminated else set())
+        assert all((abs(get_fragment_mass(glycan, name, -1, mass_tag) - m) < 1e-6) if aminated else get_fragment_mass(glycan, name, -1, mass_tag) is None
+                   for name, m in expected.items())
+        # the residue has no N-acetyl group to lose, so Glc gives no acetamide loss
+        assert glycan.endswith('GlcNAc') or get_fragment_mass(glycan, 'I_03X0-C2H5NO-H2O', -1, mass_tag) is None
+        for kwargs, masses in ((dict(charge = 1), [m + 2 * PROTON_MASS for m in expected.values()]), (dict(charge = -1, disable_X_cross_rings = True), list(expected.values())),
+                               (dict(charge = -1, sample_prep = 'permethylated'), list(expected.values()))):
+            out = CandyCrumbs(glycan, masses, 0.003, mass_tag = mass_tag, simplify = False, **kwargs)
+            assert not any(name[2:] in CHAIN_IONS for v in out.values() if v for d in v['Domon-Costello nomenclatures'] for name in d)
+    if modification == '2AB':
+        assert abs(get_fragment_mass('GlcNAc(b1-4)GlcNAc', 'I_03X0-C2H5NO-H2O', -1, mass_tag) - 173.0720) < 1e-3
+        assert domon_costello_to_mpl(['I_03X0-C2H5NO-H2O']) == '$^{0,3}X_0 - C_{2}H_{5}NO - H_{2}O$'

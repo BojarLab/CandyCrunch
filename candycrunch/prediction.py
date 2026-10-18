@@ -81,7 +81,8 @@ def get_adduct_list(mode):
     return NEGATIVE_ADDUCTS if mode == 'negative' else POSITIVE_ADDUCTS
 
 
-def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotope_tolerance = 0.25, min_explained = 0.7, charges = None, isolation_mz = False):
+def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotope_tolerance = 0.25, min_explained = 0.7, charges = None, isolation_mz = False,
+                        max_lighter = None):
     """moves precursor m/z values the instrument never refined onto the monoisotopic centroid of their survey scan\n
    | Arguments:
    | :-
@@ -98,7 +99,8 @@ def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotop
    |                 then z = 2 spacing)
    | isolation_mz (bool): whether the header m/z is the isolation window center (Bruker) instead of a peak; the strongest centroid within mz_tolerance is then
    |                      the trigger (with a TOF tolerance, Bruker's timsTOF monoisotopic pick itself), and no spectrum is dropped, as every isolation window
-   |                      holds the whole envelope; default:False\n
+    |                      holds the whole envelope; default:False
+   | max_lighter (float): a lighter peak only counts as the monoisotopic peak if it is at most this many times as intense as the trigger peak; default:None (any)\n
    | Returns:
    | :-
    | (1) a list of refined precursor m/z values
@@ -149,7 +151,7 @@ def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotop
             for j in range(len(chain) - 1, 0, -1):
                 below = np.where(np.abs(scan_mzs - (scan_mzs[chain[j]] - ISOTOPE_SPACING / z)) <= isotope_tolerance)[0]
                 below = below[np.argmax(scan_ints[below])] if len(below) else None
-                if (scan_ints[chain[j]] * envelope(scan_mzs[chain[j]] * z)[j] >= min_explained * scan_ints[k] and
+                if (scan_ints[chain[j]] * envelope(scan_mzs[chain[j]] * z)[j] >= min_explained * scan_ints[k] and (max_lighter is None or scan_ints[chain[j]] <= max_lighter * scan_ints[k]) and
                         (below is None or scan_ints[below] * envelope(scan_mzs[below] * z)[1] < min_explained * scan_ints[chain[j]])):
                     mono = chain[j]
                     break
@@ -377,6 +379,16 @@ def process_mzML_stack(filepath, num_peaks = 1000,
         walk = [c in (2, 3) and t and detected_ms1_trap == 'linear' for c, t in zip(charges, thermo)]
         df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [r or w for r, w in zip(refine, walk)],
                                                   charges = [c if w else None for c, w in zip(charges, walk)])
+        if detected_ms1_trap == 'orbitrap':
+            # A Thermo orbitrap's own monoisotopic pick of a glycan above ~2000 Da, whose M+1 rivals M, is often its 13C peak (GPST000651: 303 of 1,680
+            # precursors, e.g., A2G2S2F 1243.95 for 1243.45, A4G4S4 1827.65 for 1826.65), which then reads as a composition 1-2 Da heavier, sometimes an isobar
+            # within a few ppm (Hex7HexNAc6Neu5Ac3dHex2 for the M+1 of Hex7HexNAc6Neu5Ac4), so those precursors walk their isotopes in the survey scan at the
+            # header charge with orbitrap tolerances, as timsTOF precursors do, onto a lighter peak at most twice as intense (a much stronger peak 1-2 Da lower is
+            # another glycan, whose isotopes the walk took for the trigger in GPST000461); every other precursor keeps the instrument's m/z. Spectra walked onto vs away
+            # from a ground-truth composition: GPST000651 75/2, GPST000403 317/5, GPST000548 40/9)
+            walked, _ = refine_precursor_mz(ms1, list(df_out['m/z']), rts, ms1_scans, [bool(c) and m * c >= 2000 for m, c in zip(df_out['m/z'], charges)],
+                                            mz_tolerance = 0.02, isotope_tolerance = 0.02, charges = charges, isolation_mz = True, max_lighter = 2)
+            df_out['m/z'] = [w if c and abs(w - m) > ISOTOPE_SPACING / c / 2 else m for w, m, c in zip(walked, df_out['m/z'], charges)]
     df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
@@ -620,6 +632,11 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     walk = [c in (2, 3) and detected_ms1_trap == 'linear' for c in charges]
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [r or w for r, w in zip(refine, walk)],
                                               charges = [c if w else None for c, w in zip(charges, walk)])
+    if detected_ms1_trap == 'orbitrap':
+        # Thermo orbitrap monoisotopic picks of glycans above ~2000 Da walk their isotopes as in process_mzML_stack
+        walked, _ = refine_precursor_mz(ms1, list(df_out['m/z']), rts, ms1_scans, [bool(c) and m * c >= 2000 for m, c in zip(df_out['m/z'], charges)],
+                                        mz_tolerance = 0.02, isotope_tolerance = 0.02, charges = charges, isolation_mz = True, max_lighter = 2)
+        df_out['m/z'] = [w if c and abs(w - m) > ISOTOPE_SPACING / c / 2 else m for w, m, c in zip(walked, df_out['m/z'], charges)]
     df_out = df_out[~drop].reset_index(drop = True)
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
@@ -3691,11 +3708,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         if window is not None:
             center, width = window
             predicted_specs = set(df_out['spec_id'][has_pred])
-            # Orbitrap MS2 hold hundreds of fragments and orbitrap DDA samples a real chromatographic peak repeatedly, so there a database structure needs at
-            # least 3 spectra and 14 annotations
+            # Orbitrap MS2 hold hundreds of fragments, so there a database structure needs 14 annotations; permethylated orbitrap DDA (GPST000403/548)
+            # samples a real chromatographic peak repeatedly, so there it also needs 3 spectra (one-spectrum rows: 56 FP vs 5 TP in GPST000403), while with
+            # dynamic exclusion most glycans get one or two (GPST000651, 2AB HILIC: 0.516 with 3 spectra, 0.589 with 2, 0.761 with 1)
             ok = (~has_pred & ~df_out['cross_class'].values & (np.abs(ppm - center) <= width) & (
                         df_out['annotation_score'].values > cross_crumbs_thresh) & (
-                    ((df_out['num_spectra'].values >= 3) & (df_out['annotation_score'].values >= 14)) if trap == 'orbitrap' else True)
+                    (((df_out['num_spectra'].values >= 3) | (sample_prep != 'permethylated')) & (df_out['annotation_score'].values >= 14)) if trap == 'orbitrap' else True)
                   & ~df_out['spec_id'].isin(predicted_specs).values & np.array(
                         [isinstance(g, str) for g in df_out['candidate_structure']]))
             for i in df_out.reset_index(drop = True)[ok].groupby('spec_id')['annotation_score'].idxmax().values if ok.any() else []:

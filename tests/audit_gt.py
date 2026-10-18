@@ -3,7 +3,7 @@
 Usage (from the repo root, in the CandyCrunch environment):
     python tests/audit_gt.py <spectra file> <source GT csv> --glycan_class N [--run NAME] [--modification reduced] [--mass_tag 0]
                              [--sample_prep underivatized] [--output df_mz_X.csv] [--predictions <CandyCrunch output .xlsx/.csv>]
-                             [--rt_window 1.5] [--library_cache PATH] [--data_dir tests/data]
+                             [--rt_window 1.5] [--lc PGC] [--library_cache PATH] [--data_dir tests/data]
 
 <spectra file> is a .raw/.mzML/.mzXML/.d (MS1 used) or an extract_spectra .xlsx (no MS1: only the MS2-based checks apply). <source GT csv> has Mass,
 RT (or <run>_RT), glycan, optionally charge, and the run's abundance column (<run>, the spectra file's stem unless --run says otherwise). Writes the
@@ -232,7 +232,9 @@ class Run:
         lo, hi = np.searchsorted(rts, rts - 1), np.searchsorted(rts, rts + 1, side = 'right')
         roll_med = np.array([np.median(med[a:b]) for a, b in zip(lo, hi)])
         roll_tic = np.array([np.median(tic[a:b]) for a, b in zip(lo, hi)])
-        self.spikes = (med > 3 * roll_med) & (tic > 2 * roll_tic) & (roll_med > 0)
+        # Not in orbitrap/TOF survey scans: their centroid lists only hold peaks above the noise, so a big glycan raises their median and TIC alike (every
+        # large apex of GPST000651 was flagged and interpolated away)
+        self.spikes = (med > 3 * roll_med) & (tic > 2 * roll_tic) & (roll_med > 0) & (not self.accurate)
         # Gaussian smoothing in time (sigma 0.05 min, at least 0.7 cycles), as MS1 cycles vary 0.3-6 s within a run and scan-index smoothing invents humps
         self.weights = None
         if self.cycle <= SLOW_CYCLE:
@@ -352,7 +354,7 @@ def describe_fragments(f):
 
 
 def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = 'reduced', mass_tag = 0.0, sample_prep = 'underivatized',
-          predictions = None, rt_window = 1.5, library_cache = None, data_dir = DATA_DIR):
+          predictions = None, rt_window = 1.5, library_cache = None, data_dir = DATA_DIR, lc = 'PGC'):
     """audits a source GT against its run; returns the audited GT, the removed rows (with reasons), the review list, and a summary text"""
     t_start = time.time()
     spectra_path, gt_path = Path(spectra_path), Path(gt_path)
@@ -512,7 +514,7 @@ def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = '
         # isomers eluting after each other, e.g. GPST000029 829.45 at 25.34/25.92/26.44 after 23.2), and with the apex's MS2
         for p in peaks:
             for q in peaks:
-                if not (0 < p['RT'] - q['RT'] <= TAIL_RT) or p['vec'] is None or q['vec'] is None:
+                if lc != 'PGC' or not (0 < p['RT'] - q['RT'] <= TAIL_RT) or p['vec'] is None or q['vec'] is None:
                     continue
                 k = p['dominant']
                 hq, hp, between = (smoothed[k][q['i']], smoothed[k][p['i']], smoothed[k][q['i']:p['i'] + 1].min()) if smoothed else (q['height'], p['height'], p['height'])
@@ -853,6 +855,7 @@ def main():
     parser.add_argument('--output', default = None)
     parser.add_argument('--predictions', default = None, help = 'CandyCrunch output table of this run (.xlsx or .csv)')
     parser.add_argument('--rt_window', type = float, default = 1.5, help = 'minutes around the shifted source RT within which a row looks for its peak')
+    parser.add_argument('--lc', default = 'PGC', choices = ['PGC', 'C18', 'other'], help = 'the tail rule only applies to PGC')
     parser.add_argument('--library_cache', default = str(Path.home() / '.cache' / 'candycrunch' / 'audit_gt_library.pkl'))
     parser.add_argument('--data_dir', default = str(DATA_DIR), help = 'test data folder whose curated GTs and .xlsx form the spectral library')
     args = parser.parse_args()
@@ -863,7 +866,7 @@ def main():
         sys.exit(f'{output} is the source GT; give another --output')
     audited, removed, review, summary = audit(args.spectra, gt_path, args.glycan_class, run_name = args.run, modification = args.modification,
                                               mass_tag = args.mass_tag, sample_prep = args.sample_prep, predictions = args.predictions,
-                                              rt_window = args.rt_window, library_cache = args.library_cache, data_dir = args.data_dir)
+                                              rt_window = args.rt_window, library_cache = args.library_cache, data_dir = args.data_dir, lc = args.lc)
     audited.to_csv(output, index = False)
     removed.to_csv(output.with_name(output.stem + '_removed.csv'), index = False)
     review.to_csv(output.with_name(output.stem + '_review.csv'), index = False)

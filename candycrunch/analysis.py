@@ -189,6 +189,8 @@ fragmentation_priors = {
     'hydrogen_shift': {1: 0.5, 2: 0.25},
     # an ion without a residue (HSO4-, a label's reporter ion) is specific to its group, so it outranks any single cleavage
     'small_ion': 1.5,
+    # an open-chain ion of a labelled reducing end (CHAIN_IONS) is a cleavage of that residue, as likely as a Y ion
+    'chain_ion': 1.0,
     # Alkali-cation-adducted fragments only (Na+/CID; from doi:10.1021/acs.jpca.6c00953): cross-ring dissociation needs reducing-end
     # ring-opening via the free anomeric O1, so it concentrates on the reducing-terminal residue.
     # X_1 cross-rings retain the reducing end and are the diagnostic class; cross-rings on
@@ -869,6 +871,21 @@ SMALL_IONS = {'HSO4': (calculate_adduct_mass('HSO4') + ELECTRON_MASS, 'S', r'$HS
     label: (calculate_adduct_mass(modification_formula_dict[label] + 'O') + PROTON_MASS, label, rf'$[{label}+H]^+$', f'[{label}+H]<sup>+</sup>')
     for label in ('2AA', '2AB', 'procainamide')} | {
     'C5H12N': (calculate_adduct_mass('C5H12N') - ELECTRON_MASS, 'procainamide', r'$C_5H_{12}N^+$', 'C<sub>5</sub>H<sub>12</sub>N<sup>+</sup>')}
+# Ions of the open chain a reductive amination label makes of the reducing-end residue, in negative mode, where the label holds the charge: the label with
+# carbons C1 to Ck of that residue (^{0,k}X_0, a bond of the chain cleaved), as such or after losing water, hydrogen and, from a HexNAc, acetamide or acetic
+# acid, as {name: (k, HexNAc only)}, the losses written in the name. These are the ones 2AB N-glycans give in >= 25% of their HCD spectra against <= 2% for
+# m/z-shifted decoys (GPST000651: 6.5 of them per spectrum against 0.08, 173.07 ^{0,3}X_0 - C2H5NO - H2O in 89%); an alditol gives them at chance (0 in the 91
+# timsTOF N-glycan spectra whose top 100 peaks reach their m/z, ion traps cut them off).
+# Like other X cross-rings, disable_X_cross_rings strips them, so the pipeline's annotation scores do not count them: they are the same for every candidate
+# structure, and counting them only loosened the score gates (GPST000651 F1 0.761 -> 0.749, 4 more FP rows of the database fallback). They are in SMALL_IONS
+# for their names, without an m/z, which chain_ions computes
+CHAIN_IONS = {'02X0': (2, False), '02X0-H2O': (2, False), '02X0-H2': (2, False), '02X0-C2H5NO': (2, True), '02X0-C2H4O2': (2, True), '03X0-H2O': (3, False),
+              '03X0-C2H5NO-H2O': (3, True), '04X0': (4, False), '04X0-H2O': (4, False), '04X0-2H2O': (4, False), '04X0-C2H5NO-H2O': (4, True),
+              '04X0-C2H5NO-2H2O': (4, True), '04X0-C2H5NO-H2O-H2': (4, True)}
+AMINATED_LABELS = ('2AA', '2AB', 'procainamide', 'PA')
+SMALL_IONS |= {name: (None, 'chain', rf'$^{{0,{k}}}X_0' + ''.join(' - ' + re.sub(r'(?<=[A-Za-z])(\d+)', r'_{\1}', x) for x in name.split('-')[1:]) + '$',
+                      f'<sup>0,{k}</sup>X<sub>0</sub>' + ''.join(' - ' + re.sub(r'(?<=[A-Za-z])(\d+)', r'<sub>\1</sub>', x) for x in name.split('-')[1:]))
+               for name, (k, _) in CHAIN_IONS.items()}
 
 
 def acidic_groups(label):
@@ -896,6 +913,30 @@ def small_ions(residues, charge, mass_tag):
         present = {label for label in ('2AA', '2AB', 'procainamide') if mass_tag is not None and
                    abs(mass_tag - calculate_adduct_mass(modification_formula_dict[label])) < 0.01}
     return {f'I_{k}': v[0] for k, v in SMALL_IONS.items() if v[1] in present}
+
+
+def chain_ions(root_label, charge, mass_tag, sample_prep = 'underivatized'):
+    """The open-chain ions of a labelled reducing end (CHAIN_IONS) a glycan gives, as {token: m/z}: in negative mode, for an underivatized Hex or HexNAc
+    carrying a reductive amination label, recognized by mass_tag\n
+    | Arguments:
+    | :-
+    | root_label (string): the reducing-end monosaccharide
+    | charge (int): the precursor's charge, whose sign sets the ion mode
+    | mass_tag (float): mass of the glycan label or reducing end modification, as in CandyCrumbs
+    | sample_prep (string): underivatized/permethylated/peracetylated\n
+    | Returns:
+    | :-
+    | Returns a dict of fragment name ('I_02X0') : m/z
+    """
+    base = map_to_basic(root_label, obfuscate_ptm = False)
+    if charge > 0 or sample_prep != 'underivatized' or base not in ('Hex', 'HexNAc') or mass_tag is None or not any(
+            abs(mass_tag - calculate_adduct_mass(modification_formula_dict[x])) < 0.01 for x in AMINATED_LABELS):
+        return {}
+    # each carbon of the chain as CH2O, the N-acetylated C2 of a HexNAc as C3H5NO; the label with C1 alone is the label plus CH2O
+    carbons = [calculate_adduct_mass('C3H5NO') if base == 'HexNAc' and i == 1 else calculate_adduct_mass('CH2O') for i in range(6)]
+    return {f'I_{name}': mass_tag + sum(carbons[:k]) - sum(int(n or 1) * calculate_adduct_mass(f) for n, f in (re.fullmatch(r'(\d*)(.+)', x).groups()
+                                                                                                         for x in name.split('-')[1:])) - PROTON_MASS
+            for name, (k, hexnac) in CHAIN_IONS.items() if base == 'HexNAc' or not hexnac}
 
 
 def update_global_mods(subg, global_mods, special_residues):
@@ -1749,7 +1790,7 @@ def score_fragment_prior(dc_name, charge, chain_lengths = None):
                 score += math.prod(fragmentation_priors['global_mod'].get(x, 0.2) for x in other) if other else 0.2
             continue
         if parts[0] == 'I':
-            score += fragmentation_priors['small_ion']
+            score += fragmentation_priors['chain_ion' if parts[1] in CHAIN_IONS else 'small_ion']
             n_cleavages += 1
             continue
         cut_score = cleavage_weights.get(parts[0], 0.1)
@@ -2571,7 +2612,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | intensities (list): intensities of fragment_masses; with simplify, the most intense peaks are assigned first; default:None
     | disable_global_mods (bool): whether to disable global modifications (neutral losses, adducts) and the ions without a residue (HSO4-, SO3-, H2PO4-,
     |                             PO3- of sulfates and phosphates in negative mode, the reporter ions of a 2AA/2AB/procainamide label in positive mode); default:False
-    | disable_X_cross_rings (bool): whether to strip out any X-type cross-rings; default:None (kept)
+    | disable_X_cross_rings (bool): whether to strip out any X-type cross-rings, the open-chain ions of a labeled reducing end (CHAIN_IONS) included;
+    |                               default:None (kept)
     | disable_A_cross_rings (bool or string): whether to strip out any A-type cross-rings, or 'non_reducing' for all but the A_R ions (cross-rings of the
     |                                         reducing-terminal residue) of fragments with a metal cation; default:None ('non_reducing' in positive mode for
     |                                         unreduced glycans (mass_tag 0), stripped for other positive-mode glycans)
@@ -2802,6 +2844,9 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     else:
         peptide = False
         small = {} if disable_global_mods or parents is not None else small_ions(node_labels.values(), charge, mass_tag)
+        # the open chain of a labeled reducing end gives X cross-rings of its own, also without global modifications
+        if parents is None and allowed_X_cleavages:
+            small |= chain_ions(node_labels[next(v for v, d in nx_mono.out_degree() if d == 0)], charge, mass_tag, sample_prep)
         # every fragment is named once, as it can match several observed masses (each gets its own copy of the names)
         graphs = [g for gs in subg_frags.values() for g in gs]
         names = dict(zip(map(id, graphs), subgraphs_to_domon_costello(nx_mono, graphs, chain_rank)))
@@ -2831,7 +2876,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
             dc_names = [list(names[id(sg)]) for sg in fragment_properties[-1]]
             lability = [compute_fragment_lability(edge_lability, sg) for sg in fragment_properties[-1]]
-            # an ion without a residue (no graph), which its fragmentation prior puts ahead of any single cleavage
+            # an ion named without a graph: one without a residue, which its fragmentation prior puts ahead of any single cleavage, or an open-chain ion
             hits = [(t, m) for t, m in small.items() if abs(observed_mass - m) <= mass_threshold and (
                 mass_threshold_ppm is None or abs(observed_mass - m) <= m * mass_threshold_ppm / 1e6)]
             if hits:
@@ -3228,8 +3273,10 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
     fragment = sorted(fragment)
     nx_mono = mono_graph_to_nx(glycan_to_graph_monos(glycan), directed = True)
     if any(c.startswith('I_') for c in fragment):
-        # an ion without a residue stands alone, if the glycan gives it
-        return small_ions(nx.get_node_attributes(nx_mono, 'string_labels').values(), charge, mass_tag).get(fragment[0]) if len(fragment) == 1 else None
+        # an ion named without a graph (HSO4-, a label's reporter or open-chain ion) stands alone, if the glycan gives it
+        labels = nx.get_node_attributes(nx_mono, 'string_labels')
+        root_label = labels[next(v for v, d in nx_mono.out_degree() if d == 0)]
+        return (small_ions(labels.values(), charge, mass_tag) | chain_ions(root_label, charge, mass_tag, sample_prep)).get(fragment[0]) if len(fragment) == 1 else None
     chain_rank = list(rank_chains(nx_mono))
     try:
         skelly_dict, post_mono, global_mod = domon_costello_to_node_labels(fragment, dict(chain_rank))
