@@ -24,11 +24,11 @@ import torch
 import torch.nn.functional as F
 from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
 from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, graph_to_string
-from glycowork.motif.processing import enforce_class, canonicalize_iupac, get_class
+from glycowork.motif.processing import enforce_class, canonicalize_iupac, get_class, is_composition
 from glycowork.motif.annotate import get_molecular_properties
 from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           glycan_to_composition, PROTON_MASS,
-                                          glycan_to_mass, modification_formula_dict, calculate_adduct_mass,
+                                          glycan_to_mass, modification_formula_dict, calculate_adduct_mass, get_formula,
                                           mz_to_composition, structure_to_basic, mass_dict, SIALIC_KEYS,
                                           sialic_linkage_splits, resolve_sialic_linkages, _carboxyl_sites)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
@@ -971,7 +971,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     | isotopes (int): number of isotope peaks summed on top of the monoisotopic one; default:3
     | weights (array-like): if given, precursors that land on the same peak (same apex and m/z) split its area in proportion to these instead of each claiming all of it; default:None
     | mz_calibration (tuple): (m/z offset, half-width) from ms1_mz_calibration; default:None (estimated from the targets)
-    | glycans (list): if given, each area is divided by the share of the glycan's molecules within the summed isotope peaks (computed from its elemental formula; None entries are interpolated by mass); default:None
+    | glycans (list): if given, each area is divided by the share of the glycan's molecules within the summed isotope peaks (computed from its elemental formula; None entries are interpolated by mass); a composition or an element formula counts as the whole molecule, e.g., a glycopeptide as get_formula('H5N4', peptide = 'EEQYNSTYR'); default:None
     | sample_prep (string): underivatized/permethylated/peracetylated, for the elemental formula; default:'underivatized'
     | other_charges (list): if given, per target the other charge states of its molecule whose envelopes are added if they co-elute with it (over its peak); default:None
     | mode (string): ion mode, which sets the charge carrier of other_charges; default:'negative'\n
@@ -1049,15 +1049,18 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
         areas = np.array([areas[t] * (weights[t] / weights[same].sum() if weights[same].sum() > 0 else 1 / len(same)) for t, same in enumerate(shared)])
     if glycans is not None:
         # Divide by the share of each glycan's molecules within the summed isotope peaks, from its elemental formula plus any derivatization groups; glycans without a formula are interpolated by mass
-        props = get_molecular_properties([g for g in set(glycans) if isinstance(g, str)]) if any(isinstance(g, str) for g in glycans) else pd.DataFrame()
-        formulas = props['molecular_formula'].to_dict() if 'molecular_formula' in props.columns else {}
+        # A composition or element formula is weighed whole by glycowork's get_formula (derivatization included), e.g., a glycopeptide as
+        # get_formula('H5N4F1', peptide = 'EEQYNSTYR'); structures go through get_molecular_properties and get their derivatization groups below
+        whole = {g: get_formula(g, sample_prep = sample_prep) for g in set(glycans) if isinstance(g, str) and (is_composition(g) or re.fullmatch(r'(?:(?:Cl|Br|Na|[CHNOPSKFI])\d*)+', g))}
+        props = get_molecular_properties([g for g in set(glycans) if isinstance(g, str) and g not in whole]) if any(isinstance(g, str) and g not in whole for g in glycans) else pd.DataFrame()
+        formulas = (props['molecular_formula'].to_dict() if 'molecular_formula' in props.columns else {}) | whole
         unit = {'permethylated': 'CH2', 'peracetylated': 'C2H2O'}.get(sample_prep)
         share = np.full(len(target_mzs), np.nan)
         for t, g in enumerate(glycans):
             if g not in formulas:
                 continue
             counts = defaultdict(int, {el: int(k or 1) for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', formulas[g])})
-            if unit:
+            if unit and g not in whole:
                 comp = get_comp(g)
                 n_units = round((composition_to_mass(comp, sample_prep = sample_prep) - composition_to_mass(comp)) / calculate_adduct_mass(unit))
                 for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', unit):
@@ -3351,9 +3354,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo), ".d" (Bruker timsTOF or ion trap folder), ".mzML", ".mzXML", ".mgf", ".cc", or ".xlsx" pointing to a file containing
+   | spectra_filepath (string or dataframe): absolute filepath ending in ".raw" (Thermo), ".d" (Bruker timsTOF or ion trap folder), ".mzML", ".mzXML", ".mgf", ".cc", or ".xlsx" pointing to a file containing
    |                            spectra or preprocessed spectra; MS3 spectra in it (.raw/.mzML/.mzXML, or .xlsx from extract_spectra) are used automatically, as fragment
-   |                            evidence and to rank isomers
+   |                            evidence and to rank isomers; or a dataframe of spectra as load_spectra_filepath returns them (survey scans in attrs['ms1'], named by
+   |                            attrs['name']), such as the pseudo-spectra of a DIA run
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable that takes a dataframe with one row per
    |                              (pooled spectrum, candidate composition) input, in input order (index m/z; columns spec_id, RT, intensity, peak_d,
@@ -3409,6 +3413,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    """
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
     run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate', '_loaded', '_top_clusters', '_condensed')}
+    # Spectra already in memory are processed as if loaded from a file named after attrs['name']
+    if isinstance(spectra_filepath, pd.DataFrame):
+        spectra_filepath, _loaded = spectra_filepath.attrs.get('name', 'spectra'), spectra_filepath
     # A timsTOF .d is a folder, which a shell completes with a trailing separator
     spectra_filepath = os.path.normpath(spectra_filepath)
     # ppm_thresh is the only tolerance the user sets; derive the flat-Da window everything downstream needs from it here
