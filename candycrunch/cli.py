@@ -13,7 +13,7 @@ def str_to_bool(value):
 def main():
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
     parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker .d folders (timsTOF, ion traps), .mzML, .mzXML, .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
-    parser.add_argument('--glycan_class', help='Glycan class', type=str, choices=['O', 'N', 'free', 'lipid'], required=True)
+    parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g. N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
     parser.add_argument('--modification', help='Reducing-end modification; custom: a label of --mass_tag Da', type=str, choices=['reduced', '2AA', '2AB', 'procainamide', 'PA', 'custom'], required=False)

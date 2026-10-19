@@ -3,6 +3,7 @@ Mass,RT,glycan,charge,20230622_SD_GSL_SSSMuG_5,RT_source,source,audit
 634.22,17.03,Neu5Ac(a2-3)Gal(b1-4)Glc,-1,7.266877014,16.29,given,
 644.7202,14.59,Neu5Ac(a2-8)Neu5Ac(a2-3)[Gal(b1-3)GalNAc(b1-4)]Gal(b1-4)Glc,-2,2.405818288,14.04,given,
 644.7202,15.08,Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,33.03142468,14.52,given,
+667.2302,14.43,,-1,1,,added,"Hex4 peak (24.5x baseline, valley 0.00) with MS2 at 14.48 (487.1 = M - 180, 341.1, 383.1), 2 of 10 annotated, one min after the Hex3 row; library Hex4 0.68; superset ions <= 0.26x; structure open (GT audit 2026-10-18)"
 781.2626,15.91,"{Neu1,7lactone5Ac(a2-8)}Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc",-2,8.263643765,15.17,given,
 790.2679,17.52,{Neu5Ac(a2-8)}Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,17.8882175,15.81,given,
 790.2679,18.34,{Neu5Ac(a2-8)}Neu5Ac(a2-3)Gal(b1-3)GalNAc(b1-4)[Neu5Ac(a2-3)]Gal(b1-4)Glc,-2,3.836719618,16.13,given,

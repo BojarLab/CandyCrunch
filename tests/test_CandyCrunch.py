@@ -37,7 +37,7 @@ TEST_DICTS = [
     {'name':'GPST000029','args': {'glycan_class':'O'}},
     {'name':'PMC8950484_CHO','args': {'glycan_class':'O'}},
     {'name':'GPST000307','args': {'glycan_class':'O'}},
-    {'name':'GPST000487','args': {'glycan_class':'N'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")]},
+    {'name':'GPST000487','args': {'glycan_class':['N', 'O']},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")]},
     # Four O-glycan and four N-glycan replicate runs (Bruker HCT) share one folder; 'folder' names it, 'name' the ground truth (df_mz_<name>.csv)
     {'name':'GPST000169_O','folder':'GPST000169','args': {'glycan_class':'O'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'OGlycan' in x]},
     {'name': 'GPST000169_N', 'folder': 'GPST000169', 'args': {'glycan_class': 'N'},
@@ -269,7 +269,7 @@ def pytest_generate_tests(metafunc):
         input_format = metafunc.config.getoption('--input-format')
         groups = ['xlsx', 'mzml'] if input_format == 'both' else [input_format]
         metafunc.parametrize('test_params, file_group', [(p, g) for p in test_params for g in groups],
-                             ids = [f"{p['test_dict']['name']}-{p['test_dict']['args']['glycan_class']}-{g}" for p in test_params for g in groups])
+                             ids = [f"{p['test_dict']['name']}-{'+'.join(glycan_classes(p['test_dict']['args']['glycan_class']))}-{g}" for p in test_params for g in groups])
 
 
 def test_candycrunch_accuracy(test_params, file_group, result_collector, input_format, verbose, test_files = None):

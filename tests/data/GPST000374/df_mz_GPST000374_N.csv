@@ -1,14 +1,21 @@
 Mass,RT,glycan,charge,20230623_SD_NG_SSSMuG_2,RT_source,source,audit
 505.1774,13.41,Glc(a1-?)Glc(a1-?)Glc,-1,1,,added,"Hex3 peak (also in the GSL run), MS2 at 13.45; structure open"
+710.7595,22.67,,-2,1,,added,"Hex4HexNAc3dHex1 peak (5.5x baseline, valley 0.00) with MS2 at 22.80, 6 of 10 fragments annotated; library 0.61; structure open (GT audit 2026-10-18)"
 718.757,14.8,,-2,1,,added,"Hex5HexNAc3 peak with MS2 at 14.69, before the given 15.87 isomer (15.91 here, no MS2); structure open"
+731.2728,20.16,,-2,1,,added,"Hex3HexNAc4dHex1 peak (5.4x, valley 0.05) with MS2 at 20.29 (Hex and HexNAc losses 650.2/629.8), 4 of 10 annotated; library 0.53; structure open (GT audit 2026-10-18)"
 739.2702,13.73,{GlcNAc(b1-2/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.187961944,13.68,given,
 759.7835,13.92,GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.183729653,13.79,given,
+783.7885,17.58,,-2,1,,added,"Hex4HexNAc3dHex2 peak (28.3x, valley 0.00) with MS2 at 17.72 (precursor 783.79), 4 of 10 annotated vs 2 of 10 for the 1.02 Da isobar Hex4HexNAc3Neu5Ac1 (library 0.06); structure open (GT audit 2026-10-18)"
+783.7885,19.97,,-2,1,,added,"Hex4HexNAc3dHex2 peak (11.9x, valley 0.01) with MS2 at 20.13, 5 of 10 annotated (Hex4HexNAc3Neu5Ac1 3 of 10); MS2 cos 0.14 to the 17.58 isomer; structure open (GT audit 2026-10-18)"
 799.7834,16.82,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.040796073,16.83,given,
 812.2992,14.8,GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.392370893,14.7,given,
 812.2992,18.89,Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.475891677,18.79,given,
 820.2966,13.92,GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.615905513,13.99,given,
+839.7665,16.47,,-2,1,,added,"Hex6HexNAc3P1 peak (30.1x, highest within 1 min) with MS2 at 16.54 (656.8 = M - HexHexNAc at z = 2), 7 of 10 annotated; structure open (GT audit 2026-10-18)"
 840.8099,14.27,,-2,1,,added,Hex4HexNAc5 peak with MS2 at 14.34; structure open
 852.2776,22.48,Gal3/6S(b1-4)GlcNAc(b1-2)Man(a1-6)[GlcNAc(b1-2)Man(a1-3)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.211185972,22.65,given,
+856.3072,24.72,,-2,1,,added,"Hex4HexNAc3Neu5Ac1dHex1 peak (7.0x, valley 0.24 towards 25.27) with MS2 at 24.87, 7 of 10 annotated; MS2 cos 0.42 to the 25.27 isomer; structure open (GT audit 2026-10-18)"
+856.3072,25.27,,-2,1,,added,"Hex4HexNAc3Neu5Ac1dHex1 peak (8.0x, valley 0.03) with MS2 at 25.34, 8 of 10 annotated; library 0.57; structure open (GT audit 2026-10-18)"
 864.3047,22.29,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.143201447,22.59,given,
 864.8149,17.02,{Fuc(a1-2/3)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.335275142,16.95,given,
 872.8123,16.1,{Man(a1-2)}Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.145424739,16.1,given,
@@ -35,9 +42,11 @@ Mass,RT,glycan,charge,20230623_SD_NG_SSSMuG_2,RT_source,source,audit
 957.8469,22.48,Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)[GlcNAc(b1-2)Man(a1-3)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.179550935,23.02,given,
 957.8469,24.15,Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.158416266,24.61,given,
 957.8469,25.84,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.641754633,26.24,given,
+957.8469,30.52,,-2,1,,added,"Hex4HexNAc4Neu5Ac1dHex1 peak (8.7x, valley 0.01) with MS2 at 30.68, 3 of 10 annotated; library 0.23; structure open (GT audit 2026-10-18)"
 965.8444,19.97,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.149282017,20.32,given,
 966.3546,14.8,{Fuc(a1-2/3)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.517156516,14.71,given,
 973.8418,19.8,Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)[Gal(b1-4)GlcNAc(b1-2)Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.104334013,20.05,given,given structure lacked a Gal (mass is Hex5HexNAc4Neu5Gc1); Gal added on the free arm
+974.352,14.1,,-2,1,,added,"Hex6HexNAc4dHex1 peak (23.0x, valley 0.01) with MS2 at 14.15 (791.2 = M - HexHexNAc at z = 2), 2 of 10 annotated; library 0.29; structure open (GT audit 2026-10-18)"
 974.352,16.82,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.187519964,16.73,given,
 986.8678,15.15,{Fuc(a1-2/3)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,1.661977886,15.11,given,
 986.8678,17.21,{Fuc(a1-2/3)}Gal(b1-4)GlcNAc(b1-2)Man(a1-6)[GlcNAc(b1-2)Man(a1-3)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.172117639,17.06,given,
@@ -62,6 +71,7 @@ Mass,RT,glycan,charge,20230623_SD_NG_SSSMuG_2,RT_source,source,audit
 1059.3866,21.91,{HexNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.147942685,22.42,given,
 1059.3866,23.41,{HexNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.194779147,23.6,given,
 1059.3866,26.18,{HexNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.275567693,26.59,given,
+1062.3325,17.58,,-2,1,,added,"Hex10HexNAc2P1 peak (60.3x, highest within 1 min) with MS2 at 17.68, 7 of 10 annotated; library Glc1Man9-P (GPST000302) 0.67; structure open (GT audit 2026-10-18)"
 1082.8813,25.65,{Neu5Ac(a2-6/8)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.469904861,26.65,given,
 1103.3946,26.73,,-2,0.662393749,27.59,given,given structure (with bisecting GlcNAc) is 203 Da heavier than the peak (Hex4HexNAc4dHex1Neu5Ac2); structure left open
 1111.3921,22.48,Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.115316541,22.78,given,
@@ -77,13 +87,16 @@ Mass,RT,glycan,charge,20230623_SD_NG_SSSMuG_2,RT_source,source,audit
 1160.9263,24.72,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)[GlcNAc(b1-6)]Man(a1-6)[GlcNAc(b1-2)[GlcNAc(b1-4)]Man(a1-3)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.645531551,25.08,given,
 1163.9077,26.18,Neu5Ac(a2-8)Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.357856291,27.17,given,
 1184.421,24.72,{Fuc(a1-3/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.206243835,25.47,given,
+1184.421,26.0,,-2,1,,added,"Hex5HexNAc4Neu5Ac2dHex1 peak (3.8x, valley 0.09) with MS2 at 26.13 (1788.7 = [M-H]- minus two Neu5Ac), 4 of 10 annotated; library 0.28; structure open (GT audit 2026-10-18)"
 1184.421,27.83,{Fuc(a1-3/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.206458128,28.75,given,
 1184.421,29.19,{Fuc(a1-3/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.194524674,30.18,given,
 1184.421,32.87,{Fuc(a1-3/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.379138287,33.89,given,
 1184.421,36.77,{Fuc(a1-3/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.173202498,37.83,given,
 1192.4185,29.03,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.193814828,29.58,given,
 1200.4159,24.34,{Fuc(a1-3/6)}Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.369776352,25.1,given,
+1200.4159,28.67,,-2,1,,added,"Hex5HexNAc4Neu5Gc2dHex1 / Hex6HexNAc4Neu5Ac1Neu5Gc1 (same mass) peak (23.3x, valley 0.01) with MS2 at 28.72, 8 of 10 annotated for either; structure open (GT audit 2026-10-18)"
 1213.4419,22.83,{Fuc(a1-2/3)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)[GlcNAc(b1-6)]Man(a1-6)[Gal(b1-4)GlcNAc(b1-2)Man(a1-3)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.095400665,23.23,given,
+1213.4419,24.72,,-2,1,,added,"Hex5HexNAc5Neu5Ac1dHex2 peak (3.6x, valley 0.05) with MS2 at 24.84, 7 of 10 annotated (Hex5HexNAc5Neu5Ac2 2 of 10); structure open (GT audit 2026-10-18)"
 1219.4469,19.6,Man(a1-3/6)Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-1,0.282103636,19.6,given,
 1235.4418,18.16,Man(a1-3)[Man(a1-6)]Man(a1-6)[Man(a1-3)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-1,12.27570698,18.21,given,
 1257.45,26.73,{Fuc(a1-2/3)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.731985474,27.65,given,
@@ -91,7 +104,9 @@ Mass,RT,glycan,charge,20230623_SD_NG_SSSMuG_2,RT_source,source,audit
 1280.9321,24.9,{Neu5Gc(a2-6/8)}Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.173831985,26.73,given,three 1281.0 peaks with MS2 in the same order and ratio as the three given rows
 1280.9321,27.47,{Neu5Gc(a2-6/8)}Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.161536911,29.46,given,see 24.90 row
 1280.9321,32.37,{Neu5Gc(a2-6/8)}Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Gc(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-2,0.072578436,34.53,given,see 24.90 row
+1285.9607,23.41,,-2,1,,added,"Hex5HexNAc5Neu5Ac2dHex1 peak (8.2x, valley 0.05) with MS2 at 23.53, 6 of 10 annotated; MS2 cos 0.30 to the 27.08 row; structure open (GT audit 2026-10-18)"
 1285.9607,27.08,{GlcNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.116736234,27.56,given,
+1285.9607,33.21,,-2,1,,added,"Hex5HexNAc5Neu5Ac2dHex1 peak (10.8x, valley 0.03) with MS2 at 33.36, 6 of 10 annotated; MS2 cos 0.29 to the 27.08 row; structure open (GT audit 2026-10-18)"
 1314.9816,20.92,{Fuc(a1-2/3)}{GlcNAc(b1-4/6)}{GlcNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.489365364,21.4,given,
 1314.9816,23.02,{Fuc(a1-2/3)}{GlcNAc(b1-4/6)}{GlcNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.144554173,23.28,given,
 1329.9687,31.68,Neu5Ac(a2-8)Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.238307459,32.72,given,
@@ -99,6 +114,7 @@ Mass,RT,glycan,charge,20230623_SD_NG_SSSMuG_2,RT_source,source,audit
 1367.4973,21.12,{Gal(b1-4)GlcNAc(b1-4/6)}{Fuc(a1-2/3)}{Fuc(a1-2/3)}{Neu5Ac(a2-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.26734419,21.37,given,
 1367.4973,23.21,{Gal(b1-4)GlcNAc(b1-4/6)}{Fuc(a1-2/3)}{Fuc(a1-2/3)}{Neu5Ac(a2-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.166371902,23.54,given,
 1367.4973,25.65,{Gal(b1-4)GlcNAc(b1-4/6)}{Fuc(a1-2/3)}{Fuc(a1-2/3)}{Neu5Ac(a2-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.172278359,26.03,given,
+1367.4973,28.31,,-2,1,,added,"Hex6HexNAc5Neu5Ac1dHex3 peak (3.5x, valley 0.10) with MS2 at 28.42, 7 of 10 annotated (Hex6HexNAc5Neu5Ac2dHex1 4 of 10); structure open (GT audit 2026-10-18)"
 1387.5004,31.68,{GlcNAc(b1-4/6)}{GlcNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.07259183,32.56,given,
 1397.4946,15.91,Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,-1,6.232638063,15.83,given,
 1416.5213,20.54,{Fuc(a1-2/3)}{GlcNAc(b1-4/6)}{GlcNAc(b1-4/6)}{HexNAc(b1-4/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,-2,0.103517021,20.81,given,

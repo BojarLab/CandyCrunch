@@ -39,6 +39,7 @@ Mass,RT,glycan,20190917_RNaseB_glycans_1,charge,composition,ion,height,n_ms2,sou
 821.3034,15.97,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4,[M+K+H]2+,1140000.0,12,given,given structure
 821.3034,17.39,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4,[M+K+H]2+,2090000.0,16,given,given structure
 821.3034,17.77,,1,2,Hex5HexNAc4,[M+K+H]2+,225000.0,10,added,structure open
+840.7733,23.59,,1,2,Hex6HexNAc3P1,[M+K+H]2+,35900.0,22,added,structure open
 861.3032,11.98,,1,2,Hex8HexNAc2,[M+Na+H]2+,5080000.0,22,given,Man8 isomer undetermined
 861.3032,14.59,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)[Man(a1-3)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex8HexNAc2,[M+K+H]2+,60600000.0,27,given,Man8 anomer pair (K+H MS2 cos 0.99); given 15.56 structure (lacking D3) replaced by that of its partner 14.57
 861.3032,15.58,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)[Man(a1-3)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex8HexNAc2,[M+K+H]2+,120000000.0,25,given,Man8 anomer pair (K+H MS2 cos 0.99); given 15.56 structure (lacking D3) replaced by that of its partner 14.57
@@ -57,6 +58,7 @@ Mass,RT,glycan,20190917_RNaseB_glycans_1,charge,composition,ion,height,n_ms2,sou
 894.3323,16.82,,1,2,Hex5HexNAc4dHex1,[M+K+H]2+,134000.0,2,added,structure open
 894.3323,17.59,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4dHex1,[M+K+H]2+,2600000.0,17,given,given structure
 894.3323,19.12,{Fuc(a1-3/6)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex5HexNAc4dHex1,[M+K+H]2+,5770000.0,29,given,given structure
+921.7997,23.25,,1,2,Hex7HexNAc3P1,[M+K+H]2+,81100.0,39,added,structure open
 938.3403,28.05,,1,2,Hex5HexNAc3Neu5Ac1dHex1,[M+K+H]2+,37400.0,19,added,structure open
 938.3403,30.45,,1,2,Hex5HexNAc3Neu5Ac1dHex1,[M+K+H]2+,248000.0,37,added,structure open
 942.3296,11.68,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex9HexNAc2,[M+2H]2+,5360000.0,41,given,Man9
@@ -66,6 +68,7 @@ Mass,RT,glycan,20190917_RNaseB_glycans_1,charge,composition,ion,height,n_ms2,sou
 942.3296,16.16,,1,2,Hex9HexNAc2,[M+K+H]2+,2440000.0,31,added,Hex9HexNAc2 isomer (Glc1Man8?) undetermined; K+H MS2 cos 0.89-0.97 to Man9
 946.3378,27.34,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc3Neu5Ac1,[M+K+H]2+,235000.0,41,added,"NeuAc B3 ion 657 > NeuGc 673; linkage hedged a2-3/6 as given, 27.34 and 29.71 2H MS2 cos 0.94"
 946.3378,29.71,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc3Neu5Ac1,[M+K+H]2+,412000.0,64,given,"NeuAc B3 ion 657 > NeuGc 673; linkage hedged a2-3/6 as given, 27.34 and 29.71 2H MS2 cos 0.94"
+946.848,18.17,,1,2,Hex6HexNAc3dHex2,[M+K+H]2+,92100.0,4,added,structure open
 954.3353,26.68,,1,2,Hex6HexNAc3Neu5Gc1,[M+K+H]2+,151000.0,48,added,structure open
 954.3353,28.98,,1,2,Hex6HexNAc3Neu5Gc1,[M+K+H]2+,242000.0,49,added,structure open
 966.8511,22.23,,1,2,Hex5HexNAc4Neu5Ac1,[M+K+H]2+,50200.0,8,added,structure open
@@ -86,6 +89,7 @@ Mass,RT,glycan,20190917_RNaseB_glycans_1,charge,composition,ion,height,n_ms2,sou
 974.8485,29.44,,1,2,Hex5HexNAc4Neu5Gc1,[M+K+H]2+,39500.0,16,added,structure open
 975.3587,18.82,{Fuc(a1-3/6)}{GlcNAc(b1-3/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc4dHex1,[M+K+H]2+,56600.0,2,given,given structure
 975.3587,20.16,{Fuc(a1-3/6)}{GlcNAc(b1-3/4)}Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,2,Hex6HexNAc4dHex1,[M+K+H]2+,143000.0,18,given,given structure
+1002.8261,22.91,,1,2,Hex8HexNAc3P1,[M+K+H]2+,58800.0,27,added,structure open
 1003.8695,17.64,,1,2,Hex6HexNAc5,[M+2H]2+,41500.0,2,given,structure open
 1019.3668,30.94,,1,2,Hex6HexNAc3Neu5Ac1dHex1,[M+2H]2+,72000.0,12,added,structure open
 1023.3561,11.93,,1,2,Hex10HexNAc2,[M+2H]2+,65100.0,4,added,Hex10HexNAc2 isomer undetermined
@@ -99,5 +103,6 @@ Mass,RT,glycan,20190917_RNaseB_glycans_1,charge,composition,ion,height,n_ms2,sou
 1047.8775,28.44,,1,2,Hex5HexNAc4Neu5Gc1dHex1,[M+K+H]2+,114000.0,32,added,structure open
 1047.8775,30.75,,1,2,Hex5HexNAc4Neu5Gc1dHex1,[M+2H]2+,630000.0,37,added,structure open
 1056.3851,21.42,Gal(b1-4)GlcNAc(b1-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,2,Hex7HexNAc4dHex1,[M+K+H]2+,98200.0,15,given,given structure
+1083.8525,22.26,,1,2,Hex9HexNAc3P1,[M+2H]2+,40100.0,12,added,structure open
 1120.9064,31.76,,1,2,Hex6HexNAc4Neu5Ac1dHex1,[M+2H]2+,73800.0,5,added,structure open
 1128.9039,31.26,,1,2,Hex6HexNAc4Neu5Gc1dHex1,[M+2H]2+,96700.0,4,added,structure open

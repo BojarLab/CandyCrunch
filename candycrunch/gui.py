@@ -67,7 +67,10 @@ NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?g
               'sample_prep': {'permethylated': r'permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
 BATCH_KEYS = ('intra_cat_thresh', 'top_n_isomers', 'n_jobs')
 FEATURES = '\x00features'
-GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharides (e.g., milk)', 'free'), ('Glycolipid glycans', 'lipid')]
+GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharides (e.g., milk)', 'free'), ('Glycolipid glycans', 'lipid'),
+                  ('N- and O-glycans (same run)', 'N+O')]
+# Classes measured together are one combo choice, their names joined by '+' in this order; wrap_inference takes them as a list
+CLASS_ORDER = ['N', 'O', 'free', 'lipid']
 # 'unreduced' exists only in the app: wrap_inference takes a free reducing end as a custom label without mass (its reducing end check calls that 'unreduced')
 REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('Unreduced (free reducing end)', 'unreduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'),
                  ('PA (2-aminopyridine)', 'PA'), ('Other label (enter its mass)', 'custom')]
@@ -788,6 +791,11 @@ def _set_combo(box, value):
         box.setCurrentIndex(index)
 
 
+def _class_choice(value):
+    # The glycan class combo's data of a class or a list of classes ('N+O'); a list of one class is that class
+    return value if value is None or isinstance(value, str) else '+'.join(sorted(set(value), key = CLASS_ORDER.index))
+
+
 def _fmt(value, decimals):
     return '' if value is None or (isinstance(value, float) and np.isnan(value)) else f'{value:.{decimals}f}'
 
@@ -1371,6 +1379,8 @@ class SettingsPanel(QScrollArea):
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.inputs['glycan_class'] = _combo(GLYCAN_CLASSES)
+        self.inputs['glycan_class'].setToolTip('Glycan class of the samples. N- and O-glycans measured in one run: candidate compositions and structures come from '
+                                               'both classes, and only structures of other classes need the cross-class confidence')
         self.mode = _combo([('Negative', 'negative'), ('Positive', 'positive')])
         self.mode.setToolTip('Overridden by the polarity stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
         self.charge = _spin(1, 8, 1)
@@ -1768,9 +1778,19 @@ class SettingsPanel(QScrollArea):
         values['modification'], values['mass_tag'] = ('custom', None) if values['modification'] == 'unreduced' else (values['modification'], values['mass_tag'] if values['modification'] == 'custom' else None)
         values['sialic_derivatization'] = self.sialic.currentData()
         values['model_file'] = self.model.currentData()
+        # Classes measured together go to wrap_inference as a list
+        if '+' in values['glycan_class']:
+            values['glycan_class'] = values['glycan_class'].split('+')
         return values
 
     def set_values(self, values):
+        # A list of classes the combo does not offer (from a session, or settings made outside the app) becomes a choice of its own
+        choice = _class_choice(values.get('glycan_class'))
+        if choice is not None:
+            values = {**values, 'glycan_class': choice}
+            if self.inputs['glycan_class'].findData(choice) < 0:
+                names = {value: label for label, value in GLYCAN_CLASSES}
+                self.inputs['glycan_class'].addItem(' and '.join(names[c] for c in choice.split('+')), choice)
         for key, widget in self.inputs.items():
             value = values.get(key, DEFAULTS.get(key))
             if value is None:

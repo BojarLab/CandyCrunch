@@ -3,6 +3,7 @@ build/
 dist/
 *.egg-info/
 CLAUDE.md
+.claude/notes/
 
 # Python cache files
 __pycache__/

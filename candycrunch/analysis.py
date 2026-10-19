@@ -3856,6 +3856,14 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
     consumed = [False] * len(sorted_peaks)
     deisotoped = {}
     spacings = [1.0034 / z for z in range(1, precursor_charge + 1)]
+    # Whether any peak lies one isotope spacing of a tested charge above a peak, for all peaks at once (with the bounds the search below computes): a peak
+    # without one starts no pattern, which spares most peaks of a pooled orbitrap or TOF spectrum the search
+    arr = np.array(masses, dtype = float)
+    partner = np.zeros(len(arr), dtype = bool) if not np.isnan(arr).any() else np.ones(len(arr), dtype = bool)
+    for spacing in spacings if not partner.all() else []:
+        start = np.maximum(np.searchsorted(arr, arr + spacing - mass_tolerance), np.arange(1, len(arr) + 1))
+        partner |= (start < len(arr)) & (arr[np.minimum(start, len(arr) - 1)] <= arr + spacing + mass_tolerance)
+    partner = partner.tolist()
     for i, (current_mass, current_intensity) in enumerate(sorted_peaks):
         # Skip if already processed
         if consumed[i]:
@@ -3864,7 +3872,7 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
         consumed[lo:hi] = [True] * (hi - lo)
         best_pattern = [(current_mass, current_intensity)]
         # Check all charge states
-        for spacing in spacings:
+        for spacing in spacings if partner[i] else []:
             next_mass = current_mass
             charge_pattern = [(current_mass, current_intensity)]
             # Fast-forward to relevant mass range

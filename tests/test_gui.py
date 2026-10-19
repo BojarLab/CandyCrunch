@@ -96,6 +96,22 @@ def test_gui_experiments(app):
     assert [name for name, _, _ in panel.experiments()] == ['Experiment 1'] and len(panel.paths()) == 3
 
 
+def test_gui_glycan_class_list(app):
+    from candycrunch import gui
+    panel = gui.SettingsPanel()
+    # N- and O-glycans measured together are one choice, sent to wrap_inference as a list; lists from sessions come back in any order
+    panel.set_values({**panel.values(), 'glycan_class': ['O', 'N']})
+    assert panel.inputs['glycan_class'].currentData() == 'N+O' and panel.values()['glycan_class'] == ['N', 'O']
+    # A list the combo does not offer becomes a choice of its own, and a list of one class is that class
+    panel.set_values({**panel.values(), 'glycan_class': ['free', 'O']})
+    assert panel.values()['glycan_class'] == ['O', 'free'] and panel.inputs['glycan_class'].currentText() == 'O-glycans and Free oligosaccharides (e.g., milk)'
+    panel.set_values({**panel.values(), 'glycan_class': ['lipid']})
+    assert panel.values()['glycan_class'] == 'lipid'
+    panel.add_paths([os.path.abspath('a.mzML')], detect = False)
+    panel.set_values({**panel.values(), 'glycan_class': ['N', 'O']})
+    assert panel.experiments()[0][2]['glycan_class'] == ['N', 'O']
+
+
 def test_gui_supporting_ions(app):
     import time
     from candycrunch import gui

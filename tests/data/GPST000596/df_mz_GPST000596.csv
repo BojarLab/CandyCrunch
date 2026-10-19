@@ -58,5 +58,6 @@ Mass,charge,RT,glycan,20240402_PVelos_KC_NG_PLT008_K2,composition,source,RT_sour
 1075.8917,-2,24.68,,0.1923,Hex6HexNAc5dHex1,added,,,,distinct envelope peak with MS2 at 24.79
 1119.3895,-2,32.36,,0.224,Hex5HexNAc4Neu5Ac1Neu5Gc1,added,,,,distinct envelope peak with MS2 at 32.33
 1309.9531,-2,33.32,,0.2377,Hex6HexNAc5Neu5Gc2,added,,,,"distinct envelope peak with MS2 at 33.26, 33.29 (weak: signal 2-5x the local median, like the given 1156.4/1229.4 rows)"
+1309.9531,-2,31.97,,0.1821,Hex6HexNAc5Neu5Gc2,added,,,,"added (GT audit 2026-10-18): distinct envelope peak at 31.97 (193 counts on M-0.3..M+1.0, valley 0.28 towards 33.32, 2.1x the local median) with 1 MS2 at 32.05 (precursor 1309.93, 5 of 10 top fragments annotated); no superset co-apex; open"
 1309.9531,-2,38.04,,0.1428,Hex6HexNAc5Neu5Gc2,added,,,,"distinct envelope peak with MS2 at 38.08 (weak: signal 2-5x the local median, like the given 1156.4/1229.4 rows)"
 1382.982,-2,36.87,,0.119,Hex6HexNAc5Neu5Gc2dHex1,added,,,,"distinct envelope peak with MS2 at 36.55, 36.94 (weak: signal 2-5x the local median, like the given 1156.4/1229.4 rows)"

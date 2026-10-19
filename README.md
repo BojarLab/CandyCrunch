@@ -41,7 +41,7 @@ If you would like to run our main inference function from the command line, you 
 #### Requires at a minimum:
 <pre>
 --spectra_filepath, type=string(s): one or more filepaths to Thermo .raw files, Bruker timsTOF .d folders, mzML, mzXML, or mgf files or .xlsx files, and/or folders of .raw, .d, mzML, mzXML, or mgf files (the .xlsx files in a folder are not used); several files are processed together via `wrap_inference_batch` <br />
---glycan_class, type=string: the glycan class measured ("N", "O", "lipid"/"free") <br />
+--glycan_class, type=string(s): the glycan class measured ("N", "O", "lipid"/"free"), or several measured together in one run (e.g., `--glycan_class N O`) <br />
 --output, type=string: an output filepath ending with `.csv` or `.xlsx`
 </pre>
 
@@ -103,7 +103,7 @@ Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `C
 #### Requires at a minimum:  
 <pre>
 - spectra_filepath, type = string: a filepath to a Thermo .raw file, a Bruker timsTOF .d folder, an mzML, mzXML, or mgf file, or a .xlsx file <br />
-- glycan_class,type = string: the glycan class measured ("N", "O", "lipid"/"free")
+- glycan_class,type = string or list: the glycan class measured ("N", "O", "lipid"/"free"), or a list of the classes measured together in one run (e.g., `["N", "O"]` for N- and O-glycans released from one sample)
 </pre>
 Thermo .raw, Bruker timsTOF .d, mzML, mzXML, and mgf files are internally processed into extracted spectra; .raw files are read directly (via [opentfraw](https://github.com/Sigilweaver/OpenTFRaw)), and timsTOF .d folders of DDA-PASEF runs via [timsrust](https://github.com/MannLabs/timsrust), without any conversion or vendor software (survey frames are summed over their ion mobility scans, m/z come from the file's own TOF calibration, and the unfragmented precursor is removed from MS2 spectra; diaPASEF and timsTOF data without ion mobility (.tsf) are not supported). Bruker ion trap .d folders (esquire, HCT, amaZon, with an Analysis.yep) are read directly as well, from the centroided line spectra the instrument stores. With accurate (orbitrap or timsTOF) survey scans, a peak the model has no structure for gets a database structure of its composition (evidence 'composition') if the precursor m/z pins that composition and its fragments back the structure up. mzML files converted from timsTOF data work with or without combining ion mobility scans in msconvert. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `candycrunch.prediction`) writes such an xlsx from a .raw, mzML, mzXML or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept). `extract_spectra(spectra_filepath, file_format = 'cc')` instead writes a compact binary .cc file that keeps everything CandyCrunch reads from the original file (MS2 and MS3 spectra exactly as loaded, the detected ion mode and analyzers, and the survey scans), so predictions and XIC quantification from it match the original (a 38 MB mzML becomes a 4.8 MB .cc, read in a tenth of a second); it is a zip of numpy arrays that `numpy.load` opens.
 <details>
@@ -183,7 +183,7 @@ At each composition, an isomer group is kept if it is among the top_n_isomers gr
 #### Requires at a minimum:  
 <pre>
 - spectra_filepath_list, type = list: list of filepaths to Thermo .raw files, Bruker timsTOF .d folders, mzML, mzXML, or mgf files and/or .xlsx files <br />
-- glycan_class, type = string: the glycan class measured ("N", "O", "lipid"/"free") <br />
+- glycan_class, type = string or list: the glycan class measured ("N", "O", "lipid"/"free"), or a list of the classes measured together in one run <br />
 - intra_cat_thresh, type = float: minutes the RT of a structure can differ from the mean of a group. <br />
 </pre>
 
