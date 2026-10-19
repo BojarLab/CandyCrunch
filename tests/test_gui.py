@@ -451,3 +451,27 @@ def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
     assert not send.isEnabled() and dialog.correct.text() == 'Gal(b1-4)GlcNAc' and dialog.include_data.isChecked()
     gui._set_combo(dialog.problem, 'structure')
     assert send.isEnabled()
+
+
+def test_gui_progress_wrappers(monkeypatch):
+    # The app's worker runs the pipeline through the progress wrappers _install_progress puts around prediction.py: a run through them must still predict
+    # (get_topk's own batching once failed on a wrapped loader, which only the built app's self-test caught) and count get_topk's batches
+    import queue
+    from candycrunch import gui
+    import candycrunch.prediction as cp
+    # The wrappers stay on the module for the rest of the process; restoring its attributes keeps them out of later tests
+    for name, value in vars(cp).copy().items():
+        if not name.startswith('__'):
+            monkeypatch.setattr(cp, name, value)
+    monkeypatch.setattr(cp, '_progress_installed', False, raising = False)
+    messages = queue.Queue()
+    gui._install_progress(messages, gui.STAGE_WEIGHTS, 1)
+    df = cp.wrap_inference(gui.EXAMPLE_RUN, 'O')
+    stage, progress = None, []
+    while not messages.empty():
+        kind, payload = messages.get()
+        stage = payload[0] if kind == 'stage' else stage
+        if kind == 'progress' and stage == 'get_topk':
+            progress.append(payload[1])
+    # Each get_topk call reports its start; only counted batches move it on
+    assert df['top1_pred'].notna().any() and progress and max(progress) > progress[0]

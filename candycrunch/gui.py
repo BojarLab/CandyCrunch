@@ -312,14 +312,14 @@ def _install_progress(messages, weights, n_files):
         p['done'] += done
         if p['todo'] and p['stage'] in p['shares'] and p['key'] != 'tail':
             report(p['starts'][p['stage']] + p['shares'][p['stage']] * min(p['done'] / p['todo'], 1.0))
-    class Batches:
-        """get_topk's dataloader, counting batches"""
-        def __init__(self, loader):
-            self.loader, self.dataset = loader, loader.dataset
-        def __iter__(self):
-            for batch in self.loader:
-                yield batch
-                advance(1)
+    class Counted:
+        """get_topk's model, counting batches (get_topk makes its own batches from a plain loader, so wrapping the loader would not see them)"""
+        def __init__(self, model):
+            self.model = model
+        def __call__(self, *inputs):
+            out = self.model(*inputs)
+            advance(1)
+            return out
     def staged(func, name):
         def run(*args, **kwargs):
             p = _PROGRESS
@@ -342,7 +342,7 @@ def _install_progress(messages, weights, n_files):
                 p['todo'] = args[0]['candidate_structure'].nunique()
             elif name == 'get_topk':
                 p['todo'] = len(args[0])
-                args = (Batches(args[0]),) + args[1:]
+                args = (args[0], Counted(args[1])) + args[2:]
             return func(*args, **kwargs)
         return run
     for name in STAGES:
