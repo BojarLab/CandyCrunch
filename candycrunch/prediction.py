@@ -34,7 +34,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2
-from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
+from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, read_raw_packet, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir, this_filename = os.path.split(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
@@ -524,41 +524,24 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, and activation as in
    | process_mzML_stack; precursor m/z, charge and intensity follow ThermoRawFileParser, which converted the mzML files CandyCrunch was validated on
    """
-    raw, table, index_addr, data_addr = read_raw_scan_table(filepath)
+    table = read_raw_scan_table(filepath)
     peak_ds, rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], [], []
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
-    # One handle for the packets of every profile scan (opening the file per scan took a quarter of the reading time)
-    ms3s, isolations, packets = [], [], open(filepath, 'rb') if index_addr else None
-    for i, scan in enumerate(range(raw.first_scan, raw.last_scan + 1)):
+    # One handle for the packets of every scan (opening the file per scan took a quarter of the reading time)
+    ms3s, isolations, packets = [], [], open(filepath, 'rb')
+    for i, scan in enumerate(table['scan']):
         if table['ms_level'][i] not in (1, ms_level, ms_level + 1):
             continue
-        peak_mzs, peak_ints = raw.peaks(scan)
+        peak_mzs, peak_ints, profile = read_raw_packet(packets, table['packet'][i])
         # Ion-trap profile scans come without centroids. Like Thermo's centroider, which made the centroids of mzML files from such runs, profile
         # points below 1 are dropped, the profile is split at the lowest point between maxima and neighboring centroids closer than 0.5 m/z are
-        # merged, each carrying the summed signal of its share of the profile at its intensity-weighted m/z
-        if not len(peak_mzs) and table['scan_mode'][i] == 'profile' and table['analyzer'][i] != 'FTMS':
-            if index_addr:
-                # opentfraw 2.0.0 also converts these profiles with coefficients of the misread events, but ion-trap profile bins are m/z already,
-                # so each chunk's m/z (and its intensities, as opentfraw gives them) are read from the scan's packet: 40-byte header, 8 bytes per
-                # further segment, then the profile
-                packets.seek(index_addr + 88 * i + 72)
-                packets.seek(data_addr + int.from_bytes(packets.read(8), 'little'))
-                head = packets.read(40)
-                packets.seek(8 * max(int.from_bytes(head[:4], 'little') - 1, 0), 1)
-                prof = packets.read(4 * int.from_bytes(head[4:8], 'little'))
-                (first_value, step), fudge, pos, prof_mzs, prof_ints = np.frombuffer(prof, '<f8', 2), head[12] > 0, 24, [np.zeros(0)], [np.zeros(0)]
-                for _ in range(int.from_bytes(prof[16:20], 'little')):
-                    first_bin, n = np.frombuffer(prof, '<u4', 2, pos)
-                    fudge_mz = np.frombuffer(prof, '<f4', 1, pos + 8)[0] if fudge else 0
-                    prof_mzs.append(first_value + np.arange(first_bin, first_bin + n) * step + fudge_mz)
-                    prof_ints.append(np.frombuffer(prof, '<f4', int(n), pos + 8 + 4 * fudge))
-                    pos += 8 + 4 * fudge + 4 * int(n)
-                prof_mzs, prof_ints = np.concatenate(prof_mzs), np.concatenate(prof_ints)
-            else:
-                prof_mzs, prof_ints = raw.profile(scan)
-            # opentfraw's profile axis sits one bin below Thermo's, which centroid_ion_trap expects
-            peak_mzs, peak_ints = centroid_ion_trap(prof_mzs + (np.median(np.diff(prof_mzs)) if len(prof_mzs) > 1 else 0), prof_ints).T
+        # merged, each carrying the summed signal of its share of the profile at its intensity-weighted m/z. The stored profile axis sits one bin
+        # below Thermo's, which centroid_ion_trap expects; orbitrap scans always come with centroids
+        if profile:
+            if table['scan_mode'][i] != 'profile' or table['analyzer'][i] == 'FTMS':
+                continue
+            peak_mzs, peak_ints = centroid_ion_trap(peak_mzs + (np.median(np.diff(peak_mzs)) if len(peak_mzs) > 1 else 0), peak_ints).T
         if not len(peak_mzs):
             continue
         if table['ms_level'][i] == 1:
@@ -610,11 +593,10 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         if intensity:
             # ThermoRawFileParser's precursor intensity: summed centroids within 1.5 m/z of the isolation m/z in the trailer's master scan (tribrids
             # acquire MS2 in parallel with the next survey scan), else in the preceding survey scan; LTQ trailers only carry a 'Master Index:', no scan
-            s = ms1_index.get((raw.scan_parameters(scan) or {}).get('Master Scan Number:'), len(ms1_rts) - 1)
+            s = ms1_index.get(table['master_scan'][i], len(ms1_rts) - 1)
             intensities.append(
                 float(ms1_ints[s][(ms1_mzs[s] >= iso - 1.5) & (ms1_mzs[s] < iso + 1.5)].sum()) if s >= 0 else np.nan)
-    if packets is not None:
-        packets.close()
+    packets.close()
     df_out = pd.DataFrame({
         'm/z': mzs,
         'peak_d': peak_ds,

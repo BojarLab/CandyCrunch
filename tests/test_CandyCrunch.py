@@ -774,6 +774,58 @@ def test_tdf_frames(tmp_path):
     assert outputs[0]['peak_d'][0] == outputs[1]['peak_d'][0]
 
 
+def test_thermo_raw(tmp_path):
+    # A version 66 Thermo .raw file with an ion-trap profile survey scan (a peak at 1000.0 on Thermo's axis, stored one bin lower) and two centroided MS2
+    # scans, one with an undetermined precursor (isolation m/z and no charge) and one with the instrument's monoisotopic m/z, charge and master scan;
+    # their scan events differ in size, and the trailer extra header sits behind the error log
+    def text(s):
+        return struct.pack('<I', len(s)) + s.encode('utf-16-le')
+    def event(level, mode, reactions):
+        preamble = bytearray(136)
+        preamble[4:7] = bytes([0, mode, level])
+        return (bytes(preamble) + struct.pack('<I', len(reactions)) + b''.join(struct.pack('<3dI28x', mz, 2.0, energy, code << 1) for mz, energy, code in reactions)
+                + struct.pack('<I2dI3I', 1, 150.0, 2000.0, 0, 0, 0, 0))
+    profile = struct.pack('<2d2I2I5f', 100.0, 0.1, 1, 0, 8997, 5, 10, 50, 100, 50, 10)
+    centroids = [[(400.1, 50.0), (600.2, 100.0)], [(300.0, 20.0)]]
+    packets = [struct.pack('<4I24x', 1, len(profile) // 4, 0, 0) + profile] + [struct.pack('<4I24x', 1, 0, 1 + 2 * len(c), 0) + struct.pack('<I', len(c))
+                                                                                  + b''.join(struct.pack('<2f', *p) for p in c) for c in centroids]
+    events = event(1, 1, []) + event(2, 0, [(1000.0, 35.0, 0)]) + event(2, 0, [(1000.5, 30.0, 5)])
+    header = struct.pack('<I', 3) + b''.join(struct.pack('<2I', kind, 0) + text(label) for kind, label in [(11, 'Monoisotopic M/Z:'), (6, 'Charge State:'), (8, 'Master Scan Number:')])
+    trailer = struct.pack('<dhi', 0, 0, 0) + struct.pack('<dhi', 0, 0, 1) + struct.pack('<dhi', 1000.02, 2, 1)
+    start = 1356 + 64 + 32 * 4 + 24 + 4
+    run_header, data = start + 824 + 32, start + 824 + 32 + 7464
+    index = data + sum(len(p) for p in packets)
+    errors = index + 3 * 88
+    events_addr = errors + 4 + len(header)
+    params = events_addr + 4 + len(events)
+    head = bytearray(1356)
+    head[0:18], head[36:40] = b'\x01\xa1' + 'Finnigan'.encode('utf-16-le'), struct.pack('<I', 66)
+    info = bytearray(824)
+    info[28:32] = struct.pack('<I', 1)
+    rh = bytearray(7464)
+    rh[8:24] = struct.pack('<4I', 1, 3, 0, 0)
+    rh[7376:7380] = struct.pack('<I', 3)
+    rh[7408:7464] = struct.pack('<7Q', index, data, 0, errors, 0, events_addr, params)
+    entries = b''
+    for k, (rt, packet) in enumerate(zip([10.0, 10.01, 10.02], np.cumsum([0] + [len(p) for p in packets[:-1]]))):
+        entry = bytearray(88)
+        entry[24:32], entry[72:80] = struct.pack('<d', rt), struct.pack('<Q', int(packet))
+        entries += bytes(entry)
+    path = tmp_path / 'run.raw'
+    path.write_bytes(bytes(head) + bytes(64) + text('') * 16 + bytes(4) + text('') * 15 + bytes(24) + text('') + bytes(info) + struct.pack('<Q24x', run_header)
+                     + bytes(rh) + b''.join(packets) + entries + bytes(4) + header + bytes(4) + events + trailer)
+    table = candycrunch.utils.read_raw_scan_table(str(path))
+    assert table['ms_level'] == [1, 2, 2] and table['filter_string'] == ['', '1000.0000@cid35.00', '1000.5000@hcd30.00']
+    assert table['precursor_mz'] == [None, 1000.0, 1000.02] and table['charge'] == [None, None, 2] and table['master_scan'] == [None, 1, 1]
+    df = process_raw_stack(str(path), intensity = True, extract_ms1 = True)
+    _, ms1_mzs, ms1_ints, _ = df.attrs['ms1']
+    assert np.allclose(ms1_mzs, [1000.0]) and np.allclose(ms1_ints, [220])
+    assert df.attrs['detected_mode'] == 'negative' and df.attrs['detected_trap'] == df.attrs['detected_ms1_trap'] == 'linear'
+    assert np.allclose(df['m/z'], [1000.0, 1000.02]) and pd.isna(df['precursor_charge'][0]) and df['precursor_charge'][1] == 2
+    assert list(df['scan']) == [2, 3] and list(df['activation']) == ['CID', 'HCD'] and np.allclose(df['intensity'], [220, 220]) and np.allclose(df['RT'], [10.01, 10.02])
+    assert np.allclose(list(df['peak_d'][0]), [600.2, 400.1]) and list(df['peak_d'][0].values()) == [100, 50]
+
+
 def test_qtof_mzml(tmp_path):
     # A Waters Q-TOF DDA run as msconvert writes it (pwiz's ATEHLSTLSEK_LM_684.3469.raw): the generic Waters model without analyzers, native IDs
     # function=f process=0 scan=s, survey scans in function 1, the lockmass function 3 written as MS1 scans between them and the MS2 spectra (function 2),

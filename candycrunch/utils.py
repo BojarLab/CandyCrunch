@@ -1,4 +1,4 @@
-"""Readers for mzML, mzXML and mgf spectra files and for the scan table of Thermo .raw files, on the standard library, numpy and opentfraw"""
+"""Readers for mzML, mzXML, mgf, and Thermo .raw spectra files, on the standard library and numpy"""
 import base64
 import heapq
 import itertools
@@ -7,7 +7,13 @@ import struct
 import zlib
 import xml.etree.ElementTree as ET
 import numpy as np
-import opentfraw
+# Thermo .raw trailer extra fields: numpy types of the generic data types (0 is a gap, 2-4 are booleans; 12 and 13, strings of the declared length
+# in ASCII or UTF-16, are not read)
+RAW_FIELD_TYPES = {0: 'V0', 1: 'i1', 2: 'u1', 3: 'u1', 4: 'u1', 5: 'u1', 6: '<i2', 7: '<u2', 8: '<i4', 9: '<u4', 10: '<f4', 11: '<f8'}
+# The trailer extra fields read per scan (Thermo writes 0 for a monoisotopic m/z or charge state it did not determine)
+RAW_TRAILER_FIELDS = ('Monoisotopic M/Z:', 'Charge State:', 'MS2 Isolation Width:', 'MSn Isolation Width:', 'Master Scan Number:')
+# Activation of a scan event reaction, bits 1 and up of the u32 after its energy (Thermo's ActivationType)
+RAW_ACTIVATIONS = {0: 'cid', 1: 'mpd', 2: 'ecd', 3: 'pqd', 4: 'etd', 5: 'hcd', 8: 'ptr', 9: 'netd', 10: 'nptr', 11: 'uvpd'}
 # A timsTOF survey frame summed over its ion mobility scans holds ~40k centroids, mostly single-ion noise; the 5000 most intense reach down to ~0.04%
 # of the base peak and keep the MS1 data of an hour-long run near 150 MB
 TIMS_MS1_PEAKS = 5000
@@ -370,65 +376,164 @@ def read_mgf(filepath):
 
 
 def read_raw_scan_table(filepath):
-    """opens a Thermo .raw file with opentfraw and reads its scan table, rebuilt from the scan events where opentfraw misreads them\n
+    """reads the scan table of a Thermo .raw file (format versions 57 to 66, i.e. Xcalibur 2.0 and later) from its scan index, scan events and trailer\n
    | Arguments:
    | :-
    | filepath (string): absolute filepath to the .raw file\n
    | Returns:
    | :-
-   | Returns the opentfraw RawFile, its scan table (a list per column: ms_level, polarity, scan_mode, analyzer, filter_string, precursor_mz, charge,
-   | isolation_width, retention_time, ...), and the index and data addresses of the scan packets if the table was rebuilt (else 0 and 0)
+   | Returns the scan table as a list per column, one entry per scan: scan, ms_level, polarity, scan_mode, analyzer, filter_string (isolation m/z,
+   | activation and energy of each stage, e.g., 1022.4700@etd50.00), precursor_mz, charge, isolation_width, master_scan, retention_time, and packet
+   | (the file offset of the scan's data packet, for read_raw_packet)
    """
-    raw = opentfraw.RawFile(filepath)
-    table = raw.scan_table()
-    # opentfraw 2.0.0 and 3.0.0 misread the scan events of version 66 files from ion traps (LTQ, LTQ XL, LTQ Orbitrap Velos with Xcalibur 4): they are
-    # self-describing (136-byte preamble, then counted 56-byte reactions, 16-byte scan windows and 8-byte coefficients, then 3 u32), not of the
-    # fixed size it assumes. Its peaks, profile intensities, retention times and trailers are right, so if this layout walks exactly over the event
-    # stream, the columns read below are rebuilt from the events and the trailer
-    index_addr, data_addr = 0, 0
     with open(filepath, 'rb') as f:
-        f.seek(36)
-        if int.from_bytes(f.read(4), 'little') >= 66:
-            # Skips the sequence row (64 bytes, 31 strings with a u32 after the 16th) and the autosampler info (24 bytes, a string), each string
-            # being a u32 count of UTF-16 characters followed by them
-            f.seek(1420)
-            for size in [None] * 16 + [4] + [None] * 15 + [24, None]:
-                f.seek(size or 2 * int.from_bytes(f.read(4), 'little'), 1)
-            info = f.read(824)
-            addrs = f.read(16 * max(int.from_bytes(info[28:32], 'little'), 2))
-            # The MS controller's run header has scan events or the file's data address
-            for a in range(0, len(addrs), 16):
-                f.seek(int.from_bytes(addrs[a:a + 8], 'little'))
-                run_header = f.read(7464)
-                n_events = int.from_bytes(run_header[7376:7380], 'little')
-                if int.from_bytes(addrs[a:a + 8], 'little') and (n_events or run_header[7416:7424] == info[808:816]):
+        head = f.read(1356)
+        version = int.from_bytes(head[36:40], 'little')
+        if head[2:18] != 'Finnigan'.encode('utf-16-le') or version < 57:
+            raise ValueError(f"{filepath} is not a Thermo .raw file of Xcalibur 2.0 or later (format version {version}); convert it to mzML with "
+                             f"ThermoRawFileParser or msconvert first.")
+        wide = version >= 64
+        # Skips the sequence row (64 bytes, then 16 strings, a u32 and, from version 60, 15 more strings) and the autosampler info (24 bytes, a
+        # string), each string being a u32 count of UTF-16 characters followed by them
+        f.seek(1420)
+        for size in [None] * 16 + [4] + [None] * (15 if version >= 60 else 0) + [24, None]:
+            f.seek(size or 2 * int.from_bytes(f.read(4), 'little'), 1)
+        # The file info lists the run header of each controller (MS, UV, pump, ...) from byte 824 as u64 every 16 bytes, before version 64 from byte 44
+        # as u32 every 12 bytes; the MS controller is the one with scan events
+        info = f.read(824 if wide else 44)
+        stride, width = (16, 8) if wide else (12, 4)
+        addrs = f.read(stride * max(int.from_bytes(info[28:32], 'little'), 2))
+        for a in range(0, len(addrs), stride):
+            f.seek(int.from_bytes(addrs[a:a + width], 'little'))
+            run_header = f.read(7464)
+            if int.from_bytes(addrs[a:a + width], 'little') and len(run_header) == 7464 and int.from_bytes(run_header[7376:7380], 'little'):
+                break
+        else:
+            raise ValueError(f"{filepath} holds no scan events (e.g. SRM data of a triple quadrupole), which CandyCrunch cannot use.")
+        first, last, _, n_errors = struct.unpack_from('<4I', run_header, 8)
+        if wide:
+            index_addr, data_addr, _, error_addr, _, trailer_addr, params_addr = struct.unpack_from('<7Q', run_header, 7408)
+        else:
+            (index_addr, data_addr, _, error_addr), (trailer_addr, params_addr) = struct.unpack_from('<4I', run_header, 28), struct.unpack_from('<2I', run_header, 7368)
+        n_scans = last - first + 1
+        # Scan index: 72 bytes per scan (88 from version 66) with the retention time (minutes) at byte 24 and the packet offset at 0 (u32), from
+        # version 64 at 72 (u64)
+        f.seek(index_addr)
+        index = np.frombuffer(f.read((88 if version >= 66 else 80 if wide else 72) * n_scans),
+                              {'names': ['offset', 'rt'], 'formats': ['<u8' if wide else '<u4', '<f8'], 'offsets': [72 if wide else 0, 24],
+                               'itemsize': 88 if version >= 66 else 80 if wide else 72})
+        f.seek(trailer_addr + 4)
+        stream = f.read(params_addr - trailer_addr - 4)
+        # The trailer extra header (a u32 field count, then per field a u32 type, a u32 length and its label) follows the error log and the method's
+        # scan event templates; its records, one per scan, start at params_addr
+        f.seek(error_addr + 4 * wide)
+        for _ in range(n_errors):
+            f.seek(4, 1)
+            f.seek(2 * int.from_bytes(f.read(4), 'little'), 1)
+        region = f.read(1 << 20)
+        trailer, end = {}, region.find('Charge State:'.encode('utf-16-le'))
+        for pos in range(0, max(end, 0), 2):
+            n, fields, p = int.from_bytes(region[pos:pos + 4], 'little'), [], pos + 4
+            while 2 <= n <= 500 and len(fields) < n and p + 12 <= len(region):
+                kind, length, chars = struct.unpack_from('<3I', region, p)
+                if kind > 13 or chars > 200:
                     break
-            trailer_addr, params_addr = int.from_bytes(run_header[7448:7456], 'little'), int.from_bytes(run_header[7456:7464], 'little')
-            f.seek(trailer_addr + 4)
-            stream = f.read(max(params_addr - trailer_addr - 4, 0))
-            starts, pos = [], 0
-            while pos + 148 <= len(stream) and len(starts) < n_events:
-                starts.append(pos)
-                pos += 140 + 56 * int.from_bytes(stream[pos + 136:pos + 140], 'little')
-                pos += 4 + 16 * int.from_bytes(stream[pos:pos + 4], 'little')
-                pos += 16 + 8 * int.from_bytes(stream[pos:pos + 4], 'little')
-            if pos == len(stream) and len(starts) == len(table['ms_level']) and len(set(np.diff(starts + [pos]))) > 1:
-                index_addr, data_addr = int.from_bytes(run_header[7408:7416], 'little'), int.from_bytes(info[808:816], 'little')
-                for i, s in enumerate(starts):
-                    level = max(stream[s + 6], 1)
-                    reactions = [np.frombuffer(stream, '<f8', 3, s + 140 + 56 * k) for k in range(int.from_bytes(stream[s + 136:s + 140], 'little'))]
-                    act = {1: 'hcd', 3: 'etd', 4: 'cid', 5: 'ecd'}.get(stream[s + 24], '')
-                    params = (raw.scan_parameters(raw.first_scan + i) or {}) if level > 1 else {}
-                    mono, charge = params.get('Monoisotopic M/Z:') or 0, int(params.get('Charge State:') or 0)
-                    table['ms_level'][i] = level
-                    table['polarity'][i] = {0: '-', 1: '+'}.get(stream[s + 4])
-                    table['scan_mode'][i] = {0: 'centroid', 1: 'profile'}.get(stream[s + 5])
-                    table['analyzer'][i] = {0: 'ITMS', 1: 'TQMS', 2: 'SQMS', 3: 'TOFMS', 4: 'FTMS', 5: 'Sector'}.get(stream[s + 40])
-                    table['filter_string'][i] = ' '.join(f'{mz:.4f}@{act}{energy:.2f}' for mz, width, energy in reactions if mz > 0)
-                    table['precursor_mz'][i] = mono if mono > 0 else float(reactions[-1][0]) if reactions else None
-                    table['charge'][i] = charge if charge > 0 else None
-                    table['isolation_width'][i] = params.get('MS2 Isolation Width:') or params.get('MSn Isolation Width:')
-    return raw, table, index_addr, data_addr
+                fields.append((kind, length, region[p + 12:p + 12 + 2 * chars].decode('utf-16-le', 'replace').split('\x00')[0]))
+                p += 12 + 2 * chars
+            sizes = [np.dtype(RAW_FIELD_TYPES[kind]).itemsize if kind in RAW_FIELD_TYPES else length * (1 + (kind == 13)) for kind, length, _ in fields]
+            if len(fields) == n and 'Charge State:' in [label for _, _, label in fields] and n_scans * sum(sizes) <= f.seek(0, 2) - params_addr:
+                # First field of each label, as the instrument's software reads them
+                columns = {label: (RAW_FIELD_TYPES[kind], int(o)) for (kind, _, label), o in reversed(list(zip(fields, np.cumsum([0] + sizes))))
+                           if label in RAW_TRAILER_FIELDS and kind in RAW_FIELD_TYPES}
+                f.seek(params_addr)
+                records = np.frombuffer(f.read(n_scans * sum(sizes)), {'names': list(columns), 'formats': [t for t, _ in columns.values()],
+                                                                        'offsets': [o for _, o in columns.values()], 'itemsize': sum(sizes)})
+                trailer = {label: records[label].tolist() for label in columns}
+                break
+    # Scan events, one per scan, are self-describing: a preamble (120 bytes in version 62, 128 in 63 and 64, 136 from 66) with polarity at byte 4,
+    # profile mode at 5, MS level at 6 and analyzer at 40, then counted reactions (isolation m/z, isolation width and energy as doubles, then the
+    # activation in bits 1 and up of a u32; 32 bytes, 56 from version 66), counted scan windows (16 bytes) and counted calibration coefficients (8 bytes),
+    # then a few u32 (2 before version 66, then 3, 5 in newer Q Exactive firmware), so the layout is the one that walks exactly over the stream
+    preamble, reaction = {57: 80, 60: 80, 62: 120, 63: 128, 64: 128}.get(version, 136), 56 if version >= 66 else 32
+    for tail in (12, 20, 8, 4, 16, 24, 28):
+        starts, pos = [], 0
+        while pos + preamble + 4 <= len(stream) and len(starts) < n_scans:
+            starts.append(pos)
+            pos += preamble + 4 + reaction * int.from_bytes(stream[pos + preamble:pos + preamble + 4], 'little')
+            pos += 4 + 16 * int.from_bytes(stream[pos:pos + 4], 'little')
+            pos += 4 + 8 * int.from_bytes(stream[pos:pos + 4], 'little') + tail
+        if pos == len(stream) and len(starts) == n_scans:
+            break
+    else:
+        raise ValueError(f"{filepath} stores its scan events in a layout CandyCrunch does not know; convert it to mzML with ThermoRawFileParser or "
+                         f"msconvert first.")
+    table = {key: [] for key in ['scan', 'ms_level', 'polarity', 'scan_mode', 'analyzer', 'filter_string', 'precursor_mz', 'charge',
+                                 'isolation_width', 'master_scan', 'retention_time', 'packet']}
+    for i, s in enumerate(starts):
+        level = max(stream[s + 6], 1)
+        # MS1 events of some orbitraps carry their scan range as a reaction
+        reactions = [struct.unpack_from('<3dI', stream, s + preamble + 4 + reaction * k)
+                     for k in range(int.from_bytes(stream[s + preamble:s + preamble + 4], 'little'))] if level > 1 else []
+        mono, charge, ms2_width, msn_width, master = (trailer[label][i] if label in trailer and level > 1 else None for label in RAW_TRAILER_FIELDS)
+        table['scan'].append(first + i)
+        table['ms_level'].append(level)
+        table['polarity'].append({0: '-', 1: '+'}.get(stream[s + 4]))
+        table['scan_mode'].append({0: 'centroid', 1: 'profile'}.get(stream[s + 5]))
+        table['analyzer'].append({0: 'ITMS', 1: 'TQMS', 2: 'SQMS', 3: 'TOFMS', 4: 'FTMS', 5: 'Sector'}.get(stream[s + 40]))
+        # A supplemental activation (EThcD, ETciD) is a further reaction without an m/z of its own or with the stage's m/z
+        stages = []
+        for mz, _, energy, code in reactions:
+            if stages and (mz <= 0 or mz == stages[-1][0]):
+                stages[-1][1] += f"@{RAW_ACTIVATIONS.get(code >> 1, 'cid')}{energy:.2f}"
+            elif mz > 0:
+                stages.append([mz, f"@{RAW_ACTIVATIONS.get(code >> 1, 'cid')}{energy:.2f}"])
+        table['filter_string'].append(' '.join(f'{mz:.4f}{activations}' for mz, activations in stages))
+        # The instrument's monoisotopic m/z where it determined one (else 0), otherwise the isolation m/z of the last stage
+        table['precursor_mz'].append(mono if mono and mono > 0 else reactions[-1][0] if reactions else None)
+        table['charge'].append(int(charge) if charge and charge > 0 else None)
+        table['isolation_width'].append(ms2_width or msn_width)
+        table['master_scan'].append(master)
+        table['retention_time'].append(float(index['rt'][i]))
+        table['packet'].append(data_addr + int(index['offset'][i]))
+    return table
+
+
+def read_raw_packet(f, address):
+    """reads the data packet of one scan of a Thermo .raw file\n
+   | Arguments:
+   | :-
+   | f (file): the .raw file, opened in binary mode
+   | address (int): file offset of the scan's data packet (the scan table's packet)\n
+   | Returns:
+   | :-
+   | Returns m/z (float64) and intensity of the scan's centroids (float32), or if it has none, of its profile points (float64) as stored (one bin
+   | below the axis of Thermo's own export; orbitrap profiles are in frequency), and whether these are profile points
+   """
+    # 40-byte header (number of scan segments, then the sizes of the profile and the centroid list in 4-byte words and the layout flags), 8 bytes
+    # (m/z range) per further segment, the profile, then the centroid list: its length, then float32 m/z (double with layout flag 0x10000) and
+    # float32 intensity per centroid
+    f.seek(address)
+    n_segments, profile_size, peaks_size, layout = struct.unpack_from('<4I', f.read(40))
+    profile_addr = f.seek(8 * max(n_segments - 1, 0), 1)
+    if peaks_size:
+        f.seek(4 * profile_size, 1)
+        n = int.from_bytes(f.read(4), 'little')
+        peaks = np.frombuffer(f.read(n * (12 if layout & 0x10000 else 8)), [('mz', '<f8' if layout & 0x10000 else '<f4'), ('int', '<f4')])
+        if n:
+            return peaks['mz'].astype(np.float64), peaks['int'].copy(), False
+    # Profile: first value and step of the bin axis (doubles), the number of chunks, then per chunk its first bin and number of bins (u32), a
+    # float32 m/z offset if the layout has one, and its intensities (float32)
+    f.seek(profile_addr)
+    prof = f.read(4 * profile_size)
+    if len(prof) < 24:
+        return np.zeros(0), np.zeros(0), False
+    (first_value, step), fudge, pos, mzs, ints = struct.unpack_from('<2d', prof), layout & 0xFF > 0, 24, [np.zeros(0)], [np.zeros(0)]
+    for _ in range(int.from_bytes(prof[16:20], 'little')):
+        first_bin, n = struct.unpack_from('<2I', prof, pos)
+        mzs.append(first_value + np.arange(first_bin, first_bin + n) * step + (np.frombuffer(prof, '<f4', 1, pos + 8)[0] if fudge else 0))
+        ints.append(np.frombuffer(prof, '<f4', n, pos + 8 + 4 * fudge))
+        pos += 8 + 4 * fudge + 4 * n
+    return np.concatenate(mzs), np.concatenate(ints), True
 
 
 def mz_order(mzs, rts, charges, compositions):

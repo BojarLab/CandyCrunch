@@ -444,7 +444,7 @@ def _detect_run(path, results):
                     charges = {int(c): int(k) for c, k in zip(*np.unique(z[~np.isnan(z)], return_counts = True))}
         elif ext == '.raw':
             from candycrunch.utils import read_raw_scan_table
-            _, table, _, _ = read_raw_scan_table(path)
+            table = read_raw_scan_table(path)
             ms2 = [i for i, level in enumerate(table['ms_level']) if level == 2]
             n_ms2 = len(ms2)
             if ms2:

@@ -26,7 +26,6 @@ dependencies = [
     "numpy<2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
     "numpy",
     "pandas>=2.2.2",
-    "opentfraw>=2.0,<4",
     "zstandard; python_version < '3.14'",
     "openpyxl",
     "matplotlib>=3.10",
