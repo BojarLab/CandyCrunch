@@ -663,10 +663,9 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
    | scans; both are centroided with centroid_tof, on m/z from the file's own TOF calibration (MzCalibration)
    """
     try:
-        import timsrust_pyo3
+        from compression.zstd import decompress as zstd_decompress
     except ImportError:
-        raise ValueError("Reading timsTOF .d folders needs timsrust_pyo3, which is not installed (it has no build for Python 3.14 or later yet); convert "
-                         f"{os.path.basename(os.path.normpath(filepath))} to mzML with msconvert first, or use Python 3.11-3.13.") from None
+        from zstandard import decompress as zstd_decompress
     tdf = os.path.join(filepath, 'analysis.tdf')
     if not os.path.exists(tdf):
         raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no analysis.tdf. CandyCrunch reads timsTOF .d folders directly; other Bruker "
@@ -679,9 +678,10 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
             raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no DDA-PASEF precursors; CandyCrunch needs data-dependent MS2 spectra "
                              f"(data-independent acquisition such as diaPASEF has none).")
         compression = dict(db.execute('SELECT Key, Value FROM GlobalMetadata').fetchall()).get('TimsCompressionType')
-        if compression != '2':
-            raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} stores its frames in the format of early timsTOF software (compression type "
-                             f"{compression}), which CandyCrunch cannot read; convert it to mzML with msconvert first.")
+        if compression not in ('1', '2'):
+            raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} stores its frames in a format CandyCrunch does not know (compression type "
+                             f"{compression}); convert it to mzML with msconvert first.")
+        tims_ids = dict(db.execute('SELECT Id, TimsId FROM Frames').fetchall())
         frames = {i: (t, p, k, c, t1, t2, n) for i, t, p, k, c, t1, t2, n in db.execute('SELECT Id, Time, Polarity, MsMsType, MzCalibration, T1, T2, NumPeaks FROM Frames')}
         calibrations = {row[0]: row[1:] for row in db.execute('SELECT Id, ModelType, DigitizerTimebase, DigitizerDelay, T1, T2, dC1, dC2, C0, C1, C2, C3, C4 FROM MzCalibration')}
         precursors = db.execute('SELECT Id, LargestPeakMz, MonoisotopicMz, Charge, Intensity, Parent FROM Precursors').fetchall()
@@ -700,17 +700,64 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         return (x * x - c4) / (1 + dc1 * 1e-6 * (t1 - t1_ref) + dc2 * 1e-6 * (t2 - t2_ref))
     polarity = next((p for _, p, _, _, _, _, _ in frames.values() if p), None)
     detected_mode = {'+': 'positive', '-': 'negative'}.get(polarity)
-    # timsrust 0.4.1 raises "Corrupt frame" for frames without peaks, so those are never read
+
+    def read_frame(frame_id):
+        # A frame in analysis.tdf_bin is its byte size and number of scans, then (compression type 2) a zstd block of 32-bit values stored as four byte
+        # planes: the number of scans, twice the peak count of every scan but the last, and per peak its TOF index step from the previous peak of its scan
+        # (the first from -1) and its intensity; or (type 1) the byte offsets of the scans and per scan an LZF block of 32-bit values, each an intensity
+        # at the current TOF index (then the next one) if >= 0, else a skip of that many indices. Returns the scans' offsets into the peaks, the peaks'
+        # TOF indices and intensities
+        tdf_bin.seek(tims_ids[frame_id])
+        size, num_scans = struct.unpack('<2I', tdf_bin.read(8))
+        blob = tdf_bin.read(size - 8)
+        if compression == '2':
+            values = np.ascontiguousarray(np.frombuffer(zstd_decompress(blob), np.uint8).reshape(4, -1).T).view('<u4').ravel()
+            pairs = values[num_scans:].reshape(-1, 2).astype(np.int64)
+            offsets = np.concatenate([[0], np.cumsum(values[1:num_scans] // 2, dtype = np.int64), [len(pairs)]])
+            steps = np.concatenate([[0], np.cumsum(pairs[:, 0])])
+            return offsets, steps[1:] - np.repeat(steps[offsets[:-1]], np.diff(offsets)) - 1, pairs[:, 1].astype(np.float64)
+        tofs, ints = [], []
+        scan_bytes = np.frombuffer(blob, '<u4', num_scans + 1).astype(np.int64) - 8
+        for begin, end in zip(scan_bytes[:-1].tolist(), scan_bytes[1:].tolist()):
+            # LZF: a control byte below 32 is followed by that many literal bytes plus one, else it copies (control >> 5) + 2 bytes (7: plus the next
+            # byte) from (control & 31) * 256 + the next byte + 1 bytes back, which may overlap the bytes it writes
+            out, i = bytearray(), begin
+            while i < end:
+                c = blob[i]
+                if c < 32:
+                    out += blob[i + 1:i + c + 2]
+                    i += c + 2
+                    continue
+                length = c >> 5
+                if length == 7:
+                    i += 1
+                    length += blob[i]
+                start = len(out) - ((c & 31) << 8) - blob[i + 1] - 1
+                i += 2
+                if start + length + 2 <= len(out):
+                    out += out[start:start + length + 2]
+                else:
+                    for k in range(start, start + length + 2):
+                        out.append(out[k])
+            values = np.frombuffer(out, '<i4').astype(np.int64)
+            steps = np.where(values < 0, -values, 1)
+            tofs.append((np.cumsum(steps) - steps)[values >= 0])
+            ints.append(values[values >= 0].astype(np.float64))
+        offsets = np.concatenate([[0], np.cumsum([len(t) for t in tofs], dtype = np.int64)])
+        return offsets, np.concatenate(tofs) if tofs else np.zeros(0, np.int64), np.concatenate(ints) if ints else np.zeros(0)
+
+    # Frames without peaks are never read
+    tdf_bin = open(os.path.join(filepath, 'analysis.tdf_bin'), 'rb')
     reader = timsrust_pyo3.FrameReader(filepath)
     ms1_ids = sorted(i for i, f in frames.items() if f[2] == 0)
     ms1_rts, ms1_mzs, ms1_ints = [], [], []
     for i in ms1_ids:
         peaks = np.zeros((0, 2))
         if frames[i][6]:
-            frame = reader.read_frame(i - 1)
+            _, tof, ints = read_frame(i)
             # Summed per TOF index over the frame's mobility scans (np.unique is 4x faster than a bincount over all ~440k indices, with the same sums)
-            tof, inverse = np.unique(np.asarray(frame.tof_indices, dtype = np.int64), return_inverse = True)
-            peaks = centroid_tof(tof_to_mz(tof, i), np.bincount(inverse, weights = np.asarray(frame.intensities, dtype = np.float64)), max_peaks = TIMS_MS1_PEAKS)
+            tof, inverse = np.unique(tof, return_inverse = True)
+            peaks = centroid_tof(tof_to_mz(tof, i), np.bincount(inverse, weights = ints), max_peaks = TIMS_MS1_PEAKS)
         ms1_rts.append(frames[i][0] / 60)
         ms1_mzs.append(peaks[:, 0].astype(np.float32))
         ms1_ints.append(peaks[:, 1].astype(np.float32))
@@ -722,14 +769,14 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
     for frame_id, group in groupby(pasef, key = lambda x: x[0]):
         if frame_id not in frames or not frames[frame_id][6]:
             continue
-        frame = reader.read_frame(frame_id - 1)
-        offsets, tofs, ints = np.asarray(frame.scan_offsets), np.asarray(frame.tof_indices, dtype = np.int64), np.asarray(frame.intensities, dtype = np.float64)
+        offsets, tofs, ints = read_frame(frame_id)
         for _, begin, end, pid, iso_mz, iso_width in group:
             isolation.setdefault(pid, (iso_mz, iso_width))
             begin, end = offsets[min(begin, len(offsets) - 1)], offsets[min(end, len(offsets) - 1)]
             ms2_tofs[pid].append(tofs[begin:end])
             ms2_ints[pid].append(ints[begin:end])
             ms2_frames.setdefault(pid, frame_id)
+    tdf_bin.close()
     peak_ds, rts, mzs, charges, scans, ms1_scans = [], [], [], [], [], []
     for pid, largest, mono, charge, _, parent in precursors:
         if pid not in ms2_tofs:

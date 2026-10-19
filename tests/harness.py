@@ -200,7 +200,7 @@ def library_fingerprint():
     if 'library' in FINGERPRINTS:
         return FINGERPRINTS['library']
     versions = []
-    for lib in ['numpy', 'pandas', 'scipy', 'networkx', 'torch', 'openpyxl', 'opentfraw', 'timsrust_pyo3']:
+    for lib in ['numpy', 'pandas', 'scipy', 'networkx', 'torch', 'openpyxl', 'opentfraw', 'zstandard']:
         try:
             versions.append((lib, importlib.metadata.version(lib)))
         except importlib.metadata.PackageNotFoundError:

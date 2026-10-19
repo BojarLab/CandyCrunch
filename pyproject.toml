@@ -27,7 +27,7 @@ dependencies = [
     "numpy",
     "pandas>=2.2.2",
     "opentfraw>=2.0,<4",
-    "timsrust_pyo3>=0.4.1,<0.5; python_version < '3.14'",
+    "zstandard; python_version < '3.14'",
     "openpyxl",
     "matplotlib>=3.10",
 ]

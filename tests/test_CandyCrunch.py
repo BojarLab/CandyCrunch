@@ -3,6 +3,7 @@ import unittest
 import os
 import base64
 import pathlib
+import sqlite3
 import struct
 import zlib
 import hashlib
@@ -701,6 +702,76 @@ def test_tof_precursors():
     out, drop, intensities = refine_tof_precursors(ms1, [1111.3935, 1111.892, 1000.003], [10.0, 10.0, 10.0], [0, 0, 0], [2, 2, 1])
     assert abs(out[0] - 1111.392) < 1e-3 and abs(out[1] - 1111.392) < 1e-3 and abs(out[2] - 1000.0) < 1e-4 and not drop.any()
     assert np.allclose(intensities, [266, 266, 500])
+
+
+def test_tdf_frames(tmp_path):
+    # A DDA-PASEF .d with one survey frame and one PASEF frame, written as compression type 2 (zstd) and as type 1 (LZF per scan, as literal runs and one
+    # overlapping back reference): survey peaks come back at the m/z of their TOF index, summed over scans, and the precursor's MS2 spectrum sums only its
+    # own scans (2-5; the peak in scan 8 belongs to another precursor)
+    try:
+        from compression.zstd import compress
+    except ImportError:
+        from zstandard import compress
+    def tof(mz):
+        return round((300 + np.sqrt(1e12 / 157000 * mz) - 24864) / 0.2)
+    def mz(tof):
+        return (tof * 0.2 + 24864 - 300) ** 2 * 157000 / 1e12
+    survey = {3: [(tof(1000.0), 500)], 5: [(tof(1111.392), 100)], 6: [(tof(1111.392), 50)]}
+    pasef = {2: [(tof(500.0), 40)], 3: [(tof(600.0), 100), (tof(600.0) + 1, 100), (tof(600.0) + 2, 100)], 4: [(tof(500.0), 60), (tof(700.0), 30)],
+             8: [(tof(800.0), 1000)]}
+    outputs = []
+    for compression in ('2', '1'):
+        folder = tmp_path / f'type{compression}.d'
+        folder.mkdir()
+        frames, tims_ids = b'', []
+        for scans in (survey, pasef):
+            tims_ids.append(len(frames))
+            if compression == '2':
+                values = [10] + [2 * len(scans.get(s, [])) for s in range(9)]
+                for s in range(10):
+                    last = -1
+                    for t, i in scans.get(s, []):
+                        values += [t - last, i]
+                        last = t
+                data = compress(np.array(values, '<u4').view(np.uint8).reshape(-1, 4).T.tobytes())
+                frames += struct.pack('<2I', 8 + len(data), 10) + data
+                continue
+            blocks = []
+            for s in range(10):
+                raw, last = [], 0
+                for t, i in scans.get(s, []):
+                    raw += ([last - t] if t > last else []) + [i]
+                    last = t + 1
+                raw = np.array(raw, '<i4').tobytes()
+                if s == 3 and scans is pasef:
+                    # The three equal intensities of PASEF scan 3: the skip and the first as literals, then 8 bytes copied from 4 bytes back
+                    blocks.append(bytes([7]) + raw[:8] + bytes([0xc0, 3]))
+                else:
+                    blocks.append(b''.join(bytes([len(raw[k:k + 32]) - 1]) + raw[k:k + 32] for k in range(0, len(raw), 32)))
+            offsets = np.cumsum([8 + 44] + [len(b) for b in blocks])
+            frames += struct.pack('<2I', offsets[-1], 10) + np.array(offsets, '<u4').tobytes() + b''.join(blocks)
+        (folder / 'analysis.tdf_bin').write_bytes(frames)
+        db = sqlite3.connect(folder / 'analysis.tdf')
+        db.execute('CREATE TABLE GlobalMetadata (Key TEXT, Value TEXT)')
+        db.execute("INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', ?)", (compression,))
+        db.execute('CREATE TABLE Frames (Id INTEGER, Time REAL, Polarity TEXT, MsMsType INTEGER, TimsId INTEGER, NumPeaks INTEGER, MzCalibration INTEGER, T1 REAL, T2 REAL)')
+        db.executemany('INSERT INTO Frames VALUES (?, ?, ?, ?, ?, ?, 1, 25.0, 25.0)', [(1, 600.0, '-', 0, tims_ids[0], 3), (2, 600.1, '-', 8, tims_ids[1], 7)])
+        db.execute('CREATE TABLE MzCalibration (Id INTEGER, ModelType INTEGER, DigitizerTimebase REAL, DigitizerDelay REAL, T1 REAL, T2 REAL, dC1 REAL, dC2 REAL, C0 REAL, C1 REAL, C2 REAL, C3 REAL, C4 REAL)')
+        db.execute('INSERT INTO MzCalibration VALUES (1, 1, 0.2, 24864, 25.0, 25.0, 0, 0, 300, 157000, 0, 0, 0)')
+        db.execute('CREATE TABLE Precursors (Id INTEGER, LargestPeakMz REAL, MonoisotopicMz REAL, Charge INTEGER, Intensity REAL, Parent INTEGER)')
+        db.execute('INSERT INTO Precursors VALUES (1, ?, ?, 2, 100, 1)', (mz(tof(1111.392)), mz(tof(1111.392))))
+        db.execute('CREATE TABLE PasefFrameMsMsInfo (Frame INTEGER, ScanNumBegin INTEGER, ScanNumEnd INTEGER, Precursor INTEGER, IsolationMz REAL, IsolationWidth REAL)')
+        db.execute('INSERT INTO PasefFrameMsMsInfo VALUES (2, 2, 6, 1, 1111.4, 3.0)')
+        db.commit()
+        db.close()
+        outputs.append(process_tdf_stack(str(folder), intensity = True, extract_ms1 = True))
+    for df in outputs:
+        _, ms1_mzs, ms1_ints, _ = df.attrs['ms1']
+        assert np.allclose(ms1_mzs, [mz(tof(1000.0)), mz(tof(1111.392))], rtol = 1e-7) and np.allclose(ms1_ints, [500, 150])
+        assert len(df) == 1 and abs(df['m/z'][0] - mz(tof(1111.392))) < 1e-4 and df['precursor_charge'][0] == 2 and abs(df['RT'][0] - 10.0) < 1e-9
+        peaks = sorted(df['peak_d'][0].items())
+        assert np.allclose([m for m, _ in peaks], [mz(tof(500.0)), mz(tof(600.0) + 1), mz(tof(700.0))], rtol = 1e-6) and np.allclose([i for _, i in peaks], [100, 300, 30])
+    assert outputs[0]['peak_d'][0] == outputs[1]['peak_d'][0]
 
 
 def test_qtof_mzml(tmp_path):
