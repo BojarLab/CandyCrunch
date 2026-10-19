@@ -748,7 +748,6 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
 
     # Frames without peaks are never read
     tdf_bin = open(os.path.join(filepath, 'analysis.tdf_bin'), 'rb')
-    reader = timsrust_pyo3.FrameReader(filepath)
     ms1_ids = sorted(i for i, f in frames.items() if f[2] == 0)
     ms1_rts, ms1_mzs, ms1_ints = [], [], []
     for i in ms1_ids:
