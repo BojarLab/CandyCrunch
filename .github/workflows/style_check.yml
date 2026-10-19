@@ -1,0 +1,33 @@
+name: Coding Standard
+
+# glycowork's coding standard (.github/scripts/check_style.py, a copy of glycowork's): only the lines a push or PR touches are checked
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  style:
+    # Pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19 (GitHub notice on the CI runs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install pycodestyle
+      - name: Check style of changed lines
+        if: github.actor != 'Bribak'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin ${{ github.base_ref }}
+            BASE=origin/${{ github.base_ref }}
+          else
+            BASE="${{ github.event.before }}"
+            git cat-file -e "$BASE^{commit}" 2>/dev/null || BASE=$(git rev-parse HEAD~1)
+          fi
+          python .github/scripts/check_style.py --diff $BASE...HEAD candycrunch tests training packaging

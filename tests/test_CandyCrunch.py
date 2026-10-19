@@ -74,10 +74,14 @@ TEST_DICTS = [
     # trisialylated glycans are mostly [M+4H]4+, so max_charge 4
     {'name': 'GPST000548', 'args': {'glycan_class': 'N', 'sample_prep': 'permethylated', 'max_charge': 4, 'lc': 'C18'},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000548/") if 'Serum_control' in x]},
-    # Permethylated reduced rat serum N-glycans with Neu5Gc (Mechref lab, C18, Q Exactive HF, positive HCD), the DDA run only (the PRM run of the sample has no
-    # survey scans and its precursors sit 18 Da above the DDA ones); .raw with --input-format mzml, its .xlsx otherwise
+    # Permethylated reduced rat serum N-glycans with Neu5Gc (Mechref lab, C18, Q Exactive HF, positive HCD), the DDA run; .raw with --input-format mzml, its
+    # .xlsx otherwise
     {'name': 'GPST000403', 'args': {'glycan_class': 'N', 'sample_prep': 'permethylated', 'max_charge': 4, 'lc': 'C18'},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000403/") if 'Rat_Glyphosate' in x]},
+    # The PRM run of the same sample (30 scheduled targets, no survey scans, so no precursor intensities; every target sits on the 13C peak of its ion, those
+    # of z = 3 isolate [M+2H+NH4]3+ ions); ground truth from the DDA one (RT 2.2-3.7 min later), each row backed by its PRM MS2
+    {'name': 'GPST000403_PRM', 'folder': 'GPST000403', 'args': {'glycan_class': 'N', 'sample_prep': 'permethylated', 'max_charge': 4, 'lc': 'C18'},
+     'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000403/") if x.startswith('PRM_')]},
     # N-glycans of carcinoembryonic antigen (human, Merck preparation; Bruker amaZon speed ETD, msconvert profile mzML with MS1, its extract_spectra .xlsx otherwise)
     {'name': 'GPST000054', 'args': {'glycan_class': 'N'}, 'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000054/") if x.startswith('CEA_Human_Merk')]},
     # Glycosphingolipid glycans of SW1116 colorectal cancer cells with a GT1b spike (Bruker HCT, profile mzXML, its extract_spectra .xlsx otherwise)

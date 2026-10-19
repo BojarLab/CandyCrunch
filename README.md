@@ -7,6 +7,8 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7940046.svg)](https://doi.org/10.5281/zenodo.7940046)
 [![License](https://img.shields.io/badge/license-MIT-red.svg)](https://github.com/bojarlab/candycrunch/blob/main/LICENSE)
+[![Tests](https://github.com/BojarLab/CandyCrunch/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/BojarLab/CandyCrunch/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/BojarLab/CandyCrunch/graph/badge.svg)](https://codecov.io/gh/BojarLab/CandyCrunch)
 
 ## What is CandyCrunch?
 **CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and downstream spectrum processing tools. These are further described in our manuscript [Urban et al. (2024)](https://www.nature.com/articles/s41592-024-02314-6) &ndash; ***Predicting glycan structure from tandem mass spectrometry via deep learning*** published in Nature Methods.

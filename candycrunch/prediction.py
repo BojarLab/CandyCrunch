@@ -3756,23 +3756,31 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_out['ppm_error'] = []
         return (df_out, []) if spectra else df_out
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
+    # Prepare file for processing
+    loaded_file.dropna(subset = ['peak_d'], inplace = True)
+    idx_col = 'm/z' if 'm/z' in loaded_file.columns else 'reducing_mass'
+    # A targeted run (PRM, tMS2) isolates a list of precursor m/z over and over, without survey scans and so without precursor intensities; there each
+    # MS2's own signal (PRM quantifies by fragments) traces its target's elution, so it finds the peaks and abundances that precursor intensities give
+    targeted = not intensity and len(loaded_file) >= 100 and (loaded_file[idx_col].round(4).map(loaded_file[idx_col].round(4).value_counts()) >= 20).mean() >= 0.9
+    if targeted:
+        loaded_file['intensity'] = [float(sum(d.values())) for d in loaded_file['peak_d']]
+        intensity = True
     if intensity:
         loaded_file.loc[loaded_file['intensity'].isnull(), 'intensity'] = 0
     else:
         loaded_file['intensity'] = [0] * len(loaded_file)
-    # Prepare file for processing
-    loaded_file.dropna(subset = ['peak_d'], inplace = True)
-    idx_col = 'm/z' if 'm/z' in loaded_file.columns else 'reducing_mass'
     # A fixed tie-break jitter, so the output does not depend on the global random state
     loaded_file[idx_col] += np.random.RandomState(0).uniform(10 ** (-20), 0.00001, size = len(loaded_file))
     common_structure_map, df_use, topo_struct_map = create_struct_maps(df_use, classes, filter_out = filter_out,
                                                                        phylo_level = taxonomy_level,
                                                                        phylo_filter = taxonomy_filter)
-    if loaded_file.attrs.get('detected_ms1_trap') == 'orbitrap' and 'precursor_charge' in loaded_file.columns and loaded_file['precursor_charge'].notna().any():
+    if (loaded_file.attrs.get('detected_ms1_trap') == 'orbitrap' or targeted) and 'precursor_charge' in loaded_file.columns and loaded_file['precursor_charge'].notna().any():
         # With a header charge, the precursor m/z is the instrument's own monoisotopic pick in the orbitrap survey scan, which for large multiply charged
         # glycans sometimes lands on the 13C isotope. Such a precursor sits one or two isotope spacings / z above a
         # composition, and only the accurate m/z tells this from a composition at the m/z itself (isobaric combinations, e.g., Neu5Gc2 vs Hex2Neu5Ac, differ from
-        # 13C by several ppm), so it moves down when only an isotope fits within the file's own calibration (median and spread of the ppm errors within 20 ppm)
+        # 13C by several ppm), so it moves down when only an isotope fits within the file's own calibration (median and spread of the ppm errors within 20 ppm).
+        # A targeted run's precursors are its targets as set, computed m/z that are often of the 13C peak (the most intense isotope of large glycans: all 30
+        # PRM targets of GPST000403, at 0.6-5 ppm), so they move down alike, within 10 ppm of the computed m/z instead of a calibration
         known = loaded_file['precursor_charge'].notna().values
         charges = np.abs(loaded_file['precursor_charge'].values[known].astype(float)).reshape(-1, 1)
         neutral = np.array([composition_to_mass(c, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization)
@@ -3794,14 +3802,18 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             return np.concatenate(rows), np.concatenate(errors)
         exact = isotope_ppm(0, 20)[1]
         exact = exact[np.abs(exact) < 20]
-        if len(exact) >= 5:
-            cal = np.median(exact)
-            tol = max(3 * 1.4826 * np.median(np.abs(exact - cal)), 2)
+        if targeted or len(exact) >= 5:
+            cal = 0 if targeted else np.median(exact)
+            tol = 10 if targeted else max(3 * 1.4826 * np.median(np.abs(exact - cal)), 2)
             fits = []
             for k in range(3):
                 rows, errors = isotope_ppm(k, abs(cal) + tol)
                 fits.append(np.isin(np.arange(len(mzs)), rows[np.abs(errors - cal) < tol]))
             loaded_file.loc[known, idx_col] -= np.where(fits[0], 0, np.where(fits[1], 1, np.where(fits[2], 2, 0))) * ISOTOPE_SPACING / charges.ravel()
+            if targeted and (fits[0] | fits[1] | fits[2]).mean() >= 0.5:
+                # Targets set from computed m/z then pin their compositions like orbitrap survey scans, within the 10 ppm they were matched to (the z = 3
+                # targets of GPST000403 sit 3-5 ppm below their compositions, its z = 2 ones 0.7 ppm)
+                ms1_ppm_floor, accurate_ms1, crumbs_thresh = 10.0, True, max(crumbs_thresh - 2, 0)
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch. The reducing end and glycan class checks process the same
     # spectra again, so the clusters are kept for them, keyed by the precursor m/z and RT (only the isotope correction above can differ between their runs)
     # With accurate survey scans, spectra join a peak within 20 ppm instead of the flat-Da window: at 0.48 Da, z = 3/4 peaks pooled the MS2 triggered on their
@@ -4377,8 +4389,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | :-
    | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".d" (Bruker timsTOF or ion trap folder), ".mzML", ".mzXML", ".mgf", ".cc", or ".xlsx" pointing to files containing spectra
    | glycan_class (string or list): glycan class as string, options are "O", "N", "lipid", "free", or a list of the classes measured together in one
-   |                               run (e.g. ["N", "O"]): candidate compositions and database structures then come from all of them, each candidate goes to
-   |                               the model as a glycan of its own class, and only structures outside all of them need extra_thresh
+   |                               run (e.g., ["N", "O"]): candidate compositions and database structures then come from all of them, each candidate goes to
+   |                               the model as a glycan of its own class, and only structures outside all of them need extra_thresh.
+   |                               An "N" or "O" file with at least 2 rows of a structure only the other of the two has also looks for glycans of
+   |                               that class among the peaks it did not report, as in wrap_inference
    | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group, after correcting each file's consistent RT drift against the file with the most predicted peaks (median over peaks both files share)
    | top_n_isomers (int): number of isomer groups at each composition to retain per file (a group stays if it is among the top_n_isomers of any file); default:5
    | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable (see wrap_inference); with n_jobs > 1 it has to be picklable (a module-level function or class instance)
@@ -4513,18 +4527,21 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     dtypes = {c: pd.concat([v[c] for v in non_empty.values() if c in v.columns and v[c].notna().any()]).dtype for c in {c for v in non_empty.values() for c in v.columns}
               if any(c in v.columns and v[c].notna().any() for v in non_empty.values())}
     all_ms2 = pd.concat([v.astype({c: np.float64 if dtypes[c].kind in 'iu' else object if dtypes[c].kind == 'b' else dtypes[c] for c in v.columns if c in dtypes and v[c].isna().all()}) for v in non_empty.values()])
-    # Cluster precursor m/z across files: split at gaps above the mass tolerance, then split clusters wider than it at their largest gap
-    mz_sorted = np.unique(all_ms2.index.values)
-    to_split, mz_clusters = np.split(mz_sorted, np.where(np.diff(mz_sorted) > mass_tolerance)[0] + 1), []
-    while to_split:
-        cluster = to_split.pop()
-        if cluster[-1] - cluster[0] <= mass_tolerance:
-            mz_clusters.append(cluster)
-        else:
-            cut = np.argmax(np.diff(cluster)) + 1
-            to_split.extend([cluster[:cut], cluster[cut:]])
-    mass_labels = {mz: round(float(np.median(cluster)), 4) for cluster in mz_clusters for mz in cluster}
-    all_ms2['mass_label'] = all_ms2.index.map(mass_labels)
+
+    def mass_labels(mzs):
+        # Cluster precursor m/z across files: split at gaps above the mass tolerance, then split clusters wider than it at their largest gap
+        mz_sorted = np.unique(mzs)
+        to_split, mz_clusters = np.split(mz_sorted, np.where(np.diff(mz_sorted) > mass_tolerance)[0] + 1), []
+        while to_split:
+            cluster = to_split.pop()
+            if cluster[-1] - cluster[0] <= mass_tolerance:
+                mz_clusters.append(cluster)
+            else:
+                cut = np.argmax(np.diff(cluster)) + 1
+                to_split.extend([cluster[:cut], cluster[cut:]])
+        return {mz: round(float(np.median(cluster)), 4) for cluster in mz_clusters for mz in cluster}
+
+    all_ms2['mass_label'] = all_ms2.index.map(mass_labels(all_ms2.index.values))
     # Retention time alignment (as LaCyTools and GlycReSoft align runs on analytes they share): a file's drift is the median RT difference to the file with
     # the most predicted rows over anchor peaks, a mass_label and first prediction found exactly once in both files; with at least 3 anchors, isomer
     # groups, gap filling and feature merging compare RTs shifted by it, while every row keeps its own RT
@@ -4595,6 +4612,68 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                                            sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
                                                            ms1_ppm_floor = ms1_ppm_floors[file_label])
         inference_dfs[file_label] = (df_out, spectra_out)
+    # The other of N and O (O-glycans in N-glycan releases, N-glycans in O-glycan ones), as in wrap_inference: a file with >= 2 rows of a structure only that
+    # class has is processed again as N+O glycans on its clusters without a row, and its rows of such a structure from >= 2 spectra are harmonized across these
+    # files like the own rows (aligned RTs, isomer groups, modal structure, top_n_isomers), augmented and finalised per file, and join their file unless they
+    # are another charge state of one of its rows; gap filling and the feature table then treat them like any other row. Running the pass on every file once
+    # one file has the other class lost on the files without it (GlycoGauntlet N and O batches -0.005 each)
+    pair = {'N': 'O', 'O': 'N'}.get(classes[0]) if len(classes) == 1 else None
+    only = lambda p: isinstance(p, list) and len(p) > 0 and enforce_class(p[0][0], pair) and not enforce_class(p[0][0], classes[0])
+    triggered = [k for k in file_labels if pair is not None and sum(isinstance(g, str) and enforce_class(g, pair) and not enforce_class(g, classes[0])
+                                                                     for g in inference_dfs[k][0]['top1_pred']) >= 2]
+    pair_rows = []
+    if triggered:
+        use_pair = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin([classes[0], pair])])
+        use_pair = use_pair[use_pair[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
+        tasks = [(spectra_filepath_list[file_labels.index(k)], None, {**inference_kwargs, 'glycan_class': [classes[0], pair], 'df_use': use_pair, 'reducing_end_variants': {},
+                                                                      '_pair': (pair, list(zip(inference_dfs[k][0].index.values, inference_dfs[k][0]['RT'].values)))}) for k in triggered]
+        if n_jobs > 1:
+            with ProcessPoolExecutor(max_workers = n_jobs, initializer = torch.set_num_threads,
+                                     initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
+                pair_runs = list(pool.map(_batch_inference_file, *zip(*tasks)))
+        else:
+            pair_runs = [_batch_inference_file(*task) for task in tasks]
+        pair_rows = [r[0][[only(p) and n >= 2 for p, n in zip(r[0]['predictions'], r[0]['num_spectra'])]].assign(condition_label = k) for k, r in zip(triggered, pair_runs)]
+        pair_rows = [r for r in pair_rows if len(r)]
+    if pair_rows:
+        pair_rows = pd.concat(pair_rows)
+        pair_rows['mass_label'] = pair_rows.index.map(mass_labels(pair_rows.index.values))
+        pair_cats = assign_categories(pair_rows.assign(RT = pair_rows['RT'] + pair_rows['condition_label'].map(rt_shift).fillna(0), RT_own = pair_rows['RT']),
+                                      intra_cat_thresh = intra_cat_thresh)
+        pair_cats['RT'] = pair_cats.pop('RT_own')
+        # (their isomer groups are numbered after the own ones, so no group mixes both)
+        pair_cats['category_label'] += int(assigned_cats['category_label'].max()) + 1
+        pair_cats = filter_top_n_isomers(assign_modal_category_prediction(pair_cats), top_n = top_n_isomers)
+        neutral = lambda mz, z, file_mode: np.abs(z) * mz - (np.abs(z) - 1) * (-1 if file_mode == 'negative' else 1) * PROTON_MASS
+        for file_label, df_pair in pair_cats.groupby('condition_label', sort = False):
+            file_mode = file_modes[file_label]
+            df_pair = df_pair.sort_index()
+            if supplement or experimental:
+                df_pair = augment_predictions(df_pair, pred_thresh, supplement, experimental, [classes[0], pair], use_pair, file_mode, modification, mass_tag,
+                                              filter_out, mass_tolerance, None, sample_prep = sample_prep, max_charge = abs(max_charge) * (-1 if file_mode == 'negative' else 1),
+                                              glycans = glycans, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1s[file_label],
+                                              accurate_ms2 = accurate_ms2s[file_label])
+            if not len(df_pair):
+                continue
+            ms1 = None
+            if ms1_paths[file_label]:
+                with np.load(ms1_paths[file_label]) as ms1_file:
+                    ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])
+            df_pair, spectra_pair = finalise_predictions(df_pair, False, file_mode, modification, mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
+                                                         glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1, accurate_ms1 = accurate_ms1s[file_label],
+                                                         sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floors[file_label])
+            df_out, spectra_out = inference_dfs[file_label]
+            own_n, own_rt = neutral(df_out.index.values, df_out['charge'].values, file_mode), df_out['RT'].values
+            keep = [only(p) and not ((np.abs(own_n - neutral(mz, z, file_mode)) < mass_tolerance) & (np.abs(own_rt - rt) < rt_diff)).any()
+                    for p, mz, z, rt in zip(df_pair['predictions'], df_pair.index.values, df_pair['charge'].values, df_pair['RT'].values)]
+            df_pair, spectra_pair = df_pair[keep], [x for x, k in zip(spectra_pair, keep) if k]
+            if len(df_pair):
+                print(f"{file_label} also holds {pair}-glycans: {len(df_pair)} {pair}-glycan peak(s) added to its {classes[0]}-glycans.")
+                # (the file's attrs, such as its MS1 calibration, stay those of its own rows)
+                attrs, df_pair.attrs = df_out.attrs, {}
+                df_out = pd.concat([df_out, df_pair])
+                df_out.attrs = attrs
+                inference_dfs[file_label] = (df_out, spectra_out + spectra_pair)
     # Consensus of each isomer group that survived clean-up in at least one file, for MS1 gap filling in the others
     finalized = [v[0] for v in inference_dfs.values() if not v[0].empty]
     # Rows with a top1_pred first, so every value of a group comes from one row (groupby.first skips NaN column by column)
@@ -4743,7 +4822,7 @@ def _batch_inference_file(spectra_filepath, ms1_path, inference_kwargs):
     ms1, file_mode, accurate_ms1 = df_out.attrs.pop('ms1', None), df_out.attrs.pop('mode'), df_out.attrs.pop('accurate_ms1', False)
     accurate_ms2, ms1_ppm_floor = df_out.attrs.pop('accurate_ms2', False), df_out.attrs.pop('ms1_ppm_floor', 3.0)
     df_out.attrs.clear()
-    if ms1 is None or len(ms1[0]) == 0:
+    if ms1 is None or len(ms1[0]) == 0 or ms1_path is None:
         return df_out, file_mode, None, accurate_ms1, accurate_ms2, ms1_ppm_floor
     np.savez(ms1_path, rts = ms1[0], mzs = ms1[1], ints = ms1[2], offsets = ms1[3])
     return df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor
