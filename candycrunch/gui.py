@@ -706,7 +706,8 @@ class Annotator(QObject):
                         support = self.results[key + repr(request['candidates'])]
                         if stale():
                             continue
-                    diagnostic = sorted({s[0] for e in support['residues'] for s in e['support']} | {s[0] for c in support['candidates'] for s in c['support']}) if support else None
+                    diagnostic = sorted({s[0] for e in support['residues'] for s in e['support']} | {s[0] for c in support['candidates'] for s in c['support']} |
+                                        {e['linkage'][0] for e in support['residues'] if request['ion_trap'] and e.get('linkage') and e['linkage'][2] == 'a2-3'}) if support else None
                     # The fragment cartoons plot_annotated_spectrum will place (glycan and oxonium ions of labeled or diagnostic peaks, ~30-50 ms each) are
                     # rendered into its cache here, outside MPL_LOCK (GlycoDraw and glycorender need no matplotlib) and one by one, so a newer request cuts it short
                     glycans = resolve_spectrum_input(request['structure'])[1] if request['cartoons'] else []
@@ -1077,9 +1078,10 @@ class SpectrumPanel(QWidget):
         self.spec, self.ahead, self.toggles = (args, kwargs), list(prefetch), {}
         self.resubmit()
 
-    def make_request(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), toggles = None, **kwargs):
+    def make_request(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), toggles = None, ion_trap = False, **kwargs):
         """ms3: (m/z, number of MS3 spectra) of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index;
-        candidates: competing structures whose distinguishing peaks are listed; the request is drawn for the panel's current size and settings"""
+        candidates: competing structures whose distinguishing peaks are listed; ion_trap: whether the MS2 spectra are ion-trap CID, the only data the linkage
+        reading of a lone Neu5Ac (supporting_ions) was measured on; the request is drawn for the panel's current size and settings"""
         size = self.stack.size()
         choice = self.fragment_types.currentData()
         if choice == 'glycosidic' or (choice is None and sample_prep == 'permethylated'):
@@ -1091,7 +1093,7 @@ class SpectrumPanel(QWidget):
         request = {'structure': structure, 'mzs': [float(x) for x in mzs], 'intensities': [float(x) for x in intensities], 'charge': int(charge),
                    'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
                    'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value() if ppm is None else ppm * 1e-3, 'ppm': ppm,
-                   'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}),
+                   'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}), 'ion_trap': bool(ion_trap),
                    'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100)}
         request['key'] = repr(sorted((k, sorted(v.items()) if isinstance(v, dict) else v) for k, v in request.items()))
         return request
@@ -1257,10 +1259,15 @@ class SpectrumPanel(QWidget):
         """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red) and lists them above the fragment table"""
         if not support or not (support['residues'] or support['candidates']):
             return
-        from candycrunch.analysis import domon_costello_to_html
+        from candycrunch.analysis import domon_costello_to_html, glycan_to_nxGraph
         tested = [e for e in support['residues'] if e['support'] or e['open']]
         partly = sum(bool(e['support'] and e['open']) for e in tested)
-        self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) and not e["open"] for e in tested)} of {len(tested)} residues placed by diagnostic fragments' + (f', {partly} narrowed down' if partly else ''))
+        # The linkage of a lone Neu5Ac, read from how intense [M-H-Neu5Ac]- is (ion-trap CID only): no colors of its own, a peak that reads a2-3 gets the
+        # lilac marker if the structure says a2-3 and the red one if it says a2-6; a reading of a2-6 is a missing peak, so it is only listed
+        read = {id(e): e['linkage'] for e in support['residues'] if e.get('linkage') and self.request['ion_trap']}
+        linkage = {k: f'{v[0]:.2f} ' * (v[2] == 'a2-3') + f'[M-H-Neu5Ac]<sup>-</sup> at {v[1]:.0%} of the base peak: {v[2]}' for k, v in read.items()}
+        self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) and not e["open"] for e in tested)} of {len(tested)} residues placed by diagnostic fragments' + (f', {partly} narrowed down' if partly else '') +
+                             ''.join(f'; Neu5Ac linkage reads {v[2]}' + ('' if v[3] else ', not as shown') for v in read.values()))
         entry = self.cache[self.request['key']]
         if entry['markers'] is None:
             # Each marker carries what hovering it shows: the supported residues' fragment and cleaved bond in the drawing (lilac) and a tooltip naming
@@ -1271,6 +1278,10 @@ class SpectrumPanel(QWidget):
                     points['support'].setdefault(s[0], [s[1], (self.request['structure'], s[5], s[6]), f'{s[0]:.2f}: {domon_costello_to_html(list(s[2]))} = {s[3]}<br>rules out'])[2] += f'<br>{", ".join(s[4])}'
                 for a in e['against']:
                     points['against'].setdefault(a[0], [a[1], None, f'{a[0]:.2f}: {domon_costello_to_html(list(a[2]))} = {a[3]}<br>fits'])[2] += f'<br>{a[4]}'
+            for e in support['residues']:
+                if id(e) in read and read[id(e)][2] == 'a2-3':
+                    residues = range(len(glycan_to_nxGraph(self.request['structure'])) // 2 + 1)
+                    points['support' if read[id(e)][3] else 'against'].setdefault(read[id(e)][0], [read[id(e)][1], (self.request['structure'], tuple(i for i in residues if i != e['residue']), e['residue']), f'{linkage[id(e)]}<br>15% or more reads a2-3 (ion-trap CID)'])
             for color, side in ((LILAC, 'support'), (CANDY, 'against')):
                 if points[side]:
                     artist = ax.scatter(list(points[side]), [v[0] * 100 + 3 for v in points[side].values()], marker = 'v', s = 45, c = color, edgecolors = 'white',
@@ -1278,13 +1289,15 @@ class SpectrumPanel(QWidget):
                     entry['markers'].append((artist, [v[1:] for v in points[side].values()]))
             self.canvas.draw_idle()
         self.hover_targets += entry['markers']
-        rows = [f'<tr><td>{e["name"]}</td><td>{"<br>".join(f"{s[0]:.2f} {domon_costello_to_html(list(s[2]))} = {s[3]}" for s in e["support"][:3]) or "none"}</td>'
+        rows = [f'<tr><td>{e["name"]}</td><td>{"<br>".join([f"{s[0]:.2f} {domon_costello_to_html(list(s[2]))} = {s[3]}" for s in e["support"][:3]] + [linkage.get(id(e))] * (id(e) in read and read[id(e)][3])) or "none"}</td>'
                 f'<td>{", ".join(e["open"][:3]) + (", ..." if len(e["open"]) > 3 else "")}</td>'
-                f'<td style="color:{CANDY}">{"<br>".join(f"{a[0]:.2f} fits {a[4]}" for a in e["against"][:2])}</td></tr>' for e in tested]
+                f'<td style="color:{CANDY}">{"<br>".join([f"{a[0]:.2f} fits {a[4]}" for a in e["against"][:2]] + [linkage.get(id(e))] * (id(e) in read and not read[id(e)][3]))}</td></tr>'
+                for e in tested + [e for e in support['residues'] if id(e) in read and e not in tested]]
         rows += [f'<tr><td>vs {c["structure"]}</td><td>{"<br>".join(f"{s[0]:.2f} {domon_costello_to_html(list(s[2]))}" for s in c["support"][:3]) or "none"}</td><td></td>'
                  f'<td style="color:{CANDY}">{"<br>".join(f"{a[0]:.2f} {domon_costello_to_html(list(a[2]))}" for a in c["against"][:3])}</td></tr>' for c in support['candidates']]
         self.fragments.setHtml(f'<p><b>Supported by</b> <span style="color:{MUTED}">(intense peaks of a single glycosidic cleavage that no other placement of the residue, '
-                               f'or the other candidate, can form with up to two cleavages; marked lilac in the spectrum, peaks that fit only the alternative in red)'
+                               f'or the other candidate, can form with up to two cleavages; marked lilac in the spectrum, peaks that fit only the alternative in red'
+                               f'{"; the linkage of a lone Neu5Ac from how intense [M-H-Neu5Ac]<sup>-</sup> is, 15% of the base peak or more for a2-3 in ion-trap CID" if read else ""})'
                                f'</span></p><table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Residue</th>'
                                f'<th align="left">Supporting peaks</th><th align="left">Not told apart from</th><th align="left">Peaks against</th></tr>{"".join(rows)}'
                                f'</table><br>' + self.fragment_html)
@@ -2104,9 +2117,11 @@ class ResultsView(QWidget):
             columns.append(_number_column('Fragment score', df.get('annotation_score', [None] * len(df)), 0, 'CandyCrumbs fragment annotation score'))
             supported = [s if isinstance(s, str) and s else None for s in df.get('supported_by', [None] * len(df))]
             counts = [re.match(r'(\d+)/(\d+)', s) if s else None for s in supported]
+            readings = [re.search(r'Neu5Ac linkage reads (a2-\d)(, not as shown)?', s) if s else None for s in supported]
             columns.append({'title': 'Support', 'kind': 'number', 'raw': [int(m[1]) / int(m[2]) if m and int(m[2]) else None for m in counts],
-                            'text': [f'{m[1]}/{m[2]}' if m else '' for m in counts], 'tips': supported,
-                            'tip': 'Residues placed by diagnostic MS2 peaks, of those with another possible placement; hover a cell for the peaks'})
+                            'text': [', '.join(([f'{m[1]}/{m[2]}'] if m else []) + ([('reads ' if r[2] else '') + r[1]] if r else [])) for m, r in zip(counts, readings)],
+                            'tips': supported, 'tip': 'Residues placed by diagnostic MS2 peaks, of those with another possible placement, and the linkage of a lone Neu5Ac '
+                                                      'that [M-H-Neu5Ac]- reads in ion-trap runs ("reads" where it is not the one shown); hover a cell for the peaks'})
             columns.append(_number_column('Spectra', df['num_spectra'], 0, 'MS2 spectra pooled into this peak'))
             if 'ms3' in df.columns:
                 columns.append(_number_column('MS3', [len({round(p) for p, _ in x}) if isinstance(x, list) and x else None for x in df['ms3']], 0,
@@ -2350,7 +2365,7 @@ class ResultsView(QWidget):
         preds = table['predictions'].iat[r]
         return structure, ms3_groups, ((structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]), _mass_tag(settings), settings['sample_prep']),
                                        dict(ms3 = [(p, n) for p, _, n in ms3_groups], candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [],
-                                            sialic_derivatization = settings.get('sialic_derivatization'),
+                                            sialic_derivatization = settings.get('sialic_derivatization'), ion_trap = settings.get('trap') in ('linear', 'amazon'),
                                             metal_cations = 'adduct' not in table.columns or isinstance(table['adduct'].iat[r], str)))
 
     def annotate(self):

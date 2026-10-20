@@ -5,11 +5,12 @@ import random
 import time
 from collections import Counter
 import numpy as np
+import networkx as nx
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
     build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, CHAIN_IONS, domon_costello_to_mpl, \
     peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
-    subgraphs_to_domon_costello, rank_chains, X_cross_rings
+    subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
@@ -389,6 +390,55 @@ def test_candycrumbs_precheck_matches_full_calculation(case):
     fragments = [f for frags in found.values() for f in frags]
     assert subgraphs_to_domon_costello(nx_mono, fragments, chain_rank = chain_rank) == subgraphs_to_domon_costello(nx_mono, [f.graph for f in fragments],
                                                                                                                chain_rank = chain_rank)
+
+
+# Glycopeptides through the same precheck: an N-glycan on a short peptide at z = 3 with two global modifications, a sialylated core 2 with X cross-rings,
+# and two O-glycans (node sets holding both reducing ends take the full calculation)
+GLYCOPEPTIDE_PRECHECK_CASES = [dict(glycopeptide = f'EEQYN*{IGG_G0F}*STYR', charge = 3, max_cleavages = 2, max_global_mods = 2),
+                               dict(glycopeptide = 'AVAVT*Neu5Ac(a2-3)Gal(b1-3)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-6)]GalNAc*LQSH', charge = 3, max_cleavages = 2, x_rings = True),
+                               dict(glycopeptide = 'T*Gal(b1-3)GalNAc*TPPT*Neu5Ac(a2-3)Gal(b1-3)GalNAc*TATPIR', charge = 2, max_cleavages = 3)]
+
+
+@pytest.mark.parametrize('case', GLYCOPEPTIDE_PRECHECK_CASES)
+def test_candycrumbs_glycopeptide_precheck(case):
+    # as test_candycrumbs_precheck_matches_full_calculation for glycopeptides, whose node sets have two roots (the full calculation takes the C-terminal
+    # residue of the peptide part) and gain the water of the peptide's termini once, also with the ppm tolerance CandyCrumbs uses for them; and the names
+    # of the peptide and glycan parts and the charge cap read off a Fragment are those of its graph
+    input_dict = glycopeptide_string_to_input(case['glycopeptide'])
+    nx_mono, pep_gr = input_to_graph(input_dict)
+    charge = case['charge']
+    global_mods, special_residues = get_initial_global_mods(nx_mono, charge, max_global_mods = case.get('max_global_mods', 1))
+    x_rings = X_cross_rings if case.get('x_rings') else []
+    kwargs = dict(max_cleavages = case['max_cleavages'], charge = charge, disable_A_cross_rings = True)
+    full = generate_atomic_frags(nx_mono, global_mods, special_residues, x_rings, fragment_masses = [], **kwargs)
+    rng = random.Random(0)
+    masses = sorted([rng.choice(sorted(full)) * (1 + rng.gauss(0, 3e-6)) for _ in range(60)] + [rng.uniform(150, max(full)) for _ in range(60)])
+    wanted = extend_masses(masses, charge)
+    chain_rank = {}
+    for prefix in sorted({x.split('-')[0] for x in nx_mono} - {'0'}, key = int):
+        glyc = [x for x in nx_mono if x.split('-')[0] == prefix]
+        chain_rank[prefix] = [(rank, [f'{prefix}-{n}' for n in chain]) for rank, chain in
+                              rank_chains(nx.relabel_nodes(nx_mono.subgraph(glyc), {x: int(x.split('-')[1]) for x in glyc}))]
+    for threshold_ppm in (None, 10):
+        found = generate_atomic_frags(nx_mono, global_mods, special_residues, x_rings, fragment_masses = masses, threshold = 0.02, threshold_ppm = threshold_ppm,
+                                      **kwargs)
+
+        def described(fragments):
+            # fragments within the tolerance by mass and what they are, without those this close to its edge, which rounding can put on the other side
+            out = Counter()
+            for m, frags in fragments.items():
+                d = np.abs(wanted - m).min()
+                limit = 0.02 if threshold_ppm is None else min(0.02, m * threshold_ppm / 1e6)
+                if d < limit and abs(d - limit) > 1e-4:
+                    out.update((m, tuple(f.nodes), tuple(f.terminals), tuple(f.mono_mods), tuple(tuple(a.items()) for a in f.atom_mods), f.global_mod) for f in frags)
+            return out
+
+        assert found and described(found) == described(full)
+        fragments = [f for frags in found.values() for f in frags]
+        assert [peptide_to_RF_nomenclature(pep_gr, f) for f in fragments] == [peptide_to_RF_nomenclature(pep_gr, f.graph) for f in fragments]
+        assert get_glycan_cleavages(nx_mono, fragments, input_dict['glycosites'], chain_rank) == get_glycan_cleavages(nx_mono, [f.graph for f in fragments],
+                                                                                                                    input_dict['glycosites'], chain_rank)
+        assert [max_fragment_charge(f, peptide = True) for f in fragments] == [max_fragment_charge(f.graph, peptide = True) for f in fragments]
 
 
 def test_candycrumbs_speed(request):

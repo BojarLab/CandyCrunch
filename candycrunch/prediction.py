@@ -160,11 +160,12 @@ def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotop
             if mono != k:
                 break
         walked[i] = mono != k
-        # Ion-trap centroids jitter between scans, so average the monoisotopic centroid over the neighbouring survey scans
+        # Ion-trap centroids jitter between scans, so average the monoisotopic centroid over the neighboring survey scans, within the isotope tolerance (an
+        # orbitrap or TOF neighbour's nearest centroid up to 0.2 away is often another ion: walked glycopeptide precursors moved by up to 120 ppm)
         pos, wts = [], []
         for t in range(max(s - 1, 0), min(s + 2, len(ms1_rts))):
             t_mzs, t_ints = ms1_mzs[ms1_offsets[t]:ms1_offsets[t + 1]], ms1_ints[ms1_offsets[t]:ms1_offsets[t + 1]]
-            if len(t_mzs) and np.abs(t_mzs - scan_mzs[mono]).min() <= 0.2:
+            if len(t_mzs) and np.abs(t_mzs - scan_mzs[mono]).min() <= min(0.2, isotope_tolerance):
                 pos.append(t_mzs[np.argmin(np.abs(t_mzs - scan_mzs[mono]))])
                 wts.append(t_ints[np.argmin(np.abs(t_mzs - scan_mzs[mono]))])
         out[i] = float(np.average(pos, weights = wts)) if sum(wts) > 0 else float(scan_mzs[mono])
@@ -530,6 +531,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
     # One handle for the packets of every scan (opening the file per scan took a quarter of the reading time)
     ms3s, isolations, packets = [], [], open(filepath, 'rb')
+    ms2_masters = {scan: master for scan, level, master in zip(table['scan'], table['ms_level'], table['master_scan']) if level == ms_level}
     for i, scan in enumerate(table['scan']):
         if table['ms_level'][i] not in (1, ms_level, ms_level + 1):
             continue
@@ -593,7 +595,11 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         if intensity:
             # ThermoRawFileParser's precursor intensity: summed centroids within 1.5 m/z of the isolation m/z in the trailer's master scan (tribrids
             # acquire MS2 in parallel with the next survey scan), else in the preceding survey scan; LTQ trailers only carry a 'Master Index:', no scan
-            s = ms1_index.get(table['master_scan'][i], len(ms1_rts) - 1)
+            # a product-triggered scan (EThcD of a glycopeptide whose HCD scan showed oxonium ions) has that MS2 scan as its master, whose master is the survey scan
+            master = table['master_scan'][i]
+            while master not in ms1_index and master in ms2_masters:
+                master = ms2_masters[master]
+            s = ms1_index.get(master, len(ms1_rts) - 1)
             intensities.append(
                 float(ms1_ints[s][(ms1_mzs[s] >= iso - 1.5) & (ms1_mzs[s] < iso + 1.5)].sum()) if s >= 0 else np.nan)
     packets.close()
@@ -1002,7 +1008,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     | weights (array-like): if given, precursors that land on the same peak (same apex and m/z) split its area in proportion to these instead of each claiming all of it; default:None
     | mz_calibration (tuple): (m/z offset, half-width) from ms1_mz_calibration; default:None (estimated from the targets)
     | glycans (list): if given, each area is divided by the share of the glycan's molecules within the summed isotope peaks (computed from its elemental formula; None entries are interpolated by mass); a composition or an element formula counts as the whole molecule, e.g., a glycopeptide as get_formula('H5N4', peptide = 'EEQYNSTYR'); default:None
-    | sample_prep (string): underivatized/permethylated/peracetylated, for the elemental formula; default:'underivatized'
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated, for the elemental formula; default:'underivatized'
     | other_charges (list): if given, per target the other charge states of its molecule whose envelopes are added if they co-elute with it (over its peak); default:None
     | mode (string): ion mode, which sets the charge carrier of other_charges; default:'negative'\n
     | Returns:
@@ -1116,7 +1122,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
    | df (dataframe): condensed dataframe from condense_dataframe
    | glycan_class (int or list): 0 = O-linked, 1 = N-linked, 2 = lipid/free, or one such code per row
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', 'permethylated' or 'other'/'none'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0
@@ -1286,8 +1292,8 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
    | mass (float): observed m/z
    | glycan (string): glycan in IUPAC-condensed nomenclature
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
-   | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
    | mass_tag (float): label mass to add when calculating possible m/z (the mass of a 'custom' label); default:None
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
    | triple_thresh (float): mass threshold over which to consider triply-charged ions; default:1500
@@ -1524,7 +1530,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     gaps = np.diff(rt_arr[order])[np.abs(np.diff(mz_arr[order])) <= 0.02]
     gaps = gaps[gaps > 0.1]
     retrigger = float(np.quantile(gaps, 0.25)) if len(gaps) >= 50 else 0.0
-    max_gap = 1.2 * retrigger if retrigger >= 1.0 else 0.25
+    # rounded up to 0.05 min: the quartile lies in the sparse stretch before the re-trigger peak, where one spectrum more or less moves it by up to 0.006 min, and
+    # 1.2x it falls among the re-trigger gaps (GPST000461_O 1.6244 min, 1.6178 with one precursor m/z refined differently, which split clusters all over the file)
+    max_gap = float(np.ceil(round(1.2 * retrigger / 0.05, 6))) * 0.05 if retrigger >= 1.0 else 0.25
     # Python's min, max, sorted and division agree with numpy's unless NaN, negative values, or negative zeros are involved
     try:
         ints_f = np.asarray(int_arr, dtype = float)
@@ -2239,8 +2247,8 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
    | df_out (dataframe): df_out generated within wrap_inference
    | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
-   | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
    | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:set()
@@ -2466,8 +2474,8 @@ def impute(df_out, pred_thresh, mode = 'negative', modification = 'reduced', sam
     | df_out (dataframe): prediction dataframe generated within wrap_inference
     | pred_thresh (float): confidence given to an imputed prediction
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default:'negative'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
-    | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
+    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:0.0
     | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together; default:"O"
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization (glycowork's SIALIC_DERIVATIZATIONS); variants with a sialic acid of
@@ -2565,7 +2573,7 @@ def make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = 'unde
    | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together
    | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
-   | sample_prep (string): underivatized/permethylated/peracetylated
+   | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization (glycowork's SIALIC_DERIVATIZATIONS); a glycan is then listed under
    |                                          the mass of every way its sialic acids can be linked, with the linkages that mass decides filled in; default:None\n
    | Returns:
@@ -3072,12 +3080,12 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together
     | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or None (a custom label described by mass_tag)
+    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
     | mass_tolerance (float): the general mass tolerance (in Da) that is used for composition matching
     | mass_dic (dict): dictionary of form mass : list of glycans; generated here if None
-    | sample_prep (string): underivatized/permethylated/peracetylated
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
     | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
     | glycans (list): CandyCrunch vocabulary whose structures of glycan_class join df_use in a mass_dic built here; default: the shipped vocabulary
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization (glycowork's SIALIC_DERIVATIZATIONS); default:None
@@ -3139,18 +3147,18 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
 
 def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_thresh, rt_diff,
                          sample_prep = 'underivatized', glycan_class = 'O', mass_tolerance = 0.5, ms1 = None, accurate_ms1 = False,
-                         sialic_derivatization = None, n_jobs = 1, ms1_ppm_floor = 3.0):
+                         sialic_derivatization = None, n_jobs = 1, ms1_ppm_floor = 3.0, ion_trap = False):
     """Cleans up incorrect structure predictions, quantifies, and formats dataframe\n
     | Arguments:
     | :-
     | df_out (dataframe): a dataframe of augmented predictions
     | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'
+    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | ppm_thresh (float): ppm error threshold; the file's own robust ppm error spread can only make it stricter
     | rt_diff (float): maximum retention time difference (in minutes) for combining adduct species of one glycan
-    | sample_prep (string): underivatized/permethylated/peracetylated
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
     | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together
     | mass_tolerance (float): flat-Da mass tolerance used for composition matching and XIC extraction; default:0.5
     | ms1 (tuple): flat MS1 data from process_mzML_stack; if given, abundances are XIC areas; default:None
@@ -3158,7 +3166,9 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization (glycowork's SIALIC_DERIVATIZATIONS); compositions then give each
     |                                          sialic acid's linkage, as the precursor mass tells it; default:None
     | n_jobs (int): number of processes for the supporting peaks of the rows (see run_jobs); default:1
-    | ms1_ppm_floor (float): smallest half-width (ppm) of the composition-error window with accurate survey scans (MS1_PPM_FLOORS); default:3.0\n
+    | ms1_ppm_floor (float): smallest half-width (ppm) of the composition-error window with accurate survey scans (MS1_PPM_FLOORS); default:3.0
+    | ion_trap (bool): whether the MS2 spectra are ion-trap CID, the only data supporting_ions' linkage reading of a lone Neu5Ac was measured on, which
+    |                  then goes into supported_by; default:False\n
     | Returns:
     | :-
     | Returns a tuple of (dataframe of corrected predictions with unnormalized rel_abundance, list of spectra)
@@ -3442,7 +3452,10 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
             names = [re.sub(r'_(\d+)_(.).*', lambda m: m[1] + m[2].lower(), s[2][0]) for s in e['support'][:2]]
             texts += [e['name'] + ' (' + ', '.join(f'{s[0]:.1f} {n}' for s, n in zip(e['support'], names)) + ')'] if names else []
             texts += [f"against {e['name']} ({a[0]:.1f} fits {a[4]})" for a in e['against'][:1]]
-        supported_by.append(f"{sum(bool(e['support']) for e in tested)}/{len(tested)} residues supported" + (': ' + '; '.join(texts) if texts else '') if tested else '')
+        # the linkage of a lone Neu5Ac read from how intense [M-H-Neu5Ac]- is, after the residue counts, which it is not part of
+        readings = [f"Neu5Ac linkage reads {e['linkage'][2]}" + ('' if e['linkage'][3] else ', not as shown') + f" ([M-H-Neu5Ac]- {e['linkage'][0]:.1f} at {e['linkage'][1]:.0%})"
+                    for e in support['residues'] if ion_trap and e.get('linkage')]
+        supported_by.append('; '.join(([f"{sum(bool(e['support']) for e in tested)}/{len(tested)} residues supported" + (': ' + '; '.join(texts) if texts else '')] if tested else []) + readings))
     df_out['supported_by'] = supported_by
     if 're_offset' in df_out.columns:
         df_out = df_out.drop(columns = ['re_offset', 'unlabelled'] + (['reducing_end'] if df_out['reducing_end'].isna().all() else []))
@@ -3464,7 +3477,7 @@ def flag_coeluting_substructures(df_out, glycan_class, sample_prep = 'underivati
     | :-
     | df_out (dataframe): finalised predictions (index m/z; top1_pred, RT, charge, rel_abundance)
     | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together
-    | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
     | unreduced (bool): whether the glycans have a free reducing end, whose anomers make two peaks of one structure; default:False
     | ms1 (tuple): flat MS1 data from process_mzML_stack; with it, an in-source fragment also needs the apex and peak shape of its parent; default:None
     | mz_tolerance (float): largest m/z half-width of an isotope window; default:0.5
@@ -3580,13 +3593,13 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
    """
     # A wrong reducing end shifts every precursor and Y/Z ion, so the model finds few of its structures in the compositions and fragment annotations it gets:
     # under 20 among the 100 most intense clusters, against 24-45 with the right one on the test sets (and up to 14 with a wrong one). Those clusters are then
-    # processed with every other reducing end (unreduced, and glycowork's labels); if one gives at least 1.5x as many model predictions (and at least 2), the
+    # processed with every other reducing end (unreduced, 2AA, 2AB, procainamide, PA); if one gives at least 1.5x as many model predictions (and at least 2), the
     # whole file is processed with it, which takes over if it gives at least 1.5x as many (and at least 5) as the chosen reducing end did. The random state is
     # restored, so a run the check leaves alone stays as it was
     rng = (random.getstate(), np.random.get_state(), torch.get_rng_state())
     args = {k: v for k, v in run_args.items() if k != '_return_intermediate'}
     chosen = ('custom' if args['modification'] in (None, 'custom') else args['modification'], args['mass_tag'])
-    ends = {'reduced': ('reduced', None), 'unreduced': ('custom', None), **{k: (k, None) for k in modification_formula_dict if k != 'reduced'}}
+    ends = {'reduced': ('reduced', None), 'unreduced': ('custom', None), **{k: (k, None) for k in ('2AA', '2AB', 'procainamide', 'PA')}}
     names = {v: k for k, v in ends.items()}
     found, out = ({} if n_top is None else {chosen: n_top}), (None, None)
     # Condensing the whole file took as long as the rest of each run on its 100 most intense clusters, and it is the same for every reducing end (but for
@@ -3652,7 +3665,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
@@ -3671,7 +3684,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
    | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
-   | sample_prep (string): underivatized/permethylated/peracetylated
+   | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
    | taxonomy_level (string): taxonomy level of taxonomy_filter; default:'Class'
    | taxonomy_filter (string): only glycans of this taxon in df_use supply candidate compositions and database structures; default:'Mammalia'
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
@@ -4312,7 +4325,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         if pair is None:
             condensed.clear()
     if _return_intermediate:
-        df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1, df_use = df_use, accurate_ms2 = trap == 'orbitrap', ms1_ppm_floor = ms1_ppm_floor)
+        df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1, df_use = df_use, accurate_ms2 = trap == 'orbitrap', ms1_ppm_floor = ms1_ppm_floor,
+                            ion_trap = trap in ('linear', 'amazon'))
         return df_out
     if df_out.empty:
         df_out.insert(0, 'top1_pred', [])
@@ -4329,7 +4343,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                                ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1,
                                                accurate_ms1 = accurate_ms1, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
-                                               ms1_ppm_floor = ms1_ppm_floor)
+                                               ms1_ppm_floor = ms1_ppm_floor, ion_trap = trap in ('linear', 'amazon'))
     # The other of N and O (O-glycans in an N-glycan release, N-glycans in an O-glycan one): if >= 2 rows have a structure only that class has, the clusters
     # without a row are processed again as N+O glycans, with only the compositions of that class (so the model only sees inputs that can add a row) and without
     # the side-product search (none of its rows were side products), and its rows of such a structure join the run. Whole runs as N+O worsened the
@@ -4351,7 +4365,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                               trust_header_charge = accurate_ms1, accurate_ms2 = trap == 'orbitrap')
                 df_pair, spectra_pair = finalise_predictions(df_pair, False, mode, modification, mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                              glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1, accurate_ms1 = accurate_ms1,
-                                                             sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floor)
+                                                             sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floor,
+                                                             ion_trap = trap in ('linear', 'amazon'))
                 neutral = lambda mz, z: np.abs(z) * mz - (np.abs(z) - 1) * multiplier * PROTON_MASS
                 own_n, own_rt = neutral(df_out.index.values, df_out['charge'].values), df_out['RT'].values
                 keep = [only(p) and not ((np.abs(own_n - neutral(mz, z)) < mass_tolerance) & (np.abs(own_rt - rt) < rt_diff)).any()
@@ -4400,7 +4415,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
-   | modification (string): chemical modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
@@ -4419,7 +4434,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
    | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
-   | sample_prep (string): underivatized/permethylated/peracetylated
+   | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
    | taxonomy_level (string): taxonomy level to filter by; default:'Class'
    | taxonomy_filter (string): which taxonomy to pull glycans for; default:'Mammalia'
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
@@ -4509,11 +4524,11 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Built once here instead of once per file inside augment_predictions
     if experimental and not mass_dic:
         mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
-    inference_dfs, file_modes, ms1_paths, accurate_ms1s, accurate_ms2s, ms1_ppm_floors = {}, {}, {}, {}, {}, {}
-    for file_label, (df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor) in zip(file_labels, results):
+    inference_dfs, file_modes, ms1_paths, accurate_ms1s, accurate_ms2s, ms1_ppm_floors, ion_traps = {}, {}, {}, {}, {}, {}, {}
+    for file_label, (df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap) in zip(file_labels, results):
         # wrap_inference overrides the ion mode if the file says otherwise, so downstream steps have to follow it
         file_modes[file_label], ms1_paths[file_label], accurate_ms1s[file_label], accurate_ms2s[file_label] = file_mode, ms1_path, accurate_ms1, accurate_ms2
-        ms1_ppm_floors[file_label] = ms1_ppm_floor
+        ms1_ppm_floors[file_label], ion_traps[file_label] = ms1_ppm_floor, ion_trap
         inference_dfs[file_label] = df_out.assign(condition_label = file_label) if not df_out.empty else df_out
     # The table of a file without any glycan peak
     empty_table = pd.DataFrame(columns = ['top1_pred', 'predictions', 'composition', 'num_spectra', 'charge', 'RT', 'rel_abundance'],
@@ -4610,7 +4625,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                                            glycan_class = glycan_class, mass_tolerance = mass_tolerance,
                                                            ms1 = ms1, accurate_ms1 = accurate_ms1s[file_label],
                                                            sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
-                                                           ms1_ppm_floor = ms1_ppm_floors[file_label])
+                                                           ms1_ppm_floor = ms1_ppm_floors[file_label], ion_trap = ion_traps[file_label])
         inference_dfs[file_label] = (df_out, spectra_out)
     # The other of N and O (O-glycans in N-glycan releases, N-glycans in O-glycan ones), as in wrap_inference: a file with >= 2 rows of a structure only that
     # class has is processed again as N+O glycans on its clusters without a row, and its rows of such a structure from >= 2 spectra are harmonized across these
@@ -4661,7 +4676,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                     ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])
             df_pair, spectra_pair = finalise_predictions(df_pair, False, file_mode, modification, mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                          glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1, accurate_ms1 = accurate_ms1s[file_label],
-                                                         sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floors[file_label])
+                                                         sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floors[file_label],
+                                                         ion_trap = ion_traps[file_label])
             df_out, spectra_out = inference_dfs[file_label]
             own_n, own_rt = neutral(df_out.index.values, df_out['charge'].values, file_mode), df_out['RT'].values
             keep = [only(p) and not ((np.abs(own_n - neutral(mz, z, file_mode)) < mass_tolerance) & (np.abs(own_rt - rt) < rt_diff)).any()
@@ -4816,16 +4832,16 @@ def _batch_inference_file(spectra_filepath, ms1_path, inference_kwargs):
    | Returns:
    | :-
    | Returns a tuple of (intermediate prediction dataframe, ion mode used, path to the MS1 .npz or None, whether the survey scans are accurate (orbitrap,
-   | TOF), whether the MS2 spectra are orbitrap spectra, the survey scans' ppm floor of MS1_PPM_FLOORS)
+   | TOF), whether the MS2 spectra are orbitrap spectra, the survey scans' ppm floor of MS1_PPM_FLOORS, whether the MS2 spectra are ion-trap spectra)
    """
     df_out = wrap_inference(spectra_filepath, **inference_kwargs)
     ms1, file_mode, accurate_ms1 = df_out.attrs.pop('ms1', None), df_out.attrs.pop('mode'), df_out.attrs.pop('accurate_ms1', False)
-    accurate_ms2, ms1_ppm_floor = df_out.attrs.pop('accurate_ms2', False), df_out.attrs.pop('ms1_ppm_floor', 3.0)
+    accurate_ms2, ms1_ppm_floor, ion_trap = df_out.attrs.pop('accurate_ms2', False), df_out.attrs.pop('ms1_ppm_floor', 3.0), df_out.attrs.pop('ion_trap', False)
     df_out.attrs.clear()
     if ms1 is None or len(ms1[0]) == 0 or ms1_path is None:
-        return df_out, file_mode, None, accurate_ms1, accurate_ms2, ms1_ppm_floor
+        return df_out, file_mode, None, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap
     np.savez(ms1_path, rts = ms1[0], mzs = ms1[1], ints = ms1[2], offsets = ms1[3])
-    return df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor
+    return df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap
 
 
 def filter_top_n_isomers(df_in, top_n = 5):
@@ -5025,8 +5041,8 @@ def supplement_prediction(df_in, glycan_class, mode = 'negative', modification =
    | df_in (pandas dataframe): output file produced by wrap_inference
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are 'reduced', or 'other'/'none'; default:'reduced'
-   | sample_prep (string): underivatized/permethylated/peracetylated
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None\n
    | Returns:
    | :-
