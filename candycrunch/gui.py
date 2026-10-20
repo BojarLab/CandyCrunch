@@ -2,6 +2,7 @@
 import ast
 import contextlib
 import faulthandler
+import functools
 import glob
 import importlib.util
 import io
@@ -29,7 +30,7 @@ import numpy as np
 import pandas as pd
 try:
     from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRectF, QSize, QUrl, QStringListModel, \
-        QStandardPaths
+        QStandardPaths, QEvent
     from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QBrush, QShortcut, QFontDatabase, \
         QCursor
     from PySide6.QtWidgets import (QApplication, QMainWindow, QDialog, QDialogButtonBox, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
@@ -44,6 +45,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.backend_tools import Cursors
+from matplotlib.mathtext import MathTextParser
 
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch
 _tree = ast.parse(open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8').read())
@@ -116,6 +118,24 @@ _PROGRESS = {}
 INK, MUTED, LILAC, LILAC_LIGHT, WASH, CANDY = '#2a2133', '#857a90', '#8c5bb5', '#e6d9f1', '#f6f2f9', '#c8243f'
 # matplotlib's mathtext parser is not thread-safe, so the annotation threads and the window never lay out text at the same time
 MPL_LOCK = threading.Lock()
+# matplotlib caches parsed mathtext per parser, 50 entries in all, and every renderer has a parser of its own, so each spectrum parsed its fragment labels
+# again (~5 ms each), and so did the window's canvas when it drew it (~30 ms of every spectrum shown). One cache for all parsers of an output type returns
+# the same parse for the same arguments, as only the output type of the parser goes into it
+_MATHTEXT_PARSERS, _MATHTEXT_PARSE = {}, getattr(MathTextParser._parse_cached, '__wrapped__', None)
+
+
+@functools.lru_cache(2048)
+def _shared_mathtext(output_type, *args):
+    return _MATHTEXT_PARSE(_MATHTEXT_PARSERS[output_type], *args)
+
+
+def _parse_mathtext(self, *args):
+    _MATHTEXT_PARSERS.setdefault(self._output_type, self)
+    return _shared_mathtext(self._output_type, *args)
+
+
+if _MATHTEXT_PARSE is not None:
+    MathTextParser._parse_cached = _parse_mathtext
 # glycowork's modules import each other in a cycle, so two threads importing them at once (the drawing, annotation, and taxonomy threads all
 # start with an import) can hit Python's import deadlock detection, which killed the drawing thread or failed the first annotation
 IMPORT_LOCK = threading.Lock()
@@ -722,7 +742,8 @@ class Annotator(QObject):
                                     (top > 0 and intensity / top >= 0.05) or (diagnostic and np.isclose(diagnostic, mz, rtol = 0, atol = 0.0051).any())):
                                 frag_iupac = fragment_cartoon(glycans, hit['Domon-Costello nomenclatures'][0])
                                 if frag_iupac is not None and request['toggles'].get(frag_iupac) is not False:
-                                    fragIUPAC_to_image(frag_iupac)
+                                    # At the resolution plot_annotated_spectrum renders them for: its glycan_zoom at the figure's 100 dpi on this screen
+                                    fragIUPAC_to_image(frag_iupac, scale = 0.25 * (100 * request['ratio']) / 72)
                                 if stale():
                                     break
                         if stale():
@@ -736,7 +757,7 @@ class Annotator(QObject):
                         hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
                                                                charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
                                                                ax = figure.add_subplot(), draw_glycans = request['cartoons'], hit_dict = hit_dict,
-                                                               diagnostic = diagnostic, cartoons = request['toggles'],
+                                                               diagnostic = diagnostic, cartoons = request['toggles'], cartoon_dpi = 100 * request['ratio'],
                                                                **request['kwargs'])
                         # Save image… draws the spectrum again with the same diagnostic peaks
                         figure.diagnostic = diagnostic
@@ -921,7 +942,7 @@ class StructureDelegate(QStyledItemDelegate):
 
     def __init__(self, images, parent):
         super().__init__(parent)
-        self.images = images
+        self.images, self.shown = images, {}
 
     def paint(self, painter, option, index):
         image = self.images.get(index.data(TableModel.IMAGE_ROLE))
@@ -933,11 +954,20 @@ class StructureDelegate(QStyledItemDelegate):
         opt.widget.style().drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
         rect = opt.rect.adjusted(6, 4, -6, -4)
         scale = min(rect.width() / image.width(), rect.height() / image.height(), 0.5)
+        # Shrunk to its size on this screen by Qt's area-averaging scaler and kept per size: drawn shrunk, the painter's bilinear filter skipped pixels
+        # beyond half size (the 0.8 px per SVG unit of the drawings to 0.4 on a screen without scaling), which made thin strokes grainy
+        ratio = painter.device().devicePixelRatioF()
+        size = QSize(round(image.width() * scale * ratio), round(image.height() * scale * ratio))
+        key = (index.data(TableModel.IMAGE_ROLE), size.width(), size.height())
+        if key not in self.shown:
+            if len(self.shown) > 2000:
+                self.shown.clear()
+            self.shown[key] = image if size == image.size() else image.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         painter.save()
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         if opt.font.strikeOut():
             painter.setOpacity(0.3)
-        painter.drawImage(QRectF(rect.x(), rect.y() + (rect.height() - image.height() * scale) / 2, image.width() * scale, image.height() * scale), image)
+        painter.drawImage(QRectF(rect.x(), rect.y() + (rect.height() - image.height() * scale) / 2, image.width() * scale, image.height() * scale), self.shown[key])
         painter.restore()
 
 
@@ -1088,7 +1118,7 @@ class SpectrumPanel(QWidget):
                    'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
                    'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value() if ppm is None else ppm * 1e-3, 'ppm': ppm,
                    'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}), 'ion_trap': bool(ion_trap),
-                   'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100)}
+                   'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100), 'ratio': self.devicePixelRatioF()}
         request['key'] = repr(sorted((k, sorted(v.items()) if isinstance(v, dict) else v) for k, v in request.items()))
         return request
 
@@ -1110,6 +1140,12 @@ class SpectrumPanel(QWidget):
         super().resizeEvent(event)
         if self.request is not None and abs(event.size().height() - event.oldSize().height()) + abs(event.size().width() - event.oldSize().width()) > 40:
             self.relayout.start()
+
+    def event(self, event):
+        # Moved to a screen of another pixel ratio, the spectrum is drawn again, as its cartoons were rendered for the old one
+        if event.type() == QEvent.DevicePixelRatioChange and self.request is not None:
+            self.relayout.start()
+        return super().event(event)
 
     def show_message(self, text):
         self.request, self.spec, self.hover_targets, self.label_targets, self.drawn = None, None, [], [], None
@@ -1240,7 +1276,8 @@ class SpectrumPanel(QWidget):
             with MPL_LOCK:
                 plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
                                         mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = figure.add_subplot(), draw_glycans = request['cartoons'],
-                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, cartoons = request['toggles'], **request['kwargs'])
+                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, cartoons = request['toggles'],
+                                        cartoon_dpi = 300, **request['kwargs'])
                 figure.savefig(path, dpi = 300, bbox_inches = 'tight')
         except Exception as error:
             QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}')

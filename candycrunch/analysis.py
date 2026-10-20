@@ -3848,11 +3848,11 @@ def fragment_to_fragIUPAC(glycan_string, dc_name):
 _CARTOONS = {}
 
 
-def fragIUPAC_to_image(frag_iupac, padding = 4):
-    """Renders a glycan fragment as a cropped SNFG cartoon, or None if the drawing stack is unavailable; cached, as spectra are drawn again for
-    every candidate, panel size, and saved image"""
-    if (frag_iupac, padding) in _CARTOONS:
-        return _CARTOONS[(frag_iupac, padding)]
+def fragIUPAC_to_image(frag_iupac, padding = 4, scale = 1.0):
+    """Renders a glycan fragment as a cropped SNFG cartoon at scale pixels per point (padding in points), or None if the drawing stack is
+    unavailable; cached, as spectra are drawn again for every candidate, panel size, and saved image"""
+    if (frag_iupac, padding, scale) in _CARTOONS:
+        return _CARTOONS[(frag_iupac, padding, scale)]
     try:
         from io import BytesIO
         from glycowork.motif.draw import GlycoDraw
@@ -3862,16 +3862,15 @@ def fragIUPAC_to_image(frag_iupac, padding = 4):
         return None
     try:
         image = Image.open(BytesIO(convert_svg_to_png(GlycoDraw(frag_iupac, suppress = True, compact = True,
-                                                                dim = 30).as_svg(), None, return_bytes = True)))
+                                                                dim = 30).as_svg(), None, return_bytes = True, scale = scale)))
     except Exception:
         return None
-    box = image.convert('RGBA').getbbox()
+    box, pad = image.convert('RGBA').getbbox(), round(padding * scale)
     if box:
-        image = image.crop((max(0, box[0] - padding), max(0, box[1] - padding),
-                            min(image.width, box[2] + padding), min(image.height, box[3] + padding)))
+        image = image.crop((max(0, box[0] - pad), max(0, box[1] - pad), min(image.width, box[2] + pad), min(image.height, box[3] + pad)))
     if len(_CARTOONS) > 2000:
         _CARTOONS.clear()
-    _CARTOONS[(frag_iupac, padding)] = image
+    _CARTOONS[(frag_iupac, padding, scale)] = image
     return image
 
 
@@ -4017,7 +4016,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                             annotate_top_n = None, annotation_threshold = 0.05, figsize = None,
                             draw_glycans = True, glycan_zoom = 0.25, max_glycan_cartoons = None,
                             label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, mz_labels = False, diagnostic = None, cartoons = None,
-                            **kwargs):
+                            cartoon_dpi = None, **kwargs):
     """Plots an MS2 spectrum annotated with CandyCrumbs fragment assignments\n
     | Arguments:
     | :-
@@ -4037,6 +4036,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | figsize (tuple): figure size if creating a new figure; default:None (chosen for the input type)
     | draw_glycans (bool): whether to add SNFG cartoons for glycan fragments; default:True
     | glycan_zoom (float): scale of the SNFG cartoons; default:0.25
+    | cartoon_dpi (float): resolution the figure will be shown or saved at, which the cartoons are rendered for, as an image shrunk or enlarged on
+    |                      drawing turns grainy or blurry; default:None (1 px per point, as for about 300 dpi)
     | max_glycan_cartoons (int): the most cartoons to draw; they are placed in this order wherever they fit without overlapping each other, the
     |                            title, or another cartoon's leader, near their peak: fragments of diagnostic peaks first, then single glycosidic
     |                            cleavages, then the rest, most intense first within each; default:None (as many as fit)
@@ -4121,7 +4122,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     # Each label sits directly above its peak, lifted only as far as its neighbors require, with a dotted
     # leader whenever it had to move; anything that cannot be placed at all is dropped rather than overlaid
     figure = ax.figure
-    figure.canvas.draw()
+    # Lays out ticks and limits without rasterizing; the figure is drawn when it is shown or saved
+    figure.draw_without_rendering()
     renderer = figure.canvas.get_renderer()
     axes_box = ax.get_window_extent(renderer)
     placed, label_tops = [], {}
@@ -4185,6 +4187,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         # Boxes and labels block leaders through their diagonals, which any segment passing through a box with both ends outside it crosses
         blocking = [segment for b in placed for segment in (((b.x0, b.y0), (b.x1, b.y1)), ((b.x0, b.y1), (b.x1, b.y0)))]
         to_blended = blended.inverted()
+
         def crosses(a, b):
             # Whether any segment of a properly intersects any segment of b
             if not len(a) or not len(b):
@@ -4193,12 +4196,15 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
             side = lambda p, q, r: (q[..., 0] - p[..., 0]) * (r[..., 1] - p[..., 1]) - (q[..., 1] - p[..., 1]) * (r[..., 0] - p[..., 0])
             return bool(np.any((side(b[..., 0, :], b[..., 1, :], a[..., 0, :]) * side(b[..., 0, :], b[..., 1, :], a[..., 1, :]) < 0) &
                                (side(a[..., 0, :], a[..., 1, :], b[..., 0, :]) * side(a[..., 0, :], a[..., 1, :], b[..., 1, :]) < 0)))
+
+        # Rendered at the pixels per point of the shown or saved figure, so that matplotlib draws them one to one
+        scale = glycan_zoom * cartoon_dpi / 72 if cartoon_dpi else 1.0
         for frag_iupac, members in ranked:
-            image = fragIUPAC_to_image(frag_iupac)
+            image = fragIUPAC_to_image(frag_iupac, scale = scale)
             if image is None:
                 continue
             forced = bool(cartoons.get(frag_iupac))
-            box = AnnotationBbox(OffsetImage(np.array(image), zoom = glycan_zoom), (0, 0), xycoords = blended, frameon = True, annotation_clip = False,
+            box = AnnotationBbox(OffsetImage(np.array(image), zoom = glycan_zoom / scale), (0, 0), xycoords = blended, frameon = True, annotation_clip = False,
                                  bboxprops = dict(boxstyle = 'round,pad=0.15', fc = 'white', ec = '#cccccc', lw = 0.5))
             ax.add_artist(box)
             extent = box.get_window_extent(renderer)
