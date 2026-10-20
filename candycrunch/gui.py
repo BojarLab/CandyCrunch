@@ -217,11 +217,16 @@ def _send_session(update):
 
 def _load_model(path):
     """An imported CandyCrunch model: weights saved with their own vocabulary ({'state_dict': ..., 'glycans': [...]}, as the fine-tuning cell saves them)
-    or bare weights for the built-in vocabulary; read with weights_only, so a model file from elsewhere cannot run code. Returns (model, glycans)"""
-    import torch
-    from candycrunch.model import CandyCrunch_CNN
+    or bare weights for the built-in vocabulary; read with weights_only, so a model file from elsewhere cannot run code. Returns (model, glycans); without
+    PyTorch (the built app) the model runs on ONNX Runtime"""
+    from candycrunch.inference import CandyCrunchCNN, load_weights
     try:
-        state = torch.load(path, map_location = 'cpu', weights_only = True)
+        import torch
+        from candycrunch.model import CandyCrunch_CNN
+    except ImportError:
+        torch = None
+    try:
+        state = torch.load(path, map_location = 'cpu', weights_only = True) if torch is not None else load_weights(path)
     except Exception as error:
         raise ValueError(f'{os.path.basename(path)} is no PyTorch weights file, or holds code, which CandyCrunch does not load ({type(error).__name__})') from error
     if not isinstance(state, dict):
@@ -230,12 +235,20 @@ def _load_model(path):
     if glycans is None:
         with open(os.path.join(os.path.dirname(importlib.util.find_spec('candycrunch').origin), 'glycans.pkl'), 'rb') as file:
             glycans = pickle.load(file)
-    model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12)
     try:
-        model.load_state_dict({k.replace('module.', ''): v for k, v in state.get('state_dict', state).items()})
-    except (RuntimeError, AttributeError) as error:
+        if torch is not None:
+            model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12)
+            model.load_state_dict({k.replace('module.', ''): v for k, v in state.get('state_dict', state).items()})
+            return model.to('cuda:0' if torch.cuda.is_available() else 'cpu').eval(), list(glycans)
+        model = CandyCrunchCNN(state.get('state_dict', state))
+        # One empty input checks the weights against the architecture and the vocabulary
+        n = model(np.zeros((1, 2, 2048), np.float32), np.zeros((1, 12), np.float32), np.zeros(1, np.int64), np.zeros((1, 1), np.float32),
+                  *[np.zeros(1, np.int64)] * 4).shape[1]
+        if n != len(glycans):
+            raise ValueError(f'it predicts {n}')
+    except Exception as error:
         raise ValueError(f'{os.path.basename(path)} is no CandyCrunch model for {len(glycans)} structures: {" ".join(str(error).split())[:300]}') from error
-    return model.to('cuda:0' if torch.cuda.is_available() else 'cpu').eval(), list(glycans)
+    return model, list(glycans)
 
 
 def _check_model(path):
@@ -3131,7 +3144,7 @@ class MainWindow(QMainWindow):
         """A Sentry event, an error (values from _exception_values) or a message, with where it happened: versions, computer, and the run list"""
         from importlib.metadata import version, PackageNotFoundError
         versions = {}
-        for package in ('candycrunch', 'glycowork', 'glycorender', 'torch', 'numpy', 'pandas', 'PySide6'):
+        for package in ('candycrunch', 'glycowork', 'glycorender', 'torch', 'onnxruntime', 'numpy', 'pandas', 'PySide6'):
             with contextlib.suppress(PackageNotFoundError):
                 versions[package] = version(package)
         memory = None

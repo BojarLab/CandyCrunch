@@ -32,6 +32,8 @@ jobs:
         python -m pip install --upgrade pip
         pip install "glycowork @ git+https://github.com/BojarLab/glycowork.git@dev"
         pip install ".[gui]"
+        # The app runs the model on ONNX Runtime; the spec leaves PyTorch out
+        pip install "onnxruntime>=1.30"
 
     # Antivirus heuristics flag PyInstaller's precompiled bootloader, which malware ships too, so the Windows app gets one compiled here (the runner's MSVC)
     - name: Install PyInstaller with a bootloader built from source

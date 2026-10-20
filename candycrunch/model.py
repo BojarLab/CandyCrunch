@@ -1,38 +1,9 @@
 import torch
-import numpy as np
-import random
 from torch import flatten
 from torch import nn
 import torch.nn.functional as F
-
-
-def remove_low_intensity_peaks(array, removal_threshold, removal_percentage):
-    candidate_indices = np.where(np.logical_and(array > 0.0001, array <= removal_threshold))[0]
-    indices_to_remove = np.random.choice(candidate_indices, round(removal_percentage * len(candidate_indices)))
-    array_copy = np.copy(array)
-    array_copy[indices_to_remove] = 0
-    return array_copy
-
-
-def peak_intensity_jitter(array, augment_intensity):
-    return array * np.random.uniform(1 - augment_intensity, 1 + augment_intensity, len(array)).astype(np.float32)
-
-
-def new_peak_addition(array, n_noise_peaks, max_noise_intensity):
-    idx_noise_peaks = np.random.choice(np.where(array == 0)[0], n_noise_peaks)
-    new_values = max_noise_intensity * np.random.random(len(idx_noise_peaks))
-    noisy_array = np.copy(array)
-    noisy_array[idx_noise_peaks] = new_values
-    return noisy_array
-
-
-def transform_mz(x):
-    return new_peak_addition(peak_intensity_jitter(remove_low_intensity_peaks(x, removal_threshold = 0.008, removal_percentage = 0.1),
-                                                   augment_intensity = 0.25), n_noise_peaks = 10, max_noise_intensity = 0.005)
-
-
-def transform_rt(RT):
-    return max(0, RT + random.uniform(-0.1, 0.1))
+# Training augments with the functions test-time augmentation uses, which live with the inference code (the built app predicts without PyTorch)
+from candycrunch.inference import transform_mz, transform_rt
 
 
 class SimpleDataset(torch.utils.data.Dataset):

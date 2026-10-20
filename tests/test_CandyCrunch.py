@@ -391,6 +391,30 @@ def test_reducing_end_check(capsys):
     assert len(reduced) >= 15 and all(len(set(outs[m]['top1_pred'].dropna()) & reduced) >= 0.8 * len(reduced) for m in ['custom', '2AB'])
 
 
+def test_onnx_model_matches_torch():
+    # The built app runs the weights of model.py's CandyCrunch_CNN on ONNX Runtime: same logits as PyTorch, also for a norm scale below zero (which cannot
+    # be folded into the convolution after it), and the same predictions for the example run
+    pytest.importorskip('onnxruntime')
+    from candycrunch.inference import CandyCrunchCNN, load_weights
+    from candycrunch.model import CandyCrunch_CNN
+    weights = load_weights(BASE_DIR / 'candycrunch' / 'candycrunch.pt')
+    rng = np.random.default_rng(0)
+    mz = np.zeros((8, 2, 2048), np.float32)
+    for row in mz:
+        peaks = rng.choice(2048, 40, replace = False)
+        row[:, peaks] = rng.random((2, 40))
+    inputs = (mz, rng.random((8, 12)).astype(np.float32), rng.integers(0, 3, 8), rng.random((8, 1)).astype(np.float32), *rng.integers(0, 3, (4, 8)))
+    for state in (weights, {**weights, 'res3.ln2.weight': -weights['res3.ln2.weight']}):
+        model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12)
+        model.load_state_dict({k: torch.from_numpy(v) for k, v in state.items()})
+        with torch.inference_mode():
+            logits = model.eval()(*[torch.from_numpy(x if x.ndim > 1 else x[:, None]) for x in inputs]).numpy()
+        assert np.abs(CandyCrunchCNN(state)(*inputs) - logits).max() < 1e-3
+    example = str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx')
+    onnx, default = wrap_inference(example, 'O', model = CandyCrunchCNN(weights)), wrap_inference(example, 'O')
+    assert onnx.index.equals(default.index) and onnx['top1_pred'].equals(default['top1_pred'])
+
+
 def test_xic_quantification():
     # Two isomers 0.6 min apart (4:1) and a doubly charged ion, with isotope envelopes, on a 5 s MS1 cycle: each gets its own peak area
     rts, sigma, envelope = np.arange(0, 20, 0.08), 0.08, np.array([0.6, 0.3, 0.08, 0.02])

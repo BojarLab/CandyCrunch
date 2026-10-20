@@ -12,7 +12,8 @@ for package in ('candycrunch', 'glycowork', 'glycorender'):
     datas += copy_metadata(package)
 icon = os.path.join(SPECPATH, 'candycrunch.icns' if sys.platform == 'darwin' else 'candycrunch.ico')
 a = Analysis([os.path.join(SPECPATH, 'candycrunch_app.py')], datas = datas,
-             excludes = ['tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'IPython', 'notebook', 'jupyter_client', 'pytest'],
+             # Without PyTorch (only for training and GPU prediction) the app runs the model on ONNX Runtime, at half the size of the folder
+             excludes = ['tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'IPython', 'notebook', 'jupyter_client', 'pytest', 'torch'],
              # The app reads its defaults from prediction.py's source, so candycrunch is kept as plain .py files
              module_collection_mode = {'candycrunch': 'py'})
 pyz = PYZ(a.pure)

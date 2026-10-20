@@ -389,7 +389,9 @@ def test_gui_reports(app, monkeypatch):
 
 
 def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
+    import importlib.util
     import json
+    import sys
     import time
     import torch
     from candycrunch import gui
@@ -406,6 +408,15 @@ def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
     for name, reason in (('small.pt', 'no CandyCrunch model'), ('notes.pt', 'no PyTorch weights file')):
         with pytest.raises(ValueError, match = reason):
             gui._load_model(str(tmp_path / name))
+    # The same without PyTorch, as in the built app, where the model runs on ONNX Runtime
+    if importlib.util.find_spec('onnxruntime'):
+        with monkeypatch.context() as patch:
+            patch.setitem(sys.modules, 'torch', None)
+            assert gui._check_model(str(tmp_path / 'tuned.pt')) == len(glycans) + 1
+            assert type(gui._load_model(str(tmp_path / 'tuned.pt'))[0]).__name__ == 'CandyCrunchCNN'
+            for name, reason in (('small.pt', 'no CandyCrunch model'), ('notes.pt', 'no PyTorch weights file')):
+                with pytest.raises(ValueError, match = reason):
+                    gui._load_model(str(tmp_path / name))
     # Importing checks the file in a process of its own, then copies it into the model folder and chooses it; a session's model that no longer exists
     # falls back to the built-in one
     panel = gui.SettingsPanel()

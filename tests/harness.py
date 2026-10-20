@@ -523,7 +523,6 @@ def prune_stage_cache(cache_dir, max_gb):
 def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None):
     # Wraps the module globals wrap_inference looks up at call time: memoized loading, CandyCrumbs, supporting_ions and model top-k, and captures of the
     # intermediate tables of the first (main) call of each stage for the trace
-    import torch
     import candycrunch.analysis as ca
     import candycrunch.model as cm
     model, vocab = (cp.candycrunch if model is None else model), (cp.glycans if vocab is None else vocab)
@@ -581,22 +580,21 @@ def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None)
             return hit
         wrapped.__name__ = name
         return wrapped
-    def get_topk(dataloader, run_model, glycans, k = 25, temp = False, temperature = cp.temperature):
-        dataset = dataloader.dataset
-        parts = dataset.datasets if isinstance(dataset, torch.utils.data.ConcatDataset) else [dataset]
-        if run_model is not model or glycans is not vocab or any(getattr(d, 'transform_mz', None) or getattr(d, 'transform_rt', None) for d in parts):
-            # Augmentation drawn at access time (code from before content-seeded augmentation) or a model the cache was not keyed on: no cache
-            out = orig['get_topk'](dataloader, run_model, glycans, k = k, temp = temp, temperature = temperature)
+    def get_topk(batches, run_model, glycans, k = 25, temp = False, temperature = cp.temperature):
+        if run_model is not model or glycans is not vocab:
+            # A model the cache was not keyed on: no cache
+            out = orig['get_topk'](batches, run_model, glycans, k = k, temp = temp, temperature = temperature)
             first('topk', out)
             return out
         start = time.perf_counter()
         settings = (k, temp, float(temperature), model_src)
-        keys = [digest(b''.join(t.numpy().tobytes() for t in dataset[i][:9]), settings) for i in range(len(dataset))]
+        rows = [[a[i] for a in b] for b in batches for i in range(len(b[0]))]
+        keys = [digest(b''.join(np.ascontiguousarray(a).tobytes() for a in r), settings) for r in rows]
         found = [caches['topk'].get(key) for key in keys]
         missing = [i for i, f in enumerate(found) if f is None]
         if missing:
-            loader = torch.utils.data.DataLoader(torch.utils.data.Subset(dataset, missing), batch_size = dataloader.batch_size, shuffle = False)
-            preds, conf = orig['get_topk'](loader, run_model, glycans, k = k, temp = temp, temperature = temperature)
+            preds, conf = orig['get_topk']([[np.stack([rows[i][c] for i in missing[j:j + 256]]) for c in range(len(rows[0]))] for j in range(0, len(missing), 256)], run_model,
+                                           glycans, k = k, temp = temp, temperature = temperature)
             for i, p, c in zip(missing, preds, conf):
                 found[i] = (p, c)
                 caches['topk'].put(keys[i], (p, c))

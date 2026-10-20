@@ -20,8 +20,13 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 from networkx import descendants
-import torch
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn.functional as F
+    from candycrunch.model import CandyCrunch_CNN
+except ImportError:
+    # The built app ships without PyTorch and runs the model on ONNX Runtime (inference.py)
+    torch = None
 from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
 from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, graph_to_string
 from glycowork.motif.processing import enforce_class, canonicalize_iupac, get_class, is_composition
@@ -32,7 +37,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           mz_to_composition, structure_to_basic, mass_dict, SIALIC_KEYS,
                                           sialic_linkage_splits, resolve_sialic_linkages, _carboxyl_sites)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
-from candycrunch.model import (CandyCrunch_CNN, SimpleDataset, transform_mz, transform_rt)
+from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2
 from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, read_raw_packet, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
@@ -41,16 +46,19 @@ with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
     glycans = pickle.load(f)
 with open(os.path.join(this_dir, 'glytoucan_mapping.pkl'), 'rb') as f:
     glytoucan_mapping = pickle.load(f)
-# Choose the correct computing architecture
-device = "cpu"
-if torch.cuda.is_available():
-    device = "cuda:0"
 sdict = os.path.join(this_dir, 'candycrunch.pt')
-sdict = torch.load(sdict, map_location = device, weights_only = True)
-sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
-candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12).to(device)
-candycrunch.load_state_dict(sdict)
-candycrunch = candycrunch.eval()
+if torch is not None:
+    # Choose the correct computing architecture
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda:0"
+    sdict = torch.load(sdict, map_location = device, weights_only = True)
+    sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
+    candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12).to(device)
+    candycrunch.load_state_dict(sdict)
+    candycrunch = candycrunch.eval()
+else:
+    candycrunch = CandyCrunchCNN(load_weights(sdict))
 _trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 
 NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'HCO3-']
@@ -66,7 +74,7 @@ MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'orbitrap': 'orbitrap', 'fourier tra
                         'ft-icr': 'orbitrap', 'ion trap': 'linear',
                         'time-of-flight': 'other', 'tof': 'other'}
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
-temperature = torch.Tensor([1.15]).to(device)
+temperature = torch.Tensor([1.15]).to(device) if torch is not None else 1.15
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
 MZ_REF = 1600  # reference m/z used internally to turn the user's single ppm tolerance into the flat-Da window for binning/fragments; corresponds to ~0.5 Da at 300ppm
 ISOTOPE_SPACING = 1.003355  # 13C - 12C
@@ -1125,7 +1133,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
    | tta_thresh (float): inputs of spectra whose best annotation_score exceeds this get 5 augmented copies, the others one plain copy (column 'tta'); default: None (all get 5)\n
    | Returns:
    | :-
-   | (1) a dataloader used for model prediction (5-copy inputs first, then 1-copy inputs, each in input_id order)
+   | (1) the model inputs in batches of 256 (5-copy inputs first, then 1-copy inputs, each in input_id order)
    | (2) a preliminary df_out dataframe
    """
     df = df.assign(glycan_type = glycan_class,
@@ -1162,22 +1170,24 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
         X_tta.extend((transform_mz(np.asarray(k[0])), *k[1:4], transform_rt(k[4]), *k[5:]) for _ in range(5))
     random.setstate(state[0])
     np.random.set_state(state[1])
-    X_plain = [k for k, t in zip(X, tta) if not t]
-    dset = torch.utils.data.ConcatDataset([SimpleDataset(X_tta, pd.Series([0] * len(X_tta))), SimpleDataset(X_plain, pd.Series([0] * len(X_plain)))])
-    dloader = torch.utils.data.DataLoader(dset, batch_size = 256, shuffle = False)
+    X = X_tta + [k for k, t in zip(X, tta) if not t]
+    # Batches as the model takes them: binned intensities and m/z remainders as two channels, composition vector, glycan type, RT, mode, LC, modification, trap
+    batches = [(np.stack([np.asarray([x[0] for x in b], dtype = np.float32), np.asarray([x[1] for x in b], dtype = np.float32)], axis = 1),
+                np.asarray([x[2] for x in b], dtype = np.float32), np.asarray([x[3] for x in b], dtype = np.int64), np.asarray([[x[4]] for x in b], dtype = np.float32),
+                *[np.asarray([x[c] for x in b], dtype = np.int64) for c in range(5, 9)]) for b in (X[i:i + 256] for i in range(0, len(X), 256))]
     idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
     df.set_index(idx_col, inplace = True)
     drop_cols = ['binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification', 'trap', 'glycan_type', 'lc']
     df.drop(drop_cols, axis = 1, inplace = True)
-    return dloader, df
+    return batches, df
 
 
-def get_topk(dataloader, model, glycans, k = 25, temp = False, temperature = temperature):
-    """yields topk CandyCrunch predictions for spectra in dataloader\n
+def get_topk(batches, model, glycans, k = 25, temp = False, temperature = temperature):
+    """yields topk CandyCrunch predictions for the model inputs in batches\n
    | Arguments:
    | :-
-   | dataloader (PyTorch): dataloader from process_for_inference
-   | model (PyTorch): trained CandyCrunch model
+   | batches (list): model inputs in batches, from process_for_inference
+   | model (PyTorch or CandyCrunchCNN): trained CandyCrunch model
    | glycans (list): full list of glycans used for training CandyCrunch
    | k (int): how many top predictions to provide for each spectrum; default:25
    | temp (bool): whether to calibrate logits by temperature factor; default:False
@@ -1187,37 +1197,30 @@ def get_topk(dataloader, model, glycans, k = 25, temp = False, temperature = tem
    | (1) a nested list of topk glycans for each spectrum
    | (2) a nested list of associated prediction confidences, for each spectrum
    """
-    n_samples = len(dataloader.dataset)
-    preds = np.empty((n_samples, k), dtype = int)
-    conf = np.empty((n_samples, k), dtype = float)
-    start_idx = 0
-    # The batches of process_for_inference's loader (plain SimpleDatasets, in order) are made from its inputs at once, as the tensors its collation stacks
-    # (making ten tensors per input and stacking them was ~20% of this step)
-    parts = dataloader.dataset.datasets if isinstance(dataloader.dataset, torch.utils.data.ConcatDataset) else [dataloader.dataset]
-    if isinstance(dataloader.sampler, torch.utils.data.SequentialSampler) and dataloader.batch_size and all(
-            isinstance(p, SimpleDataset) and not p.transform_mz and not p.transform_rt for p in parts):
-        items, size = [x for p in parts for x in p.x], dataloader.batch_size
-        dataloader = ([torch.from_numpy(np.stack([np.asarray(x[c]) for x in b])).float() for c in range(3)] + [
-            torch.tensor([[x[c]] for x in b], dtype = torch.float32 if c == 4 else torch.int64) for c in range(3, 9)] + [b]
-                      for b in (items[i:i + size] for i in range(0, len(items), size)))
-    with torch.inference_mode():
-        for data in dataloader:
-            mz_list, mz_remainder, precursor, glycan_type, rt, mode, lc, modification, trap, y = data
-            mz_list = torch.stack([mz_list, mz_remainder], dim = 1)
-            batch_size = len(y)
-            inputs = [x.to(device, non_blocking = True) for x in
-                      [mz_list, precursor, glycan_type, rt, mode, lc, modification, trap]]
-            pred = model(*inputs)
+    preds, conf = [], []
+    # PyTorch runs every model but the ONNX one (also the app's progress counter around a PyTorch model), on the GPU if there is one
+    on_torch = torch is not None and not isinstance(model, CandyCrunchCNN)
+    for batch in batches:
+        if on_torch:
+            with torch.inference_mode():
+                pred = model(*[torch.from_numpy(x if x.ndim > 1 else x[:, None]).to(device, non_blocking = True) for x in batch])
+                if temp:
+                    pred = pred / temperature
+                conf_topk, idx_topk = torch.topk(F.softmax(pred, dim = 1), k, dim = 1)
+            idx, top = idx_topk.cpu().numpy(), conf_topk.cpu().numpy()
+        else:
+            pred = model(*batch)
             if temp:
-                pred = pred / temperature
-            pred = F.softmax(pred, dim = 1)
-            conf_topk, idx_topk = torch.topk(pred, k, dim = 1)
-            end_idx = start_idx + batch_size
-            preds[start_idx:end_idx, :] = idx_topk.cpu().numpy()
-            conf[start_idx:end_idx, :] = conf_topk.cpu().numpy()
-            start_idx = end_idx
-    preds = [[glycans[i] for i in j] for j in preds]
-    return preds, conf.tolist()
+                pred = pred / float(temperature)
+            pred = np.exp(pred - pred.max(1, keepdims = True))
+            pred /= pred.sum(1, keepdims = True)
+            # The k most likely structures, most likely first
+            idx = np.argpartition(-pred, k - 1, axis = 1)[:, :k]
+            idx = np.take_along_axis(idx, np.argsort(-np.take_along_axis(pred, idx, 1), axis = 1, kind = 'stable'), 1)
+            top = np.take_along_axis(pred, idx, 1)
+        preds.extend([glycans[i] for i in j] for j in idx)
+        conf.extend(top.astype(float).tolist())
+    return preds, conf
 
 
 comp_cache = {}
@@ -3589,7 +3592,7 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
     # processed with every other reducing end (unreduced, 2AA, 2AB, procainamide, PA); if one gives at least 1.5x as many model predictions (and at least 2), the
     # whole file is processed with it, which takes over if it gives at least 1.5x as many (and at least 5) as the chosen reducing end did. The random state is
     # restored, so a run the check leaves alone stays as it was
-    rng = (random.getstate(), np.random.get_state(), torch.get_rng_state())
+    rng = (random.getstate(), np.random.get_state(), torch.get_rng_state() if torch is not None else None)
     args = {k: v for k, v in run_args.items() if k != '_return_intermediate'}
     chosen = ('custom' if args['modification'] in (None, 'custom') else args['modification'], args['mass_tag'])
     ends = {'reduced': ('reduced', None), 'unreduced': ('custom', None), **{k: (k, None) for k in ('2AA', '2AB', 'procainamide', 'PA')}}
@@ -3623,7 +3626,8 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
             out = (best, df_end)
     random.setstate(rng[0])
     np.random.set_state(rng[1])
-    torch.set_rng_state(rng[2])
+    if torch is not None:
+        torch.set_rng_state(rng[2])
     return out
 
 
@@ -3635,7 +3639,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                    filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True,
                    experimental = True, mass_dic = None, sample_prep = 'underivatized',
                    taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
-                   sialic_derivatization = None, reducing_end_variants = None, n_jobs = 1, _return_intermediate = False, _loaded = None, _top_clusters = None,
+                   sialic_derivatization = None, reducing_end_variants = None, n_jobs = 1, return_inputs = False, _return_intermediate = False, _loaded = None, _top_clusters = None,
                    _condensed = None, _pair = None):
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
@@ -3695,11 +3699,14 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                               for; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid', as released
    |                               glycosphingolipid glycans form them)
    | n_jobs (int): number of processes for fragment scoring (CandyCrumbs) and supporting peaks, which are pure Python; the model already uses every core.
-   |               The processes stay up for later runs; a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS; default:1\n
+   |               The processes stay up for later runs; a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS; default:1
+   | return_inputs (bool): whether to return the model's inputs instead of predictions, as a callable model receives them (e.g., to build training data from
+   |                       runs with known structures); the model and everything after it, including the reducing-end and glycan-class checks, are
+   |                       skipped, so modification and glycan_class have to be right; default:False\n
    | Returns:
    | :-
    | Returns dataframe of predictions for spectra in file; if spectra=True, a tuple of (dataframe, list of its MS2 spectra), and files with MS3 spectra
-   | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row)
+   | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row); with return_inputs, the dataframe of model inputs
    """
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
     run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate', '_loaded', '_top_clusters', '_condensed', '_pair')}
@@ -3895,7 +3902,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = 'permethylated' if sample_prep == 'permethylated' else (
         'reduced' if modification is None and not mass_tag else modification), lc = lc, trap = trap,
                                            rt_max_default = rt_max_default, tta_thresh = crumbs_thresh)
-    if isinstance(model, torch.nn.Module):
+    if return_inputs and not _return_intermediate:
+        # One row per input (pooled spectrum and candidate composition; index its m/z), as a callable model gets them, with the settings it was encoded with
+        df_in = df_out.drop_duplicates('input_id').drop(columns = ['input_id', 'tta'])
+        df_in.attrs.update(glycan_class = glycan_class, mode = mode, modification = modification, mass_tag = mass_tag, lc = lc, trap = trap,
+                           sample_prep = sample_prep, accurate_ms1 = accurate_ms1)
+        return df_in
+    if isinstance(model, CandyCrunchCNN) or (torch is not None and isinstance(model, torch.nn.Module)):
         # Predict glycans from spectra
         preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
         # Max over the 5 augmented copies of each test-time augmented input (they come first in the loader), a plain input has one copy
@@ -4499,7 +4512,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), {**inference_kwargs, 'glycan_class': glycan_class if c == key else c, 'df_use': use_c, **({'_loaded': first.pop()} if i == 0 and first else {}),
                                                                        **({'_condensed': condensed.pop()} if i == 0 and condensed else {})}) for i, fp in enumerate(spectra_filepath_list)]
         if n_jobs > 1:
-            with ProcessPoolExecutor(max_workers = n_jobs, initializer = torch.set_num_threads,
+            with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if torch is None else torch.set_num_threads,
                                      initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
                 runs[c] = (list(pool.map(_batch_inference_file, *zip(*tasks))), use_c)
         else:
@@ -4635,7 +4648,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         tasks = [(spectra_filepath_list[file_labels.index(k)], None, {**inference_kwargs, 'glycan_class': [classes[0], pair], 'df_use': use_pair, 'reducing_end_variants': {},
                                                                       '_pair': (pair, list(zip(inference_dfs[k][0].index.values, inference_dfs[k][0]['RT'].values)))}) for k in triggered]
         if n_jobs > 1:
-            with ProcessPoolExecutor(max_workers = n_jobs, initializer = torch.set_num_threads,
+            with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if torch is None else torch.set_num_threads,
                                      initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
                 pair_runs = list(pool.map(_batch_inference_file, *zip(*tasks)))
         else:
