@@ -178,5 +178,4 @@ class CandyCrunch_CNN(torch.nn.Module):
         comb = self.comb_lin3(comb)
         if rep:
             return comb, comb_rep
-        else:
-            return comb
+        return comb

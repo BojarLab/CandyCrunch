@@ -1,5 +1,4 @@
 import pytest
-import unittest
 import re
 import random
 import time
@@ -70,35 +69,33 @@ REFERENCE_CORRECT = [(8, 11), (16, 17), (10, 13), (7, 13), (4, 4), (9, 11), (25,
 CHAIN_RANKS = {'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu'}
 
 def strip_chain_rank(name):
-	parts = name.split('_')
-	if len(parts) == 3 and parts[2] in CHAIN_RANKS:
-		return '_'.join(parts[:2])
-	return name
+    parts = name.split('_')
+    if len(parts) == 3 and parts[2] in CHAIN_RANKS:
+        return '_'.join(parts[:2])
+    return name
 
 def normalize_annotations(annotations):
-	if not annotations:
-		return []
-	if isinstance(annotations[0], str):
-		return sorted(strip_chain_rank(x) for x in annotations)
-	return sorted(tuple(sorted(strip_chain_rank(y) for y in x)) for x in annotations)
+    if not annotations:
+        return []
+    if isinstance(annotations[0], str):
+        return sorted(strip_chain_rank(x) for x in annotations)
+    return sorted(tuple(sorted(strip_chain_rank(y) for y in x)) for x in annotations)
 
 @pytest.mark.parametrize("test_dict", TEST_DICTS)
 def test_candycrumbs_accuracy(test_dict):
-    result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], mass_threshold = 0.4, charge=test_dict['charge'],mass_tag=test_dict['label_mass'],max_cleavages=test_dict.get('max_cleavages',3))
+    result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], mass_threshold = 0.4, charge = test_dict['charge'], mass_tag = test_dict['label_mass'], max_cleavages = test_dict.get('max_cleavages', 3))
     total_annotations = len(test_dict['annotations'])
     correct_annotations = 0
     assert len(result) == total_annotations
-    for mass, expected_annotations in zip(test_dict['masses'], test_dict['annotations']):
+    for mz, expected_annotations in zip(test_dict['masses'], test_dict['annotations']):
         if not expected_annotations:
             total_annotations=total_annotations-1
             continue
-        if mass in result:
-            if result[mass]:
-                predicted_annotations = result[mass]['Domon-Costello nomenclatures'][0]
+        if mz in result:
+            if result[mz]:
+                predicted_annotations = result[mz]['Domon-Costello nomenclatures'][0]
                 if normalize_annotations(predicted_annotations) == normalize_annotations(expected_annotations):
                     correct_annotations += 1
-            elif not expected_annotations:
-                correct_annotations += 1  # Credit for correctly predicting no annotations
     score = correct_annotations / total_annotations
     floor = REFERENCE_CORRECT[TEST_DICTS.index(test_dict)][0]
     print(f"Score: {score:.2f} ({correct_annotations}/{total_annotations}), reference: {floor}/{total_annotations}")
@@ -106,22 +103,20 @@ def test_candycrumbs_accuracy(test_dict):
 
 @pytest.mark.parametrize("test_dict", TEST_DICTS)
 def test_candycrumbs_accuracy_top5(test_dict):
-    result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], 0.4, charge=test_dict['charge'],mass_tag=test_dict['label_mass'],simplify=False)
+    result = CandyCrumbs(test_dict['glycan_string'], test_dict['masses'], 0.4, charge = test_dict['charge'], mass_tag = test_dict['label_mass'], simplify = False)
     total_annotations = len(test_dict['annotations'])
     correct_annotations = 0
     assert len(result) == total_annotations
-    for mass, expected_annotations in zip(test_dict['masses'], test_dict['annotations']):
+    for mz, expected_annotations in zip(test_dict['masses'], test_dict['annotations']):
         if not expected_annotations:
             total_annotations=total_annotations-1
             continue
-        if mass in result:
-            if result[mass]:
-                predicted_annotations = result[mass]['Domon-Costello nomenclatures']
+        if mz in result:
+            if result[mz]:
+                predicted_annotations = result[mz]['Domon-Costello nomenclatures']
                 exp_norm = normalize_annotations(expected_annotations)
                 if any(normalize_annotations(pred) == exp_norm for pred in predicted_annotations):
                     correct_annotations += 1
-            elif not expected_annotations:
-                correct_annotations += 1  # Credit for correctly predicting no annotations
     score = correct_annotations / total_annotations
     floor = REFERENCE_CORRECT[TEST_DICTS.index(test_dict)][1]
     print(f"Score: {score:.2f} ({correct_annotations}/{total_annotations}), reference: {floor}/{total_annotations}")

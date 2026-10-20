@@ -178,7 +178,7 @@ def _post_envelope(header, items):
 
 
 def _send_report(event, files = None):
-    """Posts a Sentry event (an error, or a bug report as type 'feedback') and text attachments ({file name: text}) as one envelope; True if Sentry took it"""
+    """Posts a Sentry event (an error, or a bug report as type 'feedback') and attachments ({file name: text, or bytes for binary files}) as one envelope; True if Sentry took it"""
     items = [({'type': event.get('type', 'event')}, _scrub(json.dumps(event, default = str)).encode())]
     # Text is scrubbed of the home folder; bytes (the .cc of a misprediction's surroundings) go as they are
     items += [({'type': 'attachment', 'filename': name, 'content_type': 'application/octet-stream' if isinstance(data, bytes) else 'text/plain'},
@@ -695,15 +695,16 @@ class Annotator(QObject):
                     # second for large glycans), so the spectrum labels them whatever their intensity and draws their fragments first
                     support = None
                     if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get('ms3_precursor') is None:
-                        if key + repr(request['candidates']) not in self.results:
+                        support_key = key + repr(request['candidates'])
+                        if support_key not in self.results:
                             try:
-                                self.results[key + repr(request['candidates'])] = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])),
-                                                                                                   charge = request['charge'], candidates = request['candidates'],
-                                                                                                   mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                                                                   sialic_derivatization = request['kwargs'].get('sialic_derivatization'))
+                                self.results[support_key] = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])),
+                                                                            charge = request['charge'], candidates = request['candidates'],
+                                                                            mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
+                                                                            sialic_derivatization = request['kwargs'].get('sialic_derivatization'))
                             except Exception:
-                                self.results[key + repr(request['candidates'])] = {'residues': [], 'candidates': []}
-                        support = self.results[key + repr(request['candidates'])]
+                                self.results[support_key] = {'residues': [], 'candidates': []}
+                        support = self.results[support_key]
                         if stale():
                             continue
                     diagnostic = sorted({s[0] for e in support['residues'] for s in e['support']} | {s[0] for c in support['candidates'] for s in c['support']} |
@@ -790,11 +791,6 @@ def _set_combo(box, value):
     index = box.findData(value)
     if index >= 0:
         box.setCurrentIndex(index)
-
-
-def _class_choice(value):
-    # The glycan class combo's data of a class or a list of classes ('N+O'); a list of one class is that class
-    return value if value is None or isinstance(value, str) else '+'.join(sorted(set(value), key = CLASS_ORDER.index))
 
 
 def _fmt(value, decimals):
@@ -1030,10 +1026,8 @@ class SpectrumPanel(QWidget):
         self.controls.addWidget(self.fragment_types)
         self.controls.addWidget(self.cartoons)
         self.controls.addWidget(self.save)
-        self.message = QLabel()
+        self.message = _label('', 'hint')
         self.message.setAlignment(Qt.AlignCenter)
-        self.message.setWordWrap(True)
-        self.message.setProperty('role', 'hint')
         self.holder = QWidget()
         self.holder_layout = QVBoxLayout(self.holder)
         self.holder_layout.setContentsMargins(0, 0, 0, 0)
@@ -1223,7 +1217,6 @@ class SpectrumPanel(QWidget):
                               for text in figure.axes[0].texts if text.get_text() and text.xy[0] in tips]
         self.show_support(support)
 
-
     def save_image(self):
         """Draws the spectrum shown again at print size, with the m/z of every labeled peak, as PNG (300 dpi), SVG, or PDF"""
         if self.drawn is None:
@@ -1253,7 +1246,6 @@ class SpectrumPanel(QWidget):
             QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}')
         finally:
             QApplication.restoreOverrideCursor()
-
 
     def show_support(self, support):
         """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red) and lists them above the fragment table"""
@@ -1301,7 +1293,6 @@ class SpectrumPanel(QWidget):
                                f'</span></p><table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Residue</th>'
                                f'<th align="left">Supporting peaks</th><th align="left">Not told apart from</th><th align="left">Peaks against</th></tr>{"".join(rows)}'
                                f'</table><br>' + self.fragment_html)
-
 
     def toggle_cartoon(self, event):
         """A click on a fragment label hides that fragment's cartoon if it is drawn, else draws it (every peak of one fragment shares its cartoon)"""
@@ -1679,7 +1670,7 @@ class SettingsPanel(QScrollArea):
                 path, found, charges, n_ms2 = self.detections.get_nowait()
             except (queue.Empty, EOFError, OSError):
                 break
-            experiment = next((e for e in map(self.files.topLevelItem, range(self.files.topLevelItemCount())) if getattr(e, 'detecting', (None,))[0] == path), None)
+            experiment = next((e for e in self.waiting() if e.detecting[0] == path), None)
             if experiment is None:
                 continue
             before, current = experiment.detecting[1], self.values() if experiment is self.shown else dict(experiment.settings)
@@ -1797,9 +1788,10 @@ class SettingsPanel(QScrollArea):
         return values
 
     def set_values(self, values):
-        # A list of classes the combo does not offer (from a session, or settings made outside the app) becomes a choice of its own
-        choice = _class_choice(values.get('glycan_class'))
+        # A list of classes the combo does not offer (from a session, or settings made outside the app) becomes a choice of its own; a list of one class is that class
+        choice = values.get('glycan_class')
         if choice is not None:
+            choice = choice if isinstance(choice, str) else '+'.join(sorted(set(choice), key = CLASS_ORDER.index))
             values = {**values, 'glycan_class': choice}
             if self.inputs['glycan_class'].findData(choice) < 0:
                 names = {value: label for label, value in GLYCAN_CLASSES}
@@ -2103,7 +2095,7 @@ class ResultsView(QWidget):
                     column.update(kind = 'bar', bar = [None if v is None else (v / top, e == 'ms1_only') for v, e in zip(column['raw'], evidence)],
                                   tips = [f'{t} ({e})' if isinstance(e, str) else t for t, e in zip(column['text'], evidence)])
                     columns.append(column)
-            notes = [c for c in df['curation']]
+            notes = list(df['curation'])
         else:
             abundance = 'rel_abundance' if 'rel_abundance' in df.columns else 'num_spectra'
             column = _number_column('Abundance' if abundance == 'rel_abundance' else 'Spectra', df[abundance], 2 if abundance == 'rel_abundance' else 0,
@@ -2199,7 +2191,7 @@ class ResultsView(QWidget):
             self.spectrum_file.blockSignals(True)
             self.spectrum_file.clear()
             best = None
-            for run, (table, spectra) in self.payload['tables'].items():
+            for run, (table, _) in self.payload['tables'].items():
                 evidence = df[f'evidence_{run}'].iat[row] if f'evidence_{run}' in df.columns else None
                 if not isinstance(evidence, str) or evidence == 'ms1_only' or table.empty:
                     continue
@@ -2299,7 +2291,7 @@ class ResultsView(QWidget):
         if self.source is None:
             self.spectrum.show_message('This feature has MS2 evidence in no run, only MS1 signal')
             return
-        table, spectra = self.payload['tables'][self.source[0]]
+        table = self.payload['tables'][self.source[0]][0]
         preds = table['predictions'].iat[self.source[1]]
         for structure, score in (preds if isinstance(preds, (list, tuple)) else []):
             item = QListWidgetItem(f'{score:.3f}')
@@ -2313,17 +2305,17 @@ class ResultsView(QWidget):
         """What a misprediction report sends about the peak shown: its row (for a feature also the feature's, without the other runs' values), its MS2 and
         MS3 spectra, the structure the pipeline gave it and the one shown, and the experiment's settings; not the run's name"""
         table, spectra = self.payload['tables'][self.source[0]]
-        r = self.source[1]
+        r, run = self.source[1], next((f for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None)
         report = {'peak': {k: v for k, v in table.iloc[r].items() if k not in ('ms3', 'excluded', '_top1')}, 'predicted': table['_top1'].iat[r],
                   'shown': self.alternative or table['top1_pred'].iat[r], 'ms2': spectra[r], 'ms3': table['ms3'].iat[r] if 'ms3' in table.columns else None,
-                  'run_format': next((os.path.splitext(f)[1].lower() for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None),
+                  'run_format': os.path.splitext(run)[1].lower() if run is not None else None,
                   'settings': {k: sorted(v) if isinstance(v, set) else v for k, v in self.payload['settings'].items()}, 'tolerance': self.spectrum.tolerance.value(),
                   'tolerance_unit': self.spectrum.unit.currentData()}
         if self.dataset.currentData() == FEATURES:
             report['feature'] = {k: v for k, v in self.frame.iloc[self.row].items() if k not in self.payload['tables'] and not k.startswith('evidence_') and k not in ('excluded', '_top1')}
         # What the report can add if the user agrees, kept out of the report itself as the path names the run: the run's file (to cut out the peak's
         # surroundings) and its table of peaks without spectra
-        run, charge = next((f for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None), table['charge'].iat[r]
+        charge = table['charge'].iat[r]
         self.report_data = {'path': run, 'mz': float(table['m/z'].iat[r]), 'rt': float(table['RT'].iat[r]),
                             'charge': int(charge) if pd.notna(charge) else -1 if self.payload['settings'].get('max_charge', -3) < 0 else 1,
                             'table': table.drop(columns = [c for c in ('ms3', 'excluded', '_top1') if c in table.columns]).to_csv(index = False)}
@@ -2539,8 +2531,9 @@ class ResultsView(QWidget):
         text, ok = QInputDialog.getText(self, 'Enter structure', 'Structure in IUPAC-condensed nomenclature:', text = current if isinstance(current, str) else '')
         if not ok or not text.strip():
             return
-        from glycowork.motif.processing import canonicalize_iupac
-        from glycowork.motif.tokenization import glycan_to_composition
+        with IMPORT_LOCK:
+            from glycowork.motif.processing import canonicalize_iupac
+            from glycowork.motif.tokenization import glycan_to_composition
         try:
             structure = canonicalize_iupac(text.strip())
             # Like the pipeline's structures, reduced glycans go without -ol, since the experiment's reducing end already says so
@@ -2602,7 +2595,8 @@ class ResultsView(QWidget):
 
     def write(self, df, path, kind):
         if kind == 'snfg':
-            from glycowork.motif.draw import plot_glycans_excel
+            with IMPORT_LOCK:
+                from glycowork.motif.draw import plot_glycans_excel
             plot_glycans_excel(df, path, glycan_col_num = 'top1_pred')
         elif path.lower().endswith('.csv'):
             df.to_csv(path, index = False)
@@ -3233,14 +3227,14 @@ class MainWindow(QMainWindow):
         saved = []
         for name, data in files.items():
             if isinstance(data, bytes):
-                os.makedirs(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation), exist_ok = True)
-                saved.append(os.path.join(QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation), f'CandyCrunch_report_{name}'))
+                folder = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+                os.makedirs(folder, exist_ok = True)
+                saved.append(os.path.join(folder, f'CandyCrunch_report_{name}'))
                 with open(saved[-1], 'wb') as file:
                     file.write(data)
         body += _scrub(''.join(f'\n\nPlease attach {path} to this issue.' for path in saved))
         full = body + _scrub(''.join(f'\n\n{name}:\n```\n{text}\n```' for name, text in files.items() if isinstance(text, str) and text))
-        title = (event.get('message') or f'{event["exception"]["values"][-1]["type"]}: {event["exception"]["values"][-1]["value"]}') if event else \
-        body.splitlines()[0]
+        title = (event.get('message') or f'{event["exception"]["values"][-1]["type"]}: {event["exception"]["values"][-1]["value"]}') if event else body.splitlines()[0]
         QApplication.clipboard().setText(full)
         QDesktopServices.openUrl(QUrl(f'{ISSUES_URL}?{urllib.parse.urlencode({"title": title[:120], "body": body[:6000]})}'))
         QMessageBox.information(self, 'CandyCrunch',
@@ -3326,12 +3320,12 @@ class MainWindow(QMainWindow):
         if self.runner.dead:
             QMessageBox.critical(self, 'CandyCrunch', 'The CandyCrunch model could not be loaded, so nothing can be predicted; the error is in the log (View > Log).')
             return
-        missing = [path for _, paths, _ in experiments for path in paths if not os.path.exists(path)]
+        files = [file for _, paths, _ in experiments for file in paths]
+        missing = [path for path in files if not os.path.exists(path)]
         if missing:
             QMessageBox.warning(self, 'CandyCrunch', 'These runs are no longer where they were added (moved, renamed, or on another computer); remove them and '
                                 'add them again:\n\n' + '\n'.join(missing))
             return
-        files = [file for _, paths, _ in experiments for file in paths]
         settings = self.settings.values()
         self.store.setValue('settings', json.dumps({**settings, 'filter_out': sorted(settings['filter_out'])}))
         self.weights = {**STAGE_WEIGHTS, **json.loads(self.store.value('stage_weights', '{}'))}
@@ -3621,8 +3615,7 @@ def main():
         app.exec()
         runner.shutdown()
         with open('candycrunch_self_test.log', 'w', encoding = 'utf-8') as file:
-            file.write(''.join(
-                log) + f'\nGlycan peaks found: {outcome[0] if outcome else 0}\nExample run bundled: {os.path.exists(EXAMPLE_RUN)}\n')
+            file.write(''.join(log) + f'\nGlycan peaks found: {outcome[0] if outcome else 0}\nExample run bundled: {os.path.exists(EXAMPLE_RUN)}\n')
         sys.exit(0 if outcome and outcome[0] > 0 and os.path.exists(EXAMPLE_RUN) else 1)
     # A window crash file that can be removed belongs to an earlier session that did not end cleanly (one in use is a running CandyCrunch's), and is
     # offered as a crash report; worker files are removed by their window, or here once a day old

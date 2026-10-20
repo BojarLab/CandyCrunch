@@ -22,8 +22,7 @@ sys.path.insert(0, str(BASE_DIR / 'tests'))
 def outcomes_from_preds(folder, wanted):
     # Per-peak outcomes of every pickled output table in a --save_preds folder, scored against the ground truth the harness would use
     import harness
-    import tests.test_CandyCrunch as tc
-    parser = argparse.Namespace(sets = None, format = 'mzml' if any('.mzML' in p.name or '.raw' in p.name for p in pathlib.Path(folder).glob('*.pkl')) else 'xlsx',
+    parser = argparse.Namespace(sets = None,
                                 private_spectra = str(harness.GG_DIR / 'improved_xlsx_2026-10-10' / 'private_test'),
                                 private_gt = str(harness.GG_DIR / 'refined_ground_truths' / 'private_test'), private_ms1 = str(harness.GG_DIR / 'private_files_raw' / 'mzml'), no_private = False)
     tmp = pathlib.Path(folder) / '_gt'

@@ -118,7 +118,7 @@ class ResultCollector:
         test_dict_name = params['test_dict']['name']
         param_key = tuple(
             params[key] if key != 'test_dict' else params['test_dict']['name']
-            for key in self.param_names.keys()
+            for key in self.param_names
         )
         # Append the individual score to the list of scores for this parameter combination
         self.dict_results[test_dict_name][param_key[1:]].append(score)
@@ -128,7 +128,7 @@ class ResultCollector:
         if self.current_dict != test_dict_name and self.current_dict is not None:
             self.print_dict_results(self.current_dict)
         self.current_dict = test_dict_name
-    
+
     def print_dict_results(self, dict_name):
         print(f"\n=== Results for {dict_name} ===")
         # Get results for this test_dict
@@ -154,14 +154,13 @@ class ResultCollector:
             table_data.append(row)
         print(tabulate(table_data, headers = headers, tablefmt = 'grid'))
         print()
-    
+
     def get_table(self):
         if not self.dict_results:
             return "No results collected!"
         self.save_current_results()
         # Print overall results
         print("\n=== Overall Performance Results ===")
-        headers = list(self.param_names.values()) + ['F1 Score']
         table_data = []
         # Combine results from all test_dicts
         overall_results = defaultdict(list)
@@ -191,7 +190,7 @@ class ResultCollector:
             table_data.append(row)
         headers = list(self.param_names.values()) + ['F1', 'Prec', 'Rec', 'NotPicked', 'Wrong', 'FP']
         param_scores = defaultdict(lambda: {'means': [], 'weights': []})
-        for dict_name, param_results in self.dict_results.items():
+        for param_results in self.dict_results.values():
             for params, scores in param_results.items():
                 param_scores[params]['means'].append(np.mean(scores))
                 param_scores[params]['weights'].append(len(scores))
@@ -210,7 +209,6 @@ class ResultCollector:
             print(line)
         return tabulate(table_data, headers = headers, tablefmt = 'grid')
 
-# Rest remains the same
 collector = ResultCollector()
 
 @pytest.fixture(scope = "session")
@@ -258,14 +256,14 @@ def pytest_sessionfinish(session):
         session.config.cache.set('candycrunch/durations', {**session.config.cache.get('candycrunch/durations', {}), **test_durations})
     print("\n=== Final Summary ===")
     # Print tables for each test_dict
-    for dict_name in collector.dict_results.keys():
+    for dict_name in collector.dict_results:
         collector.print_dict_results(dict_name)
     # Print overall results (get_table prints its own header)
     print(collector.get_table())
     print()
     if collector.previous_results:
         print("\n=== Comparison with Previous Run ===")
-        for dict_name in collector.dict_results.keys():
+        for dict_name in collector.dict_results:
             if dict_name in collector.previous_results:
                 prev_timestamp = collector.previous_results[dict_name]['timestamp']
                 prev_score = collector.previous_results[dict_name]['scores']

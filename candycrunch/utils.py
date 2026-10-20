@@ -282,9 +282,10 @@ def read_mzxml(filepath, centroid_levels = ()):
    """
     queue, order, instruments = [], itertools.count(), {}
     for _, el in ET.iterparse(filepath):
-        if el.tag.rsplit('}', 1)[-1] == 'msInstrument':
+        tag = el.tag.rsplit('}', 1)[-1]
+        if tag == 'msInstrument':
             instruments[el.get('msInstrumentID', el.get('id'))] = ' '.join(c.get('value', '') for c in el if c.tag.rsplit('}', 1)[-1] in ('msModel', 'msMassAnalyzer')).lower()
-        if el.tag.rsplit('}', 1)[-1] != 'scan':
+        if tag != 'scan':
             continue
         ns = el.tag[:-4]
         scan = dict(el.attrib)
@@ -348,8 +349,8 @@ def read_mgf(filepath):
             if sline == 'BEGIN IONS':
                 params, mzs, ints, started = dict(header), [], [], True
             elif params is None:
-                if not started and len(line.split('=')) == 2:
-                    header[line.split('=')[0].lower()] = line.split('=')[1].strip()
+                if not started and len(parts := line.split('=')) == 2:
+                    header[parts[0].lower()] = parts[1].strip()
             elif sline == 'END IONS':
                 if 'pepmass' in params:
                     pepmass = params['pepmass'].split()
@@ -404,9 +405,10 @@ def read_raw_scan_table(filepath):
         stride, width = (16, 8) if wide else (12, 4)
         addrs = f.read(stride * max(int.from_bytes(info[28:32], 'little'), 2))
         for a in range(0, len(addrs), stride):
-            f.seek(int.from_bytes(addrs[a:a + width], 'little'))
+            addr = int.from_bytes(addrs[a:a + width], 'little')
+            f.seek(addr)
             run_header = f.read(7464)
-            if int.from_bytes(addrs[a:a + width], 'little') and len(run_header) == 7464 and int.from_bytes(run_header[7376:7380], 'little'):
+            if addr and len(run_header) == 7464 and int.from_bytes(run_header[7376:7380], 'little'):
                 break
         else:
             raise ValueError(f"{filepath} holds no scan events (e.g. SRM data of a triple quadrupole), which CandyCrunch cannot use.")

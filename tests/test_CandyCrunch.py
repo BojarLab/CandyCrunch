@@ -1,5 +1,4 @@
 import pytest
-import unittest
 import os
 import base64
 import pathlib
@@ -8,7 +7,6 @@ import struct
 import zlib
 import hashlib
 import inspect
-import sys
 import json
 from tabulate import tabulate
 import numpy as np
@@ -25,7 +23,6 @@ from glycowork.motif.processing import canonicalize_iupac, canonicalize_composit
 import time
 import random
 import torch
-import time
 
 BASE_DIR = pathlib.Path(__file__).parent.parent  # Go up one level from the test file
 # CC_TEST_DATA_DIR: an alternate data folder (e.g., hardlinks with regenerated .xlsx), for measuring regenerated inputs
@@ -38,7 +35,7 @@ TEST_DICTS = [
     {'name':'GPST000029','args': {'glycan_class':'O'}},
     {'name':'PMC8950484_CHO','args': {'glycan_class':'O'}},
     {'name':'GPST000307','args': {'glycan_class':'O'}},
-    {'name':'GPST000487','args': {'glycan_class':['N', 'O']},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000487/")]},
+    {'name':'GPST000487','args': {'glycan_class':['N', 'O']},'test_files':os.listdir(f"{TEST_DATA_DIR}/GPST000487/")},
     # Four O-glycan and four N-glycan replicate runs (Bruker HCT) share one folder; 'folder' names it, 'name' the ground truth (df_mz_<name>.csv)
     {'name':'GPST000169_O','folder':'GPST000169','args': {'glycan_class':'O'},'test_files':[x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000169/") if 'OGlycan' in x]},
     {'name': 'GPST000169_N', 'folder': 'GPST000169', 'args': {'glycan_class': 'N'},
@@ -207,11 +204,10 @@ def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbos
       while any('{' in p for p in possible_structures):
         possible_structures = list(dict.fromkeys(q for p in possible_structures for q in ([graph_to_string(x) for x in get_possible_topologies(p, exhaustive = True)] if '{' in p else [p])))
       similarity_scores.append(1.0 if compare_glycans(gt_glycan, pred_glycan) else max([1.0 if compare_glycans(p, pred_glycan) else get_glycan_similarity(p, pred_glycan) for p in possible_structures]))
+    elif compare_glycans(gt_glycan, pred_glycan):
+      similarity_scores.append(1.0)
     else:
-      if compare_glycans(gt_glycan, pred_glycan):
-        similarity_scores.append(1.0)
-      else:
-        similarity_scores.append(get_glycan_similarity(gt_glycan, pred_glycan))
+      similarity_scores.append(get_glycan_similarity(gt_glycan, pred_glycan))
   new_md['similarity_score'] = similarity_scores
   unevaluable = len(np.where((new_md['in_ground_truth'])&(new_md['glycan'].isnull())&(new_md['batch_pred'].notnull()))[0])
   fp = len(np.where((~new_md['in_ground_truth'])&(new_md['batch_pred'].notnull()))[0])
@@ -253,7 +249,7 @@ def posthoc_process_df(df_in, posthoc_params):
             df_in = df_in[(df_in[df_arg] < posthoc_params[arg])]
         else:
             df_in = df_in[(df_in[df_arg] > posthoc_params[arg])]
-    return df_in 
+    return df_in
 
 extra_param_dict = {
         'test_dict': TEST_DICTS,
@@ -262,8 +258,8 @@ extra_param_dict = {
     }
 
 test_params = [
-    dict(zip([x for x in extra_param_dict], combo))
-    for combo in product(*[v for v in extra_param_dict.values()])
+    dict(zip(extra_param_dict, combo))
+    for combo in product(*extra_param_dict.values())
 ]
 
 
@@ -277,16 +273,15 @@ def pytest_generate_tests(metafunc):
                              ids = [f"{p['test_dict']['name']}-{'+'.join(glycan_classes(p['test_dict']['args']['glycan_class']))}-{g}" for p in test_params for g in groups])
 
 
-def test_candycrunch_accuracy(test_params, file_group, result_collector, input_format, verbose, test_files = None):
+def test_candycrunch_accuracy(test_params, file_group, result_collector, input_format, verbose):
     if result_collector.param_names is None:
         result_collector.param_names = {k: k for k in list(extra_param_dict.keys()) + ['format']}
-    start_time = time.time()  # Start timing
     test_outputs = []
     test_dict = test_params['test_dict']
     folder = test_dict.get('folder', test_dict['name'])
-    test_files = test_params['test_dict'].get('test_files',None)
+    test_files = test_dict.get('test_files')
     if test_files is None:
-        test_files = [x for x in os.listdir(f"{TEST_DATA_DIR}/{folder}")]
+        test_files = os.listdir(f"{TEST_DATA_DIR}/{folder}")
     test_files = [x for x in test_files if 'df_mz' not in x if not x.startswith(".")]
     # mzXML and Thermo .raw files count as mzML (raw spectra with MS1), so they never enter an xlsx run
     if file_group == "xlsx":
@@ -315,7 +310,7 @@ def test_candycrunch_accuracy(test_params, file_group, result_collector, input_f
         print(f"\nTest execution time: {execution_time:.2f} seconds")  # Print execution time
         preds_out = posthoc_process_df(preds_out,posthoc_params)
         loaded_gt = pd.read_csv(f"{TEST_DATA_DIR}/{folder}/df_mz_{test_dict['name']}.csv")
-        col_name  =  filename.split(".")[0]
+        col_name = filename.split(".")[0]
         rt_col_name = 'RT' if 'RT' in loaded_gt.columns else col_name+'_RT'
         eval_scores = evaluate_predictions(preds_out, loaded_gt[loaded_gt[col_name] > 0], rt_col_name, MASS_TOLERANCE, RT_TOLERANCE, verbose = verbose)
         print('True Positives',eval_scores[-4])
@@ -496,8 +491,9 @@ def test_quantification_published(quant_set, result_collector):
     if by:
         gt = gt.groupby(by).agg(measured = ('measured', 'sum'), **{column: (column, 'first')}).reset_index()
     measured, published = gt['measured'].values / gt['measured'].sum(), gt[column].values / gt[column].sum()
-    log_ratio = np.log2(np.maximum(measured, measured[measured > 0].min() / 2) / published)
-    score = float(np.corrcoef(np.log2(np.maximum(measured, measured[measured > 0].min() / 2)), np.log2(published))[0, 1])
+    floored = np.maximum(measured, measured[measured > 0].min() / 2)
+    log_ratio = np.log2(floored / published)
+    score = float(np.corrcoef(np.log2(floored), np.log2(published))[0, 1])
     print(f'{quant_set} quantification ({len(gt)} {"compositions" if by else "peaks"}): r of log shares {score:.3f}, Spearman {spearmanr(measured, published)[0]:.3f}, '
           f'{np.mean(np.abs(log_ratio) <= 1):.2f} within 2x, median |log2 ratio| {np.median(np.abs(log_ratio)):.3f}, {(measured == 0).sum()} not found')
     result_collector.add_result({'test_dict': {'name': f'{quant_set}_quant'}, 'supplement': True, 'experimental': True, 'format': 'quant'}, score)
@@ -811,7 +807,7 @@ def test_thermo_raw(tmp_path):
     rh[7376:7380] = struct.pack('<I', 3)
     rh[7408:7464] = struct.pack('<7Q', index, data, 0, errors, 0, events_addr, params)
     entries = b''
-    for k, (rt, packet) in enumerate(zip([10.0, 10.01, 10.02], np.cumsum([0] + [len(p) for p in packets[:-1]]))):
+    for rt, packet in zip([10.0, 10.01, 10.02], np.cumsum([0] + [len(p) for p in packets[:-1]])):
         entry = bytearray(88)
         entry[24:32], entry[72:80] = struct.pack('<d', rt), struct.pack('<Q', int(packet))
         entries += bytes(entry)

@@ -10,7 +10,7 @@ RT (or <run>_RT), glycan, optionally charge, and the run's abundance column (<ru
 audited GT (default: the source path without '_source', or with '_audited' if it has no such suffix), <output stem>_removed.csv (source rows not kept
 and predictions not added, each with its reason) and <output stem>_review.csv (cases that need a human), and prints a summary.
 
-Criteria (CLAUDE.md, GT audits 2026-10-05 to 2026-10-14): a row needs a distinct MS1 peak of its composition on the envelope XIC of one of its ions
+Criteria (.claude/notes/datasets.md, GT audits 2026-10-05 to 2026-10-14): a row needs a distinct MS1 peak of its composition on the envelope XIC of one of its ions
 (Thermo ion traps: M-0.3 to M+1.3 m/z, which holds the isotopes they merge at z >= 2; Bruker ion traps, which resolve z = 2 isotopes, and
 orbitrap/TOF: one window per isotope M..M+3 after the file's calibration), smoothed in time with a Gaussian of sigma 0.05 min (none at MS1 cycles
 above 4 s), whose valley towards the nearest higher point on either side lies below 0.7 of its apex (0.5 if that higher peak's pooled MS2 has
@@ -224,7 +224,8 @@ class Run:
         self.cycle = float(np.median(steps[steps > 0]))
         # Thermo ion traps merge centroids closer than 0.5 m/z (z >= 2 isotopes become one centroid between them); Bruker ion traps resolve z = 2
         # isotopes (665.20/665.68/666.14 in GPST000316), so their centroids are often closer than 0.45
-        gaps = np.diff(mzs.astype(np.float64))[np.repeat(np.arange(n), np.diff(offsets))[1:] == np.repeat(np.arange(n), np.diff(offsets))[:-1]]
+        scan_of = np.repeat(np.arange(n), np.diff(offsets))
+        gaps = np.diff(mzs.astype(np.float64))[scan_of[1:] == scan_of[:-1]]
         self.resolved = not self.accurate and len(gaps) > 0 and float((gaps < 0.45).mean()) > 0.02
         # Spray spikes raise every m/z at once (milk 26.22/30.61 min, 4-6x the baseline at m/z without glycans), so they show in the median centroid
         # intensity and the TIC of the scan; their trace values are interpolated from the neighbouring scans, so they never make an apex
@@ -241,9 +242,10 @@ class Run:
         if self.cycle <= SLOW_CYCLE:
             sigma = max(SIGMA, 0.7 * self.cycle)
             k = int(min(200, np.max(np.searchsorted(rts, rts + 3 * sigma, side = 'right') - np.arange(n))))
-            self.idx = np.clip(np.arange(n)[:, None] + np.arange(-k, k + 1)[None, :], 0, n - 1)
+            idx = np.arange(n)[:, None] + np.arange(-k, k + 1)[None, :]
+            self.idx = np.clip(idx, 0, n - 1)
             dt = rts[self.idx] - rts[:, None]
-            valid = (np.arange(n)[:, None] + np.arange(-k, k + 1)[None, :] >= 0) & (np.arange(n)[:, None] + np.arange(-k, k + 1)[None, :] < n)
+            valid = (idx >= 0) & (idx < n)
             w = np.where(valid & (np.abs(dt) <= 3 * sigma), np.exp(-0.5 * (dt / sigma) ** 2), 0)
             self.weights = w / w.sum(1, keepdims = True)
 
@@ -472,7 +474,7 @@ def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = '
         ions = ions_of[key][1]
         # Precursors of each ion: refined ion-trap precursors of z >= 2 sit up to 0.4 above M (merged isotopes); accurate MS1 also takes 13C triggers
         ion_hits = []
-        for name, z, mz, prot in ions:
+        for _, z, mz, _ in ions:
             d = run.prec - mz - shift
             if run.accurate:
                 tol = max(0.01, 2e-5 * mz)
@@ -552,7 +554,7 @@ def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = '
         """the MS2 of a composition near an RT that lie outside its MS1 peaks, for removal reasons"""
         inside = {h for p in a['peaks'] for v in p['ms2'].values() for h in v}
         out = []
-        for k, (_, z, mz, _) in enumerate(a['ions']):
+        for _, _, mz, _ in a['ions']:
             out += [h for h in np.flatnonzero((np.abs(run.prec - mz - shift) <= 0.3) & (np.abs(run.rt - expected) <= rt_window)) if h not in inside]
         if not out:
             return none
@@ -604,7 +606,7 @@ def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = '
     for e in entities:
         by_comp.setdefault(comp_key(e[0]['comp']), []).append(e)
     assigned = {}
-    for key, ents in by_comp.items():
+    for ents in by_comp.values():
         a = analyse(ents[0][0]['comp'])
         peaks = a['peaks']
         if not peaks:
@@ -849,7 +851,7 @@ def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = '
             k['abundance'] = round(100 * k['peak']['height'] / total_height, 4)
         elif k['source'] == 'added':
             k['abundance'] = round(k['peak']['height'] * scale, 4) if scale else np.nan
-    out_col = abund_col if abund_col and abund_col == run_name else run_name
+    out_col = run_name
     audited = pd.DataFrame([{'Mass': round(k['Mass'], 4), 'charge': k['charge'], 'RT': round(k['RT'], 2), 'glycan': k['glycan'], out_col: k['abundance'],
                              'composition': k['composition'], 'source': k['source'], 'RT_source': k['row']['RT_source'] if k['row'] else np.nan,
                              'Mass_source': k['row']['Mass_source'] if k['row'] else np.nan, 'glycan_source': k['row']['glycan_source'] if k['row'] else '',

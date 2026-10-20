@@ -97,7 +97,7 @@ def digest(*parts):
 
 def replace_file(tmp, path):
     # os.replace fails on Windows while another process (a second run sharing the cache) has the target open; it is retried for up to a minute
-    for attempt in range(120):
+    for _ in range(120):
         try:
             return os.replace(tmp, path)
         except PermissionError:
@@ -114,7 +114,7 @@ class file_lock:
     def __enter__(self):
         self.path.parent.mkdir(parents = True, exist_ok = True)
         self.f = open(self.path, 'a+b')
-        for attempt in range(600):
+        for _ in range(600):
             try:
                 if os.name == 'nt':
                     import msvcrt
@@ -167,24 +167,21 @@ class Cache:
     def save(self):
         # Merged with what another run sharing the cache saved since this one loaded it (keys are content-addressed, so entries never conflict)
         with timed('cache_write'):
-            self.write()
-
-    def write(self):
-        if self.enabled and self.new:
-            self.path.parent.mkdir(parents = True, exist_ok = True)
-            with file_lock(self.path):
-                if self.path.exists() and self.path.stat().st_mtime_ns != self.mtime:
-                    try:
-                        with open(self.path, 'rb') as f:
-                            self.data = {**pickle.load(f), **self.data}
-                    except Exception:
-                        pass
-                tmp = self.path.with_suffix(f'.{os.getpid()}.tmp')
-                with open(tmp, 'wb') as f:
-                    pickle.dump(self.data, f, protocol = 4)
-                replace_file(tmp, self.path)
-                self.mtime = self.path.stat().st_mtime_ns
-            self.new = 0
+            if self.enabled and self.new:
+                self.path.parent.mkdir(parents = True, exist_ok = True)
+                with file_lock(self.path):
+                    if self.path.exists() and self.path.stat().st_mtime_ns != self.mtime:
+                        try:
+                            with open(self.path, 'rb') as f:
+                                self.data = {**pickle.load(f), **self.data}
+                        except Exception:
+                            pass
+                    tmp = self.path.with_suffix(f'.{os.getpid()}.tmp')
+                    with open(tmp, 'wb') as f:
+                        pickle.dump(self.data, f, protocol = 4)
+                    replace_file(tmp, self.path)
+                    self.mtime = self.path.stat().st_mtime_ns
+                self.new = 0
 
 
 def file_list(root, keep = lambda p: True):
@@ -681,7 +678,6 @@ class GlycoworkMemo:
 
 def z1(mz, z, sign = -1):
     # Singly charged equivalent, as the metric compares masses (an unknown charge counts as singly charged in the run's ion mode)
-    # Singly charged equivalent, as the metric compares masses (an unknown charge counts as singly charged in the run's ion mode)
     from candycrunch.prediction import PROTON_MASS
     z = np.where(np.isnan(z) | (z == 0), sign, z)
     return mz * np.abs(z) - (z - np.sign(z)) * PROTON_MASS
@@ -719,7 +715,8 @@ def peak_outcomes(preds, gt, rt_col):
             sim = 1.0 if tc.compare_glycans(glycan, pred) else max(1.0 if tc.compare_glycans(x, pred) else tc.get_glycan_similarity(x, pred) for x in options)
         peaks.append(dict(mass = float(mass), rt = float(rt), gt = glycan, pred = pred, sim = None if sim is None else round(float(sim), 4),
                           row = None if i not in matched else [round(float(p['m/z'].iloc[matched[i]]), 4), round(float(p['RT'].iloc[matched[i]]), 2)]))
-    fps = [dict(mass = round(float(m), 4), rt = round(float(r), 2), pred = g) for j, (m, r, g) in enumerate(zip(p['m/z'], p['RT'], p['top1_pred'])) if j not in set(matched.values())]
+    taken = set(matched.values())
+    fps = [dict(mass = round(float(m), 4), rt = round(float(r), 2), pred = g) for j, (m, r, g) in enumerate(zip(p['m/z'], p['RT'], p['top1_pred'])) if j not in taken]
     return peaks, fps
 
 
