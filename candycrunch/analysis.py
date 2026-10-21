@@ -85,8 +85,8 @@ mono_attributes = {
 }
 WATER_MASS = 18.0105546
 CH2_MASS = calculate_adduct_mass('CH2')
-bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond'], 3: ['peptide_a', 'peptide_b', 'peptide_c'],
-                    4: ['peptide_y', 'peptide_z', 'peptide_w']}
+bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond'], 3: ['peptide_a', 'peptide_b', 'peptide_c', 'peptide_c-1'],
+                    4: ['peptide_y', 'peptide_z', 'peptide_w', 'peptide_z+1']}
 # Neutral radical lost from a z. ion by Cbeta-Cgamma homolysis, giving the w ion; residues without a
 # gamma atom (G, A, P) cannot form w ions and are absent by design
 W_SIDE_CHAIN_LOSSES = {'C': 32.979896, 'D': 44.997655, 'E': 59.013305, 'F': 77.039125, 'H': 67.029623,
@@ -121,18 +121,22 @@ MODIFICATION_TOKENS = {
 # Relative abundance of the backbone ion types within a fragmentation method; the method already gates
 # which types can occur, so these only rank the allowed types against each other
 PEPTIDE_ION_PRIORS = {'y': 1.0, 'b': 0.9, 'c': 0.9, 'z': 0.9, 'a': 0.3, 'w': 0.3, 'x': 0.1}
-N_TERM_IONS = {'a', 'b', 'c'}
-C_TERM_IONS = {'w', 'x', 'y', 'z'}
-PEPTIDE_ION_TYPES = {'CID': {'b', 'y'}, 'HCD': {'a', 'b', 'y'}, 'ETD': {'c', 'z'}, 'ECD': {'c', 'z'},
-                     'EThcD': {'b', 'c', 'w', 'y', 'z'}, 'ETciD': {'b', 'c', 'w', 'y', 'z'},
-                     None: N_TERM_IONS | C_TERM_IONS} | dict.fromkeys(('EED', 'EDD', 'NETD', 'UVPD'), N_TERM_IONS | C_TERM_IONS)
+# Electron transfer also gives c and z ions after a hydrogen atom moved between the two halves: c-1 (c - H, as pyteomics names it) and z+1 (z. + H, pyteomics'
+# z+2, as CandyCrunch's z is the radical, pyteomics' z-dot). In ETD runs, unannotated peaks lay 1 H above a z ion as often as at its 13C peak,
+# and with both ion types CandyCrumbs told the Byonic glycan of ion-trap ETD spectra from its isobar (Neu5Ac + Hex vs Neu5Gc + Fuc) in 0.41 instead of 0.37
+N_TERM_IONS = {'a', 'b', 'c', 'c-1'}
+C_TERM_IONS = {'w', 'x', 'y', 'z', 'z+1'}
+PEPTIDE_ION_TYPES = {'CID': {'b', 'y'}, 'HCD': {'a', 'b', 'y'}, 'ETD': {'c', 'c-1', 'z', 'z+1'}, 'ECD': {'c', 'c-1', 'z', 'z+1'},
+                     'EThcD': {'b', 'c', 'c-1', 'w', 'y', 'z', 'z+1'}, 'ETciD': {'b', 'c', 'c-1', 'w', 'y', 'z', 'z+1'},
+                     None: (N_TERM_IONS | C_TERM_IONS) - {'c-1', 'z+1'}} | dict.fromkeys(('EED', 'EDD', 'NETD', 'UVPD'), (N_TERM_IONS | C_TERM_IONS) - {'c-1', 'z+1'})
 tester_ma_addition = {k: {'mass': {k: v}, 'atoms': {k: [1, 2, 3, 4, 5, 6]}} for k, v in AA_masses.items()}
 mono_attributes = mono_attributes | tester_ma_addition
 bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WATER_MASS,
                'peptide_c': -(WATER_MASS - 17.026549),
                'peptide_z': -(17.026549 - 1.007825),
                'peptide_w': -(17.026549 - 1.007825),  # plus a residue-specific side-chain loss
-               'peptide_a': -(WATER_MASS + 27.994915)}  # z here is the EThcD radical z. convention
+               'peptide_a': -(WATER_MASS + 27.994915),  # z here is the EThcD radical z. convention
+               'peptide_c-1': -(WATER_MASS - 17.026549) - 1.007825, 'peptide_z+1': -(17.026549 - 2 * 1.007825)}
 # Atom positions whose -OH (or amide N-H, -NH2, -COOH) groups get derivatized, per base monosaccharide; C1 (C2 of the
 # nonulosonic acids) is excluded as the glycosidic bond takes it in the residue mass convention. A position carrying two
 # groups is listed twice (the free amine of HexN, the N-glycolyl of Neu5Gc). Permethylation also methylates amide N-H and
@@ -345,7 +349,7 @@ def derivatize_carboxyls(glycan, sialic_derivatization):
     | Arguments:
     | :-
     | glycan (string or dict): glycan in IUPAC-condensed format, or a composition with linkage-resolved sialic acids (e.g., 'H5N4E1L1')
-    | sialic_derivatization (string or tuple): 'EE', 'EEA', 'ME', 'DMA', 'SALSA' (glycowork's SIALIC_DERIVATIZATIONS), or a pair of its SIALIC_PRODUCTS
+    | sialic_derivatization (string or tuple): 'EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5' (glycowork's SIALIC_DERIVATIZATIONS), or a pair of its SIALIC_PRODUCTS
     |                                          for a2-6 and a2-3/8/9 sialic acids\n
     | Returns:
     | :-
@@ -676,14 +680,15 @@ def get_valid_A_frags(subg, node, label, nx_edge_dict):
     return valid_A_mods_list
 
 
-def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic_mod_dict_subg):
+def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic_mod_dict_subg, peptide_ion_types = None):
     """Determines all possible monosaccharide modifications and their respective atom level representations\n
     | Arguments:
     | :-
     | terminals (list): node labels of nodes with floating bonds
     | terminal_labels (list): string labels of nodes in terminals
     | mono_mods_list (list): a nested list with one list of modifications per terminal node
-    | atomic_mod_dict_subg (dict): nested dict of each terminal node with floating bonds labelled at each atom\n
+    | atomic_mod_dict_subg (dict): nested dict of each terminal node with floating bonds labeled at each atom
+    | peptide_ion_types (set): the peptide backbone ion types a cut peptide bond may give; default:None (all)\n
     | Returns:
     | :-
     | (1) a nested list of all possible cross ring level fragmentations for each terminal node
@@ -702,6 +707,8 @@ def generate_mod_permutations(terminals, terminal_labels, mono_mods_list, atomic
             dict_perms = [{**atom_dict, **dict(zip(modded_atoms, perm))} for perm in product(*(bond_type_helper[atom_dict[y]] for y in modded_atoms))]
             if label not in W_SIDE_CHAIN_LOSSES:
                 dict_perms = [x for x in dict_perms if 'peptide_w' not in x.values()]
+            if peptide_ion_types is not None:
+                dict_perms = [x for x in dict_perms if all(v[8:] in peptide_ion_types for v in x.values() if isinstance(v, str) and v.startswith('peptide_'))]
             all_atom_dict_perms.extend(dict_perms)
             all_mono_mod_perms.extend(len(dict_perms) * [mono_mods[i]])
         all_terminal_perms.append(all_atom_dict_perms)
@@ -1048,7 +1055,7 @@ _GLYCAN_GRAPHS = {}
 def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = 3,
                           fragment_masses = [], subgraphs = None,
                           threshold = 0.5, mass_tag = None, charge = -1, sample_prep = 'underivatized',
-                          disable_A_cross_rings = False, threshold_ppm = None):
+                          disable_A_cross_rings = False, threshold_ppm = None, peptide_ion_types = None):
     """Calculates the graph and mass of all possible fragments of the input\n
     | Arguments:
     | :-
@@ -1066,7 +1073,8 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     | disable_A_cross_rings (bool or string): whether to strip out any A-type cross-rings, or 'non_reducing' for all but those of the reducing-terminal
     |                                         residue on fragments with a metal cation; default: False
     | threshold_ppm (float): relative tolerance in ppm on top of threshold, as match_fragment_properties applies it (a fragment it could never match
-    |                        is not made); default:None\n
+    |                        is not made); default:None
+    | peptide_ion_types (set): the peptide backbone ion types to make, as CandyCrumbs names only those of its fragmentation method; default:None (all)\n
     | Returns:
     | :-
     | Returns a dict of lists of Fragments by their mass
@@ -1135,7 +1143,8 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
         mode_mass = -PROTON_MASS if charge < 0 else PROTON_MASS
         targets = np.sort(charge_masses)
         red_ends = {v: not any(nx_edge_dict[x]['bond_label'] == 'glycosite' for x in nx_mono.in_edges(v)) for v, d in nx_mono.nodes(data = True) if 'reducing_end' in d}
-        settings, global_settings = (tuple(allowed_X_cleavages), disable_A_cross_rings, sample_prep, mass_tag), (tuple(global_mods), tuple(special_residues), charge < 0)
+        settings = (tuple(allowed_X_cleavages), disable_A_cross_rings, sample_prep, mass_tag, None if peptide_ion_types is None else tuple(sorted(peptide_ion_types)))
+        global_settings = (tuple(global_mods), tuple(special_residues), charge < 0)
         pos = {v: j for j, v in enumerate(node_list)}
         # Everything before the wanted masses depends only on the glycan, its topology's node sets and the settings, and the same structures come up for
         # many spectra (supporting_ions compares each with its placements for every spectrum), so it is kept across calls for a glycan's enumerated node sets
@@ -1197,7 +1206,8 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
                     breaks = {b: l for b, l in get_broken_bonds(view, nx_edge_dict).items() if (b[0] if b[0] in rep else b[1]) == v}
                     mods = get_mono_mods_list(root, view, [v], [node_dict_basic[v]], nx_edge_dict, allowed_X_cleavages, disable_A_cross_rings = not red_ends.get(v, False)
                                               if disable_A_cross_rings == 'non_reducing' else disable_A_cross_rings)
-                    mono_perms, atom_perms = generate_mod_permutations([v], [node_dict_basic[v]], mods, atom_mods_init(view, breaks, [v], [node_dict_basic[v]]))
+                    mono_perms, atom_perms = generate_mod_permutations([v], [node_dict_basic[v]], mods, atom_mods_init(view, breaks, [v], [node_dict_basic[v]]),
+                                                                       peptide_ion_types = peptide_ion_types)
                     mono_m, atom_m, _ = precalculate_mod_masses(mono_perms, atom_perms, [node_dict_basic[v]], [None], sample_prep = sample_prep, charge = charge)
                     bonus = red_ends.get(v, False)
                     vals = np.array(
@@ -1373,7 +1383,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             mono_mods_list = get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict, allowed_X_cleavages,
                                                 not (bonus_root_mass and root_node == bonus_root_node) if disable_A_cross_rings == 'non_reducing' else disable_A_cross_rings)
             mono_mod_perms, atom_dict_perms = generate_mod_permutations(terminals, terminal_labels, mono_mods_list,
-                                                                        atomic_mod_dict_subg)
+                                                                        atomic_mod_dict_subg, peptide_ion_types = peptide_ion_types)
             mono_masses, atom_masses, global_masses = precalculate_mod_masses(mono_mod_perms, atom_dict_perms,
                                                                               terminal_labels, subg_global_mods,
                                                                               sample_prep = sample_prep, charge = charge)
@@ -2310,7 +2320,7 @@ def peptide_to_RF_nomenclature(peptide, pep_subg, allowed_ion_types = None, allo
     n_term_cuts, c_term_cuts = 0, 0
     for node, cleavages in pep_atom_dict.items():
         for cleavage in [x for x in cleavages.values() if isinstance(x, str) and x.startswith('peptide_')]:
-            ion_type = cleavage[-1]
+            ion_type = cleavage[len('peptide_'):]
             if allowed_ion_types is not None and ion_type not in allowed_ion_types:
                 return None
             if ion_type in C_TERM_IONS:
@@ -2524,6 +2534,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                     ('c', lambda i: cum_n[i - 1] + 17.026549, 'n'),
                     ('y', lambda i: cum_c[i - 1] + WATER_MASS, 'c'),
                     ('z', lambda i: cum_c[i - 1] + WATER_MASS - 17.026549 + HYDROGEN_MASS, 'c'),
+                    ('c-1', lambda i: cum_n[i - 1] + 17.026549 - HYDROGEN_MASS, 'n'),
+                    ('z+1', lambda i: cum_c[i - 1] + WATER_MASS - 17.026549 + 2 * HYDROGEN_MASS, 'c'),
                     ('w', lambda i: cum_c[i - 1] + WATER_MASS - 17.026549 + HYDROGEN_MASS - W_SIDE_CHAIN_LOSSES[peptide_seq[n_aa - i]]
                      if peptide_seq[n_aa - i] in W_SIDE_CHAIN_LOSSES else None, 'c')]
         pep_ions = [x for x in pep_ions if x[0] in allowed_ion_types]
@@ -2734,8 +2746,9 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | prior_weight (float): weighting of prior-informed scoring in simplify=True
     | glycan_class (string): "N" or "O" if relevant (only used to assign candidate sites in glycopeptides, nowhere else)
     | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD'/'EED'/'EDD'/'NETD'/'UVPD'; restricts peptide backbone ion types (not for
-    |                                EED/EDD/NETD/UVPD), and the radical methods (all but CID/HCD) give free-glycan fragments that are one (odd-electron, M_+H)
-    |                                or two hydrogen atoms (M_2-H) off, at no cleavage but half (a quarter) of their fragmentation prior; default:None (all)
+    |                                EED/EDD/NETD/UVPD; c-1 and z+1 only with ETD/ECD/EThcD/ETciD), and the radical methods (all but CID/HCD) give free-glycan
+    |                                fragments that are one (odd-electron, M_+H) or two hydrogen atoms (M_2-H) off, at no cleavage but half (a quarter) of their
+    |                                fragmentation prior; default:None (all but c-1 and z+1)
     | allow_internal_peptide_fragments (bool): whether to allow peptide fragments cleaved at both termini; default:False
     | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; default:None
     | max_global_mods (int): how many global modifications may co-occur on one fragment; 2 captures the
@@ -2913,11 +2926,14 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         ms3_keep = {}
         # cleavages are counted from the isolated fragment, so an MS3 fragment keeping all of its cleavages may have max_cleavages more
         ms3_cleavages, max_cleavages = max_cleavages, max(map(len, parent_cuts)) + max_cleavages
+    # a glycopeptide's backbone ions are only made in the types its fragmentation method gives, as only those are named
+    allowed_ion_types = (PEPTIDE_ION_TYPES[fragmentation_method] if isinstance(fragmentation_method, (str, type(None))) else set(fragmentation_method)) if (
+        input_dict['peptide']) else None
     subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,
                                        max_cleavages = max_cleavages, fragment_masses = fragment_masses,
                                        subgraphs = subgraphs, threshold = mass_threshold, mass_tag = mass_tag,
                                        charge = charge, sample_prep = sample_prep,
-                                       disable_A_cross_rings = disable_A_cross_rings, threshold_ppm = mass_threshold_ppm)
+                                       disable_A_cross_rings = disable_A_cross_rings, threshold_ppm = mass_threshold_ppm, peptide_ion_types = allowed_ion_types)
     sorted_frag_keys = sorted(subg_frags.keys())
     if input_dict['peptide']:
         # each glycan's chains are ranked once, on the integer nodes of the free glycan: rank_chains orders equal-mass chains (the two arms
@@ -2941,7 +2957,6 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     downstream_values = []
     if input_dict['peptide']:
         peptide = True
-        allowed_ion_types = PEPTIDE_ION_TYPES[fragmentation_method] if isinstance(fragmentation_method, (str, type(None))) else set(fragmentation_method)
         matches = [match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge, sorted_frag_keys, peptide = True,
                                              mass_threshold_ppm = mass_threshold_ppm) for observed_mass in fragment_masses]
         # every matched fragment is named once (one fragment can match several observed masses; each gets its own copy of the names), each glycan's
@@ -3298,6 +3313,11 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
         fragment_masses = dict(zip(fragment_masses, [1.0] * len(fragment_masses) if intensities is None else intensities))
     if not fragment_masses:
         raise ValueError("No peaks to score")
+    # An accurate spectrum is scored deisotoped, as the app annotates it: the 13C peaks of the oxonium and Y ions are no fragments of their own, but took
+    # chance labels from candidates with more residue kinds (ETD runs: database structures of every composition within 10 ppm and -1 to +2
+    # isotopes of 516 spectra, the Byonic glycan ranked first 0.576 -> 0.584; CandyCrumbs told it from its isobar Neu5Gc + Fuc in HCD 0.45 -> 0.67)
+    if mass_threshold_ppm:
+        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), min(mass_threshold, 0.05))
     peaks = sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]
     # a spectrum without intensities (all zero) weighs its peaks equally
     weights = {float(mz): math.sqrt(i / peaks[0][1]) if peaks[0][1] > 0 else 1.0 for mz, i in peaks}
@@ -3357,6 +3377,70 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
     df_out = pd.DataFrame(rows, columns = ['structures', 'score', 'explained', 'direct_fragments', 'missing_fragments'])
     df_out = df_out.sort_values('score', ascending = False, kind = 'stable').reset_index(drop = True)
     df_out.insert(2, 'rank', df_out['score'].round(10).rank(ascending = False, method = 'min').astype(int))
+    return df_out
+
+
+def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, intensities = None, charge = 2, glycosite = None, isotope_errors = None,
+                                   fragmentation_method = None, mass_threshold = 0.5, mass_threshold_ppm = 10, top_n_peaks = 100, isotope_penalty = 0.2, **kwargs):
+    """Ranks the glycan compositions that fit a glycopeptide's precursor (isobars such as Neu5Ac + Hex and Neu5Gc + Fuc, or compositions at other isotope
+    errors of the precursor) by their fragment evidence in its MS2 spectrum\n
+    | Arguments:
+    | :-
+    | peptide (string): amino acid sequence, in CandyCrunch's one-letter code (c, j, k, m for modified residues)
+    | compositions (list): candidate compositions of the peptide's one glycan, as dicts or strings ('H5N4F1A1', 'Hex5HexNAc4Neu5Ac1')
+    | fragment_masses (list or dict): observed m/z values, or a peak dictionary of m/z : intensity such as the peak_d of load_spectra_filepath
+    | intensities (list): intensities of the m/z values if fragment_masses is a list; default:None (all equal)
+    | charge (int): precursor charge state; default:2
+    | glycosite (int): 0-based position of the glycosylated residue; default:None (the first site infer_glycosites finds)
+    | isotope_errors (list): per composition, how many isotope steps the precursor m/z is off for it (the m/z the instrument picked minus the composition's,
+    |                        in 13C spacings); default:None (all 0)
+    | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD', e.g., the activation column of load_spectra_filepath; default:None (all peptide ion types)
+    | mass_threshold (float): fragment mass tolerance in Da; default:0.5
+    | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; None for low-resolution spectra; default:10
+    | top_n_peaks (int): how many of the most intense peaks are scored; default:100
+    | isotope_penalty (float): what each isotope step of isotope_errors costs a candidate's score; default:0.2
+    | **kwargs: passed on to CandyCrumbs; default max_cleavages 2\n
+    | Returns:
+    | :-
+    | Returns a dataframe with one row per candidate, best first: 'composition', 'isotope_error', 'score' (explained x sialic_evidence, minus isotope_penalty
+    | per isotope step), 'rank' (equal scores tie), 'explained' (share of the square-root intensity CandyCrumbs annotates), and 'sialic_evidence' (share of the candidate's
+    | sialic acid kinds whose oxonium ion, B1 or B1 - H2O, is a peak; 1 without sialic acids)
+    """
+    if not isinstance(fragment_masses, dict):
+        fragment_masses = dict(zip(fragment_masses, [1.0] * len(fragment_masses) if intensities is None else intensities))
+    if not fragment_masses:
+        raise ValueError("No peaks to score")
+    # Accurate spectra are scored deisotoped, as the app annotates them: the 13C peaks of the oxonium and Y ions took chance labels from candidates with more
+    # residue kinds; in ion-trap spectra deisotoping cost more than it gained
+    if mass_threshold_ppm:
+        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), min(mass_threshold, 0.05))
+    peaks = sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]
+    weights = np.sqrt(np.maximum([i for _, i in peaks], 0)) if peaks[0][1] > 0 else np.ones(len(peaks))
+    observed = np.array([m for m, _ in peaks])
+    isotope_errors = [0] * len(compositions) if isotope_errors is None else list(isotope_errors)
+    kwargs.setdefault('max_cleavages', 2)
+    rows = []
+    for comp, isotope_error in zip(compositions, isotope_errors):
+        comp = canonicalize_composition(comp) if isinstance(comp, str) else dict(comp)
+        hits = CandyCrumbs({'peptide': peptide, 'glycans': [comp], 'glycosites': [] if glycosite is None else [glycosite]}, list(observed), mass_threshold,
+                           charge = abs(charge), intensities = [i for _, i in peaks], fragmentation_method = fragmentation_method,
+                           mass_threshold_ppm = mass_threshold_ppm, **kwargs)
+        explained = float(weights[[hits.get(m) is not None for m in observed]].sum() / weights.sum())
+        # The explained share alone rewards compositions with more residue kinds (more fragments, more chance matches) and knows no missing ion: in
+        # glycopeptide runs with search-engine identifications it chose Neu5Gc + Fuc over the identified glycan's isobar Neu5Ac + Hex in 55% (HCD) to 74% (EThcD) of spectra, while every
+        # sialic acid kind there showed its oxonium ion (Neu5Ac 292/274 in 97% of HCD, 56% of EThcD and 85% of ion-trap ETD spectra of sialylated
+        # glycopeptides, 1% of the others; Neu5Gc's never). Weighted by it, the identified glycan won 0.98 (HCD), 0.77 (EThcD) and 0.93 (ion-trap ETD) of
+        # these isobars; Fuc and Hex oxonium ions are too rare (0 and 64% in HCD) to count. With candidates from the reader's precursor m/z at isotope errors
+        # -1..+2 (1,206 spectra, 51 of them still on a 13C peak) the identified glycan came first in 0.948, against 0.890 by the isotope error alone and 0.865 by
+        # explained share alone; the isotope penalty scanned 0-0.3 (0.05: 0.911, 0.1: 0.931, 0.2: 0.948, 0.3: 0.953, the 13C-picked spectra 0.745 from 0.1 on)
+        sialic = [r for r in ('Neu5Ac', 'Neu5Gc') if comp.get(r)]
+        found = [check_masses(observed, np.array([mono_attributes[r]['mass'][r] + PROTON_MASS - d for d in (0, WATER_MASS)]), np.minimum(
+            mass_threshold, (mono_attributes[r]['mass'][r] + PROTON_MASS) * mass_threshold_ppm / 1e6) if mass_threshold_ppm else mass_threshold).any() for r in sialic]
+        evidence = float(np.mean(found)) if sialic else 1.0
+        rows.append([comp, isotope_error, explained * evidence - isotope_penalty * abs(isotope_error), explained, evidence])
+    df_out = pd.DataFrame(rows, columns = ['composition', 'isotope_error', 'score', 'explained', 'sialic_evidence'])
+    df_out = df_out.sort_values('score', ascending = False, kind = 'stable').reset_index(drop = True)
+    df_out.insert(3, 'rank', df_out['score'].round(10).rank(ascending = False, method = 'min').astype(int))
     return df_out
 
 
@@ -3776,7 +3860,7 @@ def classify_fragment(dc_name):
     peptide_part = [str(x) for x in dc_name[0]]
     if 'No Peptide' in peptide_part:
         return 'oxonium'
-    backbone = [x[0] for x in peptide_part if re.fullmatch(r'[abcwxyz]_\d+', x)]
+    backbone = [x[0] for x in peptide_part if re.fullmatch(r'[abcwxyz](?:-1|\+1)?_\d+', x)]
     if backbone:
         return 'backbone_n' if backbone[0] in N_TERM_IONS else 'backbone_c'
     return 'glycopeptide'
@@ -3908,12 +3992,12 @@ def draw_peptide_ladder(peptide, hit_dict, glycosites = (), ax = None, fontsize 
         if not dc_name or not isinstance(dc_name[0], list):
             continue
         for token in dc_name[0]:
-            match = re.fullmatch(r'([abcwxyz])_(\d+)', str(token))
+            match = re.fullmatch(r'([abcwxyz](?:-1|\+1)?)_(\d+)', str(token))
             if not match:
                 continue
             series, index = match.group(1), int(match.group(2))
             target = n_cuts if series in N_TERM_IONS else c_cuts
-            target.setdefault(index if series in N_TERM_IONS else len(peptide) - index, set()).add(f'{series}{index}')
+            target.setdefault(index if series in N_TERM_IONS else len(peptide) - index, set()).add(f'{series[0]}{index}{series[1:]}')
     for cuts, sign, align in ((n_cuts, 1, 'right'), (c_cuts, -1, 'left')):
         for bond, tokens in cuts.items():
             x = bond - 0.5

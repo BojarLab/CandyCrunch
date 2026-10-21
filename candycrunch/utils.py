@@ -500,12 +500,13 @@ def read_raw_scan_table(filepath):
     return table
 
 
-def read_raw_packet(f, address):
+def read_raw_packet(f, address, drop_flagged = False):
     """reads the data packet of one scan of a Thermo .raw file\n
    | Arguments:
    | :-
    | f (file): the .raw file, opened in binary mode
-   | address (int): file offset of the scan's data packet (the scan table's packet)\n
+   | address (int): file offset of the scan's data packet (the scan table's packet)
+   | drop_flagged (bool): whether to leave out the orbitrap centroids that Thermo's centroid stream leaves out (flag 0x10: FT side lobes and ghosts); default:False\n
    | Returns:
    | :-
    | Returns m/z (float64) and intensity of the scan's centroids (float32), or if it has none, of its profile points (float64) as stored (one bin
@@ -513,7 +514,7 @@ def read_raw_packet(f, address):
    """
     # 40-byte header (number of scan segments, then the sizes of the profile and the centroid list in 4-byte words and the layout flags), 8 bytes
     # (m/z range) per further segment, the profile, then the centroid list: its length, then float32 m/z (double with layout flag 0x10000) and
-    # float32 intensity per centroid
+    # float32 intensity per centroid; orbitrap centroids are followed by one descriptor per centroid (u16 index, u8 flags, u8 charge)
     f.seek(address)
     n_segments, profile_size, peaks_size, layout = struct.unpack_from('<4I', f.read(40))
     profile_addr = f.seek(8 * max(n_segments - 1, 0), 1)
@@ -521,6 +522,12 @@ def read_raw_packet(f, address):
         f.seek(4 * profile_size, 1)
         n = int.from_bytes(f.read(4), 'little')
         peaks = np.frombuffer(f.read(n * (12 if layout & 0x10000 else 8)), [('mz', '<f8' if layout & 0x10000 else '<f4'), ('int', '<f4')])
+        if n and drop_flagged:
+            # Ion-trap centroids have no descriptors, which the index check tells
+            descriptors = f.read(4 * n)
+            descriptors = np.frombuffer(descriptors[:len(descriptors) // 4 * 4], '<u4')
+            keep = (descriptors & 0x100000) == 0 if len(descriptors) == n and np.array_equal(descriptors & 0xFFFF, np.arange(n) & 0xFFFF) else slice(None)
+            return peaks['mz'][keep].astype(np.float64), peaks['int'][keep].copy(), False
         if n:
             return peaks['mz'].astype(np.float64), peaks['int'].copy(), False
     # Profile: first value and step of the bin axis (doubles), the number of chunks, then per chunk its first bin and number of bins (u32), a

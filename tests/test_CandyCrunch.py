@@ -117,6 +117,11 @@ UNTRACKED_DIR = BASE_DIR / "tests" / "untracked"
 if os.path.exists(UNTRACKED_DIR / 'df_mz_timsTOF_serum.csv'):
     TEST_DICTS.append({'name': 'timsTOF_serum', 'folder': '../untracked', 'args': {'glycan_class': 'N'},
                        'test_files': [x for x in os.listdir(UNTRACKED_DIR) if x.startswith('20260831_TIMS_SC_NG') and x.lower().endswith(('.d', '.xlsx'))]})
+# Pooled human urine N-glycans labelled with 2-aminopyridine (PA), DEAE fraction A1 sub-run 1, fraction 8 after aminolysis-SALSA (a2-6 isopropylamide, a2-3/8
+# methylamide), Thermo LTQ (ion-trap MS1 and CID MS2, positive), one run (.raw with --input-format mzml, its .xlsx otherwise); in tests/untracked like timsTOF_serum
+if os.path.exists(UNTRACKED_DIR / 'GPST000750' / 'df_mz_GPST000750.csv'):
+    TEST_DICTS.append({'name': 'GPST000750', 'folder': '../untracked/GPST000750',
+                       'args': {'glycan_class': 'N', 'modification': 'PA', 'lc': 'C18', 'max_charge': 3, 'sialic_derivatization': 'SALSA'}})
 # Misprediction reports from the app (fetched from Sentry by the misprediction cell into tests/untracked/mispredictions): one set per report, the .cc of
 # the peak's surroundings and an .xlsx made from it (older reports: the pooled MS2 spectrum as a one-spectrum .xlsx)
 if os.path.exists(UNTRACKED_DIR / 'mispredictions' / 'index.json'):

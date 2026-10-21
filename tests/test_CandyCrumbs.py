@@ -7,7 +7,8 @@ import numpy as np
 import networkx as nx
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, CHAIN_IONS, domon_costello_to_mpl, \
+    build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
+    CHAIN_IONS, domon_costello_to_mpl, \
     peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
     subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
@@ -220,6 +221,19 @@ def test_glycopeptide_ethcd_charges():
             assert result[mz]['Domon-Costello nomenclatures'][0] == [[name], ['M']] and result[mz]['Fragment charges'][0] == 2
 
 
+def test_glycopeptide_hydrogen_transfer_ions():
+    # ETD-type spectra also hold c and z ions after a hydrogen atom moved between the two halves: c - H (c-1, as pyteomics names it) and z. + H (z+1, y - NH,
+    # as CandyCrunch's z is the radical; pyteomics 4 calls it 'z+1', pyteomics 5 'z+2'), which only the ETD-type methods name
+    glycan = 'Neu5Ac(a2-3)Gal(b1-3)GalNAc'
+    ions = {round(mass.fast_mass('ETQ', ion_type = 'c-1', charge = 1) + glycan_to_mass(glycan) - composition_to_mass({}), 4): [['c-1_3'], ['M']],
+            round(mass.fast_mass('PATSPAR', ion_type = 'y', charge = 1) - mass.calculate_mass(formula = 'NH'), 4): [['z+1_7'], ['loss of glycan 1']]}
+    for g in (glycan, 'Hex1HexNAc1Neu5Ac1'):
+        for method in ('ETD', 'EThcD', 'HCD', None):
+            result = CandyCrumbs({'peptide': 'ETQPATSPAR', 'glycans': [g], 'glycosites': [2]}, list(ions), charge = 3, fragmentation_method = method)
+            for mz, name in ions.items():
+                assert (result[mz]['Domon-Costello nomenclatures'][0] if result[mz] else None) == (name if method in ('ETD', 'EThcD') else None), (g, method, mz)
+
+
 def test_build_glycopeptide_input_modifications():
     # Met oxidation is a peptide residue, not a glycan; an unknown modification raises instead of becoming a massless glycan
     gp = build_glycopeptide_input('EMTSPGTPAR', 'M2(Oxidation);T3(HexNAc(1)Hex(1))')
@@ -263,6 +277,20 @@ def test_rank_glycopeptide_structures():
                                           ('TPSAAYPTDR', 'S3(Hex1HexNAc1NeuAc1);T8(Hex1HexNAc1NeuAc1)', [structures] * 2, 'max_candidates')):
         with pytest.raises(ValueError, match = message):
             rank_glycopeptide_structures(pep_seq, mods, peaks, charge = 2, structures = cands, max_candidates = 3)
+
+
+def test_rank_glycopeptide_compositions():
+    # Neu5Ac + Hex and Neu5Gc + Fuc weigh the same, so the sialic acid's oxonium ions (292/274 or 308/290) decide; and of two equal candidates, the one
+    # that needs no isotope step off the precursor comes first
+    pep = mass.calculate_mass(sequence = 'TPSAAYPTDR')
+    res = {k: composition_to_mass({k: 1}) - composition_to_mass({}) for k in ('HexNAc', 'Neu5Ac', 'Neu5Gc')}
+    peaks = {res['HexNAc'] + PROTON_MASS: 100, pep + PROTON_MASS: 70, pep + res['HexNAc'] + PROTON_MASS: 90}
+    for sialic_acid in ('Neu5Ac', 'Neu5Gc'):
+        spectrum = peaks | {res[sialic_acid] + PROTON_MASS: 80, res[sialic_acid] - WATER_MASS + PROTON_MASS: 60}
+        df = rank_glycopeptide_compositions('TPSAAYPTDR', ['H1N1A1', 'N1F1G1'], spectrum, charge = 2, glycosite = 2, fragmentation_method = 'HCD')
+        assert df['composition'][0].get(sialic_acid) == 1 and df['sialic_evidence'].tolist() == [1.0, 0.0] and df['rank'].tolist() == [1, 2]
+    df = rank_glycopeptide_compositions('TPSAAYPTDR', ['H1N1', 'H1N1'], peaks, charge = 2, glycosite = 2, isotope_errors = [1, 0])
+    assert df['isotope_error'].tolist() == [0, 1]
 
 
 def test_glycopeptide_nsite_pieces():

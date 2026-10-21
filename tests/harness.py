@@ -724,7 +724,7 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
     from tests.test_CandyCrunch import match_spectra, MASS_TOLERANCE, RT_TOLERANCE, compare_glycans, canonicalize_iupac, get_possible_topologies, graph_to_string
     from candycrunch.prediction import get_comp, glycans
     vocabulary = glycans if vocabulary is None else vocabulary
-    comp_key = lambda c: tuple(sorted((k, v) for k, v in c.items() if v)) if isinstance(c, dict) else None
+    comp_key = lambda c: tuple(sorted(sum((Counter({k.split('_a2-')[0]: v}) for k, v in c.items() if v), Counter()).items())) if isinstance(c, dict) else None
     gt_comp = lambda g: comp_key(get_comp(g)) if isinstance(g, str) else None
     vocab = {canonicalize_iupac(g) for g in vocabulary}
     gt = gt.reset_index(drop = True)
