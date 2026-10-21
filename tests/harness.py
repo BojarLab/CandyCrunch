@@ -53,8 +53,10 @@ import psutil
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
-# GlycoGauntlet: $GLYCOGAUNTLET, else next to this repo (as synced to a remote machine), else where the laptop keeps it
-GG_DIR = pathlib.Path(os.environ.get('GLYCOGAUNTLET') or next((p for p in [BASE_DIR.parent / 'GlycoGauntlet'] if p.exists()), BASE_DIR.parent / 'Gothenburg' / 'Projects' / 'GlycoGauntlet'))
+# GlycoGauntlet: $GLYCOGAUNTLET, else next to this repo (as synced to a remote machine), else where the laptop keeps it; a folder only counts if it holds
+# the private files (a checkout of the public GlycoGauntlet repo next to this one has none, and the held-out sets were silently left out)
+GG_DIR = pathlib.Path(os.environ.get('GLYCOGAUNTLET') or next((p for p in [BASE_DIR.parent / 'GlycoGauntlet'] if (p / 'improved_xlsx_2026-10-10').exists()),
+                                                              BASE_DIR.parent / 'Gothenburg' / 'Projects' / 'GlycoGauntlet'))
 TRACE_ORDER = ['no_ms2', 'no_cluster', 'composition_not_candidate', 'model_no_composition', 'below_pred_thresh', 'domain_filter', 'other_composition_chosen',
                'crumbs_gate', 'deduplicated', 'finalise', 'matched_elsewhere']
 WRONG_ORDER = ['wrong_composition', 'not_in_vocabulary', 'not_in_top25', 'below_thresh', 'ranked_lower']

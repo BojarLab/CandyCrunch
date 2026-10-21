@@ -1769,6 +1769,13 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         if highest_intensity > 0:
             rep_mz = cluster['m/z'][highest_intensity_index]
             mean_rt = cluster['RT'][highest_intensity_index]
+            # DDA re-triggers on the 13C peak of a multiply charged precursor once its monoisotopic peak is excluded, and where an ion-trap survey scan
+            # merges the isotopes into one centroid as intense as the monoisotopic one, the loader cannot walk it down; such spectra chain into their
+            # precursor's cluster, whose apex they can be. A cluster whose spectra 0.3-0.7 m/z below its apex hold at least half the intensity of those above is reported at the strongest of them
+            mzs_c, ints_c = np.array(cluster['m/z'], dtype = float), np.array(cluster['intensity'], dtype = float)
+            lower = (mzs_c >= rep_mz - 0.7) & (mzs_c <= rep_mz - 0.3)
+            if lower.any() and ints_c[lower].sum() >= 0.5 * ints_c[mzs_c > rep_mz - 0.3].sum():
+                rep_mz = float(mzs_c[lower][np.argmax(ints_c[lower])])
         else:
             rep_mz = min(cluster['m/z'])
             mean_rt = np.mean(cluster['RT'])
@@ -1814,20 +1821,22 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                     t = total + weights[:, c]
                     comp += np.where(np.abs(total) >= np.abs(weights[:, c]), (total - t) + weights[:, c], (weights[:, c] - t) + total)
                     total = t
-            if (den == 0).any():
-                raise ZeroDivisionError("Weights sum to zero, can't be normalized")
+            # A group of zero-intensity peaks is no peak (np.average raised for it)
+            keep = np.ones(len(starts), dtype = bool)
+            keep[np.flatnonzero(small)[den == 0]] = False
             keys, values = np.empty(len(starts)), np.empty(len(starts))
-            keys[small] = num / den
+            keys[small] = num / np.where(den == 0, 1.0, den)
             values[small] = np.where((comp != 0) & np.isfinite(comp), total + comp, total) if COMPENSATED_SUM else den
             ints_list = ints.tolist()
             for g in np.flatnonzero(~small):
                 a, b = bounds[g], bounds[g + 1]
                 den = ints[a:b].sum()
                 if den == 0:
-                    raise ZeroDivisionError("Weights sum to zero, can't be normalized")
+                    keep[g] = False
+                    continue
                 keys[g] = (ms[a:b] * ints[a:b]).sum() / den
                 values[g] = sum(ints_list[a:b])
-            pk = dict(zip(list(keys), values.tolist()))
+            pk = dict(zip(list(keys[keep]), values[keep].tolist()))
         else:
             mi_pairs = sorted([(m, i) for spec in cluster['peak_d'] for m, i in spec.items()], key = lambda x: x[0])
             starts, grp_start = [], None
@@ -1845,9 +1854,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                         num += m * i
                         den += i
                     if den == 0:
-                        raise ZeroDivisionError("Weights sum to zero, can't be normalized")
+                        continue
                     pk[np.float64(num / den)] = sum(ints)
-                else:
+                elif sum(ints) != 0:
                     pk[np.average(ms, weights = ints)] = sum(ints)
         peaks = dict(sorted(pk.items(), key = lambda x: x[1], reverse = True))
         binned = []

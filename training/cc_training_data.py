@@ -1,0 +1,327 @@
+"""Training data from the .cc files of mapped projects: each run's model inputs as CandyCrunch builds them (pooled spectra of MS1-refined precursors, one per
+candidate composition), labelled from the project's map with pipeline_labels.label_run, one file per run, merged into a training and a pretraining table.
+
+Usage (rerun whenever files arrive; finished runs are skipped unless their .cc, map, checklist row or this code changed):
+    python training/cc_training_data.py [--cc_root DIR] [--maps DIR] [--checklist CSV] [--out DIR] [--projects ID1,ID2] [--n_jobs 2] [--watch 30]
+
+Inputs: <cc_root>/<project>/**/<run>.cc (project = a map ID: GlycoPOST, PMC, MassIVE, ...), <maps>/df_mz_<project>[_<suffix>].csv (Mass, RT, glycan, optional
+sample columns whose names are substrings of the run names) and the checklist row of the project (mode, LC_type, trap, glycan_type, reducing_end, sample_prep,
+sialic_derivatization, mass_tag).
+Per run: the project's maps of the class its name gives (NG/OG, N-/O-glycans, GSL, a sample number ending in N or O; map class from the suffix _N, _O, _GSL,
+...), those with a sample column found in the run name (rows where it is > 0), else every row of a map that names no run; glycan class from the maps' suffixes,
+else the run name, else the map's structures, else the checklist; map masses 0.5-1 off their structure's ion take its m/z; candidate compositions from the
+species' kingdom for non-mammals; without a reducing end in the checklist, reduced and free are both tried and the one labelling more inputs is kept, and if
+the checklist's settings label nothing although the map has structures, underivatized/permethylated x reduced/free are tried. label_run shifts map RTs onto the
+run and labels RT-less map rows only on their composition's strongest inputs. Runs of test sets and held-out files (tests/data, the training exclusion list of
+the GlycoGauntlet audit) are written but never merged; the other runs of their projects are training data like any.
+Outputs: <out>/runs/<project>/<run>.pkl (labelled and unlabelled inputs with settings), <out>/runs.csv (one line per run), <out>/train.pkl (labelled inputs:
+m/z, peak_d, RT, precursor_charge, glycan, glycan_candidates, glycan_match_status, composition, annotation_score, num_spectra, intensity, rt_range, spec_id,
+filename, GlycoPost_ID, mode, trap, lc_type, modification (as wrap_inference passes them), model_input, RT2, compositional_vector, glycan_type (the spectrum,
+RT, composition and class as the model got them; label_run), reducing_end, sample_prep, fragmentation, ion_source) and <out>/pretrain/<project>.pkl
+(unlabelled pooled spectra with compositions, compositional_vectors, glycan_types and charges of their candidates; one file per project, as all of them
+together exceed the memory of a laptop).
+"""
+import argparse
+import hashlib
+import inspect
+import json
+import os
+import pathlib
+import re
+import sys
+import time
+import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+import numpy as np
+import pandas as pd
+
+BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+PROJECTS = BASE_DIR.parent / 'Gothenburg' / 'Projects'
+NON_SAMPLE = {'Mass', 'RT', 'glycan', 'added_db', 'removed_db', 'glycan_class', 'rt_group', 'charge', 'reducing_end'}
+# Class of a map by the first part of its suffix (_N_rt: N)
+SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid', 'milk': 'free'}
+REDUCING_ENDS = {'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP'}
+
+
+def sample_columns(df):
+    return [c for c in df.columns if c not in NON_SAMPLE and not str(c).startswith('Unnamed')]
+
+
+def name_class(stem):
+    # NG/OG, N-glycan/O-glycan, GSL in the run name, or a sample number ending in N or O (JC_171012Ze1N, JC_160226O3)
+    s = stem.upper()
+    for pattern, cls in [(r'(^|[^A-Z])(NG|N-?GLY)', 'N'), (r'(^|[^A-Z])(OG|O-?GLY)', 'O'), (r'(^|[^A-Z])(GSL|LIPID)', 'lipid'), (r'\dN\d*$', 'N'), (r'\dO\d*$', 'O')]:
+        if re.search(pattern, s):
+            return cls
+    return None
+
+
+def structure_class(glycans):
+    from glycowork.motif.processing import get_class
+    classes = pd.Series([get_class(g) for g in glycans if isinstance(g, str)]).replace({'lipid/free': 'free', 'repeat': None, '': None}).dropna()
+    return classes.value_counts().index[0] if len(classes) else None
+
+
+def maps_for_run(project, path, maps_dir):
+    # Mapping rows for the run, its glycan class (or list of classes) and the names of the maps used
+    maps = sorted(p for p in maps_dir.glob(f'df_mz_{project}*.csv') if p.stem == f'df_mz_{project}' or p.stem.startswith(f'df_mz_{project}_'))
+    hint = name_class(path.stem)
+    named, general = [], []
+    for m in maps:
+        df = pd.read_csv(m, encoding = 'utf-8-sig')
+        cls = SUFFIX_CLASSES.get(m.stem[len(f'df_mz_{project}'):].lstrip('_').split('_')[0])
+        # A map of another class than the run name says (N-glycan maps for an O-glycan run of the same samples) is not the run's
+        if hint and cls and cls != hint:
+            continue
+        # A sample column at the start of the run name (its sample group, as in '6i. <sample>') before columns found elsewhere in it (a '2' or '4' in
+        # 'Stage2_4'), then the longest, so 'S1' cannot claim 'S10'
+        samples = sample_columns(df)
+        cols = sorted((c for c in samples if str(c) in path.name), key = lambda c: (path.name.startswith(str(c)), len(str(c))), reverse = True)
+        if cols:
+            named.append((df[pd.to_numeric(df[cols[0]], errors = 'coerce') > 0], cls, m.name, (path.name.startswith(str(cols[0])), len(str(cols[0])))))
+        else:
+            # Maps whose sample columns name no run (samples, not files) apply as a whole, as in the snapshot's extraction
+            general.append((df[(df[samples].apply(pd.to_numeric, errors = 'coerce') > 0).any(axis = 1)] if samples else df, cls, m.name))
+    # Maps naming the run win over maps for every run, and among them those naming it at its start, then by the longest column (one-character columns
+    # such as 1 or 2 are in many run names besides the column of the run's own group)
+    chosen = [c[:3] for c in named if c[3] == max(n[3] for n in named)] or general
+    if not chosen:
+        return None, hint, []
+    mapping = pd.concat([c[0] for c in chosen], ignore_index = True)
+    classes = list(dict.fromkeys(c[1] for c in chosen if c[1]))
+    cls = classes if len(classes) > 1 else (classes[0] if classes else hint or structure_class(mapping['glycan']))
+    return mapping, cls, [c[2] for c in chosen]
+
+
+def run_settings(row):
+    # wrap_inference settings of a project from its checklist row (no modification: reducing end unknown)
+    get = lambda k: row[k] if k in row and isinstance(row[k], str) and row[k].strip() else None
+    mode = (get('mode') or 'negative').split(';')[0].strip()
+    prep = get('sample_prep') or 'underivatized'
+    end = get('reducing_end')
+    settings = dict(max_charge = (4 if prep != 'underivatized' else 3) * (1 if mode == 'positive' else -1), sample_prep = prep,
+                    lc = {'PGC': 'PGC', 'C18': 'C18'}.get(get('LC_type'), 'other'), trap = {'linear': 'linear', 'orbitrap': 'orbitrap', 'amazon': 'amazon'}.get(get('trap'), 'other'))
+    tag = pd.to_numeric(row.get('mass_tag'), errors = 'coerce')
+    if end in REDUCING_ENDS:
+        settings['modification'] = end
+    elif end in ('free', 'native') or (end and end.startswith('custom')):
+        settings.update(modification = 'custom', mass_tag = None if np.isnan(tag) else float(tag))
+    sia = get('sialic_derivatization')
+    if sia:
+        settings['sialic_derivatization'] = tuple(re.findall(r"'([^']+)'", sia)) if sia.startswith('(') else sia
+    return settings
+
+
+def taxonomy(species):
+    # Candidate compositions from the glycans of the run's kingdom when its species are no mammals (wrap_inference's default Mammalia lacks many
+    # compositions of other animals); species unknown to glycowork count by their genus
+    from glycowork.glycan_data.loader import df_species
+    taxa = df_species.drop_duplicates('Species').set_index('Species')[['Genus', 'Class', 'Kingdom']]
+    found = []
+    for s in (species or '').split(';'):
+        s = s.strip()
+        hit = taxa.loc[s] if s in taxa.index else taxa[taxa['Genus'] == s.split('_')[0]].head(1).squeeze(axis = 0) if (taxa['Genus'] == s.split('_')[0]).any() else None
+        if hit is not None and len(hit):
+            found.append((hit['Class'], hit['Kingdom']))
+    if not found or all(c == 'Mammalia' for c, _ in found) or len({k for _, k in found}) > 1:
+        return {}
+    return dict(taxonomy_level = 'Kingdom', taxonomy_filter = found[0][1])
+
+
+def rescue_masses(mapping, settings):
+    # Masses 0.5-1 off the nearest ion of their row's structure (rounded, the 13C peak, z = 2 m/z written 0.5 off) take that
+    # ion's m/z, as the snapshot's extraction did; rows further off (structure and mass disagree) keep their mass and label nothing
+    from glycowork.motif.tokenization import glycan_to_mass, get_ion_mzs
+    modification = None if settings.get('modification') == 'custom' else settings.get('modification')
+    masses, rescued = [], 0
+    for glycan, mass in zip(mapping['glycan'], pd.to_numeric(mapping['Mass'], errors = 'coerce')):
+        if isinstance(glycan, str) and not np.isnan(mass):
+            try:
+                neutral = glycan_to_mass(glycan, sample_prep = settings['sample_prep'], modification = modification) + (settings.get('mass_tag') or 0)
+                ions = np.array(list(get_ion_mzs(neutral, max_charge = settings['max_charge'], adducts = ['Na+'] if settings['max_charge'] > 0 else None).values()))
+                error = np.abs(ions - mass)
+                if 0.5 < np.nanmin(error) <= 1.0:
+                    mass, rescued = float(ions[np.nanargmin(error)]), rescued + 1
+            except Exception:
+                pass
+        masses.append(mass)
+    return mapping.assign(Mass = masses), rescued
+
+
+def stamp(path, mapping_names, maps_dir, row, code):
+    # What a run's output depends on: the .cc, its maps, its checklist row and the code turning it into inputs and labels
+    h = hashlib.sha1(code)
+    st = path.stat()
+    h.update(f'{st.st_size} {st.st_mtime_ns}'.encode())
+    for m in mapping_names:
+        h.update((maps_dir / m).read_bytes())
+    h.update(json.dumps({k: str(v) for k, v in row.items()}, sort_keys = True).encode())
+    return h.hexdigest()
+
+
+def convert_run(task):
+    # One run in its own process: labelled and unlabelled inputs with settings, written to <out>/runs/<project>/<run>.pkl
+    os.environ.setdefault('OMP_NUM_THREADS', '1')
+    from training.pipeline_labels import label_run
+    path, out, maps_dir = pathlib.Path(task['path']), pathlib.Path(task['out']), pathlib.Path(task['maps'])
+    start = time.time()
+    info = dict(project = task['project'], run = path.stem, path = str(path), excluded = task['excluded'], maps = ', '.join(task['map_names']), glycan_class = str(task['glycan_class']))
+    try:
+        settings = dict(run_settings(task['row']), **taxonomy(task['row'].get('Species') if isinstance(task['row'].get('Species'), str) else None))
+        tries = [settings] if 'modification' in settings else [dict(settings, modification = 'reduced'), dict(settings, modification = 'custom', mass_tag = None)]
+        def attempt(s):
+            mapping, rescued = rescue_masses(task['mapping'], s) if task['mapping'] is not None else (pd.DataFrame(columns = ['Mass', 'RT', 'glycan']), 0)
+            return (*label_run(str(path), mapping, task['glycan_class'], **s), s, mapping, rescued)
+        # The first of the most labelling settings
+        best, fitted = max([attempt(s) for s in tries], key = lambda r: len(r[0])), False
+        if best[0].empty and len(best[1]) and task['mapping'] is not None and task['mapping']['glycan'].notna().any():
+            # The checklist's settings label nothing although the map has structures: the derivatization and reducing end that the map's masses fit
+            done = [(s['sample_prep'], s['modification']) for s in tries]
+            other = [attempt(dict(settings, sample_prep = prep, modification = end, mass_tag = None, max_charge = (4 if prep != 'underivatized' else 3) * int(np.sign(settings['max_charge']))))
+                     for prep in ('underivatized', 'permethylated') for end in ('reduced', 'custom') if (prep, end) not in done]
+            if other and max(len(r[0]) for r in other):
+                best, fitted = max(other, key = lambda r: len(r[0])), True
+        labelled, unlabelled, settings, mapping, rescued = best
+        info.update(rt_shift = labelled.attrs.get('rt_shift'), masses_rescued = rescued, settings_fitted = fitted)
+        end = settings['modification'] if settings['modification'] != 'custom' else ('free' if settings.get('mass_tag') is None else f"custom {settings['mass_tag']}")
+        meta = dict(filename = path.stem, GlycoPost_ID = task['project'], reducing_end = end, sample_prep = settings['sample_prep'],
+                    fragmentation = task['row'].get('fragmentation'), ion_source = task['row'].get('ionization'))
+        # glycan_type (labelled) and glycan_types (unlabelled) are label_run's: the class code the model got, the run's class
+        labelled = labelled.assign(**meta)
+        unlabelled = unlabelled.assign(**meta)
+        mapped = mapping[mapping['glycan'].notna()]
+        info.update(status = 'ok', settings = json.dumps({k: v for k, v in settings.items()}, default = str), inputs = len(labelled) + len(unlabelled),
+                    labelled = len(labelled), unique = int((labelled['glycan_match_status'] == 'unique').sum()), structures = labelled['glycan'].nunique(),
+                    map_rows = len(mapped), map_rows_with_rt = int(pd.to_numeric(mapped.get('RT', pd.Series(dtype = float)), errors = 'coerce').notna().sum()),
+                    unlabelled = len(unlabelled))
+        target = out / 'runs' / task['project'] / f'{path.stem}.pkl'
+        target.parent.mkdir(parents = True, exist_ok = True)
+        tmp = target.with_suffix(f'.{os.getpid()}.tmp')
+        pd.to_pickle(dict(labelled = labelled, unlabelled = unlabelled, settings = settings, info = info, stamp = task['stamp']), tmp)
+        os.replace(tmp, target)
+        # The stamp also beside the run, so rescans need not load the pickle
+        target.with_suffix('.stamp').write_text(task['stamp'])
+    except Exception:
+        info.update(status = 'error', error = traceback.format_exc(limit = 3).strip().splitlines()[-1])
+    info['seconds'] = round(time.time() - start, 1)
+    return info
+
+
+def convert_runs(tasks):
+    return [convert_run(t) for t in tasks]
+
+
+def excluded_stems(exclusion_csv):
+    stems = {p.stem.split('.')[0] for p in (BASE_DIR / 'tests' / 'data').rglob('*') if p.suffix.lower() in ('.raw', '.mzml', '.mzxml', '.xlsx', '.d', '.cc', '.mgf')}
+    if exclusion_csv and pathlib.Path(exclusion_csv).exists():
+        ex = pd.read_csv(exclusion_csv)
+        stems |= {str(f).rsplit('.', 1)[0] for f in ex['filename']} | {str(f).rsplit('.', 1)[0] for f in ex.get('matched_to', pd.Series(dtype = str)).dropna()}
+    return stems
+
+
+def collect(args):
+    cc_root, maps_dir, out = pathlib.Path(args.cc_root), pathlib.Path(args.maps), pathlib.Path(args.out)
+    checklist = pd.read_csv(args.checklist, encoding_errors = 'replace')
+    checklist['GlycoPOST_ID'] = checklist['GlycoPOST_ID'].astype(str).str.strip()
+    checklist = checklist.drop_duplicates('GlycoPOST_ID').set_index('GlycoPOST_ID')
+    wanted = set(args.projects.split(',')) if args.projects else None
+    exclude = excluded_stems(args.exclusion)
+    # The source of the package, of the labelling (neither imported here: the main process stays small) and of the conversion functions
+    code = b''.join(p.read_bytes() for p in sorted((BASE_DIR / 'candycrunch').glob('*.py')) + [BASE_DIR / 'training' / 'pipeline_labels.py']) + ''.join(
+        inspect.getsource(f) for f in (sample_columns, name_class, structure_class, maps_for_run, run_settings, taxonomy, rescue_masses, convert_run)).encode()
+    tasks, skipped = [], 0
+    for project in sorted(p.name for p in cc_root.iterdir() if p.is_dir()):
+        if wanted and project not in wanted:
+            continue
+        row = checklist.loc[project].to_dict() if project in checklist.index else {}
+        for path in sorted(cc_root.joinpath(project).rglob('*.cc')):
+            # Files still being downloaded or copied wait for the next scan
+            if time.time() - path.stat().st_mtime < 120:
+                continue
+            mapping, cls, names = maps_for_run(project, path, maps_dir)
+            if cls is None:
+                cls = (str(row.get('glycan_type', '')).split(';')[0].strip() or 'N') if isinstance(row.get('glycan_type'), str) else 'N'
+            target = out / 'runs' / project / f'{path.stem}.pkl'
+            st = stamp(path, names, maps_dir, row, code)
+            if target.exists():
+                try:
+                    side = target.with_suffix('.stamp')
+                    if (side.read_text() if side.exists() else pd.read_pickle(target)['stamp']) == st:
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass
+            tasks.append(dict(project = project, path = str(path), out = str(out), maps = str(maps_dir), mapping = mapping, glycan_class = cls, map_names = names,
+                              row = row, stamp = st, excluded = path.stem in exclude))
+    return tasks, skipped
+
+
+def write(df, path):
+    path.parent.mkdir(parents = True, exist_ok = True)
+    tmp = path.with_suffix(f'.{os.getpid()}.tmp')
+    df.to_pickle(tmp)
+    os.replace(tmp, path)
+
+
+def merge(out):
+    # Every finished run into train.pkl / pretrain/<project>.pkl (excluded runs left out) and runs.csv
+    out = pathlib.Path(out)
+    train, infos, n_pretrain = [], [], 0
+    for project in sorted(p for p in out.joinpath('runs').iterdir() if p.is_dir()):
+        pretrain = []
+        for r in sorted(project.glob('*.pkl')):
+            d = pd.read_pickle(r)
+            infos.append(d['info'])
+            if d['info'].get('excluded'):
+                continue
+            train.append(d['labelled'].reset_index())
+            pretrain.append(d['unlabelled'].reset_index())
+        if pretrain:
+            write(pd.concat(pretrain, ignore_index = True), out / 'pretrain' / f'{project.name}.pkl')
+            n_pretrain += sum(len(f) for f in pretrain)
+    pd.DataFrame(infos).to_csv(out / 'runs.csv', index = False)
+    write(pd.concat(train, ignore_index = True) if train else pd.DataFrame(), out / 'train.pkl')
+    return sum(len(f) for f in train), n_pretrain, len(infos)
+
+
+def main(args):
+    tasks, skipped = collect(args)
+    print(f'{len(tasks)} runs to convert, {skipped} up to date', flush = True)
+    if tasks:
+        log = pathlib.Path(args.out) / 'log.csv'
+        log.parent.mkdir(parents = True, exist_ok = True)
+        # A few runs per process (its imports take ~20 s), each process fresh (reusing processes through max_tasks_per_child > 1 stalls the pool on Windows)
+        chunks = [tasks[i:i + args.runs_per_process] for i in range(0, len(tasks), args.runs_per_process)]
+        with ProcessPoolExecutor(max_workers = args.n_jobs, mp_context = multiprocessing.get_context('spawn'), max_tasks_per_child = 1) as pool:
+            for fut in as_completed([pool.submit(convert_runs, c) for c in chunks]):
+                for info in fut.result():
+                    pd.DataFrame([info]).to_csv(log, mode = 'a', header = not log.exists(), index = False)
+                    print(f"  {info['project']}/{info['run']}: {info['status']}, {info.get('labelled', 0)} labelled / {info.get('inputs', 0)} inputs"
+                          f" ({info.get('glycan_class')}, {info.get('maps') or 'no map'}) {info['seconds']} s" + (f" {info.get('error')}" if info['status'] == 'error' else ''), flush = True)
+    # The merged tables only when a run changed (writing them takes minutes)
+    if tasks or not (pathlib.Path(args.out) / 'train.pkl').exists():
+        n_train, n_pretrain, n_runs = merge(args.out)
+        print(f'{n_runs} runs: {n_train} labelled inputs in train.pkl, {n_pretrain} unlabelled in pretrain/', flush = True)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description = 'CandyCrunch training data from mapped .cc files')
+    parser.add_argument('--cc_root', default = str(PROJECTS / 'CandyCrunch' / 'cc_files'))
+    parser.add_argument('--maps', default = str(PROJECTS / 'CandyCrunch' / 'mz_maps'))
+    parser.add_argument('--checklist', default = str(PROJECTS / 'CandyCrunch' / 'file_checklist.csv'))
+    parser.add_argument('--exclusion', default = str(PROJECTS / 'GlycoGauntlet' / 'full20261003_audit' / 'exclusion_files.csv'), help = 'files never to merge (test and held-out runs)')
+    parser.add_argument('--out', default = str(PROJECTS / 'CandyCrunch' / 'cc_training'))
+    parser.add_argument('--projects', default = None, help = 'comma-separated project folders; default: all')
+    parser.add_argument('--n_jobs', type = int, default = 2, help = 'runs converted in parallel (each holds one run in memory, ~1-2 GB)')
+    parser.add_argument('--runs_per_process', type = int, default = 10)
+    parser.add_argument('--watch', type = float, default = 0, help = 'minutes between rescans for new files (0: convert once and stop)')
+    args = parser.parse_args()
+    # Set iteration order reaches the inputs (as in the test harness), so conversions are reproducible
+    os.environ['PYTHONHASHSEED'] = '0'
+    while True:
+        main(args)
+        if not args.watch:
+            break
+        time.sleep(args.watch * 60)

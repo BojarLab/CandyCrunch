@@ -549,6 +549,35 @@ def test_precursor_refinement():
     assert list(drop) == [False, True, False, False]
 
 
+def test_label_run_mapping_rules(monkeypatch):
+    # label_run on inputs as wrap_inference(return_inputs = True) gives them: mapping RTs taken 1.3 min early in another run are shifted onto the run by
+    # its 5 compositions listed once, and a mapping row without RT labels only its composition's most intense inputs above crumbs_thresh, as many as the
+    # mapping has rows of that composition
+    import training.pipeline_labels as pl
+    comps = [{'Hex': 3, 'HexNAc': 2}, {'Hex': 5, 'HexNAc': 2}, {'Hex': 6, 'HexNAc': 2}, {'Hex': 7, 'HexNAc': 2}, {'Hex': 8, 'HexNAc': 2},
+             {'Hex': 5, 'HexNAc': 4, 'Neu5Ac': 1}]
+    glycans = ['Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc', 'Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc',
+               'Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc',
+               'Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc',
+               'Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc']
+    sia = ['Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc',
+           'Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc']
+    mzs = [911.33, 1235.43, 698.24, 779.27, 860.29, 965.84]
+    # Each high-mannose glycan at RT 20 + k; four inputs of the sialylated composition: two isomer peaks, a more intense one failing crumbs_thresh, a weak third
+    rows = [(mzs[k], 20.0 + k, 1e5, 5, comps[k], 12.0) for k in range(5)] + [(965.84, 30.0, 4e5, 6, comps[5], 15.0), (965.84, 31.0, 3e5, 4, comps[5], 14.0),
+                                                                            (965.85, 35.0, 9e5, 2, comps[5], 2.0), (965.84, 33.0, 1e4, 1, comps[5], 9.0)]
+    inputs = pd.DataFrame({'spec_id': range(len(rows)), 'RT': [r[1] for r in rows], 'intensity': [r[2] for r in rows], 'peak_d': [{500.0: 1.0}] * len(rows),
+                           'rt_range': [(r[1], r[1]) for r in rows], 'num_spectra': [r[3] for r in rows], 'composition': [r[4] for r in rows],
+                           'charge': [1, 1, 2, 2, 2, 2, 2, 2, 2], 'annotation_score': [r[5] for r in rows]}, index = pd.Index([r[0] for r in rows], name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    monkeypatch.setattr(pl, 'wrap_inference', lambda *args, **kwargs: inputs.copy())
+    mapping = pd.DataFrame({'Mass': mzs[:5] + [965.84, 965.84], 'RT': [18.7 + k for k in range(5)] + [np.nan, np.nan], 'glycan': glycans + sia})
+    labelled, unlabelled = pl.label_run('run.cc', mapping, 'N')
+    assert np.isclose(labelled.attrs['rt_shift'], 1.3)
+    assert labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6] and len(unlabelled) == 2
+    assert all(len(c) == 2 for c in labelled['glycan_candidates'].iloc[5:]) and labelled['glycan_match_status'].iloc[5] == 'candidates'
+
+
 def test_ms1_peak_regrouping():
     # Unreduced anomers 1 min apart (1:3) fragmented on their flanks only, and a broad peak (sigma 1 min) whose MS2 every 1.2 min differ: with accurate survey
     # scans each anomer is a cluster at its MS1 apex, and the broad peak one cluster at its apex
@@ -564,6 +593,20 @@ def test_ms1_peak_regrouping():
     assert np.allclose(out['RT'], [10.0, 11.0, 15.0], atol = 0.02) and out['num_spectra'].tolist() == [2, 2, 5]
     # Without survey scans the anomers stay one cluster and the broad peak five
     assert len(condense_dataframe(df.copy(), mz_ppm = 20)) == 6
+
+
+def test_condense_isotope_apex():
+    # GPST000315 IL_VB_NG_260717 Man7 [M-2H]2- 779.27 (precursor m/z, RT and intensity as loaded from its .cc): the ion trap re-triggered on the merged 13C
+    # centroid 779.80-779.93, once at the apex, and the cluster is reported at its strongest monoisotopic spectrum; a spectrum 0.4 below an apex with a tenth
+    # of its intensity is another ion, and a peak of zero intensity in every spectrum of a cluster is left out instead of stopping the run
+    spectra = [(779.274, 32.777, 4224), (779.927, 32.798, 4152), (779.275, 32.847, 7899), (779.922, 32.878, 8025), (779.386, 32.948, 12896),
+               (779.919, 32.959, 13263), (779.435, 33.050, 20655), (779.470, 33.153, 22386), (779.804, 33.164, 22616), (779.479, 33.256, 18707),
+               (779.275, 33.358, 12072), (779.466, 33.503, 4898), (1100.0, 40.0, 1000), (1100.4, 40.05, 10000), (1100.42, 40.1, 9000)]
+    df = pd.DataFrame({'m/z': [m for m, _, _ in spectra], 'RT': [t for _, t, _ in spectra], 'intensity': [float(i) for _, _, i in spectra],
+                       'peak_d': [{698.3: 100.0, 596.2: 50.0, 1438.6: 30.0} if m < 800 else {500.0: 10.0, 300.0: 0.0} for m, _, _ in spectra]})
+    out = condense_dataframe(df.copy(), mz_diff = 0.48).sort_values('RT')
+    assert np.allclose(out['m/z'], [779.470, 1100.4]) and out['num_spectra'].tolist() == [12, 3]
+    assert all(300.0 not in p for p in out['peak_d'])
 
 
 def test_ion_trap_header_charge():
