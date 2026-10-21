@@ -76,7 +76,8 @@ def main():
         tables = [(args.output, combined_batch)] + [(f'{stem}_{label}{ext}', df_out) for label, df_out in inference_dfs.items()]
     for path, df_out in tables:
         if isinstance(df_out, tuple):
-            df_out, spectra_out = df_out
+            # (without the MS1 integrations behind each abundance, traces that only the app shows)
+            df_out, spectra_out = df_out[0].drop(columns=['xic'], errors='ignore'), df_out[1]
             # Rounded as in extract_spectra, which keeps every peak dictionary below Excel's 32,767-character cell limit
             df_out['peak_d'] = [{round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()} if isinstance(d, dict) else d for d in spectra_out]
             if 'ms3' in df_out.columns:

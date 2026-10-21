@@ -80,6 +80,58 @@ def test_gui_ms3(app):
     assert 'ms3' not in view.export_frame(view.current_frame()).columns
 
 
+def test_gui_quantification(app):
+    from candycrunch import gui
+    import numpy as np
+    times = np.arange(10, 14, 0.05, dtype = np.float32)
+    def record(mz, z, apex, height):
+        trace = (height * np.exp(-0.5 * ((times - apex) / 0.1) ** 2)).astype(np.float32)
+        left, right = int(np.searchsorted(times, apex - 0.4)), int(np.searchsorted(times, apex + 0.4))
+        return {'mz': mz, 'charge': z, 'rt': apex, 'times': times, 'trace': trace, 'left': left, 'apex': int(np.searchsorted(times, apex)), 'right': right,
+                'baseline': 0.0, 'area': float(np.sum((trace[left + 1:right + 1] + trace[left:right]) * np.diff(times[left:right + 1])) / 2), 'others': [], 'scale': 1.0,
+                'windows': [(mz - 0.25 + i / z, mz + 0.25 + i / z) for i in range(4)], 'scan': (np.array([mz, mz + 1 / z]), np.array([height, height / 2]))}
+    # Run a: the first peak sums two integrations (its ion and a charge state folded into it); run b has no record (an older session)
+    xic = [[record(530.2, 1, 12.0, 3e5), record(264.6, 2, 12.0, 1e5)], [record(384.15, 1, 11.0, 1e5)]]
+    raw = [sum(d['area'] for d in x) for x in xic]
+    tables = {}
+    for run, values in (('a', [r / sum(raw) * 100 for r in raw]), ('b', [70.0, 30.0])):
+        tables[run] = (pd.DataFrame({'top1_pred': ['Fuc(a1-2)Gal(b1-3)GalNAc', 'Gal(b1-3)GalNAc'], 'predictions': [[('Fuc(a1-2)Gal(b1-3)GalNAc', 0.8)], [('Gal(b1-3)GalNAc', 0.9)]],
+                                     'composition': [{'Hex': 1, 'HexNAc': 1, 'dHex': 1}, {'Hex': 1, 'HexNAc': 1}], 'num_spectra': [5, 3], 'charge': [-1, -1], 'RT': [12.0, 11.0],
+                                     'rel_abundance': values, 'evidence': ['strong', 'strong'], 'notes': ['', ''], 'ppm_error': [20.0, 10.0], 'GlyTouCan_ID': ['', '']},
+                                    index = pd.Index([530.2, 384.15], name = 'm/z')).assign(**({'xic': xic} if run == 'a' else {})), [{384.15: 100.0}, {204.09: 50.0}])
+    features = pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc', 'Fuc(a1-2)Gal(b1-3)GalNAc'], 'm/z': [384.15, 530.2], 'RT': [11.0, 12.0], 'charge': [-1, -1],
+                             'composition': [{'Hex': 1, 'HexNAc': 1}, {'Hex': 1, 'HexNAc': 1, 'dHex': 1}], 'GlyTouCan_ID': ['', ''], 'n_files_ms2': [2, 2],
+                             'a': [tables['a'][0]['rel_abundance'].iat[1], tables['a'][0]['rel_abundance'].iat[0]], 'b': [30.0, 70.0],
+                             'evidence_a': ['strong', 'strong'], 'evidence_b': ['strong', 'ms1_only']})
+    view = gui.ResultsView(gui.GlycanImages())
+    view.resize(1200, 800)
+    view.show()
+    view.set_results({'files': ['a.mzML', 'b.mzML'], 'settings': dict(gui.DEFAULTS), 'tables': tables, 'features': features})
+    view.tabs.setCurrentWidget(view.quant)
+    view.select_row(view.proxy.mapToSource(view.proxy.index(1, 0)).row())
+    # A feature's integration in every run with it, MS1 signal only too; the run whose spectrum is shown comes first
+    assert view.frame['top1_pred'].iat[view.row] == 'Fuc(a1-2)Gal(b1-3)GalNAc'
+    assert [view.quant.run.itemText(i) for i in range(view.quant.run.count())] == ['a', 'b (MS1 signal only)'] and view.quant_source == ('a', 0)
+    assert view.quant.ion.count() == 2 and view.quant.ion.isVisibleTo(view.quant) and '75%' in view.quant.summary.text()
+    a, before = tables['a'][0], tables['a'][0]['rel_abundance'].copy()
+    # Half the peak's range: the run's abundances stay percentages, and the feature table's column of the run follows
+    view.quant.select(0, 11.6, 12.0)
+    assert np.isclose(a['rel_abundance'].sum(), 100) and a['rel_abundance'].iat[0] < before.iat[0] and np.isclose(features['a'].sum(), 100)
+    assert np.isclose(features.loc[features['top1_pred'] == 'Fuc(a1-2)Gal(b1-3)GalNAc', 'a'].iat[0], a['rel_abundance'].iat[0])
+    assert a['curation'].iat[0] == 'area edited' and features['curation'].iat[1] == 'area edited' and view.quant.automatic.isVisibleTo(view.quant) and view.dirty
+    assert 'xic' not in view.export_frame(a).columns
+    # A structure assigned keeps the note; CandyCrunch's range again restores every value
+    view.curate('Fuc(a1-2)Gal(b1-4)GlcNAc', 'reassigned')
+    assert a['curation'].iat[0] == 'reassigned; area edited'
+    view.quant.automatic.click()
+    assert np.allclose(a['rel_abundance'], before) and a['curation'].iat[0] == 'reassigned' and 'auto' not in a['xic'].iat[0][0]
+    # Results without records (older sessions) and runs without survey scans say why there is nothing to show
+    view.quant.run.setCurrentIndex(1)
+    assert 'earlier CandyCrunch' in view.quant.message.text()
+    view.quant.show([], 50.0)
+    assert 'survey scans' in view.quant.message.text()
+
+
 def test_gui_experiments(app):
     from candycrunch import gui
     panel = gui.SettingsPanel()

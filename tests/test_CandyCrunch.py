@@ -430,6 +430,11 @@ def test_xic_quantification():
     areas = extract_xic_areas(ms1, [p[0] for p in peaks], [8.05, 8.55, 12.1], charges = [p[1] for p in peaks], weights = [4, 1, 2])
     truth = np.array([p[3] for p in peaks]) * sigma * np.sqrt(2 * np.pi)
     assert np.allclose(areas, truth, rtol = 0.05)
+    # The record of each integration (what the app shows) gives its area back, on its own peak, and asking for it changes no area
+    details = []
+    assert np.array_equal(extract_xic_areas(ms1, [p[0] for p in peaks], [8.05, 8.55, 12.1], charges = [p[1] for p in peaks], weights = [4, 1, 2], details = details), areas)
+    assert np.allclose([(d['area'] + sum(o['area'] for o in d['others'])) * d['scale'] for d in details], areas)
+    assert [round(float(d['times'][d['apex']]), 1) for d in details] == [8.0, 8.6, 12.0] and all(d['left'] < d['apex'] < d['right'] for d in details)
 
 
 def test_quantification_synthetic(result_collector):

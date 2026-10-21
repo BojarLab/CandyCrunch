@@ -46,6 +46,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.backend_tools import Cursors
 from matplotlib.mathtext import MathTextParser
+from matplotlib.widgets import SpanSelector
 
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch
 _tree = ast.parse(open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8').read())
@@ -1389,6 +1390,143 @@ class SpectrumPanel(QWidget):
             self.support_hovered.emit(highlight)
 
 
+class QuantPanel(QWidget):
+    """How a peak's abundance was integrated from the survey scans: per integration it sums (its own ion and the rows folded into it), the extracted ion
+    chromatogram of the isotope envelope with the range integrated, and the survey scan at its apex with the m/z windows summed. Dragging across the
+    chromatogram integrates another range"""
+    # (integration, (left, right) as indices into its trace, or None for the pipeline's own range)
+    edited = Signal(int, object)
+
+    def __init__(self):
+        super().__init__()
+        self.records, self.selector = [], None
+        controls = QHBoxLayout()
+        controls.setContentsMargins(6, 4, 6, 0)
+        self.run, self.ion = QComboBox(), QComboBox()
+        self.run.setToolTip('Run whose integration of this feature is shown')
+        self.run.setMinimumWidth(80)
+        self.ion.setToolTip('The peak\'s abundance sums these integrations: its own ion and the rows folded into it (other charge states, adducts)')
+        self.automatic = QPushButton('Automatic range')
+        self.automatic.setToolTip('Integrate the range CandyCrunch chose again')
+        controls.addWidget(self.run)
+        controls.addWidget(self.ion)
+        controls.addStretch(1)
+        controls.addWidget(self.automatic)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary.setContentsMargins(10, 0, 6, 0)
+        self.summary.setToolTip('Area: the isotope envelope (M to M+3) above its baseline (dashed) over the range, by the trapezoid rule, plus the other charge '
+                                'states whose traces follow it there (r >= 0.9). Factor: its share of a peak that several rows landed on, divided by the share of '
+                                'its molecules within M to M+3. Part: its share of the abundance, which sums every row folded into this peak')
+        self.message = _label('', 'hint')
+        self.message.setAlignment(Qt.AlignCenter)
+        self.chart = ChartView()
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.message)
+        self.stack.addWidget(self.chart)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addLayout(controls)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.stack, 1)
+        self.ion.currentIndexChanged.connect(self.draw)
+        self.automatic.clicked.connect(lambda: self.edited.emit(self.ion.currentIndex(), None))
+
+    def show_message(self, text):
+        self.records = []
+        self.summary.clear()
+        self.ion.setVisible(False)
+        self.automatic.setVisible(False)
+        self.message.setText(text)
+        self.stack.setCurrentWidget(self.message)
+
+    def show(self, records, abundance, keep = 0):
+        if not isinstance(records, list):
+            self.show_message('These results were made by an earlier CandyCrunch, which kept no record of how it integrated the peaks; predict the run again to see it')
+            return
+        if not records:
+            self.show_message('Not integrated from survey scans: this run has none (e.g., an .xlsx or .mgf file), so abundances are the precursor intensities of the '
+                              'MS2 spectra')
+            return
+        self.records = records
+        self.ion.blockSignals(True)
+        self.ion.clear()
+        for d in records:
+            self.ion.addItem(f'm/z {d["mz"]:.4f}, z = {d["charge"]}, {d["rt"]:.2f} min' + (' (edited)' if 'auto' in d else ''))
+        self.ion.setCurrentIndex(keep if 0 <= keep < len(records) else 0)
+        self.ion.blockSignals(False)
+        self.ion.setVisible(len(records) > 1)
+        # Each integration's raw area (its own ion plus the charge states added) times its factor is its part of the abundance
+        parts = [(d['area'] + sum(o['area'] for o in d['others'])) * d['scale'] for d in records]
+        cell = 'style="padding-right:12px; white-space:nowrap"'
+        rows = [f'<tr><td style="color:{MUTED}; padding-right:12px">' + f'</td><td style="color:{MUTED}; padding-right:12px">'.join(
+            ('Ion', 'Range', 'Area', 'Charge states added', 'Factor', 'Part')) + '</td></tr>']
+        for d, part in zip(records, parts):
+            times = d['times']
+            span = f'{times[d["left"]]:.2f}-{times[d["right"]]:.2f} min' if d['left'] >= 0 else 'not integrated (too few survey scans)'
+            added = ', '.join(f'z = {o["charge"]}: {o["area"]:.3g} (r {o["r"]:.2f})' for o in d['others'] if o['added']) or 'none'
+            rows.append(f'<tr><td {cell}>m/z {d["mz"]:.4f}, z = {d["charge"]}</td><td {cell}>{span}{" (edited)" if "auto" in d else ""}</td><td {cell}>{d["area"]:.3g}</td>'
+                        f'<td {cell}>{added}</td><td {cell}>{d["scale"]:.3f}</td><td {cell}>{part / (sum(parts) or 1):.0%}</td></tr>')
+        self.summary.setText((f'Abundance {abundance:.2f}% of the run, from ' if isinstance(abundance, float) and not np.isnan(abundance) else 'From ') +
+                             f'{"these integrations" if len(records) > 1 else "this integration"}; drag across the chromatogram to integrate another range'
+                             '<table cellspacing="0" cellpadding="1">' + ''.join(rows) + '</table>')
+        self.stack.setCurrentWidget(self.chart)
+        self.draw()
+
+    def draw(self):
+        k = self.ion.currentIndex()
+        if not 0 <= k < len(self.records):
+            return
+        d, figure = self.records[k], self.chart.figure
+        self.automatic.setVisible('auto' in d)
+        figure.clear()
+        ax, scan_ax = figure.add_axes([0.08, 0.16, 0.54, 0.74]), figure.add_axes([0.71, 0.16, 0.27, 0.74])
+        times, trace, left, right = d['times'], d['trace'], d['left'], d['right']
+        if left >= 0:
+            ax.fill_between(times[left:right + 1], d['baseline'], np.maximum(trace[left:right + 1], d['baseline']), color = LILAC, alpha = 0.35, linewidth = 0,
+                            label = 'Integrated')
+            ax.hlines(d['baseline'], times[left], times[right], colors = MUTED, linestyles = '--', linewidth = 0.8, label = 'Baseline')
+        if 'auto' in d and d['auto'][0] >= 0:
+            ax.axvspan(times[d['auto'][0]], times[d['auto'][1]], fill = False, edgecolor = MUTED, linestyle = ':', linewidth = 0.8, label = 'CandyCrunch\'s range')
+        ax.plot(times, trace, color = INK, linewidth = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"]}')
+        for o in d['others']:
+            ax.plot(times, o['trace'], color = LILAC if o['added'] else '#b8b0c0', linestyle = '-' if o['added'] else '--', linewidth = 0.8,
+                    label = f'z = {o["charge"]} (m/z {o["mz"]:.2f}): ' + ('added' if o['added'] else 'not added') + (f', r {o["r"]:.2f}' if o['r'] is not None else ', flat'))
+        ax.axvline(d['rt'], color = CANDY, linestyle = ':', linewidth = 0.8, label = 'Peak RT')
+        ax.set_xlim(times[0], times[-1]) if len(times) > 1 else None
+        ax.set_xlabel('Retention time (min)', fontsize = 8)
+        ax.set_ylabel('Intensity', fontsize = 8)
+        ax.set_title(f'Extracted ion chromatogram, M to M+{len(d["windows"]) - 1}' if d['windows'] else 'Extracted ion chromatogram', fontsize = 8)
+        ax.legend(fontsize = 7, frameon = False, loc = 'upper right')
+        if d['scan'] is not None:
+            mzs, ints = d['scan']
+            for lo, hi in d['windows']:
+                scan_ax.axvspan(lo, hi, color = LILAC, alpha = 0.25, linewidth = 0)
+            scan_ax.vlines(mzs, 0, ints, colors = INK, linewidth = 0.8)
+            spacing = 1.00335 / d['charge']
+            scan_ax.set_xlim(d['windows'][0][0] - 1.5 * spacing, d['windows'][-1][1] + 1.5 * spacing)
+            scan_ax.set_ylim(0, max(ints.max(initial = 0), 1) * 1.1)
+            scan_ax.set_title(f'Survey scan at {times[d["apex"]]:.2f} min', fontsize = 8)
+        scan_ax.set_xlabel('m/z (shaded: windows summed)', fontsize = 8)
+        for a in (ax, scan_ax):
+            a.tick_params(labelsize = 7)
+            a.ticklabel_format(axis = 'y', style = 'sci', scilimits = (0, 0))
+            a.yaxis.get_offset_text().set_fontsize(7)
+            a.spines[['top', 'right']].set_visible(False)
+        # Kept as an attribute: a selector without a reference is garbage collected and stops responding
+        self.selector = SpanSelector(ax, lambda lo, hi: self.select(k, lo, hi), 'horizontal', useblit = True, props = dict(facecolor = LILAC, alpha = 0.2))
+        self.chart.canvas.draw_idle()
+
+    def select(self, k, lo, hi):
+        times = self.records[k]['times']
+        left, right = int(np.searchsorted(times, lo)), int(np.searchsorted(times, hi, side = 'right')) - 1
+        # A click without a drag selects no range
+        if right - left >= 1:
+            self.edited.emit(k, (left, right))
+
+
 class SettingsPanel(QScrollArea):
     """Input files and every wrap_inference / wrap_inference_batch setting"""
     files_changed = Signal()
@@ -1887,6 +2025,7 @@ class ResultsView(QWidget):
         super().__init__()
         self.images, self.payload, self.frame, self.row, self.source, self.glytoucan = images, None, None, None, None, None
         self.alternative, self.ms3_groups, self.ms3_args, self.support_highlight, self.dirty, self.drawing_of = None, [], None, None, False, None
+        self.quant_source = None
         top = QHBoxLayout()
         top.setContentsMargins(8, 6, 8, 4)
         # About 16 and 24 characters wide, not as wide as their longest name: run names of 50 characters squeezed the filter box next to them to a few pixels
@@ -2005,13 +2144,14 @@ class ResultsView(QWidget):
         self.ms3_tab.addWidget(self.ms3_panel)
         self.ms3_tab.addWidget(self.ms3_panel.fragments)
         self.ms3_tab.setSizes([320, 120])
-        self.map, self.across = ChartView(), ChartView()
+        self.map, self.across, self.quant = ChartView(), ChartView(), QuantPanel()
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self.spectrum, 'MS2 spectrum')
         self.tabs.addTab(self.spectrum.fragments, 'Fragments')
         self.tabs.addTab(self.ms3_tab, 'MS3 spectrum')
         self.tabs.setTabVisible(2, False)
+        self.tabs.addTab(self.quant, 'Quantification')
         self.tabs.addTab(self.map, 'Glycan map')
         self.tabs.addTab(self.across, 'Across runs')
         bottom = QSplitter(Qt.Horizontal)
@@ -2054,6 +2194,9 @@ class ResultsView(QWidget):
         self.ms3_fragment.currentIndexChanged.connect(self.annotate_ms3)
         self.tabs.currentChanged.connect(lambda: self.tabs.currentWidget() is self.ms3_tab and self.annotate_ms3())
         self.tabs.currentChanged.connect(lambda: self.row is not None and self.tabs.currentWidget() in (self.map, self.across) and self.draw_selection())
+        self.tabs.currentChanged.connect(lambda: self.row is not None and self.tabs.currentWidget() is self.quant and self.show_quant())
+        self.quant.run.currentIndexChanged.connect(self.show_quant)
+        self.quant.edited.connect(self.integrate)
         self.map_background, self.highlight = None, None
         self.map.canvas.mpl_connect('draw_event', self.map_drawn)
         self.map.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and self.select_row(int(event.ind[0])))
@@ -2233,26 +2376,35 @@ class ResultsView(QWidget):
         if rows:
             self.show_row(self.proxy.mapToSource(rows[0]).row())
 
+    def matched_rows(self, row):
+        """Per run with feature row (MS2 or MS1 signal), its per-run row: the feature table keeps no link to them, so the one with the same structure
+        closest in m/z and RT"""
+        df, rows = self.payload['features'], {}
+        for run, (table, _) in self.payload['tables'].items():
+            evidence = df[f'evidence_{run}'].iat[row] if f'evidence_{run}' in df.columns else None
+            if not isinstance(evidence, str) or table.empty:
+                continue
+            same = (table['_top1'] == df['_top1'].iat[row]) if isinstance(df['_top1'].iat[row], str) else table['_top1'].isna()
+            distance = (table['m/z'] - df['m/z'].iat[row]).abs() * 10 + (table['RT'] - df['RT'].iat[row]).abs()
+            distance = distance[same & ((table['m/z'] - df['m/z'].iat[row]).abs() < 1)]
+            if len(distance):
+                rows[run] = int(distance.idxmin())
+        return rows
+
     def show_row(self, row):
         self.row, self.alternative, self.support_highlight = row, None, None
         df = self.frame
         if self.dataset.currentData() == FEATURES:
-            # The feature table keeps no link to the per-run rows, so the row of each run is the one with the same structure closest in m/z and RT
             self.spectrum_file.blockSignals(True)
             self.spectrum_file.clear()
             best = None
-            for run, (table, _) in self.payload['tables'].items():
-                evidence = df[f'evidence_{run}'].iat[row] if f'evidence_{run}' in df.columns else None
-                if not isinstance(evidence, str) or evidence == 'ms1_only' or table.empty:
+            for run, r in self.matched_rows(row).items():
+                if df[f'evidence_{run}'].iat[row] == 'ms1_only':
                     continue
-                same = (table['_top1'] == df['_top1'].iat[row]) if isinstance(df['_top1'].iat[row], str) else table['_top1'].isna()
-                distance = (table['m/z'] - df['m/z'].iat[row]).abs() * 10 + (table['RT'] - df['RT'].iat[row]).abs()
-                distance = distance[same & ((table['m/z'] - df['m/z'].iat[row]).abs() < 1)]
-                if len(distance):
-                    self.spectrum_file.addItem(run, (run, int(distance.idxmin())))
-                    value = df[run].iat[row] if run in df.columns else 0
-                    if best is None or (value or 0) > best[0]:
-                        best = (value or 0, self.spectrum_file.count() - 1)
+                self.spectrum_file.addItem(run, (run, r))
+                value = df[run].iat[row] if run in df.columns else 0
+                if best is None or (value or 0) > best[0]:
+                    best = (value or 0, self.spectrum_file.count() - 1)
             if best is not None:
                 self.spectrum_file.setCurrentIndex(best[1])
             self.spectrum_file.blockSignals(False)
@@ -2262,6 +2414,8 @@ class ResultsView(QWidget):
         self.update_detail()
         self.show_source()
         self.draw_selection()
+        if self.quant.isVisible():
+            self.show_quant()
 
     def update_detail(self):
         df, row = self.frame, self.row
@@ -2351,12 +2505,84 @@ class ResultsView(QWidget):
         self.update_alternative_icons()
         self.annotate()
 
+    def show_quant(self):
+        """The integrations the shown peak's abundance sums (for a feature: in the run picked, at first the run of the spectrum shown)"""
+        if self.row is None:
+            return
+        if self.dataset.currentData() == FEATURES:
+            picked = self.quant.run.currentData() if self.quant.run.count() else None
+            matched = self.matched_rows(self.row)
+            self.quant.run.blockSignals(True)
+            self.quant.run.clear()
+            for run, r in matched.items():
+                self.quant.run.addItem(run + (' (MS1 signal only)' if self.frame[f'evidence_{run}'].iat[self.row] == 'ms1_only' else ''), (run, r))
+            target = picked if picked in matched.items() else self.spectrum_file.currentData()
+            self.quant.run.setCurrentIndex(next((i for i in range(self.quant.run.count()) if self.quant.run.itemData(i) == target), 0))
+            self.quant.run.blockSignals(False)
+            self.quant.run.setVisible(True)
+            source = self.quant.run.currentData()
+        else:
+            self.quant.run.setVisible(False)
+            source = (self.dataset.currentData(), self.row)
+        # The integration shown stays when the same peak is shown again (after an edit)
+        keep, self.quant_source = self.quant.ion.currentIndex() if source == self.quant_source else 0, source
+        if source is None:
+            self.quant.show_message('This feature was found in no run')
+            return
+        table = self.payload['tables'][source[0]][0]
+        self.quant.show(table['xic'].iat[source[1]] if 'xic' in table.columns else None,
+                        float(table['rel_abundance'].iat[source[1]]) if 'rel_abundance' in table.columns else None, keep)
+
+    def integrate(self, k, span):
+        """Integration k of the peak shown over span (indices into its trace; None: CandyCrunch's own range): the run's abundances stay percentages of its
+        summed areas, and its column of the feature table, which sums them per feature, follows"""
+        run, r = self.quant_source
+        table, features = self.payload['tables'][run][0], self.payload['features']
+        raw = lambda records: sum((d['area'] + sum(o['area'] for o in d['others'])) * d['scale'] for d in records)
+        # The run's summed area, from a row whose abundance is known (every row's abundance is its area as a percentage of it)
+        total = next((raw(x) / a * 100 for x, a in zip(table['xic'], table['rel_abundance']) if isinstance(x, list) and x and a > 0 and raw(x) > 0), None)
+        if total is None:
+            return
+        records, d = table['xic'].iat[r], table['xic'].iat[r][k]
+        auto = d.get('auto', (d['left'], d['right'], d['area'], [o['area'] for o in d['others']]))
+        if span is None:
+            new = {key: v for key, v in d.items() if key != 'auto'} | {'left': auto[0], 'right': auto[1], 'area': auto[2],
+                                                                        'others': [{**o, 'area': a} for o, a in zip(d['others'], auto[3])]}
+        else:
+            # As the pipeline integrates: the raw trace above its baseline, by the trapezoid rule; charge states it added count over the same range
+            times, trapezoid = d['times'][span[0]:span[1] + 1].astype(float), getattr(np, 'trapezoid', None) or np.trapz
+            area = lambda trace, baseline: float(trapezoid(np.clip(trace[span[0]:span[1] + 1].astype(float) - baseline, 0, None), times))
+            new = d | {'left': span[0], 'right': span[1], 'area': area(d['trace'], d['baseline']), 'auto': auto,
+                       'others': [{**o, 'area': area(o['trace'], o['baseline']) if o['added'] else 0.0} for o in d['others']]}
+        records = records[:k] + [new] + records[k + 1:]
+        before, after = raw(table['xic'].iat[r]), raw(records)
+        table.at[table.index[r], 'xic'] = records
+        scale = total / (total + after - before)
+        table['rel_abundance'] = table['rel_abundance'] * scale
+        table.loc[table.index[r], 'rel_abundance'] = after / (total + after - before) * 100
+        feature = None
+        if features is not None and run in features.columns:
+            feature = self.row if self.dataset.currentData() == FEATURES else next((f for f in range(len(features)) if self.matched_rows(f).get(run) == r), None)
+            features[run] = features[run] * scale
+            if feature is not None:
+                features.loc[features.index[feature], run] += (after - before) / (total + after - before) * 100
+        # 'area edited' in the curation column while any integration of the row (of a feature: of its rows in any run) is not CandyCrunch's own
+        edited = lambda pairs: any('auto' in x for t, i in pairs if 'xic' in t.columns and isinstance(t['xic'].iat[i], list) for x in t['xic'].iat[i])
+        for df, i, pairs in [(table, r, [(table, r)])] + ([(features, feature, [(self.payload['tables'][a][0], b) for a, b in self.matched_rows(feature).items()])]
+                                                         if feature is not None else []):
+            notes = [n for n in str(df['curation'].iat[i]).split('; ') if n and n != 'area edited']
+            df.loc[df.index[i], 'curation'] = '; '.join(notes + (['area edited'] if edited(pairs) else []))
+        self.dirty = True
+        self.status.emit(f'Integrated m/z {d["mz"]:.4f} over {new["times"][new["left"]]:.2f}-{new["times"][new["right"]]:.2f} min' if span else
+                         f'Integrated m/z {d["mz"]:.4f} over CandyCrunch\'s range again')
+        self.refresh()
+
     def peak_report(self):
         """What a misprediction report sends about the peak shown: its row (for a feature also the feature's, without the other runs' values), its MS2 and
         MS3 spectra, the structure the pipeline gave it and the one shown, and the experiment's settings; not the run's name"""
         table, spectra = self.payload['tables'][self.source[0]]
         r, run = self.source[1], next((f for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None)
-        report = {'peak': {k: v for k, v in table.iloc[r].items() if k not in ('ms3', 'excluded', '_top1')}, 'predicted': table['_top1'].iat[r],
+        report = {'peak': {k: v for k, v in table.iloc[r].items() if k not in ('ms3', 'xic', 'excluded', '_top1')}, 'predicted': table['_top1'].iat[r],
                   'shown': self.alternative or table['top1_pred'].iat[r], 'ms2': spectra[r], 'ms3': table['ms3'].iat[r] if 'ms3' in table.columns else None,
                   'run_format': os.path.splitext(run)[1].lower() if run is not None else None,
                   'settings': {k: sorted(v) if isinstance(v, set) else v for k, v in self.payload['settings'].items()}, 'tolerance': self.spectrum.tolerance.value(),
@@ -2368,7 +2594,7 @@ class ResultsView(QWidget):
         charge = table['charge'].iat[r]
         self.report_data = {'path': run, 'mz': float(table['m/z'].iat[r]), 'rt': float(table['RT'].iat[r]),
                             'charge': int(charge) if pd.notna(charge) else -1 if self.payload['settings'].get('max_charge', -3) < 0 else 1,
-                            'table': table.drop(columns = [c for c in ('ms3', 'excluded', '_top1') if c in table.columns]).to_csv(index = False)}
+                            'table': table.drop(columns = [c for c in ('ms3', 'xic', 'excluded', '_top1') if c in table.columns]).to_csv(index = False)}
         return report
 
     def update_alternative_icons(self):
@@ -2564,7 +2790,8 @@ class ResultsView(QWidget):
         targets = [(self.frame, self.row)] + ([(self.payload['tables'][run][0], r) for run, r in (self.spectrum_file.itemData(i) for i in range(self.spectrum_file.count()))]
                                              if self.dataset.currentData() == FEATURES else [])
         for df, row in targets:
-            df.loc[df.index[row], ['top1_pred', 'curation']] = [structure, how]
+            # (an edited integration stays noted)
+            df.loc[df.index[row], ['top1_pred', 'curation']] = [structure, '; '.join([how] + (['area edited'] if 'area edited' in str(df['curation'].iat[row]).split('; ') else []))]
             # The pipeline's supporting peaks were found for the old structure; the spectrum panel shows those of the new one
             if 'supported_by' in df.columns:
                 df.loc[df.index[row], 'supported_by'] = np.nan
@@ -2640,7 +2867,7 @@ class ResultsView(QWidget):
 
     def export_frame(self, df):
         """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
-        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3', '_top1'], errors = 'ignore')
+        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3', 'xic', '_top1'], errors = 'ignore')
         return out.drop(columns = ['curation']) if not out['curation'].astype(bool).any() else out
 
     def write(self, df, path, kind):
@@ -3032,6 +3259,14 @@ class MainWindow(QMainWindow):
         self.auto_action.setChecked(self.store.value('crash_reports', '') == 'always')
         self.auto_action.setVisible(bool(REPORT_DSN))
         self.auto_action.triggered.connect(lambda on: self.store.setValue('crash_reports', 'always' if on else ''))
+        # Release health has its own switch, at first on unless crash reports were declined for good (which used to switch it off); off ends this
+        # window's session there and then without a word to Sentry, on starts one with the next window
+        self.usage_action = help_menu.addAction('Send anonymous usage statistics')
+        self.usage_action.setCheckable(True)
+        self.usage_action.setChecked(self.store.value('usage_stats', self.store.value('crash_reports', '') != 'never', type = bool))
+        self.usage_action.setVisible(bool(REPORT_DSN))
+        self.usage_action.toggled.connect(lambda on: (self.store.setValue('usage_stats', on), on or self.store.remove(f'sessions/{os.getpid()}'),
+                                                      setattr(self, 'session', self.session if on else None)))
         help_menu.addSeparator()
         help_menu.addAction('About CandyCrunch', self.about)
         self.settings.add_files.clicked.connect(self.choose_files)
@@ -3078,9 +3313,9 @@ class MainWindow(QMainWindow):
         sys.excepthook, threading.excepthook = hook, thread_hook
         # Release health on Sentry (crash-free sessions and users, adoption per release): a session per window, kept in the settings under the window's
         # process ID until it closes; one still there from a window that never closed (ended, from main) ends as crashed (its crash file has a trace) or
-        # abnormal (killed, power cut). None when the user declined crash reports
+        # abnormal (killed, power cut). None while Help > Send anonymous usage statistics is off
         self.session = None
-        if REPORT_DSN and self.store.value('crash_reports', '') != 'never':
+        if REPORT_DSN and self.usage_action.isChecked():
             from importlib.metadata import version, PackageNotFoundError
             self.store.beginGroup('sessions')
             for pid in self.store.childKeys():

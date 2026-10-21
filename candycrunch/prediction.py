@@ -1001,7 +1001,8 @@ def ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = 0.5,
 
 
 def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1.0, mz_tolerance = 0.5, search_window = 0,
-                      isotopes = 3, weights = None, mz_calibration = None, glycans = None, sample_prep = 'underivatized', other_charges = None, mode = 'negative'):
+                      isotopes = 3, weights = None, mz_calibration = None, glycans = None, sample_prep = 'underivatized', other_charges = None, mode = 'negative',
+                      details = None):
     """integrates the MS1 isotope envelope of each precursor over its own chromatographic peak\n
     | Arguments:
     | :-
@@ -1018,7 +1019,11 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     | glycans (list): if given, each area is divided by the share of the glycan's molecules within the summed isotope peaks (computed from its elemental formula; None entries are interpolated by mass); a composition or an element formula counts as the whole molecule, e.g., a glycopeptide as get_formula('H5N4', peptide = 'EEQYNSTYR'); default:None
     | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated, for the elemental formula; default:'underivatized'
     | other_charges (list): if given, per target the other charge states of its molecule whose envelopes are added if they co-elute with it (over its peak); default:None
-    | mode (string): ion mode, which sets the charge carrier of other_charges; default:'negative'\n
+    | mode (string): ion mode, which sets the charge carrier of other_charges; default:'negative'
+    | details (list): if given, one dict per target is appended that shows how its area was integrated: the summed envelope trace ('times', 'trace', from
+    |                 rt_window before to rt_window after the scans searched), 'left'/'apex'/'right' as indices into it (-1 if not integrated), 'baseline',
+    |                 'area' (before 'scale', the area split and isotope share applied after), the m/z 'windows', the survey scan at the apex ('scan'), and
+    |                 'others' (other_charges with their traces, r and whether they were added); default:None\n
     | Returns:
     | :-
     | Returns an array of integrated XIC areas, one per target m/z; with search_window, a tuple of (areas, apex RTs, apex intensities, whether the apex is a genuine peak)
@@ -1036,13 +1041,18 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     scan_ends = np.searchsorted(ms1_rts, rt_centers + search_window + rt_window, side = 'right')
     areas, apex_rts, apex_ints = np.zeros(len(target_mzs)), np.full(len(target_mzs), np.nan), np.zeros(len(target_mzs))
     is_peak, apex_scans = np.zeros(len(target_mzs), dtype = bool), np.full(len(target_mzs), -1)
+    # Each survey scan as its m/z values and cumulative intensities, so the intensity within an m/z window is one difference
+    cumulated = lambda first, last: [(ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]], np.concatenate([[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)]))
+                                     for si in range(first, last)]
+    records = [{'mz': float(target_mzs[t]), 'charge': int(charges[t]), 'rt': float(rt_centers[t]), 'times': np.zeros(0, dtype = np.float32), 'trace': np.zeros(0, dtype = np.float32),
+                'left': -1, 'apex': -1, 'right': -1, 'baseline': 0.0, 'area': 0.0, 'windows': [], 'scan': None, 'others': []} for t in range(len(target_mzs))] if details is not None else None
     for t in range(len(target_mzs)):
         s0, s1 = scan_starts[t], scan_ends[t]
         if s1 - s0 < 3:
             continue
         rts = ms1_rts[s0:s1]
-        scans = [(ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]], np.concatenate([[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)])) for si in range(s0, s1)]
-        xic = lambda centers, width: np.array([np.sum(cum[np.searchsorted(mzs, centers + width)] - cum[np.searchsorted(mzs, centers - width)]) for mzs, cum in scans])
+        scans = cumulated(s0, s1)
+        xic = lambda centers, width, scans = scans: np.array([np.sum(cum[np.searchsorted(mzs, centers + width)] - cum[np.searchsorted(mzs, centers - width)]) for mzs, cum in scans])
         ints_arr = xic(target_mzs[t] + shift + spacing[t] * np.arange(isotopes + 1), widths[t])
         # Smoothing (sigma of 0.05 min, at least 0.7 scans) only steers apex and boundary finding; the area comes from the raw trace. Survey scans
         # sharing a retention time (one per ion mobility scan) gave a zero median step and an infinite sigma, so only real steps count
@@ -1077,20 +1087,39 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
         while right < len(smooth) - 1 and rts[right + 1] - rts[apex] <= rt_window and smooth[right + 1] <= smooth[right] and smooth[right] > cut:
             right += 1
         areas[t], apex_scans[t] = _trapezoid(np.clip(ints_arr[left:right + 1] - baseline, 0, None), rts[left:right + 1]), s0 + apex
+        if records is not None:
+            # The trace again from rt_window before to rt_window after the scans searched, which shows the neighbouring peaks, and the survey scan at the
+            # apex around the envelope; indices point into this view
+            v0, v1 = np.searchsorted(ms1_rts, rts[0] - rt_window), np.searchsorted(ms1_rts, rts[-1] + rt_window, side = 'right')
+            centers, wide = target_mzs[t] + shift + spacing[t] * np.arange(isotopes + 1), cumulated(v0, v1)
+            a0, a1 = ms1_offsets[s0 + apex], ms1_offsets[s0 + apex + 1]
+            near = np.abs(ms1_mzs[a0:a1] - centers.mean()) <= (isotopes / 2 + 2) * spacing[t]
+            records[t].update(times = ms1_rts[v0:v1].astype(np.float32), trace = xic(centers, widths[t], wide).astype(np.float32), left = int(s0 - v0 + left),
+                              apex = int(s0 - v0 + apex), right = int(s0 - v0 + right), baseline = float(baseline), area = float(areas[t]),
+                              windows = [(float(c - widths[t]), float(c + widths[t])) for c in centers], scan = (ms1_mzs[a0:a1][near], ms1_ints[a0:a1][near]))
         if other_charges is not None and right - left >= 2:
             # The other charge states of the molecule (those no row of the run reports) elute with it: each adds its envelope over the same peak if its
             # trace follows this one (r >= 0.9), as a glycan's charge states share its abundance (N-glycans ionize mostly as [M-2H]2-, also as [M-H]-)
             neutral = (target_mzs[t] - (-1 if mode == 'negative' else 1) * PROTON_MASS) * charges[t]
             for z in other_charges[t]:
                 mz, sp = neutral / z + (-1 if mode == 'negative' else 1) * PROTON_MASS, ISOTOPE_SPACING / z
-                trace = xic(mz + shift + sp * np.arange(isotopes + 1), 0.5 * sp if half_width >= 0.2 * sp else max(half_width, 5e-6 * mz))
+                width = 0.5 * sp if half_width >= 0.2 * sp else max(half_width, 5e-6 * mz)
+                trace = xic(mz + shift + sp * np.arange(isotopes + 1), width)
                 smooth_z = np.convolve(np.pad(trace, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
-                if np.ptp(smooth_z[left:right + 1]) > 0 and np.ptp(smooth[left:right + 1]) > 0 and np.corrcoef(smooth_z[left:right + 1], smooth[left:right + 1])[0, 1] >= 0.9:
-                    areas[t] += _trapezoid(np.clip(trace[left:right + 1] - np.percentile(trace, 10), 0, None), rts[left:right + 1])
+                r = np.corrcoef(smooth_z[left:right + 1], smooth[left:right + 1])[0, 1] if np.ptp(smooth_z[left:right + 1]) > 0 and np.ptp(smooth[left:right + 1]) > 0 else None
+                area = _trapezoid(np.clip(trace[left:right + 1] - np.percentile(trace, 10), 0, None), rts[left:right + 1]) if r is not None and r >= 0.9 else 0.0
+                areas[t] += area
+                if records is not None:
+                    records[t]['others'].append({'charge': z, 'mz': float(mz), 'trace': xic(mz + shift + sp * np.arange(isotopes + 1), width, wide).astype(np.float32),
+                                                 'baseline': float(np.percentile(trace, 10)), 'r': None if r is None else float(r), 'added': bool(r is not None and r >= 0.9),
+                                                 'area': float(area)})
+    # What each raw area is multiplied with: its share of a peak that several targets landed on, then 1 / its isotope share
+    scale = np.ones(len(target_mzs))
     if weights is not None:
         weights = np.nan_to_num(np.asarray(weights, dtype = np.float64))
         shared = [np.where((apex_scans == apex_scans[t]) & (charges == charges[t]) & (np.abs(target_mzs - target_mzs[t]) <= widths[t]))[0] if apex_scans[t] >= 0 else [t] for t in range(len(target_mzs))]
-        areas = np.array([areas[t] * (weights[t] / weights[same].sum() if weights[same].sum() > 0 else 1 / len(same)) for t, same in enumerate(shared)])
+        scale = np.array([weights[t] / weights[same].sum() if weights[same].sum() > 0 else 1 / len(same) for t, same in enumerate(shared)])
+        areas = areas * scale
     if glycans is not None:
         # Divide by the share of each glycan's molecules within the summed isotope peaks, from its elemental formula plus any derivatization groups; glycans without a formula are interpolated by mass
         # A composition or element formula is weighed whole by glycowork's get_formula (derivatization included), e.g., a glycopeptide as
@@ -1119,6 +1148,9 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             order = np.argsort(target_mzs[known] * charges[known])
             share[~known] = np.interp(target_mzs[~known] * charges[~known], (target_mzs[known] * charges[known])[order], share[known][order])
             areas = areas / share
+            scale = scale / share
+    if details is not None:
+        details.extend({**record, 'scale': float(s)} for record, s in zip(records, scale))
     return (areas, apex_rts, apex_ints, is_peak) if search_window else areas
 
 
@@ -2923,6 +2955,8 @@ def combine_charge_states(df_out):
             rep = group.assign(_weak = group['top1_pred'].isna()).sort_values(['_weak', 'rel_abundance'], ascending = [True, False], kind = 'stable').index[0]
             df_filtered.at[rep, 'rel_abundance'] = group['rel_abundance'].sum()
             df_filtered.at[rep, 'num_spectra'] = group['num_spectra'].sum()
+            if 'xic' in df_filtered.columns:
+                df_filtered.at[rep, 'xic'] = sum(group['xic'], [])
             df_filtered = df_filtered.drop(group.index.drop(rep))
     df_out = pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index()
     df_out.drop(['top_pred'], axis = 1, inplace = True)
@@ -2970,11 +3004,15 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
                 if (plain[idx_i], df_out.at[idx_i, 'rel_abundance']) >= (plain[idx_j], df_out.at[idx_j, 'rel_abundance']):
                     df_out.at[idx_i, 'rel_abundance'] = df_out.at[idx_i, 'rel_abundance'] + df_out.at[idx_j, 'rel_abundance']
                     df_out.at[idx_i, 'num_spectra'] = df_out.at[idx_i, 'num_spectra'] + df_out.at[idx_j, 'num_spectra']
+                    if 'xic' in df_out.columns:
+                        df_out.at[idx_i, 'xic'] = df_out.at[idx_i, 'xic'] + df_out.at[idx_j, 'xic']
                     rows_to_drop.append(idx_j)
                     used.add(idx_j)
                 else:
                     df_out.at[idx_j, 'rel_abundance'] = df_out.at[idx_j, 'rel_abundance'] + df_out.at[idx_i, 'rel_abundance']
                     df_out.at[idx_j, 'num_spectra'] = df_out.at[idx_j, 'num_spectra'] + df_out.at[idx_i, 'num_spectra']
+                    if 'xic' in df_out.columns:
+                        df_out.at[idx_j, 'xic'] = df_out.at[idx_j, 'xic'] + df_out.at[idx_i, 'xic']
                     rows_to_drop.append(idx_i)
                     used.add(idx_i)
                     break
@@ -3147,7 +3185,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
 
 def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_thresh, rt_diff,
                          sample_prep = 'underivatized', glycan_class = 'O', mass_tolerance = 0.5, ms1 = None, accurate_ms1 = False,
-                         sialic_derivatization = None, n_jobs = 1, ms1_ppm_floor = 3.0, ion_trap = False):
+                         sialic_derivatization = None, n_jobs = 1, ms1_ppm_floor = 3.0, ion_trap = False, xic_details = False):
     """Cleans up incorrect structure predictions, quantifies, and formats dataframe\n
     | Arguments:
     | :-
@@ -3168,7 +3206,9 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     | n_jobs (int): number of processes for the supporting peaks of the rows (see run_jobs); default:1
     | ms1_ppm_floor (float): smallest half-width (ppm) of the composition-error window with accurate survey scans (MS1_PPM_FLOORS); default:3.0
     | ion_trap (bool): whether the MS2 spectra are ion-trap CID, the only data supporting_ions' linkage reading of a lone Neu5Ac was measured on, which
-    |                  then goes into supported_by; default:False\n
+    |                  then goes into supported_by; default:False
+    | xic_details (bool): whether to add the column xic: per row the MS1 integrations its abundance sums (extract_xic_areas' details of its own ion and
+    |                     of the rows folded into it; empty without MS1); default:False\n
     | Returns:
     | :-
     | Returns a tuple of (dataframe of corrected predictions with unnormalized rel_abundance, list of spectra)
@@ -3270,6 +3310,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     if 're_offset' in df_out.columns:
         df_out['theo_mz'] += df_out['re_offset'].values / np.abs(df_out['charge'].values)
     # Quantify via MS1 where available, else keep precursor intensities: each row's isotope envelope at its theoretical m/z, over its own chromatographic peak, before charge states and adducts of a glycan are summed
+    # (xic holds the integrations a row's abundance sums, which every fold below hands on with the abundance)
+    df_out['xic'] = [[] for _ in range(len(df_out))]
     if ms1 is not None and len(ms1[0]) > 0 and len(df_out) > 0:
         # Charge states of a row's composition that the neutral mass allows (as mass_check), up to the run's highest, except those another row of the
         # composition reports within rt_diff (combine_charge_states adds those) and for adduct ions
@@ -3281,13 +3323,16 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                           and not any(comps[j] == comps[i] and zs[j] == z and abs(rts[j] - rts[i]) < rt_diff for j in range(len(df_out)))] for i in range(len(df_out))]
         calibration = ms1_mz_calibration(ms1, df_out['theo_mz'].values, df_out['RT'].values, df_out['charge'].values,
                                          mz_tolerance = mass_tolerance, accurate = accurate_ms1)
+        details = [] if xic_details else None
         xic_areas = extract_xic_areas(ms1, df_out['theo_mz'].values, df_out['RT'].values, charges = df_out['charge'].values,
                                       mz_tolerance = mass_tolerance, weights = df_out['rel_abundance'].values,
                                       mz_calibration = calibration, sample_prep = sample_prep, mode = mode, other_charges = other_charges,
-                                      glycans = [k[0][0] if k else None for k in df_out['predictions']])
+                                      glycans = [k[0][0] if k else None for k in df_out['predictions']], details = details)
         if (xic_areas > 0).any():
             df_out['rel_abundance'] = xic_areas
             df_out.attrs['ms1_calibration'] = calibration
+            if details is not None:
+                df_out['xic'] = [[d] for d in details]
     df_out = df_out.drop(columns = ['theo_mz'])
     if mode == 'positive' and 'adduct' in df_out.columns and 'rt_range' in df_out.columns:
         # In positive mode a glycan's metal adduct ([M+K+H]2+, [M+Na+H]2+) can dominate its (de)protonated ion, whose weak, noisy precursor intensities then
@@ -3297,7 +3342,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         plain = ~df_out['adduct'].apply(lambda a: isinstance(a, str)).values.astype(bool)
         comps = [stringify_dict(c) if isinstance(c, dict) else None for c in df_out['composition']]
         rts, ranges = df_out['RT'].values, df_out['rt_range'].values
-        ab, ns = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra')
+        ab, ns, xc = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra'), df_out.columns.get_loc('xic')
         merged = set()
         for i in sorted(np.flatnonzero(~plain), key = lambda i: -df_out.iat[i, ab]):
             if comps[i] is None or not isinstance(ranges[i], tuple):
@@ -3309,6 +3354,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                     if j != keep:
                         df_out.iat[keep, ab] += df_out.iat[j, ab]
                         df_out.iat[keep, ns] += df_out.iat[j, ns]
+                        df_out.iat[keep, xc] = df_out.iat[keep, xc] + df_out.iat[j, xc]
                         merged.add(j)
         df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in merged]]
     df_out = df_out.drop(columns = ['rt_range'], errors = 'ignore')
@@ -3320,7 +3366,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         zs = np.abs(df_out['charge'].values)
         neutral = (df_out.index.values - sign * PROTON_MASS) * zs
         rts = df_out['RT'].values
-        ab, ns = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra')
+        ab, ns, xc = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra'), df_out.columns.get_loc('xic')
         folded = set()
         for i in range(len(df_out)):
             partners = [j for j in range(len(df_out)) if j != i and j not in folded and zs[j] != zs[i] and abs(rts[j] - rts[i]) < rt_diff and any(
@@ -3329,6 +3375,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 j = min(partners, key = lambda j: abs(rts[j] - rts[i]))
                 df_out.iat[j, ab] += df_out.iat[i, ab]
                 df_out.iat[j, ns] += df_out.iat[i, ns]
+                df_out.iat[j, xc] = df_out.iat[j, xc] + df_out.iat[i, xc]
                 folded.add(i)
         df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in folded]]
     df_out = combine_charge_states(df_out)
@@ -3346,7 +3393,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         comps = [c if isinstance(c, dict) else {} for c in df_out['composition']]
         keys = [stringify_dict(c) for c in comps]
         rts, zs = df_out['RT'].values, np.abs(df_out['charge'].values)
-        ab, ns = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra')
+        ab, ns, xc = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra'), df_out.columns.get_loc('xic')
         folded = set()
         for i in sorted(range(len(df_out)), key = lambda i: df_out.iat[i, ab]):
             c = comps[i]
@@ -3358,6 +3405,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                     j = min(partners, key = lambda j: abs(rts[j] - rts[i]))
                     df_out.iat[j, ab] += df_out.iat[i, ab]
                     df_out.iat[j, ns] += df_out.iat[i, ns]
+                    df_out.iat[j, xc] = df_out.iat[j, xc] + df_out.iat[i, xc]
                     folded.add(i)
                     break
         df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in folded]]
@@ -3366,7 +3414,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         # composition is that peak's tail and counts for it; its isomers on C18 (sialic acid linkages) elute 6-7 min apart
         comps = [stringify_dict(c) if isinstance(c, dict) else None for c in df_out['composition']]
         rts = df_out['RT'].values
-        ab, ns = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra')
+        ab, ns, xc = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra'), df_out.columns.get_loc('xic')
         folded = set()
         for i in sorted(range(len(df_out)), key = lambda i: df_out.iat[i, ab]):
             partners = [j for j in range(len(df_out)) if j != i and j not in folded and comps[i] is not None and comps[j] == comps[i] and abs(rts[j] - rts[i]) <= 3
@@ -3375,6 +3423,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 j = max(partners, key = lambda j: df_out.iat[j, ab])
                 df_out.iat[j, ab] += df_out.iat[i, ab]
                 df_out.iat[j, ns] += df_out.iat[i, ns]
+                df_out.iat[j, xc] = df_out.iat[j, xc] + df_out.iat[i, xc]
                 folded.add(i)
         df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in folded]]
     if mode == 'positive' and 'adduct' in df_out.columns:
@@ -3383,13 +3432,14 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         # (as bool: an empty run's object mask selected columns instead of rows, and the result lost every column)
         plain = ~df_out['adduct'].apply(lambda a: isinstance(a, str)).values.astype(bool)
         comps = [stringify_dict(c) if isinstance(c, dict) else None for c in df_out['composition']]
-        rts, ab, ns = df_out['RT'].values, df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra')
+        rts, ab, ns, xc = df_out['RT'].values, df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra'), df_out.columns.get_loc('xic')
         for i in np.flatnonzero(~plain):
             partners = [j for j in np.flatnonzero(plain) if comps[i] is not None and comps[j] == comps[i] and abs(rts[j] - rts[i]) <= rt_diff]
             if partners:
                 j = min(partners, key = lambda j: abs(rts[j] - rts[i]))
                 df_out.iat[j, ab] += df_out.iat[i, ab]
                 df_out.iat[j, ns] += df_out.iat[i, ns]
+                df_out.iat[j, xc] = df_out.iat[j, xc] + df_out.iat[i, xc]
         df_out = df_out[plain]
     if 'adduct' in df_out.columns and sialic_derivatization is None:
         # A species seen only as an adduct is reported at the m/z of the (de)protonated ion of its charge, the m/z it is listed by elsewhere (and that its
@@ -3427,6 +3477,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         for i in np.flatnonzero(unlabelled & np.isin(top1, list(target))):
             for col in ('rel_abundance', 'num_spectra'):
                 df_out.iloc[target[top1[i]], df_out.columns.get_loc(col)] += df_out[col].iloc[i]
+            df_out.iat[target[top1[i]], df_out.columns.get_loc('xic')] = df_out['xic'].iloc[target[top1[i]]] + df_out['xic'].iloc[i]
         df_out.index = pd.Index(df_out.index.values + df_out['re_offset'].values / np.abs(df_out['charge'].values), name = df_out.index.name)
         df_out = df_out[~unlabelled]
     df_out = flag_coeluting_substructures(df_out, glycan_class, sample_prep = sample_prep, unreduced = modification is None and not mass_tag,
@@ -3479,7 +3530,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # By m/z, but the rows of one ion (a composition and charge, whose m/z differ by noise) by RT; before the spectra are split off, which keep the row order
     df_out = df_out.iloc[np.argsort(mz_order(df_out.index, df_out['RT'], df_out['charge'].values, df_out['composition'].tolist()))]
     spectra_out = df_out.pop('peak_d').values.tolist()
-    df_out = df_out[['top1_pred', 'predictions'] + [c for c in df_out.columns if c not in ('top1_pred', 'predictions')]]
+    df_out = df_out[['top1_pred', 'predictions'] + [c for c in df_out.columns if c not in ('top1_pred', 'predictions', 'xic')] + (['xic'] if xic_details else [])]
     df_out.index.name = "m/z"
     return df_out, spectra_out
 
@@ -3726,7 +3777,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                       skipped, so modification and glycan_class have to be right; default:False\n
    | Returns:
    | :-
-   | Returns dataframe of predictions for spectra in file; if spectra=True, a tuple of (dataframe, list of its MS2 spectra), and files with MS3 spectra
+   | Returns dataframe of predictions for spectra in file; if spectra=True, a tuple of (dataframe, list of its MS2 spectra) with the column xic (the MS1
+   | integrations each row's abundance sums, see finalise_predictions), and files with MS3 spectra
    | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row); with return_inputs, the dataframe of model inputs
    """
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
@@ -4396,7 +4448,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                                ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1,
                                                accurate_ms1 = accurate_ms1, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
-                                               ms1_ppm_floor = ms1_ppm_floor, ion_trap = trap in ('linear', 'amazon'))
+                                               ms1_ppm_floor = ms1_ppm_floor, ion_trap = trap in ('linear', 'amazon'), xic_details = spectra)
     # The other of N and O (O-glycans in an N-glycan release, N-glycans in an O-glycan one): if >= 2 rows have a structure only that class has, the clusters
     # without a row are processed again as N+O glycans, with only the compositions of that class (so the model only sees inputs that can add a row) and without
     # the side-product search (none of its rows were side products), and its rows of such a structure join the run. Whole runs as N+O worsened the
@@ -4419,7 +4471,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 df_pair, spectra_pair = finalise_predictions(df_pair, False, mode, modification, mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                              glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1, accurate_ms1 = accurate_ms1,
                                                              sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floor,
-                                                             ion_trap = trap in ('linear', 'amazon'))
+                                                             ion_trap = trap in ('linear', 'amazon'), xic_details = spectra)
                 neutral = lambda mz, z: np.abs(z) * mz - (np.abs(z) - 1) * multiplier * PROTON_MASS
                 own_n, own_rt = neutral(df_out.index.values, df_out['charge'].values), df_out['RT'].values
                 keep = [only(p) and not ((np.abs(own_n - neutral(mz, z)) < mass_tolerance) & (np.abs(own_rt - rt) < rt_diff)).any()
@@ -4498,7 +4550,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | reducing_end_variants (dict): other reducing ends that glycans of the samples may carry, as in wrap_inference; default:None\n
    | Returns:
    | :-
-   | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column ms3 for files with MS3 spectra, as in wrap_inference)
+   | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column xic, and ms3 for files with MS3 spectra, as in wrap_inference)
    """
     mode = "negative" if max_charge < 0 else "positive"
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
@@ -4678,7 +4730,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                                            glycan_class = glycan_class, mass_tolerance = mass_tolerance,
                                                            ms1 = ms1, accurate_ms1 = accurate_ms1s[file_label],
                                                            sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
-                                                           ms1_ppm_floor = ms1_ppm_floors[file_label], ion_trap = ion_traps[file_label])
+                                                           ms1_ppm_floor = ms1_ppm_floors[file_label], ion_trap = ion_traps[file_label], xic_details = spectra)
         inference_dfs[file_label] = (df_out, spectra_out)
     # The other of N and O (O-glycans in N-glycan releases, N-glycans in O-glycan ones), as in wrap_inference: a file with >= 2 rows of a structure only that
     # class has is processed again as N+O glycans on its clusters without a row, and its rows of such a structure from >= 2 spectra are harmonized across these
@@ -4730,7 +4782,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             df_pair, spectra_pair = finalise_predictions(df_pair, False, file_mode, modification, mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                          glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1, accurate_ms1 = accurate_ms1s[file_label],
                                                          sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floors[file_label],
-                                                         ion_trap = ion_traps[file_label])
+                                                         ion_trap = ion_traps[file_label], xic_details = spectra)
             df_out, spectra_out = inference_dfs[file_label]
             own_n, own_rt = neutral(df_out.index.values, df_out['charge'].values, file_mode), df_out['RT'].values
             keep = [only(p) and not ((np.abs(own_n - neutral(mz, z, file_mode)) < mass_tolerance) & (np.abs(own_rt - rt) < rt_diff)).any()
@@ -4777,10 +4829,11 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             z_max = int(max(np.abs(missing['repr_charge']).max(), np.abs(df_out['charge']).max() if len(df_out) else 1))
             other_charges = [[z for z in range(1, z_max + 1) if z != abs(int(z0)) and (mz - (-1 if file_mode == 'negative' else 1) * PROTON_MASS) * abs(z0) >= {1: 0, 2: 900, 3: 1500}.get(z, 3500)]
                              for mz, z0 in zip(theo_mzs, missing['repr_charge'])]
+            details = [] if spectra else None
             areas = extract_xic_areas(ms1, theo_mzs, np.where(np.isnan(apex_rts), missing['repr_rt'].values - rt_shift.get(file_label, 0), apex_rts),
                                       charges = missing['repr_charge'].values, mz_tolerance = mass_tolerance,
                                       mz_calibration = df_out.attrs.get('ms1_calibration'), sample_prep = sample_prep,
-                                      glycans = missing['repr_top1'].tolist(), other_charges = other_charges, mode = file_mode)
+                                      glycans = missing['repr_top1'].tolist(), other_charges = other_charges, mode = file_mode, details = details)
             # Only fill with a genuine peak at least as intense as the weakest precursor that got MS2 in this file,
             # and never with the peak of a feature that already has MS2 in this file
             own = all_ms2[all_ms2['condition_label'] == file_label]
@@ -4809,9 +4862,9 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 'category_label': row['category_label'],
                 'GlyTouCan_ID': glytoucan_mapping.get(row['repr_top1'], ''),
                 'ppm_error': np.nan,
-                'notes': 'MS1 signal only; propagated from other files'}
-                for (_, row), area, apex_rt, apex_int, peak in
-                zip(missing.iterrows(), areas, apex_rts, apex_ints, is_peak)
+                'notes': 'MS1 signal only; propagated from other files', **({'xic': [record]} if spectra else {})}
+                for (_, row), area, apex_rt, apex_int, peak, record in
+                zip(missing.iterrows(), areas, apex_rts, apex_ints, is_peak, details or [None] * len(missing))
                 if peak and apex_int >= floor and not (
                             np.abs(own_rts.get(row['mass_label'], np.zeros(0)) - apex_rt) <= rt_diff).any() and not (isinstance(row['repr_composition'], dict) and (
                             np.abs(np.array(comp_rts.get(stringify_dict(row['repr_composition']), [])) - apex_rt) <= rt_diff).any())]

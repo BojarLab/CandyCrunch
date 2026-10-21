@@ -1,0 +1,16 @@
+CandyCrunch and your privacy
+
+CandyCrunch analyses your data on this computer. Your spectra and results do not leave it unless you send a report yourself. The app uses the internet for three things only.
+
+Crash and bug reports
+When something goes wrong, or when you choose Help > Report a bug or Report misprediction, CandyCrunch shows you the report and sends it only when you click Send, or by itself only after you ticked "Do this automatically" (Help > Send crash reports automatically switches that off again). "Show what is sent" lists everything in a report: the error, the versions of CandyCrunch and its main packages, the operating system, processor count and memory, each experiment's name and settings with the type and size of its files, the app's log (which can name your files), and whatever you type, such as a description or an e-mail address for questions. A misprediction report can also contain the spectrum you report and its predicted and curated structures.
+
+Anonymous usage statistics
+When CandyCrunch starts and when it closes, it sends one short message: its version, a random number created on this computer to tell installations apart, when it started, how long it ran, whether it closed normally or crashed, and how many errors occurred. Nothing about you, your data or your results. Help > Send anonymous usage statistics switches this off.
+
+Updates
+On Windows, CandyCrunch asks GitHub at every start whether a newer version exists. The request carries nothing about you or your data.
+
+Reports and usage statistics go to Sentry (sentry.io), which keeps them in the European Union. Only the CandyCrunch developers (Bojar Lab, University of Gothenburg) read them, to fix errors and improve CandyCrunch. If Sentry cannot be reached, a report opens as a prefilled GitHub issue in your browser instead, which you can read before submitting it yourself. Like any server, Sentry and GitHub see the IP address your computer connects from.
+
+Questions: https://github.com/BojarLab/CandyCrunch/issues

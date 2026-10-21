@@ -291,3 +291,13 @@ GlycoDraw(fragment_iupac)
 ## Citation 
 If you use `CandyCrunch` or any of our datasets in your work, please cite Urban et al., Nat Methods 2024.  
 The data used to train `CandyCrunch` can be found at Zenodo, under [doi:10.5281/zenodo.7940047](https://zenodo.org/record/7940047)
+
+## Code signing policy
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+The Windows installer and the `CandyCrunch.exe` it installs are signed. Only files built from this repository by the [Desktop app workflow](.github/workflows/app.yml) on GitHub Actions are signed, and every release is approved by hand before it is signed.
+
+- Committers and reviewers: Daniel Bojar, James Urban, Vahid Atabaigi Elmi
+- Approvers: Daniel Bojar
+
+Privacy: the desktop app sends crash and bug reports only when you choose to send them, sends anonymous usage statistics unless you switch them off (Help > Send anonymous usage statistics), and asks GitHub whether a newer version exists. [packaging/privacy.txt](packaging/privacy.txt), which the installer shows before installing, lists exactly what each contains.
