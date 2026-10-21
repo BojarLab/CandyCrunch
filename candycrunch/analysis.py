@@ -4362,8 +4362,8 @@ def plot_fragments_excel(df: pd.DataFrame | str | Path, # DataFrame or filepath 
                          fragment_col_num: int | str = 0, # Fragment column index, or its name
                          scaling_factor: float | None = None, # Image scaling; defaults to 0.2 if compact else 1.2
                          compact: bool = False, # Use compact style
-                         **kwargs # Passed on to GlycoDraw, e.g., vertical, 
-                         show_linkage) -> None:
+                         **kwargs # Passed on to GlycoDraw, e.g., vertical, show_linkage
+                         ) -> None:
     "Creates Excel file with SNFG images of glycan fragments in a new column"
     if Path(folder_filepath).suffix:
         raise ValueError(f"folder_filepath has to be a directory (got '{folder_filepath}').")
