@@ -1,10 +1,9 @@
 """
-Helper script to convert a condensed spectra table (e.g. full_dataset.xlsx) and
-its metadata into CandyCrunch-ready training pickles.  Adjust the paths in the
-configuration block before running.
+Helper script to convert the output of training/cc_training_data.py (train.pkl: labelled model inputs with their candidate
+sets; pretrain/<project>.pkl: unlabelled ones) into CandyCrunch-ready training pickles: X/y tuples for training_script.py,
+per-sample candidate masks and the pretraining inputs.  Adjust the paths in the configuration block before running.
 """
 
-import ast
 import pickle
 from pathlib import Path
 
@@ -12,133 +11,58 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit
 
-from candycrunch.prediction import bin_intensities
-from glycowork.motif.processing import get_class
+from glycowork.motif.graph import glycan_to_nxGraph
+from glycowork.motif.tokenization import glycan_to_composition
 
-full_dataset_path = Path("full_dataset.xlsx")
-metadata_path = Path("file_checklist_template.csv")
-legacy_train_path = None               # e.g. Path("prepared_datasets/train_legacy.pkl")
-legacy_test_path = None                # e.g. Path("prepared_datasets/test_legacy.pkl")
+cc_training_dir = Path("cc_training")
+exclude_projects = set()               # GlycoPost_IDs left out of training and pretraining
 output_dir = Path("prepared_datasets")
 test_size = 0.15
 random_state = 42
 
+# Each row's settings as wrap_inference passed them, coded as process_for_inference codes them (anything else gets the last code)
 MODE_MAP = {"negative": 1, "positive": 0}
-LC_MAP = {"pgc": 0, "c18": 1}
+LC_MAP = {"PGC": 0, "C18": 1}
 MOD_MAP = {"reduced": 0, "permethylated": 1}
 TRAP_MAP = {"linear": 0, "orbitrap": 1, "amazon": 2}
 
+# The model's inputs in the order it takes them; compositional_vector, glycan_type and RT2 are the row's as the model got them at inference
 FEATURE_COLUMNS = [
     "binned_intensities",
     "mz_remainder",
-    "reducing_mass",
+    "compositional_vector",
     "glycan_type",
-    "RT",
+    "RT2",
     "mode",
     "lc",
     "modification",
     "trap",
 ]
+# Pretraining inputs keep the spectrum sparse (model_input: float32 rows of bin index, binned intensity and m/z remainder of each non-empty bin)
+PRETRAIN_COLUMNS = ["model_input"] + FEATURE_COLUMNS[2:]
 
 
 
-def _safe_peak_parse(value):
-    if isinstance(value, dict):
-        return {float(k): float(v) for k, v in value.items()}
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        try:
-            parsed = ast.literal_eval(stripped)
-        except (SyntaxError, ValueError):
-            return None
-        if isinstance(parsed, dict):
-            return {float(k): float(v) for k, v in parsed.items()}
-    return None
+def _readable(glycan):
+    # Structures glycowork cannot turn into a composition and a graph cannot be trained on (training_script.py drops them)
+    try:
+        glycan_to_composition(glycan)
+        glycan_to_nxGraph(glycan)
+        return True
+    except Exception:
+        return False
 
-def _normalise_spectrum(spec):
-    total = float(sum(spec.values()))
-    if total <= 0:
-        return None
-    return {mz: intensity / total for mz, intensity in spec.items()}
+def _encode_settings(df):
+    return df.assign(mode=df["mode"].map(MODE_MAP), lc=df["lc_type"].map(lambda v: LC_MAP.get(v, 2)),
+                     modification=df["modification"].map(lambda v: MOD_MAP.get(v, 2)), trap=df["trap"].map(lambda v: TRAP_MAP.get(v, 3)))
 
-def _process_peaks(df, min_mz=39.714, max_mz=3000.0, bin_num=2048):
-    frames = np.linspace(min_mz, max_mz, bin_num)
-    parsed = df["peak_d"].map(_safe_peak_parse)
-    parsed = parsed.map(lambda spec: None if spec is None else _normalise_spectrum(spec))
-    keep_mask = parsed.notnull()
-    df = df.loc[keep_mask].copy()
-    parsed = parsed.loc[keep_mask]
-    binned, remainders = zip(*(bin_intensities(spec, frames) for spec in parsed))
-    df["binned_intensities"] = [np.asarray(vec, dtype=np.float32) for vec in binned]
-    df["mz_remainder"] = [np.asarray(vec, dtype=np.float32) for vec in remainders]
-    return df
-
-def _process_retention_times(df):
-    df = df.copy()
-    df["RT"] = df["RT"].fillna(15)
-    df = df[df["RT"] > 2]
-    df["RT"] = df.groupby("filename")["RT"].transform(lambda rt: rt / max(rt.max(), 30.0))
-    return df
-
-def _infer_glycan_types(df):
-    def classify(g):
-        if g.endswith(("GalNAc", "GalNAc4S", "GalNAc6S", "GalNAcOS", "Fuc", "Man", "Gal")):
-            return 0
-        if get_class(g) == 'N':
-            return 1
-        if g.endswith(("Glc", "GlcOS", "GlcNAc", "Ins", "Cer")):
-            return 2
-        return 3
-    df = df.copy()
-    df["glycan_type"] = df["glycan"].map(classify)
-    return df
-
-def _attach_metadata(df, checklist):
-    meta = checklist.copy()
-    meta.columns = [col.strip() for col in meta.columns]
-    meta = meta.set_index("GlycoPOST_ID")
-    meta.index = meta.index.astype(str).str.strip().str.lower()
-
-    def build_dict(column):
-        if column not in meta.columns:
-            return {}
-        series = meta[column].fillna("").astype(str).str.lower().str.strip()
-        return series.to_dict()
-
-    mode_dict = build_dict("mode")
-    lc_dict = build_dict("LC_type")
-    mod_dict = build_dict("modification")
-    trap_dict = build_dict("trap")
-
-    def lookup(mapping, value, fallback):
-        if not value:
-            return fallback
-        return mapping.get(value.lower(), fallback)
-
-    def map_series(ids, source_dict, mapping, fallback):
-        def mapper(gid):
-            if gid in source_dict:
-                return lookup(mapping, source_dict[gid], fallback)
-            return fallback
-        lowered = ids.fillna("").astype(str).str.strip().str.lower()
-        return lowered.map(mapper).astype(int)
-
-    df = df.copy()
-    ids = df["GlycoPost_ID"].astype(str).str.strip()
-    df["mode"] = map_series(ids, mode_dict, MODE_MAP, 2)
-    df["lc"] = map_series(ids, lc_dict, LC_MAP, 2)
-    df["modification"] = map_series(ids, mod_dict, MOD_MAP, 2)
-    df["trap"] = map_series(ids, trap_dict, TRAP_MAP, 3)
-    return df
-
-def process_full_dataset(full_df, checklist):
-    df = _process_retention_times(full_df)
-    df = _infer_glycan_types(df)
-    df = _process_peaks(df)
-    df = _attach_metadata(df, checklist)
-    return df
+def candidate_mask(df, glycans):
+    # mask[i, j]: glycans[j] is in sample i's candidate set (its label and the isomers its map lists at its RT), for a loss on the set's summed probability
+    index = {g: j for j, g in enumerate(glycans)}
+    mask = np.zeros((len(df), len(glycans)), dtype=bool)
+    for i, candidates in enumerate(df["glycan_candidates"]):
+        mask[i, [index[g] for g in candidates]] = True
+    return mask
 
 def downcast_numeric(df):
     result = df.copy()
@@ -154,29 +78,32 @@ def tupleify(df, columns):
     return list(df[list(columns)].itertuples(index=False, name=None))
 
 
-print("Loading condensed spectra")
-full_df = pd.read_excel(full_dataset_path)
-meta_df = pd.read_csv(metadata_path)
-processed = process_full_dataset(full_df, meta_df)
+print("Loading labelled inputs")
+train = pd.read_pickle(cc_training_dir / "train.pkl")
+train = train[~train["GlycoPost_ID"].isin(exclude_projects)]
+structures = set(train["glycan"]).union(*train["glycan_candidates"])
+readable = {g for g in structures if _readable(g)}
+print(f"Labelled inputs: {len(train)}, structures: {len(structures)}, unreadable: {len(structures) - len(readable)}")
+# Unreadable structures leave the candidate sets: an input whose set is then empty goes, one whose nearest-RT label went takes the next of its set
+train = train.assign(glycan_candidates=[[g for g in c if g in readable] for c in train["glycan_candidates"]])
+train = train[train["glycan_candidates"].map(len) > 0]
+train = train.assign(glycan=train["glycan_candidates"].map(lambda c: c[0]))
+# The binned spectrum and m/z remainders the model got (the mean over the pooled spectra, which binning the pooled peak_d does not give back)
+binned, remainders = [], []
+for sparse in train["model_input"]:
+    idx = sparse[0].astype(int)
+    b = np.zeros(2048, dtype=np.float32)
+    r = np.zeros(2048, dtype=np.float32)
+    b[idx] = sparse[1]
+    r[idx] = sparse[2]
+    binned.append(b)
+    remainders.append(r)
+combined = _encode_settings(train.assign(binned_intensities=binned, mz_remainder=remainders)).reset_index(drop=True)
+glycans = sorted(set().union(*combined["glycan_candidates"]))
 
-frames = [processed]
-if legacy_train_path:
-    frames.append(pd.read_pickle(legacy_train_path))
-if legacy_test_path:
-    frames.append(pd.read_pickle(legacy_test_path))
-combined = pd.concat(frames, ignore_index=True)
-
-nan_count = combined["filename"].isna().sum()
-total_count = len(combined)
-print(f"Total rows: {total_count}")
-print(f"Rows with NaN in filename: {nan_count}")
-# Remove rows with NaN in filename
-combined = combined.dropna(subset=["filename"])
-glycans = sorted(set(combined["glycan"]))
-
-print("Splitting train/test by filename")
+print("Splitting train/test by run")
 splitter = GroupShuffleSplit(test_size=test_size, n_splits=1, random_state=random_state)
-train_idx, test_idx = next(splitter.split(combined, groups=combined["filename"]))
+train_idx, test_idx = next(splitter.split(combined, groups=combined["GlycoPost_ID"] + "/" + combined["filename"]))
 train_df = combined.iloc[train_idx].reset_index(drop=True)
 test_df = combined.iloc[test_idx].reset_index(drop=True)
 
@@ -204,5 +131,21 @@ with open(output_dir / "y_test.pkl", "wb") as fh:
     pickle.dump(y_test, fh)
 with open(output_dir / "glycans.pkl", "wb") as fh:
     pickle.dump(glycans, fh)
+with open(output_dir / "cand_mask_train.pkl", "wb") as fh:
+    pickle.dump(candidate_mask(train_df, glycans), fh)
+with open(output_dir / "cand_mask_test.pkl", "wb") as fh:
+    pickle.dump(candidate_mask(test_df, glycans), fh)
+
+print("Serializing pretraining inputs")
+# One input per candidate composition of each unlabeled spectrum, as at inference; the spectrum stays sparse, as dense arrays of every unlabeled input
+# exceed memory (densify as for the labeled inputs above)
+(output_dir / "pretrain").mkdir(exist_ok=True)
+for path in sorted((cc_training_dir / "pretrain").glob("*.pkl")):
+    if path.stem in exclude_projects:
+        continue
+    pretrain = pd.read_pickle(path).explode(["compositional_vectors", "glycan_types"])
+    pretrain = _encode_settings(pretrain.rename(columns={"compositional_vectors": "compositional_vector", "glycan_types": "glycan_type"}))
+    with open(output_dir / "pretrain" / f"X_{path.stem}.pkl", "wb") as fh:
+        pickle.dump(tupleify(pretrain, PRETRAIN_COLUMNS), fh)
 
 print(f"Saved processed datasets to {output_dir.resolve()}")

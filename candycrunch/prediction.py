@@ -1155,7 +1155,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
 
 
 def process_for_inference(df, glycan_class, mode = 'negative', modification = 'reduced', lc = 'PGC',
-                          trap = 'linear', rt_max_default = 30.0, tta_thresh = None):
+                          trap = 'linear', rt_max_default = 30.0, tta_thresh = None, keep_inputs = False):
     """processes averaged spectra for them being inputs to CandyCrunch\n
    | Arguments:
    | :-
@@ -1166,7 +1166,9 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0
-   | tta_thresh (float): inputs of spectra whose best annotation_score exceeds this get 5 augmented copies, the others one plain copy (column 'tta'); default: None (all get 5)\n
+   | tta_thresh (float): inputs of spectra whose best annotation_score exceeds this get 5 augmented copies, the others one plain copy (column 'tta'); default: None (all get 5)
+   | keep_inputs (bool): whether the returned dataframe keeps each row's encoded spectrum, RT and glycan class (binned_intensities, mz_remainder, RT2,
+   |                     glycan_type) as the model gets them; default:False\n
    | Returns:
    | :-
    | (1) the model inputs in batches of 256 (5-copy inputs first, then 1-copy inputs, each in input_id order)
@@ -1213,7 +1215,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
                 *[np.asarray([x[c] for x in b], dtype = np.int64) for c in range(5, 9)]) for b in (X[i:i + 256] for i in range(0, len(X), 256))]
     idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
     df.set_index(idx_col, inplace = True)
-    drop_cols = ['binned_intensities', 'mz_remainder', 'RT2', 'mode', 'modification', 'trap', 'glycan_type', 'lc']
+    drop_cols = ['mode', 'modification', 'trap', 'lc'] + ([] if keep_inputs else ['binned_intensities', 'mz_remainder', 'RT2', 'glycan_type'])
     df.drop(drop_cols, axis = 1, inplace = True)
     return batches, df
 
@@ -1924,7 +1926,7 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
                      processed_df_use.loc[:, 'disease_ref'].map(len))
     processed_df_use = processed_df_use[~(processed_df_use['glycan'].str.contains("}"))]
     processed_df_use = processed_df_use.sort_values('ref_counts', ascending = False)
-    small = [0 < sum(x.values()) < 6 for x in processed_df_use.Composition]
+    small = np.array([0 < sum(x.values()) < 6 for x in processed_df_use.Composition], dtype = bool)
     # Only the topology map of compositions below 6 residues needs topologies; every run builds these maps (also for the other classes with accurate
     # MS1), so they are kept across calls
     topologies = [_TOPOLOGIES[x] if x in _TOPOLOGIES else _TOPOLOGIES.setdefault(x, structure_to_basic(x)) for x in processed_df_use['glycan'][small]]
@@ -3788,7 +3790,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | :-
    | Returns dataframe of predictions for spectra in file; if spectra=True, a tuple of (dataframe, list of its MS2 spectra) with the column xic (the MS1
    | integrations each row's abundance sums, see finalise_predictions), and files with MS3 spectra
-   | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row); with return_inputs, the dataframe of model inputs
+   | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row); with return_inputs, the dataframe of model inputs,
+   | each with the binned_intensities, mz_remainder, RT2 and glycan_type it was encoded with
    """
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
     run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate', '_loaded', '_top_clusters', '_condensed', '_pair')}
@@ -3987,7 +3990,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         coded_class = [CLASS_CODES[struct_class.get(g, classes[0])] for g in df_out['candidate_structure']]
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = 'permethylated' if sample_prep == 'permethylated' else (
         'reduced' if modification is None and not mass_tag else modification), lc = lc, trap = trap,
-                                           rt_max_default = rt_max_default, tta_thresh = crumbs_thresh)
+                                           rt_max_default = rt_max_default, tta_thresh = crumbs_thresh, keep_inputs = return_inputs and not _return_intermediate)
     if return_inputs and not _return_intermediate:
         # One row per input (pooled spectrum and candidate composition; index its m/z), as a callable model gets them, with the settings it was encoded with
         df_in = df_out.drop_duplicates('input_id').drop(columns = ['input_id', 'tta'])
@@ -4249,7 +4252,49 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # z = 2, and chance annotations of the one without a structure won (Hex4HexNAc4S1 over Man7 779.27, Hex4HexNAc4Neu5Gc1dHex2 over A2G2S1F 1038.87 in GPST000054)
     df_out['_pred'] = np.array([bool(p) for p in df_out['predictions']], dtype = float)
     df_out['_rank'] = df_out['annotation_score'] + df_out['_pred']
-    df_out = df_out.sort_values(['spec_id', 'doomed', '_rank', '_pred'], ascending = [False, True, False, False]).groupby('spec_id').first().drop(columns = ['doomed', '_rank', '_pred'])
+    # Neu5Ac + Hex and Neu5Gc + dHex are one formula, so a spectrum is a row of both compositions, and the one with more residue kinds explains more
+    # fragments by chance. Of such a pair, the row whose sialic acid leaves the weaker specific ions (its B1 ion, less water, its LacNAc antenna as B and
+    # C ion, also with the mannose below, and the precursor less that acid at its charge or one lower) ranks lower, if its rival's reach at least 5% of the
+    # base peak and twice its own (an acid's own ions outweighed the other's at least 2.5-fold wherever the acid was known)
+    df_out['_sia'] = 0
+    if sample_prep == 'underivatized' and sialic_derivatization is None:
+        keys = [stringify_dict(c) if isinstance(c, dict) else None for c in df_out['composition']]
+        spec_keys = defaultdict(set)
+        for spec, key in zip(df_out['spec_id'].values, keys):
+            spec_keys[spec].add(key)
+        sia_tol = fragment_tolerance if fragment_tolerance else mass_tolerance
+        evidence, promoted = {}, set()
+        for i, (spec, c, mz, z, peaks) in enumerate(zip(df_out['spec_id'].values, df_out['composition'].values, df_out['m/z'].values, df_out['charge'].values, df_out['peak_d'].values)):
+            if not isinstance(c, dict) or not isinstance(peaks, dict) or not peaks:
+                continue
+            for own, other, swap in (('Neu5Ac', 'Neu5Gc', {'Neu5Ac': -1, 'Hex': -1, 'Neu5Gc': 1, 'dHex': 1}), ('Neu5Gc', 'Neu5Ac', {'Neu5Gc': -1, 'dHex': -1, 'Neu5Ac': 1, 'Hex': 1})):
+                rival = {k: c.get(k, 0) + swap.get(k, 0) for k in set(c) | set(swap)}
+                rival_key = stringify_dict({k: v for k, v in rival.items() if v})
+                if min(rival.values()) < 0 or rival_key not in spec_keys[spec]:
+                    continue
+                z_abs, base = int(abs(z)), max(peaks.values())
+                neutral = mz * z_abs - multiplier * z_abs * PROTON_MASS
+                for acid in (own, other):
+                    if (spec, z_abs, acid) not in evidence:
+                        a = mass_dict[acid]
+                        ions = [a + multiplier * PROTON_MASS + w for w in (0, -mass_dict['H2O'])] + [
+                            a + mass_dict['Hex'] + mass_dict['HexNAc'] + multiplier * PROTON_MASS + w for w in (0, mass_dict['H2O'])] + [
+                            a + 2 * mass_dict['Hex'] + mass_dict['HexNAc'] + mass_dict['H2O'] + multiplier * PROTON_MASS] + [
+                            (neutral - a + multiplier * q * PROTON_MASS) / q for q in (z_abs, z_abs - 1) if q > 0]
+                        evidence[spec, z_abs, acid] = max(y for t in ions for y in [0] + [y for m, y in peaks.items() if abs(m - t) < sia_tol]) / base
+                if evidence[spec, z_abs, other] >= max(0.05, 2 * evidence[spec, z_abs, own]):
+                    df_out.iat[i, df_out.columns.get_loc('_sia')] = 1
+                    if df_out['predictions'].iloc[i]:
+                        promoted.add((spec, rival_key))
+        # A row promoted this way without a model structure takes its composition's database structure, as in the Neu5Gc fallback above, if the row it
+        # outranks had one: the model often has a structure only for the wrong one of the pair, and the peak, reported before, would go unreported
+        for i, (spec, key, preds, g) in enumerate(zip(df_out['spec_id'].values, keys, df_out['predictions'].values, df_out['candidate_structure'].values)):
+            if (spec, key) in promoted and not preds and isinstance(g, str):
+                df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
+                df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
+                df_out.iat[i, df_out.columns.get_loc('_pred')] = 1.0
+                database_rows.add(df_out['m/z'].iloc[i])
+    df_out = df_out.sort_values(['spec_id', 'doomed', '_sia', '_rank', '_pred'], ascending = [False, True, True, False, False]).groupby('spec_id').first().drop(columns = ['doomed', '_sia', '_rank', '_pred'])
     # A sparse spectrum (at most 6 fragments, as an ion trap near its detection limit gives) can never pass crumbs_thresh, so it passes if at least two and 60%
     # of its fragments are annotated and the model is confident in its in-class top structure; a multiply charged one already if one fragment is annotated and
     # the model gives its top structure at least 0.75
@@ -4503,6 +4548,14 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     return (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'], errors = 'ignore')
 
 
+ACIDIC_RESIDUES = {'Neu5Ac', 'Neu5Gc', 'Kdn', 'S', 'P', 'HexA'}
+
+
+def acidic_count(composition):
+    # Charged residues of a composition (linkage-split keys of derivatized sialic acids are neutral and do not count)
+    return sum(v for k, v in composition.items() if k in ACIDIC_RESIDUES) if isinstance(composition, dict) else 0
+
+
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers = 5, model = candycrunch,
                          glycans = glycans, bin_num = 2048, max_charge = -3,
                          frag_num = 100, modification = 'reduced', mass_tag = None, lc = 'PGC',
@@ -4522,7 +4575,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    |                               the model as a glycan of its own class, and only structures outside all of them need extra_thresh.
    |                               An "N" or "O" file with at least 2 rows of a structure only the other of the two has also looks for glycans of
    |                               that class among the peaks it did not report, as in wrap_inference
-   | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group, after correcting each file's consistent RT drift against the file with the most predicted peaks (median over peaks both files share)
+   | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group, after correcting each file's consistent RT drift against the file with the most predicted peaks (over peaks both files share; with enough of them as a function of RT and of the number of sialic acids and other charged residues)
    | top_n_isomers (int): number of isomer groups at each composition to retain per file (a group stays if it is among the top_n_isomers of any file); default:5
    | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable (see wrap_inference); with n_jobs > 1 it has to be picklable (a module-level function or class instance)
    | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
@@ -4671,9 +4724,11 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         return {mz: round(float(np.median(cluster)), 4) for cluster in mz_clusters for mz in cluster}
 
     all_ms2['mass_label'] = all_ms2.index.map(mass_labels(all_ms2.index.values))
-    # Retention time alignment (as LaCyTools and GlycReSoft align runs on analytes they share): a file's drift is the median RT difference to the file with
-    # the most predicted rows over anchor peaks, a mass_label and first prediction found exactly once in both files; with at least 3 anchors, isomer
-    # groups, gap filling and feature merging compare RTs shifted by it, while every row keeps its own RT
+    # Retention time alignment (as LaCyTools and GlycReSoft align runs on analytes they share): a file's drift towards the file with the most predicted rows
+    # comes from anchor peaks, a mass_label and first prediction found exactly once in both files. On PGC it can grow with retention time and with every
+    # charged residue (sialic acids, sulfates, phosphates), so with at least 10 anchors it is a + b * RT + c * acidic residues (robust least squares; each
+    # term only where the anchors span it), else the median difference over at least 3 anchors. Isomer groups, gap filling and feature merging compare RTs
+    # shifted by it, while every row keeps its own RT
     rt_shift = {}
     keyed = all_ms2.assign(top = [p[0][0] if p else None for p in all_ms2['predictions']]).dropna(subset = ['top'])
     keyed = keyed[keyed.groupby(['condition_label', 'mass_label', 'top'])['RT'].transform('size') == 1].set_index(['mass_label', 'top'])
@@ -4682,14 +4737,57 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         ref_rts = keyed.loc[keyed['condition_label'] == ref, 'RT']
         for file_label, file_rows in keyed[keyed['condition_label'] != ref].groupby('condition_label'):
             diffs = (ref_rts - file_rows['RT']).dropna()
-            # Only a consistent drift is corrected: anchors of replicate runs scatter by at most ~0.5 min around it, those of runs from different LC set-ups
-            # by ~2 min (median absolute deviation)
-            if len(diffs) >= 3 and (diffs - diffs.median()).abs().median() <= 1:
-                rt_shift[file_label] = float(diffs.median())
+            if len(diffs) < 3:
+                continue
+            rts = file_rows.loc[diffs.index, 'RT'].values.astype(float)
+            n_acid = np.array([acidic_count(c) for c in file_rows.loc[diffs.index, 'composition']], dtype = float)
+            use_rt = bool(len(diffs) >= 10 and np.percentile(rts, 90) - np.percentile(rts, 10) >= 5)
+            use_acid = bool(len(diffs) >= 10 and (n_acid == 0).sum() >= 3 and (n_acid > 0).sum() >= 3)
+            y = diffs.values.astype(float)
+            # Only a consistent drift is corrected: anchors of replicate runs scatter by at most ~0.5 min around their median difference, those of runs from
+            # different LC set-ups by ~2 min (median absolute deviation)
+            if np.median(np.abs(y - np.median(y))) > 1:
+                continue
+            beta, resid = np.array([np.median(y)]), y - np.median(y)
+            if use_rt or use_acid:
+                # Iteratively reweighted least squares from the median, Huber then Tukey's biweight, so a mismatched anchor (often at the end of the
+                # gradient, where it pulls hardest) ends up with no weight; the model replaces the median only if its anchors scatter less around it
+                X, r = np.column_stack([np.ones(len(y))] + [rts] * use_rt + [n_acid] * use_acid), resid
+                for it in range(30):
+                    u = np.abs(r) / (1.4826 * np.median(np.abs(r)) + 0.01)
+                    w = np.sqrt(np.clip(1.345 / np.maximum(u, 1e-9), 0, 1) if it < 20 else np.clip(1 - (u / 4.685) ** 2, 0, None) ** 2)
+                    fit = np.linalg.lstsq(X * w[:, None], y * w, rcond = None)[0]
+                    r = y - X @ fit
+                if np.median(np.abs(r)) < np.median(np.abs(resid)):
+                    beta = fit
+                else:
+                    use_rt = use_acid = False
+            coefs = iter(beta[1:])
+            rt_shift[file_label] = (float(beta[0]), float(next(coefs)) if use_rt else 0.0, float(next(coefs)) if use_acid else 0.0, rts.min(), rts.max(), n_acid.max())
         if rt_shift:
-            print(f"Retention times aligned to {ref}: " + ', '.join(f"{k} {v:+.2f} min" for k, v in rt_shift.items()))
+            mid = np.median(keyed['RT'])
+            print(f"Retention times aligned to {ref}: " + ', '.join(f"{k} {a + b * mid:+.2f} min" + (f" ({b:+.3f}/min, {c:+.2f} per acidic residue)" if b or c else '')
+                                                                     for k, (a, b, c, *_) in rt_shift.items()))
+
+    def drift(rts, labels, comps):
+        # Each row's drift towards the reference at its own RT and number of acidic residues (within the ranges of its file's anchors; 0 for the reference)
+        rts, labels, comps, out = np.asarray(rts, dtype = float), np.asarray(labels), np.asarray(comps, dtype = object), np.zeros(len(rts))
+        for k, (a, b, c, lo, hi, n_max) in rt_shift.items():
+            m = labels == k
+            if m.any():
+                out[m] = a + b * np.clip(rts[m], lo, hi) + c * np.minimum([acidic_count(x) for x in comps[m]], n_max)
+        return out
+
+    def file_rt(rts, label, comps):
+        # A file's own RT of a reference-aligned RT (the fixed point of t = T - drift(t))
+        rts = np.asarray(rts, dtype = float)
+        t = rts.copy()
+        for _ in range(10):
+            t = rts - drift(t, [label] * len(t), comps)
+        return t
+
     # Cross-file harmonization: resolve variant predictions, link DDA gaps
-    assigned_cats = assign_categories(all_ms2.assign(RT = all_ms2['RT'] + all_ms2['condition_label'].map(rt_shift).fillna(0), RT_own = all_ms2['RT']),
+    assigned_cats = assign_categories(all_ms2.assign(RT = all_ms2['RT'] + drift(all_ms2['RT'], all_ms2['condition_label'], all_ms2['composition']), RT_own = all_ms2['RT']),
                                       intra_cat_thresh = intra_cat_thresh)
     assigned_cats['RT'] = assigned_cats.pop('RT_own')
     smoothed_category_predictions = assign_modal_category_prediction(assigned_cats)
@@ -4767,7 +4865,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if pair_rows:
         pair_rows = pd.concat(pair_rows)
         pair_rows['mass_label'] = pair_rows.index.map(mass_labels(pair_rows.index.values))
-        pair_cats = assign_categories(pair_rows.assign(RT = pair_rows['RT'] + pair_rows['condition_label'].map(rt_shift).fillna(0), RT_own = pair_rows['RT']),
+        pair_cats = assign_categories(pair_rows.assign(RT = pair_rows['RT'] + drift(pair_rows['RT'], pair_rows['condition_label'], pair_rows['composition']), RT_own = pair_rows['RT']),
                                       intra_cat_thresh = intra_cat_thresh)
         pair_cats['RT'] = pair_cats.pop('RT_own')
         # (their isomer groups are numbered after the own ones, so no group mixes both)
@@ -4807,7 +4905,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Consensus of each isomer group that survived clean-up in at least one file, for MS1 gap filling in the others
     finalized = [v[0] for v in inference_dfs.values() if not v[0].empty]
     # Rows with a top1_pred first, so every value of a group comes from one row (groupby.first skips NaN column by column)
-    master = pd.concat(finalized).reset_index().pipe(lambda x: x.assign(RT = x['RT'] + x['condition_label'].map(rt_shift).fillna(0))).sort_values(
+    master = pd.concat(finalized).reset_index().pipe(lambda x: x.assign(RT = x['RT'] + drift(x['RT'], x['condition_label'], x['composition']))).sort_values(
         'top1_pred', key = lambda s: s.isna(), kind = 'stable').groupby(
         ['mass_label', 'category_label']).agg(
         repr_mz = ('m/z', 'median'),
@@ -4827,7 +4925,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             with np.load(ms1_paths[file_label]) as ms1_file:
                 ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])
             # Look for the apex within intra_cat_thresh of the group's consensus RT, on the monoisotopic trace around the consensus m/z
-            _, apex_rts, apex_ints, is_peak = extract_xic_areas(ms1, missing['repr_mz'].values, missing['repr_rt'].values - rt_shift.get(file_label, 0),
+            _, apex_rts, apex_ints, is_peak = extract_xic_areas(ms1, missing['repr_mz'].values, file_rt(missing['repr_rt'].values, file_label, missing['repr_composition'].values),
                                                                 mz_tolerance = mass_tolerance, search_window = intra_cat_thresh,
                                                                 isotopes = 0, mz_calibration = (0, mass_tolerance))
             # Then quantify that peak exactly like the MS2 rows of this file, so both share one abundance scale
@@ -4839,7 +4937,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             other_charges = [[z for z in range(1, z_max + 1) if z != abs(int(z0)) and (mz - (-1 if file_mode == 'negative' else 1) * PROTON_MASS) * abs(z0) >= {1: 0, 2: 900, 3: 1500}.get(z, 3500)]
                              for mz, z0 in zip(theo_mzs, missing['repr_charge'])]
             details = [] if spectra else None
-            areas = extract_xic_areas(ms1, theo_mzs, np.where(np.isnan(apex_rts), missing['repr_rt'].values - rt_shift.get(file_label, 0), apex_rts),
+            areas = extract_xic_areas(ms1, theo_mzs, np.where(np.isnan(apex_rts), file_rt(missing['repr_rt'].values, file_label, missing['repr_composition'].values), apex_rts),
                                       charges = missing['repr_charge'].values, mz_tolerance = mass_tolerance,
                                       mz_calibration = df_out.attrs.get('ms1_calibration'), sample_prep = sample_prep,
                                       glycans = missing['repr_top1'].tolist(), other_charges = other_charges, mode = file_mode, details = details)
@@ -4856,6 +4954,25 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             for c, rt in zip(df_out['composition'], df_out['RT']):
                 if isinstance(c, dict):
                     comp_rts[stringify_dict(c)].append(rt)
+            # A gap peak k/z above a co-eluting precursor of this file at least half as intense (k = 1-3, same charge) is that precursor's 13C isotope peak:
+            # replacing one Neu5Ac by two dHex adds 1.02 Da, so many compositions sit there. Of the gap rows of one composition (at any charge) on one peak
+            # only the most intense stays (ion traps scatter a precursor over several m/z clusters, and each of them would fill that peak again)
+            own_z = np.abs(own['charge'].values.astype(float)) if len(own) else np.zeros(0)
+            keep, gap_rts = np.zeros(len(missing), dtype = bool), defaultdict(list)
+            for i in np.argsort(-np.nan_to_num(np.asarray(areas, dtype = float)), kind = 'stable'):
+                row, apex_rt = missing.iloc[i], apex_rts[i]
+                if not is_peak[i] or apex_ints[i] < floor or (np.abs(own_rts.get(row['mass_label'], np.zeros(0)) - apex_rt) <= rt_diff).any():
+                    continue
+                z = abs(int(row['repr_charge'])) or 1
+                near = (own_z == z) & (np.abs(own['RT'].values - apex_rt) <= rt_diff) & (own_apex >= 0.5 * apex_ints[i]) if len(own) else np.zeros(0, dtype = bool)
+                if any((np.abs(row['repr_mz'] - own.index.values[near] - k * 1.00336 / z) <= mass_tolerance / 2).any() for k in (1, 2, 3)):
+                    continue
+                if isinstance(row['repr_composition'], dict):
+                    ck = stringify_dict(row['repr_composition'])
+                    if (np.abs(np.array(comp_rts.get(ck, []) + gap_rts[ck]) - apex_rt) <= rt_diff).any():
+                        continue
+                    gap_rts[ck].append(apex_rt)
+                keep[i] = True
             gaps = [{
                 'm/z': row['repr_mz'],
                 'top1_pred': row['repr_top1'],
@@ -4872,11 +4989,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 'GlyTouCan_ID': glytoucan_mapping.get(row['repr_top1'], ''),
                 'ppm_error': np.nan,
                 'notes': 'MS1 signal only; propagated from other files', **({'xic': [record]} if spectra else {})}
-                for (_, row), area, apex_rt, apex_int, peak, record in
-                zip(missing.iterrows(), areas, apex_rts, apex_ints, is_peak, details or [None] * len(missing))
-                if peak and apex_int >= floor and not (
-                            np.abs(own_rts.get(row['mass_label'], np.zeros(0)) - apex_rt) <= rt_diff).any() and not (isinstance(row['repr_composition'], dict) and (
-                            np.abs(np.array(comp_rts.get(stringify_dict(row['repr_composition']), [])) - apex_rt) <= rt_diff).any())]
+                for (_, row), area, apex_rt, record, k in
+                zip(missing.iterrows(), areas, apex_rts, details or [None] * len(missing), keep) if k]
             if gaps:
                 gap_df = pd.DataFrame(gaps).set_index('m/z')
                 df_out = pd.concat([df_out, gap_df]) if not df_out.empty else gap_df
@@ -4905,7 +5019,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     value_col = 'rel_abundance' if 'rel_abundance' in all_outputs.columns else 'num_spectra'
     # One glycan stays one feature when files report it at different charge states or in neighbouring m/z clusters: groups with the same structure, RTs
     # within intra_cat_thresh and no file in common join the group seen in the most files, which supplies m/z, RT and charge
-    groups = all_outputs.assign(RT = all_outputs['RT'] + all_outputs['condition_label'].map(rt_shift).fillna(0)).groupby(group_keys).agg(
+    groups = all_outputs.assign(RT = all_outputs['RT'] + drift(all_outputs['RT'], all_outputs['condition_label'], all_outputs['composition'])).groupby(group_keys).agg(
         top1 = ('top1_pred', 'first'), rt = ('RT', 'median'), files = ('condition_label', set)).reset_index()
     groups = groups.assign(n = groups['files'].map(len)).sort_values('n', ascending = False, kind = 'stable')
     target = {}

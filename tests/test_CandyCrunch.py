@@ -568,14 +568,20 @@ def test_label_run_mapping_rules(monkeypatch):
                                                                             (965.85, 35.0, 9e5, 2, comps[5], 2.0), (965.84, 33.0, 1e4, 1, comps[5], 9.0)]
     inputs = pd.DataFrame({'spec_id': range(len(rows)), 'RT': [r[1] for r in rows], 'intensity': [r[2] for r in rows], 'peak_d': [{500.0: 1.0}] * len(rows),
                            'rt_range': [(r[1], r[1]) for r in rows], 'num_spectra': [r[3] for r in rows], 'composition': [r[4] for r in rows],
-                           'charge': [1, 1, 2, 2, 2, 2, 2, 2, 2], 'annotation_score': [r[5] for r in rows]}, index = pd.Index([r[0] for r in rows], name = 'm/z'))
+                           'charge': [1, 1, 2, 2, 2, 2, 2, 2, 2], 'annotation_score': [r[5] for r in rows], 'binned_intensities': [np.eye(1, 2048, 300).ravel()] * len(rows),
+                           'mz_remainder': [np.zeros(2048)] * len(rows), 'RT2': [r[1] / 35 for r in rows], 'glycan_type': 1,
+                           'compositional_vector': [np.zeros(12)] * len(rows)}, index = pd.Index([r[0] for r in rows], name = 'm/z'))
     inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
     monkeypatch.setattr(pl, 'wrap_inference', lambda *args, **kwargs: inputs.copy())
     mapping = pd.DataFrame({'Mass': mzs[:5] + [965.84, 965.84], 'RT': [18.7 + k for k in range(5)] + [np.nan, np.nan], 'glycan': glycans + sia})
     labelled, unlabelled = pl.label_run('run.cc', mapping, 'N')
-    assert np.isclose(labelled.attrs['rt_shift'], 1.3)
+    assert np.isclose(labelled.attrs['rt_shift'], 1.3) and np.array_equal(labelled['model_input'].iloc[0], np.array([[300], [1], [0]], dtype = np.float32))
     assert labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6] and len(unlabelled) == 2
     assert all(len(c) == 2 for c in labelled['glycan_candidates'].iloc[5:]) and labelled['glycan_match_status'].iloc[5] == 'candidates'
+    # Mapping RTs of another gradient (the 5 anchors disagree): the rows count as RT-less, so each composition's strongest passing input is labeled
+    shuffled = mapping.assign(RT = [22.7, 18.7, 25.7, 19.7, 30.7, np.nan, np.nan])
+    labelled, unlabelled = pl.label_run('run.cc', shuffled, 'N')
+    assert labelled.attrs['rt_shift'] == 0.0 and labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6]
 
 
 def test_ms1_peak_regrouping():

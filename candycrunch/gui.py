@@ -4,6 +4,7 @@ import contextlib
 import faulthandler
 import functools
 import glob
+import html
 import importlib.util
 import io
 import itertools
@@ -1059,7 +1060,8 @@ class SpectrumPanel(QWidget):
                                        'All cross-rings: every A and X cross-ring, e.g., for sodiated permethylated glycans at high collision energy or in MSn')
         # The figure on screen is laid out for the panel, so saving it gave a small picture with cramped labels; this draws it again at print size
         self.save = QPushButton('Save image…')
-        self.save.setToolTip('Saves this annotated spectrum at print size (12 inches wide) as PNG (300 dpi), SVG, or PDF, with the m/z of every labeled peak')
+        self.save.setToolTip('Saves this annotated spectrum at print size (12 inches wide) as PNG (300 dpi), SVG, or PDF, with the m/z of every labeled peak; '
+                             'right-click the spectrum to copy it as an image instead')
         self.save.setEnabled(False)
         self.save.clicked.connect(self.save_image)
         self.controls.addStretch(1)
@@ -1213,12 +1215,19 @@ class SpectrumPanel(QWidget):
             entry['canvas'].mpl_connect('pick_event', lambda event: event.artist in getattr(figure, 'ms3_artists', ()) and len(event.ind) and self.ms3_clicked.emit(int(event.ind[0])))
             entry['canvas'].mpl_connect('motion_notify_event', self.hover)
             entry['canvas'].mpl_connect('button_press_event', self.toggle_cartoon)
+            entry['canvas'].mpl_connect('scroll_event', self.zoom)
+            entry['canvas'].setContextMenuPolicy(Qt.CustomContextMenu)
+            entry['canvas'].customContextMenuRequested.connect(self.canvas_menu)
             entry['toolbar'] = NavigationToolbar2QT(entry['canvas'], self, coordinates = False)
             entry['toolbar'].setIconSize(QSize(16, 16))
-            # Its save button would save the small on-screen figure; Save image… draws it at print size instead
+            # Its save button would save the small on-screen figure (Save image… draws it at print size instead), and its subplot and axes editors
+            # change a layout that every annotation lays out again; squeezed by the controls next to it, it hid pan and zoom behind an overflow arrow
             for action in entry['toolbar'].actions():
-                if action.text() == 'Save':
+                if action.text() in ('Subplots', 'Customize', 'Save'):
                     entry['toolbar'].removeAction(action)
+            if entry['toolbar'].actions()[-1].isSeparator():
+                entry['toolbar'].removeAction(entry['toolbar'].actions()[-1])
+            entry['toolbar'].setMinimumWidth(entry['toolbar'].sizeHint().width())
         self.canvas, self.toolbar, self.hover_targets = entry['canvas'], entry['toolbar'], []
         if self.hovered is not None:
             self.hovered = None
@@ -1267,16 +1276,19 @@ class SpectrumPanel(QWidget):
                               for text in figure.axes[0].texts if text.get_text() and text.xy[0] in tips]
         self.show_support(support)
 
-    def save_image(self):
-        """Draws the spectrum shown again at print size, with the m/z of every labeled peak, as PNG (300 dpi), SVG, or PDF"""
+    def save_image(self, clipboard = False):
+        """Draws the spectrum shown again at print size, with the m/z of every labeled peak, as PNG (300 dpi), SVG, or PDF; clipboard: as a 300 dpi image
+        on the clipboard instead"""
         if self.drawn is None:
             return
-        path, chosen = QFileDialog.getSaveFileName(self, 'Save annotated spectrum', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'annotated_spectrum.png'),
-                                                   'PNG image, 300 dpi (*.png);;SVG vector graphic (*.svg);;PDF (*.pdf)')
-        if not path:
-            return
-        if not os.path.splitext(path)[1]:
-            path += re.search(r'\*(\.\w+)', chosen).group(1)
+        path = None
+        if not clipboard:
+            path, chosen = QFileDialog.getSaveFileName(self, 'Save annotated spectrum', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'annotated_spectrum.png'),
+                                                       'PNG image, 300 dpi (*.png);;SVG vector graphic (*.svg);;PDF (*.pdf)')
+            if not path:
+                return
+            if not os.path.splitext(path)[1]:
+                path += re.search(r'\*(\.\w+)', chosen).group(1)
         request, hit_dict, diagnostic = self.drawn
         width, height = 12.0, 6.0 if request['cartoons'] else 4.6
         figure = Figure(figsize = (width, height), dpi = 100)
@@ -1285,6 +1297,7 @@ class SpectrumPanel(QWidget):
         figure.subplots_adjust(left = 0.65 / width, right = 1 - 0.2 / width, bottom = bottom, top = bottom + (1 - 0.4 / height - bottom) / 1.4 if request['cartoons'] else 1 - 0.4 / height)
         with IMPORT_LOCK:
             from candycrunch.analysis import plot_annotated_spectrum
+        buffer = io.BytesIO()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             with MPL_LOCK:
@@ -1292,11 +1305,25 @@ class SpectrumPanel(QWidget):
                                         mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = figure.add_subplot(), draw_glycans = request['cartoons'],
                                         hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, cartoons = request['toggles'],
                                         cartoon_dpi = 300, **request['kwargs'])
-                figure.savefig(path, dpi = 300, bbox_inches = 'tight')
+                figure.savefig(path or buffer, dpi = 300, bbox_inches = 'tight', format = None if path else 'png')
+            if clipboard:
+                QApplication.clipboard().setImage(QImage.fromData(buffer.getvalue()))
+                QToolTip.showText(QCursor.pos(), 'Spectrum copied as an image', self.canvas)
         except Exception as error:
-            QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}')
+            QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}' if path else f'Could not copy the spectrum:\n{error}')
         finally:
             QApplication.restoreOverrideCursor()
+
+    def canvas_menu(self, position):
+        """Right-click on the spectrum: copy it as an image (at print size), save it, or show all of it again after zooming"""
+        # In pan mode the right button zooms
+        if self.toolbar.mode or self.drawn is None:
+            return
+        menu = QMenu(self)
+        menu.addAction('Copy image', lambda: self.save_image(clipboard = True))
+        menu.addAction('Save image…', lambda: self.save_image())
+        menu.addAction('Show the whole spectrum', self.toolbar.home)
+        menu.exec(self.canvas.mapToGlobal(position))
 
     def show_support(self, support):
         """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red) and lists them above the fragment table"""
@@ -1344,6 +1371,21 @@ class SpectrumPanel(QWidget):
                                f'</span></p><table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Residue</th>'
                                f'<th align="left">Supporting peaks</th><th align="left">Not told apart from</th><th align="left">Peaks against</th></tr>{"".join(rows)}'
                                f'</table><br>' + self.fragment_html)
+
+    def zoom(self, event):
+        """The mouse wheel zooms into m/z around the pointer and out again; the toolbar's Home and Back return as from its own zoom"""
+        ax = self.canvas.figure.axes[0]
+        if event.inaxes is not ax or event.xdata is None:
+            return
+        if not getattr(self.canvas.figure, 'zoomed', False):
+            # The view before the first zoom is the one Home returns to
+            self.toolbar.push_current()
+            self.canvas.figure.zoomed = True
+        lo, hi = ax.get_xlim()
+        factor = 0.8 ** event.step
+        ax.set_xlim(event.xdata - (event.xdata - lo) * factor, event.xdata + (hi - event.xdata) * factor)
+        self.toolbar.push_current()
+        self.canvas.draw_idle()
 
     def toggle_cartoon(self, event):
         """A click on a fragment label hides that fragment's cartoon if it is drawn, else draws it (every peak of one fragment shares its cartoon)"""
@@ -2020,6 +2062,8 @@ class ResultsView(QWidget):
     experiment_shown = Signal(str)
     # What a misprediction report sends about the peak shown (peak_report)
     report_peak = Signal(object)
+    # dirty was set or cleared
+    curation_changed = Signal()
 
     def __init__(self, images):
         super().__init__()
@@ -2067,6 +2111,8 @@ class ResultsView(QWidget):
         self.structure_delegate, self.bar_delegate = StructureDelegate(images, self.table), BarDelegate(self.table)
         # Only while the table has focus, so Ctrl+C in the structure box still copies its text
         QShortcut(QKeySequence.Copy, self.table, self.copy_rows).setContext(Qt.WidgetShortcut)
+        # Delete excludes the selected peak or includes it again, so a table can be curated from the keyboard
+        QShortcut(QKeySequence.Delete, self.table, self.toggle_excluded).setContext(Qt.WidgetShortcut)
         # Ctrl+F (Cmd+F) goes to the filter box, its text selected to type over
         QShortcut(QKeySequence.Find, self, lambda: (self.search.setFocus(), self.search.selectAll()))
         # Detail pane: drawing, facts, alternatives, and curation of the selected peak
@@ -2099,12 +2145,18 @@ class ResultsView(QWidget):
         self.assign, self.custom, self.exclude, self.crumbs = QPushButton('Assign candidate'), QPushButton('Enter structure…'), QPushButton('Exclude'), QPushButton('Open in CandyCrumbs')
         self.assign.setToolTip('Make the selected candidate this peak\'s structure (top1_pred) in the table and its exports')
         self.custom.setToolTip('Assign a structure that is not among the candidates')
-        self.exclude.setToolTip('Leave this peak out of exports')
+        self.exclude.setToolTip(f'Leave this peak out of exports ({QKeySequence(QKeySequence.Delete).toString(QKeySequence.NativeText)} in the table)')
         self.crumbs.setToolTip('Annotate this spectrum with any structure or setting in the CandyCrumbs tab (from the MS3 tab: the MS3 spectrum shown)')
         actions.addWidget(self.assign, 0, 0)
         actions.addWidget(self.custom, 0, 1)
         actions.addWidget(self.exclude, 1, 0)
         actions.addWidget(self.crumbs, 1, 1)
+        # With the other actions on this peak: in the spectrum controls it left the matplotlib toolbar too little room, which hid pan and zoom
+        self.report_button = QPushButton('Report misprediction…')
+        self.report_button.setToolTip('Sends this peak (its MS2 and MS3 spectra, CandyCrunch\'s predictions and scores, and the settings) to the CandyCrunch '
+                                      'developers, with what is wrong about it, so that CandyCrunch can learn from it')
+        self.report_button.setEnabled(False)
+        actions.addWidget(self.report_button, 2, 0, 1, 2)
         info_layout.addWidget(self.drawing)
         info_layout.addWidget(self.structure)
         info_layout.addWidget(self.composition)
@@ -2132,11 +2184,6 @@ class ResultsView(QWidget):
         # It may shrink below its longest run name (the list shows them in full): 50-character names made the window at least 1430 px wide
         self.spectrum_file.setMinimumWidth(80)
         self.spectrum.controls.insertWidget(1, self.spectrum_file)
-        self.report_button = QPushButton('Report misprediction…')
-        self.report_button.setToolTip('Sends this peak (its MS2 and MS3 spectra, CandyCrunch\'s predictions and scores, and the settings) to the CandyCrunch '
-                                      'developers, with what is wrong about it, so that CandyCrunch can learn from it')
-        self.report_button.setEnabled(False)
-        self.spectrum.controls.addWidget(self.report_button)
         # MS3 spectra of the selected peak, pooled per isolated MS2 fragment, annotated as fragments of that fragment
         self.ms3_panel, self.ms3_fragment, self.ms3_tab = SpectrumPanel(), QComboBox(), QSplitter(Qt.Vertical)
         self.ms3_fragment.setToolTip('MS2 fragment whose MS3 spectra are shown (pooled)')
@@ -2201,6 +2248,16 @@ class ResultsView(QWidget):
         self.map.canvas.mpl_connect('draw_event', self.map_drawn)
         self.map.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and self.select_row(int(event.ind[0])))
         images.ready.connect(self.image_ready)
+
+    @property
+    def dirty(self):
+        """Whether the results hold curation (structures, exclusions, integrations) that is not saved yet"""
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, value):
+        self._dirty = value
+        self.curation_changed.emit()
 
     def set_results(self, session):
         """Takes a worker result or a saved session (older ones hold a single experiment); tables are kept with m/z as a column and get the curation columns once"""
@@ -2842,9 +2899,16 @@ class ResultsView(QWidget):
         self.select_row(self.proxy.mapToSource(index).row())
         menu = QMenu(self)
         menu.addAction('Copy row', self.copy_rows)
-        menu.addAction('Include again' if self.frame['excluded'].iat[self.row] else 'Exclude from export', self.toggle_excluded)
+        # The IUPAC string alone, as glycowork and databases take it
+        structure = self.frame['top1_pred'].iat[self.row]
+        menu.addAction('Copy structure' if isinstance(structure, str) else 'Copy composition', lambda: QApplication.clipboard().setText(
+            structure if isinstance(structure, str) else _composition(self.frame['composition'].iat[self.row])))
+        menu.addAction(('Include again' if self.frame['excluded'].iat[self.row] else 'Exclude from export') + '\t' +
+                       QKeySequence(QKeySequence.Delete).toString(QKeySequence.NativeText), self.toggle_excluded)
         menu.addAction('Enter structure…', self.enter_structure)
         menu.addAction('Open in CandyCrumbs', self.send_to_crumbs)
+        if self.source is not None:
+            menu.addAction('Report misprediction…', self.report_button.click)
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     def copy_rows(self):
@@ -3148,10 +3212,10 @@ class MainWindow(QMainWindow):
     def __init__(self, paths, crashes = (), ended = {}):
         super().__init__()
         self.store = QSettings()
-        self.setWindowTitle('CandyCrunch')
+        self.setWindowTitle('CandyCrunch[*]')
         self.setAcceptDrops(True)
         self.images, self.runner, self.started, self.stage_text = GlycanImages(), InferenceRunner(), None, ''
-        self.first_report, self.fraction, self.run_pending = None, 0.0, False
+        self.first_report, self.fraction, self.run_pending, self.session_path = None, 0.0, False, None
         self.settings = SettingsPanel()
         self.run_button, self.cancel_button = QPushButton('Run CandyCrunch'), QPushButton('Cancel')
         self.run_button.setObjectName('run')
@@ -3176,9 +3240,11 @@ class MainWindow(QMainWindow):
         title = QLabel('CandyCrunch')
         title.setObjectName('title')
         title.setAlignment(Qt.AlignCenter)
-        self.welcome_text = _label('Glycan structures from LC-MS/MS runs. Add runs on the left (or drop them anywhere here), check the sample settings, '
-                                   'and press Run CandyCrunch. No data at hand? <a href="example">Add the example run</a>.', 'hint')
-        self.welcome_text.linkActivated.connect(lambda _: self.settings.add_example())
+        self.welcome = ('Glycan structures from LC-MS/MS runs. Add runs on the left (or drop them anywhere here), check the sample settings, and press Run '
+                        'CandyCrunch. No data at hand? <a href="example">Add the example run</a>.')
+        self.welcome_text = _label(self.welcome, 'hint')
+        # The example run, or results opened or saved lately (show_recent)
+        self.welcome_text.linkActivated.connect(lambda link: self.settings.add_example() if link == 'example' else self.open_session(urllib.parse.unquote(link)))
         self.welcome_text.setAlignment(Qt.AlignCenter)
         self.welcome_text.setFixedWidth(460)
         self.welcome_text.setMinimumHeight(self.welcome_text.heightForWidth(460))
@@ -3244,8 +3310,14 @@ class MainWindow(QMainWindow):
         self.run_button.setToolTip(f'Predicts the glycan structures of every run in the list ({QKeySequence("Ctrl+R").toString(QKeySequence.NativeText)})')
         file_menu.addSeparator()
         file_menu.addAction('Open results…', self.open_session)
-        self.save_action = file_menu.addAction('Save results…', self.save_session, QKeySequence.Save)
-        self.save_action.setEnabled(False)
+        self.recent_menu = file_menu.addMenu('Open recent results')
+        self.recent_menu.setToolTipsVisible(True)
+        self.show_recent()
+        # Save writes to the file the results came from or were last saved to, asking only for new results; Save as always asks
+        self.save_action = file_menu.addAction('Save results', lambda: self.save_session(), QKeySequence.Save)
+        self.save_as_action = file_menu.addAction('Save results as…', lambda: self.save_session(True), QKeySequence('Ctrl+Shift+S'))
+        for action in (self.save_action, self.save_as_action):
+            action.setEnabled(False)
         file_menu.addSeparator()
         file_menu.addAction('Quit', self.close, QKeySequence.Quit)
         view_menu = self.menuBar().addMenu('&View')
@@ -3281,6 +3353,7 @@ class MainWindow(QMainWindow):
         self.runner.finished.connect(self.finished)
         self.runner.failed.connect(self.failed)
         self.results.status.connect(lambda text: self.statusBar().showMessage(text, 6000))
+        self.results.curation_changed.connect(self.update_title)
         self.results.experiment_shown.connect(self.settings.select_experiment)
         self.results.report_peak.connect(lambda peak: self.open_report(peak = peak))
         self.results.open_in_crumbs.connect(lambda request: (self.tabs.setCurrentWidget(self.crumbs), self.crumbs.load(request)))
@@ -3668,8 +3741,15 @@ class MainWindow(QMainWindow):
                 text += f', about {max(10, round(left / 10) * 10)} s left' if left < 175 else f', about {round(left / 60)} min left'
         self.status_text.setText(text)
         self.stage_label.setText(text)
-        # Seen in the taskbar while the window is minimized or behind others
-        self.setWindowTitle(f'CandyCrunch ({self.fraction:.0%})' if self.first_report is not None and self.clock.isActive() else 'CandyCrunch')
+        self.update_title()
+
+    def update_title(self):
+        """The results' file, marked * while their curation is not saved, and a run's progress, seen in the taskbar while the window is minimized or behind
+        others"""
+        name = f'{os.path.splitext(os.path.basename(self.session_path))[0]} – ' if self.session_path else ''
+        progress = f' ({self.fraction:.0%})' if self.first_report is not None and self.clock.isActive() else ''
+        self.setWindowTitle(f'{name}CandyCrunch{progress}[*]')
+        self.setWindowModified(self.results.dirty)
 
     def show_stage(self, update):
         name, self.stage_text = update
@@ -3722,7 +3802,7 @@ class MainWindow(QMainWindow):
         self.stage_label.setText('')
         self.welcome_text.show()
         self.elapsed.setText('')
-        self.setWindowTitle('CandyCrunch')
+        self.update_title()
         self.status_text.setText(message)
         if self.results.payload is not None:
             self.pages.setCurrentWidget(self.results)
@@ -3747,8 +3827,10 @@ class MainWindow(QMainWindow):
             return
         self.results.set_results(payload)
         self.session_path = None
+        self.update_title()
         self.pages.setCurrentWidget(self.results)
         self.save_action.setEnabled(True)
+        self.save_as_action.setEnabled(True)
         # wrap_inference(_batch) processes files as another glycan class or with another reducing end if their predictions say so, which the user has to know
         notes = [line.removeprefix('WARNING: ') for line in self.log.toPlainText().splitlines() if 'the glycan class' in line or 'the reducing end' in line]
         if notes:
@@ -3767,24 +3849,51 @@ class MainWindow(QMainWindow):
         self.stop('Run cancelled')
         self.append_log('Run cancelled\n')
 
-    def save_session(self):
-        # Offered where these results were opened from or last saved, else named after their first run: every save offered results.candycrunch in the
-        # runs' folder, so saving other results meant renaming them or overwriting the earlier ones
-        first = os.path.splitext(os.path.basename(os.path.normpath(self.results.session['experiments'][0]['files'][0])))[0]
-        path, _ = QFileDialog.getSaveFileName(self, 'Save results', getattr(self, 'session_path', None) or os.path.join(self.store.value('folder', os.path.expanduser('~')),
-                                                                                                                     f'{first}.candycrunch'), 'CandyCrunch results (*.candycrunch)')
+    def save_session(self, choose = False):
+        """Saves the results to the file they were opened from or last saved to; asks where for new results, or with choose (Save as…)"""
+        path = self.session_path
+        if choose or not path:
+            # Offered where these results were opened from or last saved, else named after their first run: every save offered results.candycrunch in the
+            # runs' folder, so saving other results meant renaming them or overwriting the earlier ones
+            first = os.path.splitext(os.path.basename(os.path.normpath(self.results.session['experiments'][0]['files'][0])))[0]
+            path, _ = QFileDialog.getSaveFileName(self, 'Save results', self.session_path or os.path.join(self.store.value('folder', os.path.expanduser('~')),
+                                                                                                         f'{first}.candycrunch'), 'CandyCrunch results (*.candycrunch)')
         if not path:
             return False
         try:
-            with open(path, 'wb') as file:
+            # Written next to it first: a failed write (a full disk) would leave a truncated file in place of the results saved before
+            with open(path + '.part', 'wb') as file:
                 pickle.dump(self.results.session, file)
+            os.replace(path + '.part', path)
         except OSError as error:
             # A folder without write access or a full disk is no crash; returning False keeps the window (and the curation) open
             QMessageBox.critical(self, 'Save results', f'Could not write {path}:\n{error}')
             return False
         self.results.dirty, self.session_path = False, path
+        self.remember(path)
+        self.update_title()
         self.statusBar().showMessage(f'Saved {os.path.basename(path)}', 6000)
         return True
+
+    def recent_results(self):
+        """Results files opened or saved lately, newest first, that still exist"""
+        return [path for path in json.loads(self.store.value('recent', '[]')) if os.path.exists(path)]
+
+    def remember(self, path):
+        path = os.path.abspath(path)
+        self.store.setValue('recent', json.dumps([path] + [p for p in self.recent_results() if os.path.normcase(p) != os.path.normcase(path)][:7]))
+        self.show_recent()
+
+    def show_recent(self):
+        """Lists the recent results in File > Open recent results, and the newest four on the start page, so the day's work is a click away"""
+        recent = self.recent_results()
+        self.recent_menu.clear()
+        for path in recent:
+            self.recent_menu.addAction(os.path.basename(path), lambda checked = False, path = path: self.open_session(path)).setToolTip(path)
+        self.recent_menu.setEnabled(bool(recent))
+        links = ' · '.join(f'<a href="{urllib.parse.quote(path)}">{html.escape(os.path.splitext(os.path.basename(path))[0])}</a>' for path in recent[:4])
+        self.welcome_text.setText(self.welcome + (f'<br><br>Recent results: {links}' if links else ''))
+        self.welcome_text.setMinimumHeight(self.welcome_text.heightForWidth(460))
 
     def keep_curation(self):
         """Offers to save curated results before a run or other results replace them or the app closes; False if the user cancels"""
@@ -3813,9 +3922,12 @@ class MainWindow(QMainWindow):
             return
         self.results.set_results(payload)
         self.session_path = path
+        self.remember(path)
+        self.update_title()
         self.settings.set_experiments(self.results.session['experiments'])
         self.pages.setCurrentWidget(self.results)
         self.save_action.setEnabled(True)
+        self.save_as_action.setEnabled(True)
         self.tabs.setCurrentWidget(self.split)
         self.status_text.setText(f'{os.path.basename(path)}: results from {payload.get("finished", "an earlier run")}')
 

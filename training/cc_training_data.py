@@ -13,13 +13,14 @@ else the run name, else the map's structures, else the checklist; map masses 0.5
 species' kingdom for non-mammals; without a reducing end in the checklist, reduced and free are both tried and the one labelling more inputs is kept, and if
 the checklist's settings label nothing although the map has structures, underivatized/permethylated x reduced/free are tried. label_run shifts map RTs onto the
 run and labels RT-less map rows only on their composition's strongest inputs. Runs of test sets and held-out files (tests/data, the training exclusion list of
-the GlycoGauntlet audit) are written but never merged; the other runs of their projects are training data like any.
+the GlycoGauntlet audit), and their copies (<run>_2, ... or the same inputs), are written but never merged; the other runs of their projects are training
+data like any. Of runs with the same inputs (one acquisition downloaded under several names) only the first is merged (runs.csv: duplicate_of).
 Outputs: <out>/runs/<project>/<run>.pkl (labelled and unlabelled inputs with settings), <out>/runs.csv (one line per run), <out>/train.pkl (labelled inputs:
 m/z, peak_d, RT, precursor_charge, glycan, glycan_candidates, glycan_match_status, composition, annotation_score, num_spectra, intensity, rt_range, spec_id,
 filename, GlycoPost_ID, mode, trap, lc_type, modification (as wrap_inference passes them), model_input, RT2, compositional_vector, glycan_type (the spectrum,
 RT, composition and class as the model got them; label_run), reducing_end, sample_prep, fragmentation, ion_source) and <out>/pretrain/<project>.pkl
-(unlabelled pooled spectra with compositions, compositional_vectors, glycan_types and charges of their candidates; one file per project, as all of them
-together exceed the memory of a laptop).
+(unlabelled pooled spectra without peak_d unless --pretrain_peaks, with compositions, compositional_vectors, glycan_types and charges of their candidates;
+one file per project, as all of them together exceed the memory of a laptop).
 """
 import argparse
 import hashlib
@@ -42,11 +43,13 @@ PROJECTS = BASE_DIR.parent / 'Gothenburg' / 'Projects'
 NON_SAMPLE = {'Mass', 'RT', 'glycan', 'added_db', 'removed_db', 'glycan_class', 'rt_group', 'charge', 'reducing_end'}
 # Class of a map by the first part of its suffix (_N_rt: N)
 SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid', 'milk': 'free'}
+LOG_COLUMNS = ['project', 'run', 'path', 'excluded', 'maps', 'glycan_class', 'rt_shift', 'masses_rescued', 'settings_fitted', 'status', 'error', 'settings',
+               'inputs', 'labelled', 'unique', 'structures', 'map_rows', 'map_rows_with_rt', 'unlabelled', 'seconds']
 REDUCING_ENDS = {'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP'}
 
 
 def sample_columns(df):
-    return [c for c in df.columns if c not in NON_SAMPLE and not str(c).startswith('Unnamed')]
+    return [c for c in df.columns if c not in NON_SAMPLE and not str(c).startswith(('Unnamed', 'RT_'))]
 
 
 def name_class(stem):
@@ -75,12 +78,19 @@ def maps_for_run(project, path, maps_dir):
         # A map of another class than the run name says (N-glycan maps for an O-glycan run of the same samples) is not the run's
         if hint and cls and cls != hint:
             continue
+        per_run = [c for c in df.columns if str(c).startswith('RT_')]
+        if per_run and 'RT' not in df.columns:
+            df['RT'] = df[per_run].apply(pd.to_numeric, errors = 'coerce').where(lambda x: x > 0).median(axis = 1)
         # A sample column at the start of the run name (its sample group, as in '6i. <sample>') before columns found elsewhere in it (a '2' or '4' in
         # 'Stage2_4'), then the longest, so 'S1' cannot claim 'S10'
         samples = sample_columns(df)
         cols = sorted((c for c in samples if str(c) in path.name), key = lambda c: (path.name.startswith(str(c)), len(str(c))), reverse = True)
         if cols:
-            named.append((df[pd.to_numeric(df[cols[0]], errors = 'coerce') > 0], cls, m.name, (path.name.startswith(str(cols[0])), len(str(cols[0])))))
+            rows = df[pd.to_numeric(df[cols[0]], errors = 'coerce') > 0].copy()
+            if f'RT_{cols[0]}' in rows.columns:
+                own = pd.to_numeric(rows[f'RT_{cols[0]}'], errors = 'coerce')
+                rows['RT'] = own.where(own > 0, rows['RT'])
+            named.append((rows, cls, m.name, (path.name.startswith(str(cols[0])), len(str(cols[0])))))
         else:
             # Maps whose sample columns name no run (samples, not files) apply as a whole, as in the snapshot's extraction
             general.append((df[(df[samples].apply(pd.to_numeric, errors = 'coerce') > 0).any(axis = 1)] if samples else df, cls, m.name))
@@ -170,6 +180,9 @@ def convert_run(task):
     info = dict(project = task['project'], run = path.stem, path = str(path), excluded = task['excluded'], maps = ', '.join(task['map_names']), glycan_class = str(task['glycan_class']))
     try:
         settings = dict(run_settings(task['row']), **taxonomy(task['row'].get('Species') if isinstance(task['row'].get('Species'), str) else None))
+        ends = task['mapping']['reducing_end'] if task['mapping'] is not None and 'reducing_end' in task['mapping'].columns else pd.Series(dtype = object)
+        if len(ends) and ends.notna().all() and ends.nunique() == 1 and ends.iloc[0] in REDUCING_ENDS:
+            settings['modification'] = ends.iloc[0]
         tries = [settings] if 'modification' in settings else [dict(settings, modification = 'reduced'), dict(settings, modification = 'custom', mass_tag = None)]
         def attempt(s):
             mapping, rescued = rescue_masses(task['mapping'], s) if task['mapping'] is not None else (pd.DataFrame(columns = ['Mass', 'RT', 'glycan']), 0)
@@ -179,7 +192,9 @@ def convert_run(task):
         if best[0].empty and len(best[1]) and task['mapping'] is not None and task['mapping']['glycan'].notna().any():
             # The checklist's settings label nothing although the map has structures: the derivatization and reducing end that the map's masses fit
             done = [(s['sample_prep'], s['modification']) for s in tries]
-            other = [attempt(dict(settings, sample_prep = prep, modification = end, mass_tag = None, max_charge = (4 if prep != 'underivatized' else 3) * int(np.sign(settings['max_charge']))))
+            # A sialic acid derivatization only exists on underivatized glycans
+            other = [attempt(dict({k: v for k, v in settings.items() if k != 'sialic_derivatization' or prep == 'underivatized'}, sample_prep = prep, modification = end,
+                                  mass_tag = None, max_charge = (4 if prep != 'underivatized' else 3) * int(np.sign(settings['max_charge']))))
                      for prep in ('underivatized', 'permethylated') for end in ('reduced', 'custom') if (prep, end) not in done]
             if other and max(len(r[0]) for r in other):
                 best, fitted = max(other, key = lambda r: len(r[0])), True
@@ -238,7 +253,7 @@ def collect(args):
         row = checklist.loc[project].to_dict() if project in checklist.index else {}
         for path in sorted(cc_root.joinpath(project).rglob('*.cc')):
             # Files still being downloaded or copied wait for the next scan
-            if time.time() - path.stat().st_mtime < 120:
+            if time.time() - path.stat().st_mtime < 120 or (args.exclude_runs and re.search(args.exclude_runs, path.stem)):
                 continue
             mapping, cls, names = maps_for_run(project, path, maps_dir)
             if cls is None:
@@ -254,7 +269,7 @@ def collect(args):
                 except Exception:
                     pass
             tasks.append(dict(project = project, path = str(path), out = str(out), maps = str(maps_dir), mapping = mapping, glycan_class = cls, map_names = names,
-                              row = row, stamp = st, excluded = path.stem in exclude))
+                              row = row, stamp = st, excluded = is_excluded(path.stem, exclude)))
     return tasks, skipped
 
 
@@ -265,22 +280,45 @@ def write(df, path):
     os.replace(tmp, path)
 
 
-def merge(out):
-    # Every finished run into train.pkl / pretrain/<project>.pkl (excluded runs left out) and runs.csv
+def is_excluded(stem, exclude):
+    # The download holds some files several times under suffixed names (<run>_2, _3, ...), copies of an excluded run among them
+    return stem in exclude or re.sub(r'_\d+$', '', stem) in exclude
+
+
+def merge(out, exclude, pretrain_peaks = False, exclude_runs = None):
+    # Every finished run into train.pkl / pretrain/<project>.pkl (excluded runs left out) and runs.csv; the pretraining tables leave out peak_d unless
+    # asked (the model takes model_input, the runs keep the peak lists, and orbitrap runs' peak lists made one project's table 15 GB in memory)
     out = pathlib.Path(out)
     train, infos, n_pretrain = [], [], 0
     for project in sorted(p for p in out.joinpath('runs').iterdir() if p.is_dir()):
-        pretrain = []
-        for r in sorted(project.glob('*.pkl')):
+        runs = []
+        for r in sorted(p for p in project.glob('*.pkl') if not (exclude_runs and re.search(exclude_runs, p.stem))):
             d = pd.read_pickle(r)
-            infos.append(d['info'])
-            if d['info'].get('excluded'):
+            inputs = pd.concat([d['labelled'].reset_index()[['m/z', 'RT', 'num_spectra']], d['unlabelled'].reset_index()[['m/z', 'RT', 'num_spectra']]])
+            # Copies of one acquisition have the same inputs (156 of the first 1107 runs, the .cc differing only in the embedded name)
+            key = hashlib.sha1(np.round(inputs.sort_values(['RT', 'm/z']).to_numpy(float), 3).tobytes()).hexdigest() if len(inputs) else r.stem
+            unlabelled = d['unlabelled'] if pretrain_peaks else d['unlabelled'].drop(columns = 'peak_d', errors = 'ignore')
+            runs.append((d['info'], key, d['labelled'], unlabelled))
+        # A copy of an excluded run is excluded too, and of the others only the first is merged
+        excluded_keys = {key for info, key, _, _ in runs if is_excluded(info['run'], exclude)}
+        first, pretrain = {}, []
+        for info, key, labelled, unlabelled in runs:
+            info = dict(info, excluded = key in excluded_keys, duplicate_of = first.get(key))
+            first.setdefault(key, info['run'])
+            infos.append(info)
+            if info['excluded'] or info['duplicate_of']:
                 continue
-            train.append(d['labelled'].reset_index())
-            pretrain.append(d['unlabelled'].reset_index())
+            train.append(labelled.reset_index())
+            pretrain.append(unlabelled.reset_index())
         if pretrain:
             write(pd.concat(pretrain, ignore_index = True), out / 'pretrain' / f'{project.name}.pkl')
             n_pretrain += sum(len(f) for f in pretrain)
+    # Runs whose conversion failed have no pickle; their last log line goes into runs.csv
+    log = out / 'log.csv'
+    if log.exists():
+        done = {(i['project'], i['run']) for i in infos}
+        last = pd.read_csv(log).drop_duplicates(['project', 'run'], keep = 'last')
+        infos += [r for r in last[last['status'] == 'error'].to_dict('records') if (r['project'], r['run']) not in done]
     pd.DataFrame(infos).to_csv(out / 'runs.csv', index = False)
     write(pd.concat(train, ignore_index = True) if train else pd.DataFrame(), out / 'train.pkl')
     return sum(len(f) for f in train), n_pretrain, len(infos)
@@ -297,12 +335,13 @@ def main(args):
         with ProcessPoolExecutor(max_workers = args.n_jobs, mp_context = multiprocessing.get_context('spawn'), max_tasks_per_child = 1) as pool:
             for fut in as_completed([pool.submit(convert_runs, c) for c in chunks]):
                 for info in fut.result():
-                    pd.DataFrame([info]).to_csv(log, mode = 'a', header = not log.exists(), index = False)
+                    # One column order for every line (a failed run has fewer fields, which shifted its values under other columns)
+                    pd.DataFrame([info]).reindex(columns = LOG_COLUMNS).to_csv(log, mode = 'a', header = not log.exists(), index = False)
                     print(f"  {info['project']}/{info['run']}: {info['status']}, {info.get('labelled', 0)} labelled / {info.get('inputs', 0)} inputs"
                           f" ({info.get('glycan_class')}, {info.get('maps') or 'no map'}) {info['seconds']} s" + (f" {info.get('error')}" if info['status'] == 'error' else ''), flush = True)
     # The merged tables only when a run changed (writing them takes minutes)
     if tasks or not (pathlib.Path(args.out) / 'train.pkl').exists():
-        n_train, n_pretrain, n_runs = merge(args.out)
+        n_train, n_pretrain, n_runs = merge(args.out, excluded_stems(args.exclusion), args.pretrain_peaks, args.exclude_runs)
         print(f'{n_runs} runs: {n_train} labelled inputs in train.pkl, {n_pretrain} unlabelled in pretrain/', flush = True)
 
 
@@ -316,6 +355,8 @@ if __name__ == '__main__':
     parser.add_argument('--projects', default = None, help = 'comma-separated project folders; default: all')
     parser.add_argument('--n_jobs', type = int, default = 2, help = 'runs converted in parallel (each holds one run in memory, ~1-2 GB)')
     parser.add_argument('--runs_per_process', type = int, default = 10)
+    parser.add_argument('--pretrain_peaks', action = 'store_true', help = 'keep the pooled peak lists (peak_d) in pretrain/*.pkl')
+    parser.add_argument('--exclude_runs', default = None, help = 'regular expression of run names never converted or merged (runs of another kind, e.g. glycopeptide digests)')
     parser.add_argument('--watch', type = float, default = 0, help = 'minutes between rescans for new files (0: convert once and stop)')
     args = parser.parse_args()
     # Set iteration order reaches the inputs (as in the test harness), so conversions are reproducible

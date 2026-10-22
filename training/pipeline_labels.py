@@ -13,7 +13,7 @@ from glycowork.motif.processing import canonicalize_iupac
 from glycowork.motif.tokenization import glycan_to_composition
 from candycrunch.prediction import wrap_inference
 
-SPECTRUM_COLUMNS = ['spec_id', 'peak_d', 'RT', 'rt_range', 'intensity', 'num_spectra']
+SPECTRUM_COLUMNS = ['spec_id', 'peak_d', 'RT', 'rt_range', 'intensity', 'num_spectra', 'model_input', 'RT2']
 
 
 def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_window = 1.0, **inference_kwargs):
@@ -26,26 +26,34 @@ def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_wi
    | glycan_class (string): glycan class of the run, as for wrap_inference
    | mz_tolerance (float): maximum distance between an input's m/z and a mapping Mass; default:0.5 (mapping masses are literature values)
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
-   |                    5 compositions it lists once); default:1.0 (2.0 only added labels away from the glycans' peaks)
+   |                    5 compositions it lists once; if their median deviation exceeds 1 min, the mapping counts as RT-less); default:1.0 (2.0 only added
+   |                    labels away from the glycans' peaks)
    | **inference_kwargs: further wrap_inference arguments; modification (and sample_prep, lc, ... where they differ from the defaults) have to be given,
    |                     as its reducing-end and glycan-class checks are skipped\n
    | Returns:
    | :-
-   | (1) labelled inputs: index m/z, columns spec_id (pooled spectrum), peak_d, RT, rt_range, intensity, num_spectra, precursor_charge (the input's charge),
-   |     composition, annotation_score, glycan (structure of the nearest-RT mapping row), glycan_candidates (every structure of the input's composition the
-   |     mapping lists within rt_window, nearest RT first: the label as a candidate set), glycan_match_status ('unique' or 'candidates'), and the settings the
-   |     model encodes, as CandyCrunch passes them at inference: mode, trap, lc_type, modification; attrs['rt_shift'] holds the shift applied to the mapping's RTs
-   | (2) unlabelled pooled spectra (for pretraining), one row per spectrum that got no label: index m/z, the spectrum columns of (1), compositions and
-   |     charges (every candidate composition of the spectrum and its charge), and the settings columns
+   | (1) labeled inputs: index m/z, columns spec_id (pooled spectrum), peak_d, RT, rt_range, intensity, num_spectra, model_input (the spectrum as the model
+   |     got it: float32 rows of bin index, binned intensity and m/z remainder of each non-empty bin), RT2 (the RT as the model got it), precursor_charge
+   |     (the input's charge), composition, compositional_vector and glycan_type (as the model got them), annotation_score, glycan (structure of the
+   |     nearest-RT mapping row), glycan_candidates (every structure of the input's composition the mapping lists within rt_window, nearest RT first: the
+   |     label as a candidate set), glycan_match_status ('unique' or 'candidates'), and the settings the model encodes, as CandyCrunch passes them at
+   |     inference: mode, trap, lc_type, modification; attrs['rt_shift'] holds the shift applied to the mapping's RTs
+   | (2) unlabelled pooled spectra (for pretraining), one row per spectrum that got no label: index m/z, the spectrum columns of (1), compositions,
+   |     compositional_vectors, glycan_types and charges (per candidate composition of the spectrum), and the settings columns
    """
     inputs = wrap_inference(spectra_filepath, glycan_class, return_inputs = True, **inference_kwargs)
     settings_columns = ['mode', 'trap', 'lc_type', 'modification']
     if inputs.empty:
         # A run without inputs (no MS2 spectrum with a candidate composition, e.g. the GPI glycan infusions of GPST000193)
         empty = lambda columns: pd.DataFrame(columns = columns, index = pd.Index([], name = 'm/z'))
-        return (empty(SPECTRUM_COLUMNS + ['precursor_charge', 'composition', 'annotation_score', 'glycan', 'glycan_candidates', 'glycan_match_status'] + settings_columns),
-                empty(SPECTRUM_COLUMNS + ['compositions', 'charges'] + settings_columns))
+        return (empty(SPECTRUM_COLUMNS + ['precursor_charge', 'composition', 'compositional_vector', 'glycan_type', 'annotation_score', 'glycan', 'glycan_candidates',
+                                          'glycan_match_status'] + settings_columns),
+                empty(SPECTRUM_COLUMNS + ['compositions', 'compositional_vectors', 'glycan_types', 'charges'] + settings_columns))
     settings = inputs.attrs
+    # The model gets the mean of the pooled spectra's binned intensities and m/z remainders, which the pooled peak_d cannot give back; kept sparse, as a
+    # float32 array of the bin index, binned intensity and m/z remainder of each non-empty bin (dense, an input takes 32 KB)
+    inputs['model_input'] = [np.vstack([np.flatnonzero(k), b[k], r[k]]).astype(np.float32) for b, r in zip(inputs['binned_intensities'], inputs['mz_remainder'])
+                             for k in [(b != 0) | (r != 0)]]
     rows = mapping[mapping['glycan'].notna() & mapping['Mass'].notna()]
     rts = pd.to_numeric(rows['RT'], errors = 'coerce') if 'RT' in rows.columns else pd.Series(np.nan, index = rows.index)
     keys, structures, masses, map_rts = [], [], [], []
@@ -81,8 +89,9 @@ def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_wi
             if hit is not None:
                 offsets.append(inputs['RT'].iloc[hit] - map_rts[k])
     rt_shift = float(np.median(offsets)) if len(offsets) >= 5 else 0.0
-    if rt_shift and np.median(np.abs(np.array(offsets) - rt_shift)) > 1.0:
-        rt_shift = 0.0
+    # Anchors that disagree mean the mapping's RTs come from another gradient or LC than the run, so its rows count as RT-less
+    if len(offsets) >= 5 and np.median(np.abs(np.array(offsets) - np.median(offsets))) > 1.0:
+        rt_shift, map_rts = 0.0, np.full(len(map_rts), np.nan)
     map_rts = map_rts + rt_shift
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
     near = [[k for k in np.flatnonzero(np.abs(masses - mz) <= mz_tolerance) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
@@ -116,10 +125,12 @@ def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_wi
     labelled = labelled[~labelled['spec_id'].duplicated()].sort_values('order')
     labelled = labelled.assign(glycan = [c[0] for c in labelled['glycan_candidates']],
                                glycan_match_status = ['unique' if len(c) == 1 else 'candidates' for c in labelled['glycan_candidates']])
-    labelled = labelled[SPECTRUM_COLUMNS + ['precursor_charge', 'composition', 'annotation_score', 'glycan', 'glycan_candidates', 'glycan_match_status'] + settings_columns]
+    labelled = labelled[SPECTRUM_COLUMNS + ['precursor_charge', 'composition', 'compositional_vector', 'glycan_type', 'annotation_score', 'glycan', 'glycan_candidates',
+                                            'glycan_match_status'] + settings_columns]
     rest = inputs[~inputs['spec_id'].isin(labelled['spec_id'])].sort_values('order')
     unlabelled = rest.reset_index().groupby('spec_id', sort = False).agg(**{'m/z': ('m/z', 'first')}, **{c: (c, 'first') for c in SPECTRUM_COLUMNS[1:] + settings_columns},
-                                                                       compositions = ('composition', list), charges = ('precursor_charge', list))
-    unlabelled = unlabelled.reset_index().set_index('m/z')[SPECTRUM_COLUMNS + ['compositions', 'charges'] + settings_columns]
+                                                                       compositions = ('composition', list), compositional_vectors = ('compositional_vector', list),
+                                                                       glycan_types = ('glycan_type', list), charges = ('precursor_charge', list))
+    unlabelled = unlabelled.reset_index().set_index('m/z')[SPECTRUM_COLUMNS + ['compositions', 'compositional_vectors', 'glycan_types', 'charges'] + settings_columns]
     labelled.attrs['rt_shift'] = rt_shift
     return labelled, unlabelled
