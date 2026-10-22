@@ -41,6 +41,7 @@ from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads,
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2
 from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, read_raw_packet, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
+
 this_dir = os.path.dirname(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
     glycans = pickle.load(f)
