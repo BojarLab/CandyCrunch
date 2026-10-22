@@ -150,3 +150,7 @@ class CandyCrunch_CNN(torch.nn.Module):
         if rep:
             return comb, comb_rep
         return comb
+
+class CandyCrunch_CNN2(torch.nn.Module):
+    """Will be added in future"""
+    pass

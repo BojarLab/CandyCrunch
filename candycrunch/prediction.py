@@ -47,16 +47,23 @@ with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
 with open(os.path.join(this_dir, 'glytoucan_mapping.pkl'), 'rb') as f:
     glytoucan_mapping = pickle.load(f)
 sdict = os.path.join(this_dir, 'candycrunch.pt')
+checkpoint_path = pathlib.Path(this_dir).parent / 'training' / 'models' / 'CandyCrunch_CNN2_ShCl_GShS_CMLOSS_NoCS_full20261021.pt'
+bin_num = 2048
+temperature = 1.15
+comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
 if torch is not None:
+    from candycrunch.checkpoint import load_checkpoint
+
     # Choose the correct computing architecture
     device = "cpu"
     if torch.cuda.is_available():
         device = "cuda:0"
-    sdict = torch.load(sdict, map_location = device, weights_only = True)
-    sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
-    candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12).to(device)
-    candycrunch.load_state_dict(sdict)
-    candycrunch = candycrunch.eval()
+    checkpoint = load_checkpoint(checkpoint_path, device = device)
+    candycrunch = checkpoint['model']
+    glycans = checkpoint['glycans']
+    bin_num = checkpoint['bin_num']
+    comp_vector_order = checkpoint['comp_vector_order']
+    temperature = checkpoint['temperature']
 else:
     candycrunch = CandyCrunchCNN(load_weights(sdict))
 _trapezoid = getattr(np, 'trapezoid', None) or np.trapz
@@ -74,8 +81,7 @@ MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'orbitrap': 'orbitrap', 'fourier tra
                         'ft-icr': 'orbitrap', 'ion trap': 'linear',
                         'time-of-flight': 'other', 'tof': 'other'}
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
-temperature = torch.Tensor([1.15]).to(device) if torch is not None else 1.15
-comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
+temperature = torch.Tensor([temperature]).to(device) if torch is not None else temperature
 MZ_REF = 1600  # reference m/z used internally to turn the user's single ppm tolerance into the flat-Da window for binning/fragments; corresponds to ~0.5 Da at 300ppm
 ISOTOPE_SPACING = 1.003355  # 13C - 12C
 # Whether Python's sum adds floats with compensation (from 3.12), which numpy versions of it have to follow to be bitwise identical
@@ -2272,7 +2278,8 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
                if isinstance(comps[j], dict) and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff and (abund is None or abund[j] > abund[k])
                and any(all(comps[k].get(r, 0) - comps[j].get(r, 0) == d.get(r, 0) for r in set(comps[k]) | set(comps[j]) | set(d)) for d in isobars)]
         if iso:
-            reps[k] = reps[iso[0]]
+            # with the rows it represents (its other spectra), which would otherwise keep it as their representative
+            reps[(reps == k) | (np.arange(len(reps)) == k)] = reps[iso[0]]
     dedup_df = df.iloc[pd.unique(reps)].copy()
     if abund is not None:
         # A representative carries the abundance of the rows it represents, so a row linking two representatives is not counted twice
@@ -3496,7 +3503,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # With accurate survey scans, a row noted as an in-source fragment (a Y-type substructure whose trace is a scaled copy of its parent's, at the parent's
     # apex, at most a third of it) is that fragment, not a glycan of the sample. Only if the scans were read: an xlsx is marked orbitrap without them, and
     # its abundance-only note dropped real glycans (GPST000578 0.938 -> 0.885, GPST000651 0.761 -> 0.753)
-    if accurate_ms1 and ms1 is not None and len(ms1[0]) > 0 and 'notes' in df_out.columns:
+    if accurate_ms1 and ms1 is not None and len(ms1[0]) > 0 and 'notes' in df_out.columns and len(df_out):
         df_out = df_out[~df_out['notes'].fillna('').str.contains('Possible in-source fragment', regex = False).values]
     elif mode == 'positive' and 'notes' in df_out.columns and 'top_fragments' in df_out.columns and len(df_out):
         # Without accurate survey scans the note alone dropped real glycans, but in positive mode a noted row that its parent's own MS2 makes as one of its
@@ -3712,7 +3719,7 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
     return out
 
 
-def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, bin_num = 2048,
+def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, bin_num = bin_num,
                    max_charge = -3, frag_num = 100, modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear',
                    rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False,
@@ -4557,7 +4564,7 @@ def acidic_count(composition):
 
 
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers = 5, model = candycrunch,
-                         glycans = glycans, bin_num = 2048, max_charge = -3,
+                         glycans = glycans, bin_num = bin_num, max_charge = -3,
                          frag_num = 100, modification = 'reduced', mass_tag = None, lc = 'PGC',
                          trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                          pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False,
@@ -4954,7 +4961,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             for c, rt in zip(df_out['composition'], df_out['RT']):
                 if isinstance(c, dict):
                     comp_rts[stringify_dict(c)].append(rt)
-            # A gap peak k/z above a co-eluting precursor of this file at least half as intense (k = 1-3, same charge) is that precursor's 13C isotope peak:
+            # A gap peak k/z above a co-eluting precursor of this file at least a quarter as intense (k = 1-3, same charge) is that precursor's 13C isotope peak
+            # (the gap's monoisotopic window then also holds the precursor's own M, so its apex can be twice the precursor's or more for large z = 2 glycans):
             # replacing one Neu5Ac by two dHex adds 1.02 Da, so many compositions sit there. Of the gap rows of one composition (at any charge) on one peak
             # only the most intense stays (ion traps scatter a precursor over several m/z clusters, and each of them would fill that peak again)
             own_z = np.abs(own['charge'].values.astype(float)) if len(own) else np.zeros(0)
@@ -4964,7 +4972,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 if not is_peak[i] or apex_ints[i] < floor or (np.abs(own_rts.get(row['mass_label'], np.zeros(0)) - apex_rt) <= rt_diff).any():
                     continue
                 z = abs(int(row['repr_charge'])) or 1
-                near = (own_z == z) & (np.abs(own['RT'].values - apex_rt) <= rt_diff) & (own_apex >= 0.5 * apex_ints[i]) if len(own) else np.zeros(0, dtype = bool)
+                near = (own_z == z) & (np.abs(own['RT'].values - apex_rt) <= rt_diff) & (own_apex >= 0.25 * apex_ints[i]) if len(own) else np.zeros(0, dtype = bool)
                 if any((np.abs(row['repr_mz'] - own.index.values[near] - k * 1.00336 / z) <= mass_tolerance / 2).any() for k in (1, 2, 3)):
                     continue
                 if isinstance(row['repr_composition'], dict):
