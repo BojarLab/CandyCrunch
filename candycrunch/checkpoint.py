@@ -3,7 +3,6 @@ from pathlib import Path
 import torch
 from candycrunch.model import CandyCrunch_CNN, CandyCrunch_CNN2
 
-
 def load_checkpoint(model_path, device=None, temperature=1.15):
     """Return keyword arguments for prediction.wrap_inference or wrap_inference_batch.
 
