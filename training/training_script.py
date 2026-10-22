@@ -115,7 +115,20 @@ dist = dist*1000*50
 dist3 = torch.tensor(dist).to(device)
 
 print("Preparing the model")
-model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = len(comp_vector_order))
+model_kwargs = {"input_dim": 2048, "num_classes": len(glycans), "input_precursor_dim": len(comp_vector_order)}
+model = CandyCrunch_CNN(**model_kwargs)
+checkpoint_metadata = {
+  "checkpoint_version": 5,
+  "model_class": type(model).__name__,
+  "model_type": "CNN",
+  "model_kwargs": model_kwargs,
+  "glycans": list(glycans),
+  "comp_vector_order": list(comp_vector_order),
+  "setting_name": "CandyCrunch_example_script",
+  "feature_columns": ["binned_intensities", "mz_remainder", "reducing_mass", "glycan_type", "RT", "mode",
+                      "lc", "modification", "trap"],
+  "loss_function": "custom_loss",
+}
 model = model.apply(lambda module: init_weights(module, mode = 'kaiming'))
 if torch.cuda.device_count() > 1:
   print("Let's use", torch.cuda.device_count(), "GPUs!")
@@ -128,6 +141,4 @@ criterion = custom_loss(primary_loss,dist2,dist3).to(device)
 
 print("Start training")
 model_ft = train_model(model, 'CandyCrunch_example_script',dataloaders, criterion, optimizer_ft, scheduler, glycans, num_epochs = 20,
-                       patience = 12)
-                       
-torch.save(model_ft.state_dict(), f'./CandyCrunch_example_script.pt')
+                       patience = 12, checkpoint_metadata = checkpoint_metadata)

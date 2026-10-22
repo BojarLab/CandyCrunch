@@ -38,7 +38,7 @@ class custom_loss(torch.nn.Module):
         
         
 def train_model(model, model_name, dataloaders, criterion, optimizer,
-                scheduler, glycans, num_epochs = 25, patience = 50):
+                scheduler, glycans, num_epochs = 25, patience = 50, checkpoint_metadata = None):
   """trains a deep learning model on predicting glycan properties\n
   | Arguments:
   | :-
@@ -47,6 +47,7 @@ def train_model(model, model_name, dataloaders, criterion, optimizer,
   | criterion (PyTorch object): PyTorch loss function
   | optimizer (PyTorch object): PyTorch optimizer
   | scheduler (PyTorch object): PyTorch learning rate decay
+  | checkpoint_metadata (dict): model settings and vocabularies saved with the weights; default:None
   | num_epochs (int): number of epochs for training; default:25
   | patience (int): number of epochs without improvement until early stop; default:50\n
   | Returns:
@@ -180,4 +181,8 @@ def train_model(model, model_name, dataloaders, criterion, optimizer,
   plt.legend()
   plt.savefig(f'{model_name}_metric_plots.png')
   model.load_state_dict(best_model_wts)
+  checkpoint_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+  checkpoint = dict(checkpoint_metadata or {})
+  checkpoint['state_dict'] = checkpoint_model.state_dict()
+  torch.save(checkpoint, f'{model_name}.pt')
   return model
