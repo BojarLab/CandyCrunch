@@ -2272,7 +2272,8 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
                if isinstance(comps[j], dict) and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff and (abund is None or abund[j] > abund[k])
                and any(all(comps[k].get(r, 0) - comps[j].get(r, 0) == d.get(r, 0) for r in set(comps[k]) | set(comps[j]) | set(d)) for d in isobars)]
         if iso:
-            reps[k] = reps[iso[0]]
+            # with the rows it represents (its other spectra), which would otherwise keep it as their representative
+            reps[(reps == k) | (np.arange(len(reps)) == k)] = reps[iso[0]]
     dedup_df = df.iloc[pd.unique(reps)].copy()
     if abund is not None:
         # A representative carries the abundance of the rows it represents, so a row linking two representatives is not counted twice
@@ -3496,7 +3497,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # With accurate survey scans, a row noted as an in-source fragment (a Y-type substructure whose trace is a scaled copy of its parent's, at the parent's
     # apex, at most a third of it) is that fragment, not a glycan of the sample. Only if the scans were read: an xlsx is marked orbitrap without them, and
     # its abundance-only note dropped real glycans (GPST000578 0.938 -> 0.885, GPST000651 0.761 -> 0.753)
-    if accurate_ms1 and ms1 is not None and len(ms1[0]) > 0 and 'notes' in df_out.columns:
+    if accurate_ms1 and ms1 is not None and len(ms1[0]) > 0 and 'notes' in df_out.columns and len(df_out):
         df_out = df_out[~df_out['notes'].fillna('').str.contains('Possible in-source fragment', regex = False).values]
     elif mode == 'positive' and 'notes' in df_out.columns and 'top_fragments' in df_out.columns and len(df_out):
         # Without accurate survey scans the note alone dropped real glycans, but in positive mode a noted row that its parent's own MS2 makes as one of its
@@ -4954,7 +4955,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             for c, rt in zip(df_out['composition'], df_out['RT']):
                 if isinstance(c, dict):
                     comp_rts[stringify_dict(c)].append(rt)
-            # A gap peak k/z above a co-eluting precursor of this file at least half as intense (k = 1-3, same charge) is that precursor's 13C isotope peak:
+            # A gap peak k/z above a co-eluting precursor of this file at least a quarter as intense (k = 1-3, same charge) is that precursor's 13C isotope peak
+            # (the gap's monoisotopic window then also holds the precursor's own M, so its apex can be twice the precursor's or more for large z = 2 glycans):
             # replacing one Neu5Ac by two dHex adds 1.02 Da, so many compositions sit there. Of the gap rows of one composition (at any charge) on one peak
             # only the most intense stays (ion traps scatter a precursor over several m/z clusters, and each of them would fill that peak again)
             own_z = np.abs(own['charge'].values.astype(float)) if len(own) else np.zeros(0)
@@ -4964,7 +4966,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 if not is_peak[i] or apex_ints[i] < floor or (np.abs(own_rts.get(row['mass_label'], np.zeros(0)) - apex_rt) <= rt_diff).any():
                     continue
                 z = abs(int(row['repr_charge'])) or 1
-                near = (own_z == z) & (np.abs(own['RT'].values - apex_rt) <= rt_diff) & (own_apex >= 0.5 * apex_ints[i]) if len(own) else np.zeros(0, dtype = bool)
+                near = (own_z == z) & (np.abs(own['RT'].values - apex_rt) <= rt_diff) & (own_apex >= 0.25 * apex_ints[i]) if len(own) else np.zeros(0, dtype = bool)
                 if any((np.abs(row['repr_mz'] - own.index.values[near] - k * 1.00336 / z) <= mass_tolerance / 2).any() for k in (1, 2, 3)):
                     continue
                 if isinstance(row['repr_composition'], dict):

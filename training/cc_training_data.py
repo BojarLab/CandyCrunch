@@ -75,8 +75,9 @@ def maps_for_run(project, path, maps_dir):
     for m in maps:
         df = pd.read_csv(m, encoding = 'utf-8-sig')
         cls = SUFFIX_CLASSES.get(m.stem[len(f'df_mz_{project}'):].lstrip('_').split('_')[0])
-        # A map of another class than the run name says (N-glycan maps for an O-glycan run of the same samples) is not the run's
-        if hint and cls and cls != hint:
+        # A map of another class than the run name says (N-glycan maps for an O-glycan run of the same samples) is not the run's, unless a column is the run
+        # itself (the O-glycans of an N-glycan fraction)
+        if hint and cls and cls != hint and path.stem not in map(str, df.columns):
             continue
         per_run = [c for c in df.columns if str(c).startswith('RT_')]
         if per_run and 'RT' not in df.columns:

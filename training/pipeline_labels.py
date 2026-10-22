@@ -11,7 +11,7 @@ import pandas as pd
 from glycowork.glycan_data.loader import stringify_dict
 from glycowork.motif.processing import canonicalize_iupac
 from glycowork.motif.tokenization import glycan_to_composition
-from candycrunch.prediction import wrap_inference
+from candycrunch.prediction import acidic_count, wrap_inference
 
 SPECTRUM_COLUMNS = ['spec_id', 'peak_d', 'RT', 'rt_range', 'intensity', 'num_spectra', 'model_input', 'RT2']
 
@@ -26,8 +26,9 @@ def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_wi
    | glycan_class (string): glycan class of the run, as for wrap_inference
    | mz_tolerance (float): maximum distance between an input's m/z and a mapping Mass; default:0.5 (mapping masses are literature values)
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
-   |                    5 compositions it lists once; if their median deviation exceeds 1 min, the mapping counts as RT-less); default:1.0 (2.0 only added
-   |                    labels away from the glycans' peaks)
+   |                    5 compositions it lists once; if their median deviation exceeds 1 min, the mapping counts as RT-less; with at least 10 of them, as a
+   |                    function of RT and of the number of charged residues where that fits them better); default:1.0 (2.0 only added labels away from the
+   |                    glycans' peaks)
    | **inference_kwargs: further wrap_inference arguments; modification (and sample_prep, lc, ... where they differ from the defaults) have to be given,
    |                     as its reducing-end and glycan-class checks are skipped\n
    | Returns:
@@ -82,17 +83,39 @@ def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_wi
     for i in by_intensity:
         if passing[i] and single.get(input_keys[i]) == 1:
             first.setdefault(input_keys[i], []).append(i)
-    offsets = []
+    offsets, anchor_rts, anchor_acid = [], [], []
     for k in range(len(keys)):
         if not np.isnan(map_rts[k]) and single[keys[k]] == 1:
             hit = next((i for i in first.get(keys[k], []) if abs(inputs.index[i] - masses[k]) <= mz_tolerance), None)
             if hit is not None:
                 offsets.append(inputs['RT'].iloc[hit] - map_rts[k])
+                anchor_rts.append(map_rts[k])
+                anchor_acid.append(acidic_count(dict(keys[k])))
     rt_shift = float(np.median(offsets)) if len(offsets) >= 5 else 0.0
+    n_acid = np.array([acidic_count(dict(k)) for k in keys], dtype = float)
+    row_shift = np.full(len(map_rts), rt_shift)
     # Anchors that disagree mean the mapping's RTs come from another gradient or LC than the run, so its rows count as RT-less
     if len(offsets) >= 5 and np.median(np.abs(np.array(offsets) - np.median(offsets))) > 1.0:
         rt_shift, map_rts = 0.0, np.full(len(map_rts), np.nan)
-    map_rts = map_rts + rt_shift
+    elif len(offsets) >= 10:
+        # On PGC the offset also moves with retention time and with every charged residue (on study maps, after the median shift, up to 88% of the
+        # disialylated rows of a map sat over 1 min off), so with >= 10 anchors it is fitted as in wrap_inference_batch: a + b * RT + c * acidic residues,
+        # each term only where the anchors span it, iteratively reweighted from the median (Huber, then Tukey's biweight), and used if its anchors scatter less
+        y, x, a = np.array(offsets), np.array(anchor_rts), np.array(anchor_acid, dtype = float)
+        use_rt, use_acid = bool(np.percentile(x, 90) - np.percentile(x, 10) >= 5), bool((a == 0).sum() >= 3 and (a > 0).sum() >= 3)
+        if use_rt or use_acid:
+            X, r = np.column_stack([np.ones(len(y))] + [x] * use_rt + [a] * use_acid), y - np.median(y)
+            for it in range(30):
+                u = np.abs(r) / (1.4826 * np.median(np.abs(r)) + 0.01)
+                w = np.sqrt(np.clip(1.345 / np.maximum(u, 1e-9), 0, 1) if it < 20 else np.clip(1 - (u / 4.685) ** 2, 0, None) ** 2)
+                beta = np.linalg.lstsq(X * w[:, None], y * w, rcond = None)[0]
+                r = y - X @ beta
+            if np.median(np.abs(r)) < np.median(np.abs(y - np.median(y))):
+                coefs = iter(beta[1:])
+                b, c = float(next(coefs)) if use_rt else 0.0, float(next(coefs)) if use_acid else 0.0
+                row_shift = beta[0] + b * np.clip(map_rts, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
+                rt_shift = float(np.nanmedian(row_shift[~np.isnan(map_rts)]))
+    map_rts = map_rts + row_shift
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
     near = [[k for k in np.flatnonzero(np.abs(masses - mz) <= mz_tolerance) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
             for mz, rt, key in zip(inputs.index, inputs['RT'], input_keys)]
