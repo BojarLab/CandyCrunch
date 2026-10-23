@@ -384,8 +384,9 @@ def read_raw_scan_table(filepath):
    | Returns:
    | :-
    | Returns the scan table as a list per column, one entry per scan: scan, ms_level, polarity, scan_mode, analyzer, filter_string (isolation m/z,
-   | activation and energy of each stage, e.g., 1022.4700@etd50.00), precursor_mz, charge, isolation_width, master_scan, retention_time, and packet
-   | (the file offset of the scan's data packet, for read_raw_packet)
+   | activation and energy of each stage, e.g., 1022.4700@etd50.00), precursor_mz, charge, isolation_width, master_scan, retention_time, scan_range
+   | ((lowest, highest) m/z of its scan windows; an ion-trap MS2's lower limit is its low-mass cutoff), and packet (the file offset of the scan's data
+   | packet, for read_raw_packet)
    """
     with open(filepath, 'rb') as f:
         head = f.read(1356)
@@ -470,7 +471,7 @@ def read_raw_scan_table(filepath):
         raise ValueError(f"{filepath} stores its scan events in a layout CandyCrunch does not know; convert it to mzML with ThermoRawFileParser or "
                          f"msconvert first.")
     table = {key: [] for key in ['scan', 'ms_level', 'polarity', 'scan_mode', 'analyzer', 'filter_string', 'precursor_mz', 'charge',
-                                 'isolation_width', 'master_scan', 'retention_time', 'packet']}
+                                 'isolation_width', 'master_scan', 'retention_time', 'scan_range', 'packet']}
     for i, s in enumerate(starts):
         level = max(stream[s + 6], 1)
         # MS1 events of some orbitraps carry their scan range as a reaction
@@ -496,6 +497,10 @@ def read_raw_scan_table(filepath):
         table['isolation_width'].append(ms2_width or msn_width)
         table['master_scan'].append(master)
         table['retention_time'].append(float(index['rt'][i]))
+        # The scan windows (two doubles each) after the reactions
+        w = s + preamble + 4 + reaction * int.from_bytes(stream[s + preamble:s + preamble + 4], 'little')
+        windows = [struct.unpack_from('<2d', stream, w + 4 + 16 * k) for k in range(int.from_bytes(stream[w:w + 4], 'little'))]
+        table['scan_range'].append((min(lo for lo, _ in windows), max(hi for _, hi in windows)) if windows else None)
         table['packet'].append(data_addr + int(index['offset'][i]))
     return table
 

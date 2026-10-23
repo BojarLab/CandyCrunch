@@ -96,6 +96,12 @@ MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'orbitrap': 'orbitrap', 'fourier tra
                         'ft-icr': 'orbitrap', 'ion trap': 'linear',
                         'time-of-flight': 'other', 'tof': 'other'}
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
+# What the spectra readers (.raw, mzML, mzXML, timsTOF and ion trap .d) record of each MS2 spectrum besides what the pipeline uses (for training data and
+# audits, kept in .cc files), each as far as its files hold it (else None): its analyzer (as the trap setting names it, 'tof' for time-of-flight),
+# polarity ('+'/'-'), collision energy, isolation width, the lower end of its scan range (an ion trap's low-mass cutoff) and how far refinement from
+# the survey scans moved its precursor (header m/z less m/z). Constant columns and the
+# mostly zero shift cost a .cc next to nothing; the scan range's upper end (+0.07%) and the header m/z itself (+0.15%) were left out
+SPECTRUM_DETAILS = ['analyzer', 'polarity', 'collision_energy', 'isolation_width', 'scan_low', 'header_shift']
 temperature = torch.Tensor([temperature]).to(device) if torch is not None else temperature
 MZ_REF = 1600  # reference m/z used internally to turn the user's single ppm tolerance into the flat-Da window for binning/fragments; corresponds to ~0.5 Da at 300ppm
 ISOTOPE_SPACING = 1.003355  # 13C - 12C
@@ -264,11 +270,11 @@ def process_mzML_stack(filepath, num_peaks = 1000,
    | :-
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan (the scan= number of the native
    | spectrum ID, else the whole ID), and activation ('CID', 'HCD', 'ETD', 'ECD', 'EThcD', 'ETciD', the fragmentation_method values of CandyCrumbs,
-   | with EAD as 'ECD' for its c/z ions; None if not stated), and, if the file has MS3 spectra, ms3 (a list of (MS3 precursor m/z, peak dictionary)
-   | tuples per MS2 spectrum); attrs detected_mode, detected_trap (MS2 analyzer), and detected_ms1_trap (survey scan analyzer)
+   | with EAD as 'ECD' for its c/z ions; None if not stated), the SPECTRUM_DETAILS, and, if the file has MS3 spectra, ms3 (a list of (MS3 precursor m/z,
+   | peak dictionary) tuples per MS2 spectrum); attrs detected_mode, detected_trap (MS2 analyzer), and detected_ms1_trap (survey scan analyzer)
    """
     highest_i_dict = {}
-    rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
+    rts, intensities, mzs, charges, scans, activations, details = [], [], [], [], [], [], []
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, thermo = [], [], [], [], [], []
     ms3s, row_of, tims = [], {}, False
@@ -349,11 +355,18 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                 # glycoproteomics runs; the scan= number of the native ID, else the native ID itself
                 scans.append(int(m.group(1)) if (m := re.search(r'\bscan=(\d+)', native_id)) else native_id)
                 # EThcD/ETciD are written as their own terms or as ETD plus a (supplemental) beam-type or resonance collisional activation
-                terms = {cv.get('accession', '') for cv in spectrum['element'].iter('{http://psi.hupo.org/ms/mzml}cvParam')}
+                params = {cv.get('accession', ''): cv.get('value') for cv in spectrum['element'].iter('{http://psi.hupo.org/ms/mzml}cvParam')}
+                terms = set(params)
                 etd, hcd, cid = 'MS:1000598' in terms, {'MS:1000422', 'MS:1002481', 'MS:1002678'}, {'MS:1000133', 'MS:1000433', 'MS:1002679'}
                 activations.append('EThcD' if 'MS:1002631' in terms or (etd and terms & hcd) else
                                    'ETciD' if 'MS:1003182' in terms or (etd and terms & cid) else 'ETD' if etd else
                                    'ECD' if terms & {'MS:1000250', 'MS:1003294'} else 'HCD' if terms & hcd else 'CID' if terms & cid else None)
+                # SPECTRUM_DETAILS: analyzer by filter string or instrument configuration, collision energy, isolation window offsets, scan window lower limit;
+                # header_shift holds the header m/z until refinement
+                number = lambda *accessions: sum(float(params[a]) for a in accessions) if all(params.get(a) for a in accessions) else None
+                details.append(({'ITMS': 'linear', 'FTMS': 'orbitrap'}.get((params.get('MS:1000512') or '')[:4]) or ('tof' if tof else next(
+                    (t for a, t in ANALYZER_TRAPS.items() if a in spectrum['instrument']), None)), '-' if 'MS:1000129' in terms else '+' if 'MS:1000130' in terms else None,
+                                number('MS:1000045'), number('MS:1000828', 'MS:1000829'), number('MS:1000501'), mzs[-1]))
                 raw_charge = spectrum['precursor'].get('charge', None)
                 # Some vendor software defaults to charge=1 when undetermined, but Thermo files (filter string) only carry a charge state the
                 # instrument determined from resolved isotopes (orbitrap survey or zoom scans), so their charge 1 is kept, as is the one of timsTOF
@@ -385,6 +398,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     if intensity:
         df_out['intensity'] = intensities
     df_out['scan'], df_out['activation'] = scans, activations
+    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
     # Each MS2 spectrum's MS3 spectra as (MS3 precursor m/z, peak dictionary) tuples; files without MS3 get no column
     if any(ms3s):
         df_out['ms3'] = ms3s
@@ -423,6 +437,7 @@ def process_mzML_stack(filepath, num_peaks = 1000,
                                             mz_tolerance = 0.02, isotope_tolerance = 0.02, charges = charges, isolation_mz = True, max_lighter = 2)
             df_out['m/z'] = [w if c and abs(w - m) > ISOTOPE_SPACING / c / 2 else m for w, m, c in zip(walked, df_out['m/z'], charges)]
     df_out = df_out[~drop].reset_index(drop = True)
+    df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
     df_out.attrs['detected_ms1_trap'] = detected_ms1_trap
@@ -442,11 +457,11 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
    | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
-   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, and activation as in
-   | process_mzML_stack
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, activation and the
+   | SPECTRUM_DETAILS as in process_mzML_stack
     """
     highest_i_dict = {}
-    rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], []
+    rts, intensities, mzs, charges, scans, activations, details = [], [], [], [], [], [], []
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine = [], [], [], [], []
     ms3s, row_of, isolation_mz = [], {}, False
@@ -492,6 +507,11 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
                 # mzXML names the method itself; ambiguous ones (ETD+SA) stay None
                 activations.append({k.upper(): k for k in PEPTIDE_ION_TYPES if k}.get(
                     str(spectrum['precursorMz'][0].get('activationMethod')).upper()))
+                # SPECTRUM_DETAILS from the scan's attributes (startMz begins its scan range); header_shift holds the header m/z until refinement
+                number = lambda v: float(v) if v not in (None, '') else None
+                trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(str(spectrum.get('filterLine', ''))[:4]) or next((t for a, t in MZXML_ANALYZER_TRAPS.items() if a in spectrum['instrument']), None)
+                details.append(({'other': 'tof'}.get(trap, trap), spectrum.get('polarity') if spectrum.get('polarity') in ('+', '-') else None,
+                                number(spectrum.get('collisionEnergy')), number(spectrum['precursorMz'][0].get('windowWideness')), number(spectrum.get('startMz')), mzs[-1]))
                 raw_charge = spectrum['precursorMz'][0].get('precursorCharge', None)
                 # As in process_mzML_stack, a charge 1 is only kept from Thermo files (filter line), and precursors without one are refined
                 if raw_charge is not None and abs(int(raw_charge)) == 1 and 'filterLine' not in spectrum:
@@ -527,11 +547,13 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
     # Bruker survey scans often show M+1 above the envelope of an average glycan (M+1/M 0.74-1.1 for a 1933 Da [M-2H]2-), so a lighter isotope explaining
     # 30% of the trigger peak counts (precursors within 0.1 m/z of their GT glycan: 84% at 70%, 93% at 50%, 97% at 30%)
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine, mz_tolerance = 0.6 if isolation_mz else 0.3,
                                               min_explained = 0.3 if isolation_mz else 0.7, charges = charges, isolation_mz = isolation_mz)
     df_out = df_out[~drop].reset_index(drop = True)
+    df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
     df_out.attrs['detected_ms1_trap'] = detected_ms1_trap
@@ -551,11 +573,12 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
    | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
-   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, and activation as in
-   | process_mzML_stack; precursor m/z, charge and intensity follow ThermoRawFileParser, which converted the mzML files CandyCrunch was validated on
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, activation and the
+   | SPECTRUM_DETAILS as in process_mzML_stack; precursor m/z, charge and intensity follow ThermoRawFileParser, which converted the mzML files CandyCrunch
+   | was validated on
    """
     table = read_raw_scan_table(filepath)
-    peak_ds, rts, intensities, mzs, charges, scans, activations = [], [], [], [], [], [], []
+    peak_ds, rts, intensities, mzs, charges, scans, activations, details = [], [], [], [], [], [], [], []
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
     # One handle for the packets of every scan (opening the file per scan took a quarter of the reading time)
@@ -620,6 +643,11 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         # Supplemental activation without a named method (ETD + sa) is ambiguous, as in process_mzXML_stack
         activations.append('EThcD' if etd and 'hcd' in methods else 'ETciD' if etd and 'cid' in methods else None if etd and ' sa ' in filt else
                            'ETD' if etd else 'ECD' if 'ecd' in methods else 'HCD' if 'hcd' in methods else 'CID' if 'cid' in methods else None)
+        # SPECTRUM_DETAILS; the collision energy is the stage's collisional one (an EThcD stage's supplemental HCD); header_shift holds the header m/z
+        # until refinement
+        energy = re.findall(r'@(?:cid|hcd)([\d.]+)', stage[-1][1]) if stage else []
+        details.append(({'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(table['analyzer'][i], 'other'), table['polarity'][i], float(energy[0]) if energy else None,
+                        table['isolation_width'][i], (table['scan_range'][i] or (None,))[0], precursor_mz))
         raw_charge = table['charge'][i]
         ms1_scans.append(len(ms1_rts) - 1)
         refine.append(raw_charge is None)
@@ -651,6 +679,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
     # The header charge of a multiply charged precursor comes with an ion trap's own monoisotopic pick, which is checked against the survey scan
     walk = [c in (2, 3) and detected_ms1_trap == 'linear' for c in charges]
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [r or w for r, w in zip(refine, walk)],
@@ -661,6 +690,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
                                         mz_tolerance = 0.02, isotope_tolerance = 0.02, charges = charges, isolation_mz = True, max_lighter = 2)
         df_out['m/z'] = [w if c and abs(w - m) > ISOTOPE_SPACING / c / 2 else m for w, m, c in zip(walked, df_out['m/z'], charges)]
     df_out = df_out[~drop].reset_index(drop = True)
+    df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = detected_trap
     df_out.attrs['detected_ms1_trap'] = detected_ms1_trap
@@ -679,8 +709,8 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
    | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
-   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan (the precursor's Id), and
-   | activation as in process_mzML_stack, one spectrum per precursor (its PASEF scans summed); survey frames are summed over their ion mobility
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan (the precursor's Id), activation
+   | and the SPECTRUM_DETAILS as in process_mzML_stack, one spectrum per precursor (its PASEF scans summed); survey frames are summed over their ion mobility
    | scans; both are centroided with centroid_tof, on m/z from the file's own TOF calibration (MzCalibration)
    """
     try:
@@ -698,7 +728,8 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         if 'Precursors' not in tables or not db.execute('SELECT COUNT(*) FROM Precursors').fetchone()[0]:
             raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no DDA-PASEF precursors; CandyCrunch needs data-dependent MS2 spectra "
                              f"(data-independent acquisition such as diaPASEF has none).")
-        compression = dict(db.execute('SELECT Key, Value FROM GlobalMetadata').fetchall()).get('TimsCompressionType')
+        metadata = dict(db.execute('SELECT Key, Value FROM GlobalMetadata').fetchall())
+        compression, scan_low = metadata.get('TimsCompressionType'), float(metadata['MzAcqRangeLower']) if metadata.get('MzAcqRangeLower') else None
         if compression not in ('1', '2'):
             raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} stores its frames in a format CandyCrunch does not know (compression type "
                              f"{compression}); convert it to mzML with msconvert first.")
@@ -706,7 +737,9 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         frames = {i: (t, p, k, c, t1, t2, n) for i, t, p, k, c, t1, t2, n in db.execute('SELECT Id, Time, Polarity, MsMsType, MzCalibration, T1, T2, NumPeaks FROM Frames')}
         calibrations = {row[0]: row[1:] for row in db.execute('SELECT Id, ModelType, DigitizerTimebase, DigitizerDelay, T1, T2, dC1, dC2, C0, C1, C2, C3, C4 FROM MzCalibration')}
         precursors = db.execute('SELECT Id, LargestPeakMz, MonoisotopicMz, Charge, Intensity, Parent FROM Precursors').fetchall()
-        pasef = db.execute('SELECT Frame, ScanNumBegin, ScanNumEnd, Precursor, IsolationMz, IsolationWidth FROM PasefFrameMsMsInfo ORDER BY Frame').fetchall()
+        # with the collision energy where the table has it
+        energy_column = 'CollisionEnergy' if 'CollisionEnergy' in {row[1] for row in db.execute('PRAGMA table_info(PasefFrameMsMsInfo)')} else 'NULL'
+        pasef = db.execute(f'SELECT Frame, ScanNumBegin, ScanNumEnd, Precursor, IsolationMz, IsolationWidth, {energy_column} FROM PasefFrameMsMsInfo ORDER BY Frame').fetchall()
     finally:
         db.close()
     if any(cal[0] != 1 or cal[10] for cal in calibrations.values()):
@@ -790,14 +823,14 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         if frame_id not in frames or not frames[frame_id][6]:
             continue
         offsets, tofs, ints = read_frame(frame_id)
-        for _, begin, end, pid, iso_mz, iso_width in group:
-            isolation.setdefault(pid, (iso_mz, iso_width))
+        for _, begin, end, pid, iso_mz, iso_width, energy in group:
+            isolation.setdefault(pid, (iso_mz, iso_width, energy))
             begin, end = offsets[min(begin, len(offsets) - 1)], offsets[min(end, len(offsets) - 1)]
             ms2_tofs[pid].append(tofs[begin:end])
             ms2_ints[pid].append(ints[begin:end])
             ms2_frames.setdefault(pid, frame_id)
     tdf_bin.close()
-    peak_ds, rts, mzs, charges, scans, ms1_scans = [], [], [], [], [], []
+    peak_ds, rts, mzs, charges, scans, ms1_scans, details = [], [], [], [], [], [], []
     for pid, largest, mono, charge, _, parent in precursors:
         if pid not in ms2_tofs:
             continue
@@ -805,7 +838,7 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         peaks = centroid_tof(tof_to_mz(tof, ms2_frames[pid]), np.bincount(inverse, weights = np.concatenate(ms2_ints[pid])))
         # The unfragmented precursor envelope (and anything else co-isolated) is often the base peak of a PASEF spectrum, while ion trap CID, which
         # the model was trained on, leaves none: peaks inside the isolation window or on the precursor's isotopes above it are not fragments
-        iso_mz, iso_width = isolation[pid]
+        iso_mz, iso_width, energy = isolation[pid]
         upper = max(iso_mz + iso_width / 2, (mono + 6 * ISOTOPE_SPACING / charge + 0.05) if mono and charge else 0)
         peaks = peaks[(peaks[:, 0] < iso_mz - iso_width / 2) | (peaks[:, 0] > upper)]
         if not len(peaks):
@@ -820,12 +853,15 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         rts.append(frames[frame_id][0] / 60)
         scans.append(pid)
         ms1_scans.append(bisect.bisect_right(ms1_ids, frame_id) - 1)
-    df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges})
+        # SPECTRUM_DETAILS (the file gives the collision energy with the polarity's sign); header_shift holds the header m/z until refinement
+        details.append(('tof', frames[frame_id][1], abs(energy) if energy is not None else None, iso_width, scan_low, mzs[-1]))
+    df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges}).assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
     df_out['m/z'], drop, intensities = refine_tof_precursors(ms1, mzs, rts, ms1_scans, charges)
     if intensity:
         df_out['intensity'] = intensities
     df_out['scan'], df_out['activation'] = scans, ['CID'] * len(df_out)
     df_out = df_out[~drop].reset_index(drop = True)
+    df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
     df_out.attrs['detected_trap'] = 'other'
     df_out.attrs['detected_ms1_trap'] = 'tof'
@@ -844,8 +880,9 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
    | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
    | Returns:
    | :-
-   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, and activation as in
-   | process_mzML_stack, from the line (centroided) spectra the instrument stores next to its profile spectra
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, activation and the
+   | SPECTRUM_DETAILS as in process_mzML_stack (of them only analyzer, polarity and header_shift), from the line (centroided) spectra the instrument
+   | stores next to its profile spectra
    """
     with open(os.path.join(filepath, 'Analysis.yep'), 'rb') as f:
         data = f.read()
@@ -874,7 +911,7 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         i = definitions.find(name + b'\x00')
         param_ids[name] = struct.unpack_from('<I', definitions, i - 16)[0] if i >= 16 else None
     ms1_rts, ms1_mzs, ms1_ints = [], [], []
-    peak_ds, rts, mzs, charges, scans, ms1_scans, intensities = [], [], [], [], [], [], []
+    peak_ds, rts, mzs, charges, scans, ms1_scans, intensities, details = [], [], [], [], [], [], [], []
     detected_mode = None
     for number in sorted(set(headers) & set(bodies)):
         header, body = headers[number], bodies[number]
@@ -912,12 +949,17 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
             charges.append(charge if charge > 1 else None)
             scans.append(number)
             ms1_scans.append(len(ms1_rts) - 1)
+            # SPECTRUM_DETAILS: analyzer and polarity (collision energy, isolation width and scan range are not read from the acquisition parameters);
+            # header_shift holds the header m/z until refinement
+            details.append(('amazon' if b'amaZon' in definitions else 'linear', ('-' if struct.unpack('<i', values[param_ids[b'iIonNeg']])[0] else '+')
+                            if param_ids[b'iIonNeg'] in values else None, None, None, None, mzs[-1]))
             # As for Bruker mzXML, the precursor intensity is the survey scan's centroids around the precursor
             intensities.append(float(ms1_ints[-1][(ms1_mzs[-1] >= mzs[-1] - 1.5) & (ms1_mzs[-1] < mzs[-1] + 1.5)].sum()) if ms1_mzs else np.nan)
     df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges})
     if intensity:
         df_out['intensity'] = intensities
     df_out['scan'], df_out['activation'] = scans, ['CID'] * len(df_out)
+    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
@@ -925,6 +967,7 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [True] * len(mzs), mz_tolerance = 0.6, min_explained = 0.3, charges = charges,
                                               isolation_mz = True)
     df_out = df_out[~drop].reset_index(drop = True)
+    df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
     # The definitions name the instrument; HCT and esquire count as linear ion traps, as for their mzXML
     df_out.attrs['detected_trap'] = df_out.attrs['detected_ms1_trap'] = 'amazon' if b'amaZon' in definitions else 'linear'
@@ -1034,7 +1077,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     | rt_window (float): maximal distance (in minutes) of a peak boundary from the apex; default:1.0
     | mz_tolerance (float): largest m/z half-width of an isotope window; default:0.5
     | search_window (float): if > 0, the apex is the highest point within this many minutes of rt_center and its genuineness is checked (MS1 gap filling), else the apex is reached by climbing uphill from rt_center; default:0
-    | isotopes (int): number of isotope peaks summed on top of the monoisotopic one; default:3
+    | isotopes (int or array-like): number of isotope peaks summed on top of the monoisotopic one, for every target or per target; default:3
     | weights (array-like): if given, precursors that land on the same peak (same apex and m/z) split its area in proportion to these instead of each claiming all of it; default:None
     | mz_calibration (tuple): (m/z offset, half-width) from ms1_mz_calibration; default:None (estimated from the targets)
     | glycans (list): if given, each area is divided by the share of the glycan's molecules within the summed isotope peaks (computed from its elemental formula; None entries are interpolated by mass); a composition or an element formula counts as the whole molecule, e.g., a glycopeptide as get_formula('H5N4', peptide = 'EEQYNSTYR'); default:None
@@ -1053,6 +1096,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     target_mzs = np.asarray(target_mzs, dtype = np.float64)
     rt_centers = np.asarray(rt_centers, dtype = np.float64)
     charges = np.ones(len(target_mzs)) if charges is None else np.maximum(np.abs(np.asarray(charges, dtype = np.float64)), 1)
+    isotopes = np.full(len(target_mzs), isotopes, dtype = int) if np.ndim(isotopes) == 0 else np.asarray(isotopes, dtype = int)
     shift, half_width = mz_calibration if mz_calibration is not None else ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = mz_tolerance)
     spacing = ISOTOPE_SPACING / charges
     # Where the MS1 m/z spread is a sizeable part of the isotope spacing (e.g., ion traps, which also merge the isotopes of multiply charged ions), the isotope windows touch; otherwise each isotope gets its own narrow window
@@ -1074,7 +1118,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
         rts = ms1_rts[s0:s1]
         scans = cumulated(s0, s1)
         xic = lambda centers, width, scans = scans: np.array([np.sum(cum[np.searchsorted(mzs, centers + width)] - cum[np.searchsorted(mzs, centers - width)]) for mzs, cum in scans])
-        ints_arr = xic(target_mzs[t] + shift + spacing[t] * np.arange(isotopes + 1), widths[t])
+        ints_arr = xic(target_mzs[t] + shift + spacing[t] * np.arange(isotopes[t] + 1), widths[t])
         # Smoothing (sigma of 0.05 min, at least 0.7 scans) only steers apex and boundary finding; the area comes from the raw trace. Survey scans
         # sharing a retention time (one per ion mobility scan) gave a zero median step and an infinite sigma, so only real steps count
         steps = np.diff(rts)
@@ -1112,9 +1156,9 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             # The trace again from rt_window before to rt_window after the scans searched, which shows the neighbouring peaks, and the survey scan at the
             # apex around the envelope; indices point into this view
             v0, v1 = np.searchsorted(ms1_rts, rts[0] - rt_window), np.searchsorted(ms1_rts, rts[-1] + rt_window, side = 'right')
-            centers, wide = target_mzs[t] + shift + spacing[t] * np.arange(isotopes + 1), cumulated(v0, v1)
+            centers, wide = target_mzs[t] + shift + spacing[t] * np.arange(isotopes[t] + 1), cumulated(v0, v1)
             a0, a1 = ms1_offsets[s0 + apex], ms1_offsets[s0 + apex + 1]
-            near = np.abs(ms1_mzs[a0:a1] - centers.mean()) <= (isotopes / 2 + 2) * spacing[t]
+            near = np.abs(ms1_mzs[a0:a1] - centers.mean()) <= (isotopes[t] / 2 + 2) * spacing[t]
             records[t].update(times = ms1_rts[v0:v1].astype(np.float32), trace = xic(centers, widths[t], wide).astype(np.float32), left = int(s0 - v0 + left),
                               apex = int(s0 - v0 + apex), right = int(s0 - v0 + right), baseline = float(baseline), area = float(areas[t]),
                               windows = [(float(c - widths[t]), float(c + widths[t])) for c in centers], scan = (ms1_mzs[a0:a1][near], ms1_ints[a0:a1][near]))
@@ -1125,13 +1169,13 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             for z in other_charges[t]:
                 mz, sp = neutral / z + (-1 if mode == 'negative' else 1) * PROTON_MASS, ISOTOPE_SPACING / z
                 width = 0.5 * sp if half_width >= 0.2 * sp else max(half_width, 5e-6 * mz)
-                trace = xic(mz + shift + sp * np.arange(isotopes + 1), width)
+                trace = xic(mz + shift + sp * np.arange(isotopes[t] + 1), width)
                 smooth_z = np.convolve(np.pad(trace, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
                 r = np.corrcoef(smooth_z[left:right + 1], smooth[left:right + 1])[0, 1] if np.ptp(smooth_z[left:right + 1]) > 0 and np.ptp(smooth[left:right + 1]) > 0 else None
                 area = _trapezoid(np.clip(trace[left:right + 1] - np.percentile(trace, 10), 0, None), rts[left:right + 1]) if r is not None and r >= 0.9 else 0.0
                 areas[t] += area
                 if records is not None:
-                    records[t]['others'].append({'charge': z, 'mz': float(mz), 'trace': xic(mz + shift + sp * np.arange(isotopes + 1), width, wide).astype(np.float32),
+                    records[t]['others'].append({'charge': z, 'mz': float(mz), 'trace': xic(mz + shift + sp * np.arange(isotopes[t] + 1), width, wide).astype(np.float32),
                                                  'baseline': float(np.percentile(trace, 10)), 'r': None if r is None else float(r), 'added': bool(r is not None and r >= 0.9),
                                                  'area': float(area)})
     # What each raw area is multiplied with: its share of a peak that several targets landed on, then 1 / its isotope share
@@ -1162,7 +1206,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             dist = np.array([1.0])
             for el, k in counts.items():
                 for _ in range(k):
-                    dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:isotopes + 1]
+                    dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:isotopes[t] + 1]
             share[t] = dist.sum()
         known = ~np.isnan(share)
         if known.any():
@@ -1905,6 +1949,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                                      'num_spectra', 'precursor_charge'])
     # First and last retention time of each cluster's spectra, to tell whether two clusters are one chromatographic peak
     df_out['rt_range'] = [(min(c['RT']), max(c['RT'])) for c in clusters]
+    # Each cluster's own spectra and their RTs (training data re-pools subsets of them; references, not copies)
+    df_out['member_peaks'] = [list(c['peak_d']) for c in clusters]
+    df_out['member_rts'] = [list(c['RT']) for c in clusters]
     # The MS3 spectra of all MS2 spectra in a cluster
     if 'ms3' in df.columns:
         df_out['ms3'] = [c['ms3'] for c in clusters]
@@ -2925,6 +2972,18 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
                                                                                              not pd.api.types.is_numeric_dtype(df[c])}}
         if region_meta:
             meta.update(region = region_meta, source = 'run' + os.path.splitext(os.path.normpath(spectra_filepath))[1].lower())
+        else:
+            # The source's size and SHA-1 (a folder's: of its files' names and sizes), which tie the .cc to the file it was extracted from
+            source = os.path.normpath(spectra_filepath)
+            if os.path.isdir(source):
+                files = sorted((os.path.relpath(os.path.join(d, f), source), os.path.getsize(os.path.join(d, f))) for d, _, names in os.walk(source) for f in names)
+                meta.update(source_size = sum(n for _, n in files), source_sha1 = hashlib.sha1(json.dumps(files).encode()).hexdigest())
+            else:
+                digest = hashlib.sha1()
+                with open(source, 'rb') as f:
+                    for chunk in iter(lambda: f.read(1 << 24), b''):
+                        digest.update(chunk)
+                meta.update(source_size = os.path.getsize(source), source_sha1 = digest.hexdigest())
         arrays = {f'col{i}': df[c].to_numpy() for i, c in enumerate(columns) if c not in ('peak_d', 'ms3') and c not in meta['json_columns']}
         spectra = [('', df['peak_d'])] + ([('ms3_', [d for x in df['ms3'] for _, d in x])] if 'ms3' in columns else [])
         for prefix, dicts in spectra:
@@ -3285,6 +3344,11 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     window = accurate_ms1_window(signed[known], df_out['annotation_score'].values[known], ppm_thresh, floor = ms1_ppm_floor) if accurate_ms1 else None
     if window is not None:
         keep = (df_out['ppm_error'].isna() | (np.abs(signed - window[0]) <= window[1])).values
+        # ... with twice the half-width for the run's most intense ions (top 20% of precursor intensities), which an orbitrap reads a few ppm off the
+        # calibration of the weaker ones, so that a half-width at its floor cut the most abundant glycans of a run
+        ab = np.nan_to_num(df_out['rel_abundance'].values.astype(float)) if 'rel_abundance' in df_out.columns else np.zeros(len(df_out))
+        loud = (ab >= np.quantile(ab[known], 0.8)) & (ab > 0) if known.any() else np.zeros(len(df_out), dtype = bool)
+        keep |= loud & (np.abs(signed - window[0]) <= 2 * window[1])
     else:
         if len(known_ppm) >= 5:
             med = np.median(known_ppm)
@@ -3356,9 +3420,13 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                           and not any(comps[j] == comps[i] and zs[j] == z and abs(rts[j] - rts[i]) < rt_diff for j in range(len(df_out)))] for i in range(len(df_out))]
         calibration = ms1_mz_calibration(ms1, df_out['theo_mz'].values, df_out['RT'].values, df_out['charge'].values,
                                          mz_tolerance = mass_tolerance, accurate = accurate_ms1)
+        # A row of a lighter reducing end (an unreduced glycan, 2 Da below the reduced one) sums only its isotopes below the monoisotopic peak of the glycan
+        # of the run's reducing end: its M+2 and M+3 are that glycan's M and M+1, which it would integrate a second time once folded into it
+        offsets = df_out['re_offset'].values if 're_offset' in df_out.columns else np.zeros(len(df_out))
+        isotopes = np.where(offsets < 0, np.clip(np.round(-offsets / ISOTOPE_SPACING) - 1, 0, 3), 3).astype(int)
         details = [] if xic_details else None
         xic_areas = extract_xic_areas(ms1, df_out['theo_mz'].values, df_out['RT'].values, charges = df_out['charge'].values,
-                                      mz_tolerance = mass_tolerance, weights = df_out['rel_abundance'].values,
+                                      mz_tolerance = mass_tolerance, isotopes = isotopes, weights = df_out['rel_abundance'].values,
                                       mz_calibration = calibration, sample_prep = sample_prep, mode = mode, other_charges = other_charges,
                                       glycans = [k[0][0] if k else None for k in df_out['predictions']], details = details)
         if (xic_areas > 0).any():
@@ -3855,6 +3923,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     if detected_trap and detected_trap != trap:
         print(f"WARNING: File was acquired on {detected_trap} but trap='{trap}' was specified. Overriding to '{detected_trap}'.")
         trap = detected_trap
+    # The run's fragmentation (its most frequent activation), which models of settings encoding version 2 take with the trap
+    activation = loaded_file['activation'].dropna().mode().iloc[0] if 'activation' in loaded_file.columns and loaded_file['activation'].notna().any() else None
+    detected_ms1_trap = loaded_file.attrs.get('detected_ms1_trap')
     # An orbitrap or timsTOF survey scan pins a precursor's composition to a few ppm, so fewer annotated fragments need to back it up; a lower threshold loses on ion-trap MS1 files
     ms1_ppm_floor = MS1_PPM_FLOORS.get(loaded_file.attrs.get('detected_ms1_trap'), 0.0)
     accurate_ms1 = ms1_ppm_floor > 0
@@ -4017,7 +4088,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         # One row per input (pooled spectrum and candidate composition; index its m/z), as a callable model gets them, with the settings it was encoded with
         df_in = df_out.drop_duplicates('input_id').drop(columns = ['input_id', 'tta'])
         df_in.attrs.update(glycan_class = glycan_class, mode = mode, modification = modification, mass_tag = mass_tag, lc = lc, trap = trap,
-                           sample_prep = sample_prep, accurate_ms1 = accurate_ms1)
+                           sample_prep = sample_prep, accurate_ms1 = accurate_ms1, activation = activation, ms1_trap = detected_ms1_trap)
         return df_in
     if isinstance(model, CandyCrunchCNN) or (torch is not None and isinstance(model, torch.nn.Module)):
         # Predict glycans from spectra

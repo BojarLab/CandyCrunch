@@ -116,8 +116,10 @@ train_df.to_pickle(output_dir / "train_second.pkl")
 test_df.to_pickle(output_dir / "test_second.pkl")
 
 print("Serialising tuples for CandyCrunch")
-X_train = tupleify(train_df, FEATURE_COLUMNS)
-X_test = tupleify(test_df, FEATURE_COLUMNS)
+# The member spectra of each input ride along as a tenth element where the conversion kept them (ResampledDataset re-pools them, SimpleDataset reads the first nine)
+columns = FEATURE_COLUMNS + (["member_inputs"] if "member_inputs" in train_df.columns else [])
+X_train = tupleify(train_df, columns)
+X_test = tupleify(test_df, columns)
 y_train = train_df["glycan"].tolist()
 y_test = test_df["glycan"].tolist()
 

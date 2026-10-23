@@ -1,12 +1,14 @@
 import copy
 import json
 import numpy as np
+import random
 import time
 import torch
 
 import matplotlib.pyplot as plt
 from glycowork.ml.model_training import EarlyStopping, disable_running_stats, enable_running_stats, training_setup, Poly1CrossEntropyLoss
 from glycowork.ml.models import init_weights
+from candycrunch.model import SimpleDataset
 import torch.nn.functional as F
 from torchmetrics.functional import accuracy, matthews_corrcoef, mean_squared_error
 
@@ -15,6 +17,28 @@ if torch.cuda.is_available():
   device = "cuda:0"
 
    
+class ResampledDataset(SimpleDataset):
+  # Each pooled input re-pooled from a random subset of its member spectra (k uniform in 1..n) every time it is drawn, as condense_dataframe pools a cluster:
+  # summed binned intensities, normalized, and the mean m/z remainder; an input without members (x[9], from build_training_pickles) stays as pooled. On
+  # 47.5k labels (2026-10-22) this served the pipeline better than training on the pooled inputs (harness DEV 0.743 vs 0.677 over two seeds) and kept their accuracy
+  def __getitem__(self, index):
+    out = super().__getitem__(index)
+    members = self.x[index][9] if len(self.x[index]) > 9 else None
+    if members is None or len(members) < 2:
+      return out
+    pick = random.sample(list(members), random.randint(1, len(members)))
+    mz, mz_r = np.zeros(len(self.x[index][0]), dtype = np.float32), np.zeros(len(self.x[index][0]), dtype = np.float32)
+    for m in pick:
+      mz[m[0].astype(int)] += m[1]
+      mz_r[m[0].astype(int)] += m[2]
+    if mz.sum() <= 0:
+      return out
+    mz = mz / mz.sum()
+    if self.transform_mz:
+      mz = self.transform_mz(mz)
+    return (torch.FloatTensor(mz), torch.FloatTensor(mz_r / len(pick))) + out[2:]
+
+
 class custom_loss(torch.nn.Module):
   def __init__(self, primary_loss, dist_sim, dist_comp, logit_norm = False, t = 1.0):
     super(custom_loss, self).__init__()

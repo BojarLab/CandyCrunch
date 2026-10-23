@@ -573,15 +573,91 @@ def test_label_run_mapping_rules(monkeypatch):
                            'compositional_vector': [np.zeros(12)] * len(rows)}, index = pd.Index([r[0] for r in rows], name = 'm/z'))
     inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
     monkeypatch.setattr(pl, 'wrap_inference', lambda *args, **kwargs: inputs.copy())
+    monkeypatch.setattr(pl, 'load_spectra_filepath', lambda *args, **kwargs: pd.DataFrame({'activation': ['CID']}))
     mapping = pd.DataFrame({'Mass': mzs[:5] + [965.84, 965.84], 'RT': [18.7 + k for k in range(5)] + [np.nan, np.nan], 'glycan': glycans + sia})
     labelled, unlabelled = pl.label_run('run.cc', mapping, 'N')
     assert np.isclose(labelled.attrs['rt_shift'], 1.3) and np.array_equal(labelled['model_input'].iloc[0], np.array([[300], [1], [0]], dtype = np.float32))
     assert labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6] and len(unlabelled) == 2
     assert all(len(c) == 2 for c in labelled['glycan_candidates'].iloc[5:]) and labelled['glycan_match_status'].iloc[5] == 'candidates'
+    # Where each label came from, and every mapping row labelled
+    assert labelled.attrs['rt_alignment'] == 'median' and labelled.attrs['rt_anchors'] == 5
+    assert labelled['label_source'].tolist() == ['rt_median'] * 5 + ['no_rt'] * 2 and np.allclose(labelled['rt_error'].iloc[:5], 0, atol = 1e-6)
+    assert [r['status'] for r in labelled.attrs['map_rows']] == ['labelled'] * 7 and [r['labels'] for r in labelled.attrs['map_rows']][5:] == [2, 0]
     # Mapping RTs of another gradient (the 5 anchors disagree): the rows count as RT-less, so each composition's strongest passing input is labeled
     shuffled = mapping.assign(RT = [22.7, 18.7, 25.7, 19.7, 30.7, np.nan, np.nan])
     labelled, unlabelled = pl.label_run('run.cc', shuffled, 'N')
     assert labelled.attrs['rt_shift'] == 0.0 and labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6]
+    assert labelled.attrs['rt_alignment'] == 'dropped' and labelled['label_source'].tolist() == ['rt_dropped'] * 5 + ['no_rt'] * 2
+    # What became of mapping rows that label nothing: no input at their mass, inputs of another composition there, their composition outside the RT window
+    extra = pd.DataFrame({'Mass': [1500.0, 911.33, 698.24], 'RT': [20.0, 20.0, 40.0], 'glycan': [glycans[4], glycans[1], glycans[2]]})
+    labelled, unlabelled = pl.label_run('run.cc', pd.concat([mapping.assign(RT = mapping['RT'] + 1.3), extra], ignore_index = True), 'N')
+    assert [r['status'] for r in labelled.attrs['map_rows']] == ['labelled'] * 7 + ['no_input_at_mass', 'other_composition', 'outside_rt']
+    assert labelled.attrs['rt_alignment'] == 'none' and labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_member_spectra_repool(monkeypatch):
+    # The member spectra run_inputs keeps of a pooled input re-pool to the input the model got: their summed binned intensities, normalized, and the mean
+    # of their m/z remainders over every member (one without a peak in the binned range counts too)
+    import training.pipeline_labels as pl
+    df = pd.DataFrame({'m/z': [900.3, 900.31, 900.29], 'RT': [10.0, 10.1, 10.2], 'intensity': [1e5, 2e5, 5e4],
+                       'peak_d': [{204.087: 100.0, 366.14: 50.0}, {204.09: 80.0, 528.19: 20.0, 2990.0: 1.0}, {3500.0: 10.0}]})
+    pooled = condense_dataframe(df.copy())
+    monkeypatch.setattr(pl, 'wrap_inference', lambda *args, **kwargs: pooled.assign(spec_id = range(len(pooled))))
+    monkeypatch.setattr(pl, 'load_spectra_filepath', lambda *args, **kwargs: df)
+    row = pl.run_inputs('run.cc', 'N').iloc[0]
+    b, r = np.zeros(2048), np.zeros(2048)
+    for m in row['member_inputs']:
+        b[m[0].astype(int)] += m[1]
+        r[m[0].astype(int)] += m[2]
+    pb, pr = np.zeros(2048), np.zeros(2048)
+    pb[row['model_input'][0].astype(int)], pr[row['model_input'][0].astype(int)] = row['model_input'][1], row['model_input'][2]
+    assert len(row['member_inputs']) == 3 and np.allclose(b / b.sum(), pb, atol = 1e-6) and np.allclose(r / 3, pr, atol = 1e-5)
+    assert np.allclose(row['member_rts'], [10.0, 10.1, 10.2]) and 'binned_intensities' not in row.index and 'member_peaks' not in row.index
+
+
+def test_label_run_rivals_and_settings(monkeypatch):
+    # A labeled spectrum keeps its other candidate compositions (negatives for a composition-level loss, rival_mapped where the mapping lists them there
+    # too) and the run's activation and survey scan analyzer
+    import training.pipeline_labels as pl
+    comps = [{'Hex': 3, 'HexNAc': 2}, {'Hex': 2, 'HexNAc': 2, 'dHex': 1}]
+    inputs = pd.DataFrame({'spec_id': [0, 0], 'RT': [20.0, 20.0], 'intensity': [1e5, 1e5], 'peak_d': [{500.0: 1.0}] * 2, 'rt_range': [(20.0, 20.0)] * 2,
+                           'num_spectra': [3, 3], 'composition': comps, 'charge': [1, 1], 'annotation_score': [12.0, 5.0],
+                           'binned_intensities': [np.eye(1, 2048, 300).ravel()] * 2, 'mz_remainder': [np.zeros(2048)] * 2, 'RT2': [0.5] * 2, 'glycan_type': 1,
+                           'compositional_vector': [np.ones(12), np.zeros(12)]}, index = pd.Index([911.33, 911.35], name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'orbitrap', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized',
+                        activation = 'HCD', ms1_trap = 'orbitrap')
+    monkeypatch.setattr(pl, 'wrap_inference', lambda *args, **kwargs: inputs.copy())
+    monkeypatch.setattr(pl, 'load_spectra_filepath', lambda *args, **kwargs: pd.DataFrame({'activation': ['HCD']}))
+    mapping = pd.DataFrame({'Mass': [911.33], 'RT': [20.0], 'glycan': ['Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc']})
+    labelled, unlabelled = pl.label_run('run.cc', mapping, 'N')
+    assert len(labelled) == 1 and unlabelled.empty and labelled['activation'].iloc[0] == 'HCD' and labelled['ms1_trap'].iloc[0] == 'orbitrap'
+    assert labelled['rival_compositions'].iloc[0] == [stringify_dict(comps[1])] and labelled['rival_scores'].iloc[0] == [5.0]
+    assert labelled['rival_mapped'].iloc[0] == [False] and np.array_equal(labelled['rival_vectors'].iloc[0][0], np.zeros(12))
+
+
+def test_run_inputs_activation_split(monkeypatch):
+    # A run with CID and HCD scans of its precursors gives the inputs of each activation's spectra, their pooled spectra numbered apart; a run of one
+    # activation goes to wrap_inference whole
+    import training.pipeline_labels as pl
+    loaded = pd.DataFrame({'m/z': [900.3, 900.3, 911.3], 'RT': [10.0, 10.0, 12.0], 'activation': ['CID', 'HCD', 'CID']})
+    calls = []
+
+    def wrap(path, glycan_class, _loaded = None, **kwargs):
+        calls.append(_loaded['activation'].tolist())
+        out = pd.DataFrame({'spec_id': range(len(_loaded)), 'binned_intensities': [np.eye(1, 2048, 300).ravel()] * len(_loaded),
+                            'mz_remainder': [np.zeros(2048)] * len(_loaded)}, index = pd.Index(_loaded['m/z'].values, name = 'm/z'))
+        out.attrs.update(mode = 'negative', activation = _loaded['activation'].iloc[0])
+        return out
+
+    monkeypatch.setattr(pl, 'wrap_inference', wrap)
+    monkeypatch.setattr(pl, 'load_spectra_filepath', lambda *args, **kwargs: loaded)
+    inputs = pl.run_inputs('run.cc', 'N')
+    assert calls == [['CID', 'CID'], ['HCD']] and inputs['activation'].tolist() == ['CID', 'CID', 'HCD'] and inputs['spec_id'].tolist() == [0, 1, 2]
+    assert inputs.attrs['mode'] == 'negative' and inputs.attrs['activation'] is None
+    calls.clear()
+    monkeypatch.setattr(pl, 'load_spectra_filepath', lambda *args, **kwargs: loaded.assign(activation = 'CID'))
+    inputs = pl.run_inputs('run.cc', 'N')
+    assert calls == [['CID'] * 3] and 'activation' not in inputs.columns and inputs.attrs['activation'] == 'CID'
 
 
 def test_ms1_peak_regrouping():
@@ -657,6 +733,9 @@ def test_bruker_mzxml(tmp_path):
     # dropped as isotope-triggered, as a Bruker isolation window always holds the whole envelope
     assert np.allclose(df['m/z'], [965.844, 675.36, 675.36], atol = 0.02) and df['precursor_charge'].tolist()[0] == 2
     assert df.attrs['detected_trap'] == 'linear' and df.attrs['detected_mode'] == 'negative'
+    # The scans' details: analyzer and polarity, nothing the file does not state, the header m/z as the shift refinement applied
+    assert df['analyzer'].tolist() == ['linear'] * 3 and df['polarity'].tolist() == ['-'] * 3 and df['collision_energy'].isna().all()
+    assert np.allclose(df['m/z'] + df['header_shift'], [966.204528808594, 675.813842773438, 675.418823242188])
 
 
 def test_bruker_ion_trap_mzml(tmp_path):
@@ -734,6 +813,7 @@ def test_bruker_yep(tmp_path, model):
     assert np.allclose(df['RT'], np.array([2813000, 2813500]) * 64e-6 / 60)
     assert len(df['peak_d'][0]) == 3 and max(df['peak_d'][0], key = df['peak_d'][0].get) == pytest.approx(800.3)
     assert df.attrs['detected_trap'] == ('linear' if hct or xct else 'amazon') and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
+    assert df['analyzer'].tolist() == [df.attrs['detected_trap']] * 2 and df['polarity'].tolist() == ['-'] * 2 and df['isolation_width'].isna().all()
 
 
 def test_tims_scans(tmp_path):
@@ -855,6 +935,8 @@ def test_tdf_frames(tmp_path):
         peaks = sorted(df['peak_d'][0].items())
         assert np.allclose([m for m, _ in peaks], [mz(tof(500.0)), mz(tof(600.0) + 1), mz(tof(700.0))], rtol = 1e-6) and np.allclose([i for _, i in peaks], [100, 300, 30])
     assert outputs[0]['peak_d'][0] == outputs[1]['peak_d'][0]
+    # Details from the PASEF table and frames; this file has no collision energy column and no acquisition range
+    assert outputs[0][['analyzer', 'polarity', 'isolation_width']].values.tolist() == [['tof', '-', 3.0]] and outputs[0][['collision_energy', 'scan_low']].isna().all(axis = None)
 
 
 def test_thermo_raw(tmp_path):
@@ -900,6 +982,7 @@ def test_thermo_raw(tmp_path):
     table = candycrunch.utils.read_raw_scan_table(str(path))
     assert table['ms_level'] == [1, 2, 2] and table['filter_string'] == ['', '1000.0000@cid35.00', '1000.5000@hcd30.00']
     assert table['precursor_mz'] == [None, 1000.0, 1000.02] and table['charge'] == [None, None, 2] and table['master_scan'] == [None, 1, 1]
+    assert table['scan_range'] == [(150.0, 2000.0)] * 3
     df = process_raw_stack(str(path), intensity = True, extract_ms1 = True)
     _, ms1_mzs, ms1_ints, _ = df.attrs['ms1']
     assert np.allclose(ms1_mzs, [1000.0]) and np.allclose(ms1_ints, [220])
@@ -907,6 +990,8 @@ def test_thermo_raw(tmp_path):
     assert np.allclose(df['m/z'], [1000.0, 1000.02]) and pd.isna(df['precursor_charge'][0]) and df['precursor_charge'][1] == 2
     assert list(df['scan']) == [2, 3] and list(df['activation']) == ['CID', 'HCD'] and np.allclose(df['intensity'], [220, 220]) and np.allclose(df['RT'], [10.01, 10.02])
     assert np.allclose(list(df['peak_d'][0]), [600.2, 400.1]) and list(df['peak_d'][0].values()) == [100, 50]
+    assert df['analyzer'].tolist() == ['linear'] * 2 and df['polarity'].tolist() == ['-'] * 2 and df['collision_energy'].tolist() == [35.0, 30.0]
+    assert df['scan_low'].tolist() == [150.0] * 2 and df['header_shift'].tolist() == [0.0, 0.0]
 
 
 def test_qtof_mzml(tmp_path):
