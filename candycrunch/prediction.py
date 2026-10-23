@@ -41,32 +41,46 @@ from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads,
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2
 from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, read_raw_packet, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
-
 this_dir = os.path.dirname(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
     glycans = pickle.load(f)
 with open(os.path.join(this_dir, 'glytoucan_mapping.pkl'), 'rb') as f:
     glytoucan_mapping = pickle.load(f)
 sdict = os.path.join(this_dir, 'candycrunch.pt')
-checkpoint_path = pathlib.Path(this_dir).parent / 'training' / 'models' / 'CandyCrunch_CNN2_ShCl_GShS_CMLOSS_NoCS_full20261021.pt'
 bin_num = 2048
 temperature = 1.15
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
-if torch is not None:
-    from candycrunch.checkpoint import load_checkpoint
 
+if torch is not None:
     # Choose the correct computing architecture
     device = "cpu"
     if torch.cuda.is_available():
         device = "cuda:0"
-    checkpoint = load_checkpoint(checkpoint_path, device = device)
-    candycrunch = checkpoint['model']
-    glycans = checkpoint['glycans']
-    bin_num = checkpoint['bin_num']
-    comp_vector_order = checkpoint['comp_vector_order']
-    temperature = checkpoint['temperature']
+    sdict = torch.load(sdict, map_location = device, weights_only = True)
+    sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
+    candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12).to(device)
+    candycrunch.load_state_dict(sdict)
+    candycrunch = candycrunch.eval()
 else:
     candycrunch = CandyCrunchCNN(load_weights(sdict))
+
+# checkpoint_path = pathlib.Path(this_dir).parent / 'training' / 'models' / 'CandyCrunch_CNN2_ShCl_GShS_CMLOSS_NoCS_full20261021.pt'
+# if torch is not None:
+#     from candycrunch.checkpoint import load_checkpoint
+#
+#     # Choose the correct computing architecture
+#     device = "cpu"
+#     if torch.cuda.is_available():
+#         device = "cuda:0"
+#     checkpoint = load_checkpoint(checkpoint_path, device = device)
+#     candycrunch = checkpoint['model']
+#     glycans = checkpoint['glycans']
+#     bin_num = checkpoint['bin_num']
+#     comp_vector_order = checkpoint['comp_vector_order']
+#     temperature = checkpoint['temperature']
+# else:
+#     candycrunch = CandyCrunchCNN(load_weights(sdict))
+
 _trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 
 NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'HCO3-']
