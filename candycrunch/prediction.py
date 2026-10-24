@@ -580,7 +580,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
    | was validated on
    """
     table = read_raw_scan_table(filepath)
-    peak_ds, rts, intensities, mzs, charges, scans, activations, details = [], [], [], [], [], [], [], []
+    peak_ds, rts, intensities, mzs, charges, scans, activations, details, real_energies = [], [], [], [], [], [], [], [], []
     detected_mode, detected_trap, detected_ms1_trap = None, None, None
     ms1_rts, ms1_mzs, ms1_ints, ms1_scans, refine, ms1_index = [], [], [], [], [], {}
     # One handle for the packets of every scan (opening the file per scan took a quarter of the reading time)
@@ -650,6 +650,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         energy = re.findall(r'@(?:cid|hcd)([\d.]+)', stage[-1][1]) if stage else []
         details.append(({'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(table['analyzer'][i], 'other'), table['polarity'][i], float(energy[0]) if energy else None,
                         table['isolation_width'][i], (table['scan_range'][i] or (None,))[0], precursor_mz))
+        real_energies.append(table['RealEnergy'][i])
         raw_charge = table['charge'][i]
         ms1_scans.append(len(ms1_rts) - 1)
         refine.append(raw_charge is None)
@@ -671,6 +672,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         'peak_d': peak_ds,
         'RT': rts,
         'precursor_charge': charges,
+        'RealEnergy': real_energies,
     })
     if intensity:
         df_out['intensity'] = intensities

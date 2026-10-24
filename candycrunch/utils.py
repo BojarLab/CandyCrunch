@@ -11,7 +11,7 @@ import numpy as np
 # in ASCII or UTF-16, are not read)
 RAW_FIELD_TYPES = {0: 'V0', 1: 'i1', 2: 'u1', 3: 'u1', 4: 'u1', 5: 'u1', 6: '<i2', 7: '<u2', 8: '<i4', 9: '<u4', 10: '<f4', 11: '<f8'}
 # The trailer extra fields read per scan (Thermo writes 0 for a monoisotopic m/z or charge state it did not determine)
-RAW_TRAILER_FIELDS = ('Monoisotopic M/Z:', 'Charge State:', 'MS2 Isolation Width:', 'MSn Isolation Width:', 'Master Scan Number:')
+RAW_TRAILER_FIELDS = ('Monoisotopic M/Z:', 'Charge State:', 'MS2 Isolation Width:', 'MSn Isolation Width:', 'Master Scan Number:', 'HCD Energy:')
 # Activation of a scan event reaction, bits 1 and up of the u32 after its energy (Thermo's ActivationType)
 RAW_ACTIVATIONS = {0: 'cid', 1: 'mpd', 2: 'ecd', 3: 'pqd', 4: 'etd', 5: 'hcd', 8: 'ptr', 9: 'netd', 10: 'nptr', 11: 'uvpd'}
 # A timsTOF survey frame summed over its ion mobility scans holds ~40k centroids, mostly single-ion noise; the 5000 most intense reach down to ~0.04%
@@ -451,10 +451,28 @@ def read_raw_scan_table(filepath):
                 # First field of each label, as the instrument's software reads them
                 columns = {label: (RAW_FIELD_TYPES[kind], int(o)) for (kind, _, label), o in reversed(list(zip(fields, np.cumsum([0] + sizes))))
                            if label in RAW_TRAILER_FIELDS and kind in RAW_FIELD_TYPES}
+                record_size = sum(sizes)
                 f.seek(params_addr)
-                records = np.frombuffer(f.read(n_scans * sum(sizes)), {'names': list(columns), 'formats': [t for t, _ in columns.values()],
+                raw_records = f.read(n_scans * record_size)
+                records = np.frombuffer(raw_records, {'names': list(columns), 'formats': [t for t, _ in columns.values()],
                                                                         'offsets': [o for _, o in columns.values()], 'itemsize': sum(sizes)})
                 trailer = {label: records[label].tolist() for label in columns}
+
+                # Parse HCD Energy separately because its type is 13 (UTF-16 string).
+                energy_idx = next(( i for i, (_, _, label) in enumerate(fields) if label == 'HCD Energy:' ), None)
+                if energy_idx is not None:
+                    energy_offset = sum(sizes[:energy_idx])
+                    energy_size = sizes[energy_idx]
+                    real_energy = []
+                    for i in range(n_scans):
+                        start = i * record_size + energy_offset
+                        raw_value = raw_records[start:start + energy_size]
+                        value = raw_value.decode('utf-16-le', 'replace').split('\x00')[0].strip()
+                        try:
+                            real_energy.append(value)
+                        except:
+                            real_energy.append(None)
+                    trailer['HCD Energy:'] = real_energy
                 break
     # Scan events, one per scan, are self-describing: a preamble (120 bytes in version 62, 128 in 63 and 64, 136 from 66) with polarity at byte 4,
     # profile mode at 5, MS level at 6 and analyzer at 40, then counted reactions (isolation m/z, isolation width and energy as doubles, then the
@@ -474,13 +492,13 @@ def read_raw_scan_table(filepath):
         raise ValueError(f"{filepath} stores its scan events in a layout CandyCrunch does not know; convert it to mzML with ThermoRawFileParser or "
                          f"msconvert first.")
     table = {key: [] for key in ['scan', 'ms_level', 'polarity', 'scan_mode', 'analyzer', 'filter_string', 'precursor_mz', 'charge',
-                                 'isolation_width', 'master_scan', 'retention_time', 'scan_range', 'packet']}
+                                 'isolation_width', 'master_scan', 'retention_time', 'scan_range', 'packet', 'RealEnergy']}
     for i, s in enumerate(starts):
         level = max(stream[s + 6], 1)
         # MS1 events of some orbitraps carry their scan range as a reaction
         reactions = [struct.unpack_from('<3dI', stream, s + preamble + 4 + reaction * k)
                      for k in range(int.from_bytes(stream[s + preamble:s + preamble + 4], 'little'))] if level > 1 else []
-        mono, charge, ms2_width, msn_width, master = (trailer[label][i] if label in trailer and level > 1 else None for label in RAW_TRAILER_FIELDS)
+        mono, charge, ms2_width, msn_width, master, real_energy = (trailer[label][i] if label in trailer and level > 1 else None for label in RAW_TRAILER_FIELDS)
         table['scan'].append(first + i)
         table['ms_level'].append(level)
         table['polarity'].append({0: '-', 1: '+'}.get(stream[s + 4]))
@@ -500,6 +518,7 @@ def read_raw_scan_table(filepath):
         table['isolation_width'].append(ms2_width or msn_width)
         table['master_scan'].append(master)
         table['retention_time'].append(float(index['rt'][i]))
+        table['RealEnergy'].append(real_energy)
         # The scan windows (two doubles each) after the reactions
         w = s + preamble + 4 + reaction * int.from_bytes(stream[s + preamble:s + preamble + 4], 'little')
         windows = [struct.unpack_from('<2d', stream, w + 4 + 16 * k) for k in range(int.from_bytes(stream[w:w + 4], 'little'))]
