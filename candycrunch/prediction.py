@@ -398,7 +398,9 @@ def process_mzML_stack(filepath, num_peaks = 1000,
     if intensity:
         df_out['intensity'] = intensities
     df_out['scan'], df_out['activation'] = scans, activations
-    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
+    # Column by column, so that a run without MS2 spectra (full-MS profiling, files of MS3 and higher stages only) still has the columns and reaches
+    # extract_spectra's error or wrap_inference's warning
+    df_out = df_out.assign(**{c: [d[k] for d in details] for k, c in enumerate(SPECTRUM_DETAILS)})
     # Each MS2 spectrum's MS3 spectra as (MS3 precursor m/z, peak dictionary) tuples; files without MS3 get no column
     if any(ms3s):
         df_out['ms3'] = ms3s
@@ -547,7 +549,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
-    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
+    df_out = df_out.assign(**{c: [d[k] for d in details] for k, c in enumerate(SPECTRUM_DETAILS)})
     # Bruker survey scans often show M+1 above the envelope of an average glycan (M+1/M 0.74-1.1 for a 1933 Da [M-2H]2-), so a lighter isotope explaining
     # 30% of the trigger peak counts (precursors within 0.1 m/z of their GT glycan: 84% at 70%, 93% at 50%, 97% at 30%)
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine, mz_tolerance = 0.6 if isolation_mz else 0.3,
@@ -679,7 +681,7 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
-    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
+    df_out = df_out.assign(**{c: [d[k] for d in details] for k, c in enumerate(SPECTRUM_DETAILS)})
     # The header charge of a multiply charged precursor comes with an ion trap's own monoisotopic pick, which is checked against the survey scan
     walk = [c in (2, 3) and detected_ms1_trap == 'linear' for c in charges]
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [r or w for r, w in zip(refine, walk)],
@@ -855,7 +857,7 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         ms1_scans.append(bisect.bisect_right(ms1_ids, frame_id) - 1)
         # SPECTRUM_DETAILS (the file gives the collision energy with the polarity's sign); header_shift holds the header m/z until refinement
         details.append(('tof', frames[frame_id][1], abs(energy) if energy is not None else None, iso_width, scan_low, mzs[-1]))
-    df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges}).assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
+    df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges}).assign(**{c: [d[k] for d in details] for k, c in enumerate(SPECTRUM_DETAILS)})
     df_out['m/z'], drop, intensities = refine_tof_precursors(ms1, mzs, rts, ms1_scans, charges)
     if intensity:
         df_out['intensity'] = intensities
@@ -959,7 +961,7 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
     if intensity:
         df_out['intensity'] = intensities
     df_out['scan'], df_out['activation'] = scans, ['CID'] * len(df_out)
-    df_out = df_out.assign(**dict(zip(SPECTRUM_DETAILS, map(list, zip(*details)))))
+    df_out = df_out.assign(**{c: [d[k] for d in details] for k, c in enumerate(SPECTRUM_DETAILS)})
     ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
            np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
            np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
@@ -1748,6 +1750,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         keys1, cum1, base1 = keys1[order1], np.concatenate([[0], np.cumsum(ints1[order1], dtype = np.float64)]), np.arange(len(rts1)) * 1e4
         clusters.sort(key = lambda c: c['apex_mz'])
         groups, placed = [], []
+        # The Gaussian weights of every survey scan's neighbours at the floor width (fast survey scans, the usual case), computed once instead of for each
+        # m/z group's window (60% of condensing a run with 11,000 groups); each window takes its rows of them, the very same values
+        floor_kernel = None
         for c in clusters:
             if groups and c['apex_mz'] - groups[-1][-1]['apex_mz'] <= (c['apex_mz'] * mz_ppm / 1e6 if mz_ppm else mz_diff):
                 groups[-1].append(c)
@@ -1769,18 +1774,25 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             sigma = max(0.05, 0.7 * float(np.median(steps[steps > 0]))) if (steps > 0).any() else 0.05
             half = int(min(200, np.max(np.searchsorted(t, t + 3 * sigma, side = 'right') - np.arange(len(t)))))
             idx = np.arange(len(t))[:, None] + np.arange(-half, half + 1)[None, :]
-            w = np.where((idx >= 0) & (idx < len(t)), np.exp(-0.5 * ((t[np.clip(idx, 0, len(t) - 1)] - t[:, None]) / sigma) ** 2), 0)
+            if sigma == 0.05:
+                if floor_kernel is None:
+                    all_idx = np.arange(len(rts1))[:, None] + np.arange(-200, 201)[None, :]
+                    floor_kernel = np.exp(-0.5 * ((rts1[np.clip(all_idx, 0, len(rts1) - 1)] - rts1[:, None]) / sigma) ** 2)
+                w = np.where((idx >= 0) & (idx < len(t)), floor_kernel[lo:hi, 200 - half:201 + half], 0)
+            else:
+                w = np.where((idx >= 0) & (idx < len(t)), np.exp(-0.5 * ((t[np.clip(idx, 0, len(t) - 1)] - t[:, None]) / sigma) ** 2), 0)
             sm = (trace[np.clip(idx, 0, len(t) - 1)] * w).sum(1) / w.sum(1)
             # Maxima inside the window (one at its edge is the flank of a peak outside it)
             tops = [k for k in range(1, len(sm) - 1) if sm[k] > 0 and sm[k] > sm[k - 1] and sm[k] >= sm[k + 1]] or [int(np.argmax(sm))]
-            merged_any = True
-            while merged_any and len(tops) > 1:
-                merged_any = False
-                for k in range(len(tops) - 1):
-                    if sm[tops[k]:tops[k + 1] + 1].min() >= 0.7 * min(sm[tops[k]], sm[tops[k + 1]]):
-                        tops.pop(k if sm[tops[k]] < sm[tops[k + 1]] else k + 1)
-                        merged_any = True
-                        break
+            # The first pair of neighbouring maxima without such a valley merges, again and again; a merge only changes the pair before it, so the search goes
+            # on from there instead of from the first pair (the same merges, in the same order; restarting made noisy traces of long windows quadratic)
+            k = 0
+            while k < len(tops) - 1:
+                if sm[tops[k]:tops[k + 1] + 1].min() >= 0.7 * min(sm[tops[k]], sm[tops[k + 1]]):
+                    tops.pop(k if sm[tops[k]] < sm[tops[k + 1]] else k + 1)
+                    k = max(k - 1, 0)
+                else:
+                    k += 1
             bounds = rts1[[lo + tops[k] + int(np.argmin(sm[tops[k]:tops[k + 1] + 1])) for k in range(len(tops) - 1)]]
             parts = {}
             for c in group:
@@ -2941,8 +2953,9 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
     df = load_spectra_filepath(spectra_filepath, extract_ms1 = cc)
     if df.empty:
         # An empty .xlsx would only fail later as a run without glycan peaks
-        raise ValueError(f"{os.path.basename(os.path.normpath(spectra_filepath))} has no MS2 spectra with a precursor m/z, so there is nothing to extract (some conversions "
-                         f"keep only the MS1 scans; data-independent acquisition such as Waters MSE has no precursors)")
+        raise ValueError(f"{os.path.basename(os.path.normpath(spectra_filepath))} has no MS2 spectra with a precursor m/z, so there is nothing to extract (full-MS "
+                         f"profiling runs hold survey scans only, MSn files of direct infusion often only MS3 and higher stages; some conversions keep only the "
+                         f"MS1 scans; data-independent acquisition such as Waters MSE has no precursors)")
     region_meta = None
     if region is not None:
         # The surroundings of one peak, as a misprediction report sends them: its ion at every charge state, in the survey scans and in the MS2/MS3 spectra
@@ -3902,6 +3915,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     glycan_class = classes[0] if len(classes) == 1 else classes
     if sialic_derivatization is not None and sample_prep != 'underivatized':
         raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans, not of {sample_prep} ones.")
+    # A pair of products read from JSON settings is a list, which the caches keyed by the settings cannot hold
+    sialic_derivatization = tuple(sialic_derivatization) if isinstance(sialic_derivatization, list) else sialic_derivatization
     if not _return_intermediate:
         print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     if df_use is None:
@@ -4714,6 +4729,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     modification = None if modification == 'custom' else modification
     classes = glycan_classes(glycan_class)
     glycan_class = classes[0] if len(classes) == 1 else classes
+    sialic_derivatization = tuple(sialic_derivatization) if isinstance(sialic_derivatization, list) else sialic_derivatization
     print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin(classes)])

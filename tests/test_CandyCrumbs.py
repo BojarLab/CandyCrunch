@@ -7,7 +7,7 @@ import numpy as np
 import networkx as nx
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
+    build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
     CHAIN_IONS, domon_costello_to_mpl, \
     peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
     subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge
@@ -311,6 +311,17 @@ def test_glycopeptide_structure_chance_categories():
         assert found[name] is None, (name, found[name])
 
 
+def test_rank_glycopeptide_sites():
+    # c ions that carry the glycan only from its site on decide between the Ser/Thr; without them every placement ties, and an O-glycoprotease's prior puts
+    # the glycan on the first residue
+    pep, hexnac = 'TPSAAYPTDR', composition_to_mass({'HexNAc': 1}) - WATER_MASS
+    cum = np.cumsum([AA_masses[a] for a in pep])
+    c_ions = {cum[i - 1] + 17.026549 + PROTON_MASS + (hexnac if i > 7 else 0): 100.0 for i in range(2, 10)}
+    df = rank_glycopeptide_sites(pep, ['HexNAc'], c_ions, charge = 2, glycan_class = 'O', fragmentation_method = 'ETD')
+    assert df['glycosites'].tolist() == [[7], [2], [0]] and df['rank'].tolist() == [1, 2, 3]
+    flat = rank_glycopeptide_sites(pep, ['HexNAc'], {hexnac + PROTON_MASS: 100.0}, charge = 2, glycan_class = 'O', fragmentation_method = 'ETD', protease = 'IMPa')
+    assert flat['glycosites'][0] == [0] and flat['rank'].tolist() == [1, 2, 2] and flat['prior'].tolist() == [0.1, 0.0, 0.0]
+
 
 def test_glycopeptide_nsite_pieces():
     # The reducing end of an N-glycan is HexNAc, so a piece of a composition still on the peptide has to contain one: the peptide + 0,2X Hex
@@ -338,6 +349,21 @@ def test_glycopeptide_chance_categories():
     for name in ('y5 + HexNAc(2)', 'Hex(1)/HexNAc(1) 2+', 'b4 - NH3', 'b4 + Na'):
         assert found[name] is None, (name, found[name])
 
+
+def test_glycopeptide_charge_reduced_ions():
+    # Electron transfer leaves the intact glycopeptide charge-reduced with all its protons, and losing NH3 or acetamide from the radical; peaks no
+    # fragment explains are named so for compositions and structures alike, and not with collisional activation
+    pep, comp = 'TTNSATKI', {'Hex': 1, 'HexNAc': 1, 'Neu5Ac': 1}
+    mass = sum(AA_masses[a] for a in pep) + WATER_MASS + 2 * (composition_to_mass(comp) - WATER_MASS)
+    peaks = {(mass + 3 * PROTON_MASS) / 2: ('M_+H', 2), (mass + 3 * PROTON_MASS - 17.026549) / 2: ('M_+H|NH3', 2), mass + 3 * PROTON_MASS - 59.037114: ('M_2+H|C2H2O|NH3', 1)}
+    for glycans in ([comp, comp], ['Neu5Ac(a2-3)Gal(b1-3)GalNAc'] * 2):
+        for method in ('EThcD', 'HCD'):
+            hits = CandyCrumbs({'peptide': pep, 'glycans': glycans, 'glycosites': [0, 1]}, list(peaks), charge = 3, fragmentation_method = method)
+            for m, (mod, z) in peaks.items():
+                if method == 'HCD':
+                    assert hits[m] is None
+                else:
+                    assert hits[m]['Domon-Costello nomenclatures'][0] == [['Peptide', mod], ['M'], ['M']] and hits[m]['Fragment charges'][0] == z
 
 
 def test_rank_glycopeptide_structures_published():

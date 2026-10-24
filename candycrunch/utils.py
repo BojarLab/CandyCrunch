@@ -297,6 +297,9 @@ def read_mzxml(filepath, centroid_levels = ()):
             scan['retentionTime'] = m + h * 60.0 + s / 60.0
         elif 'retentionTime' in scan:
             scan['retentionTime'] = float(scan['retentionTime'])
+        else:
+            # MALDI spectra exported to mzXML have none; as for MGF spectra without RTINSECONDS
+            raise ValueError(f"{filepath} has no retentionTime for scan {scan.get('num')} (e.g., MALDI spectra); CandyCrunch needs retention times")
         scan['precursorMz'] = []
         for p in el.findall(f'{ns}precursorMz'):
             prec = dict(p.attrib)

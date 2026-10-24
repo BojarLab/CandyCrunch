@@ -699,7 +699,7 @@ def peak_outcomes(preds, gt, rt_col):
     p = p[p['top1_pred'].notna()].reset_index(drop = True)
     p['top1_pred'] = p['top1_pred'].map({g: tc.canonicalize_iupac(g) for g in p['top1_pred'].unique()})
     gt = gt.reset_index(drop = True)
-    gt_z = gt['charge'].values if 'charge' in gt.columns else np.full(len(gt), -1)
+    gt_z = np.nan_to_num(gt['charge'].values.astype(float), nan = -1) if 'charge' in gt.columns else np.full(len(gt), -1)
     matched = dict(tc.match_spectra(gt[['Mass', rt_col]].round(2).values, p[['m/z', 'RT']].round(2).values, mass_threshold = tc.MASS_TOLERANCE, rt_threshold = tc.RT_TOLERANCE,
                                     array1_alt = np.column_stack([gt['Mass'].values * np.abs(gt_z) - (gt_z - np.sign(gt_z)) * PROTON_MASS, gt[rt_col].values]).round(2),
                                     array2_alt = np.column_stack([p['m/z'] * p['charge'].abs() - (p['charge'] - np.sign(p['charge'])) * PROTON_MASS, p['RT']]).round(2)) if len(p) else [])

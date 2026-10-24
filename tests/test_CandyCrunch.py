@@ -189,7 +189,8 @@ def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbos
     print('empty preds')
     return 0, 0, 0, 0, 0, 0, 0, 0, 0
   predictions['top1_pred'] = predictions['top1_pred'].map({g: canonicalize_iupac(g) for g in predictions['top1_pred'].unique()})
-  gt_charges = gt['charge'].values if 'charge' in gt.columns else np.full(len(gt), -1)
+  # a blank charge (e.g. an open mapping-file row whose ion is unknown) counts as singly charged, as a ground truth without the column
+  gt_charges = np.nan_to_num(gt['charge'].values.astype(float), nan = -1) if 'charge' in gt.columns else np.full(len(gt), -1)
   pairs = predictions[['m/z', 'RT']].round(2).values
   pairs_converted = np.column_stack([predictions['m/z'] * predictions['charge'].abs() - (predictions['charge'] - np.sign(predictions['charge'])) * PROTON_MASS, predictions['RT']]).round(2)
   gt_pairs = gt[['Mass', rt_col]].round(2).values
@@ -736,6 +737,27 @@ def test_bruker_mzxml(tmp_path):
     # The scans' details: analyzer and polarity, nothing the file does not state, the header m/z as the shift refinement applied
     assert df['analyzer'].tolist() == ['linear'] * 3 and df['polarity'].tolist() == ['-'] * 3 and df['collision_energy'].isna().all()
     assert np.allclose(df['m/z'] + df['header_shift'], [966.204528808594, 675.813842773438, 675.418823242188])
+
+
+def test_mzxml_without_ms2_or_rt(tmp_path):
+    # Runs without MS2 spectra (full-MS profiling, MSn files of MS3 and higher stages only) load as an empty table, which extract_spectra refuses
+    # with its own error; MALDI spectra exported to mzXML have no retention times
+    data = base64.b64encode(np.array([[500.0, 10.0], [600.0, 20.0]]).astype('>f8').tobytes()).decode()
+    def write(name, scans):
+        path = tmp_path / name
+        path.write_text('<?xml version="1.0"?><mzXML xmlns="http://sashimi.sourceforge.net/schema_revision/mzXML_3.2"><msRun>' + ''.join(
+            f'<scan num="{num}" msLevel="{level}" centroided="1" polarity="+"{rt}>{precursor}<peaks precision="64" byteOrder="network" '
+            f'compressionType="none" contentType="m/z-int">{data}</peaks></scan>' for num, level, rt, precursor in scans) + '</msRun></mzXML>')
+        return str(path)
+    ms3 = '<precursorMz precursorIntensity="0" precursorScanNum="1">600.0</precursorMz>'
+    path = write('ms1_ms3.mzXML', [(1, 1, ' retentionTime="PT60S"', ''), (2, 3, ' retentionTime="PT61S"', ms3)])
+    df = process_mzXML_stack(path, intensity = True, extract_ms1 = True)
+    assert df.empty and set(SPECTRUM_DETAILS) <= set(df.columns) and len(df.attrs['ms1'][0]) == 1
+    with pytest.raises(ValueError, match = 'has no MS2 spectra'):
+        extract_spectra(path, str(tmp_path / 'ms1_ms3.cc'))
+    path = write('maldi.mzXML', [(1, 2, '', '<precursorMz precursorIntensity="0">1288.6</precursorMz>')])
+    with pytest.raises(ValueError, match = 'has no retentionTime'):
+        process_mzXML_stack(path)
 
 
 def test_bruker_ion_trap_mzml(tmp_path):
