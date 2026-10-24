@@ -13,7 +13,7 @@ import struct
 import tempfile
 import zlib
 from collections import Counter, defaultdict
-from itertools import combinations_with_replacement, groupby
+from itertools import combinations_with_replacement, groupby, islice
 from concurrent.futures import ProcessPoolExecutor
 import json
 from typing import Dict
@@ -1268,20 +1268,26 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
     # input no longer depends on how many inputs came before it: with one global random stream, a change adding or dropping a single candidate row
     # reshuffled the augmentation of every later input (up to 0.02 F1 per dataset), and comparisons needed several seeds. The global random states are
     # left as they were
+
+    def inputs():
+        # The 5 augmented copies of each test-time augmented input, then the plain inputs, made as the batches take them
+        for k in [k for k, t in zip(X, tta) if t]:
+            seed = zlib.crc32(b''.join(np.asarray(v, dtype = np.float32).tobytes() for v in k[:3]))
+            random.seed(seed)
+            np.random.seed(seed)
+            for _ in range(5):
+                yield (transform_mz(np.asarray(k[0])), *k[1:4], transform_rt(k[4]), *k[5:])
+        yield from (k for k, t in zip(X, tta) if not t)
+
     state = (random.getstate(), np.random.get_state())
-    X_tta = []
-    for k in [k for k, t in zip(X, tta) if t]:
-        seed = zlib.crc32(b''.join(np.asarray(v, dtype = np.float32).tobytes() for v in k[:3]))
-        random.seed(seed)
-        np.random.seed(seed)
-        X_tta.extend((transform_mz(np.asarray(k[0])), *k[1:4], transform_rt(k[4]), *k[5:]) for _ in range(5))
+    # Batches as the model takes them: binned intensities and m/z remainders as two channels, composition vector, glycan type, RT, mode, LC, modification, trap
+    batches, stream = [], inputs()
+    while b := list(islice(stream, 256)):
+        batches.append((np.stack([np.asarray([x[0] for x in b], dtype = np.float32), np.asarray([x[1] for x in b], dtype = np.float32)], axis = 1),
+                        np.asarray([x[2] for x in b], dtype = np.float32), np.asarray([x[3] for x in b], dtype = np.int64), np.asarray([[x[4]] for x in b], dtype = np.float32),
+                        *[np.asarray([x[c] for x in b], dtype = np.int64) for c in range(5, 9)]))
     random.setstate(state[0])
     np.random.set_state(state[1])
-    X = X_tta + [k for k, t in zip(X, tta) if not t]
-    # Batches as the model takes them: binned intensities and m/z remainders as two channels, composition vector, glycan type, RT, mode, LC, modification, trap
-    batches = [(np.stack([np.asarray([x[0] for x in b], dtype = np.float32), np.asarray([x[1] for x in b], dtype = np.float32)], axis = 1),
-                np.asarray([x[2] for x in b], dtype = np.float32), np.asarray([x[3] for x in b], dtype = np.int64), np.asarray([[x[4]] for x in b], dtype = np.float32),
-                *[np.asarray([x[c] for x in b], dtype = np.int64) for c in range(5, 9)]) for b in (X[i:i + 256] for i in range(0, len(X), 256))]
     idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
     df.set_index(idx_col, inplace = True)
     drop_cols = ['mode', 'modification', 'trap', 'lc'] + ([] if keep_inputs else ['binned_intensities', 'mz_remainder', 'RT2', 'glycan_type'])
@@ -1826,14 +1832,17 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     # bin_intensities gives it, bitwise (one call per spectrum was ~15% of condensing a large run); peaks of other types than Python floats go through it
     todo = list({id(s): s for c in clusters if (tuple(map(id, c['peak_d'])), mz_diff, min_mz, max_mz, bin_num) not in merged for s in c['peak_d']
                  if ('bin', id(s), min_mz, max_mz, bin_num) not in merged and set(map(type, s)).union(map(type, s.values())) <= {float}}.values())
-    if todo:
-        sizes = [len(s) for s in todo]
-        mzs = np.fromiter((m for s in todo for m in s), np.float64, sum(sizes)).astype(np.float32)
-        ints = np.fromiter((i for s in todo for i in s.values()), np.float64, sum(sizes))
-        owner = np.repeat(np.arange(len(todo)), sizes)
+    # In chunks of 2048 spectra, each kept as its occupied bins (indices, intensities, remainders): an MS2 spectrum fills a median ~190 of the 2048 bins,
+    # and the dense arrays of every spectrum took 0.54 GB on GPST000403 (17,606 MS2)
+    for first in range(0, len(todo), 2048):
+        chunk = todo[first:first + 2048]
+        sizes = [len(s) for s in chunk]
+        mzs = np.fromiter((m for s in chunk for m in s), np.float64, sum(sizes)).astype(np.float32)
+        ints = np.fromiter((i for s in chunk for i in s.values()), np.float64, sum(sizes))
+        owner = np.repeat(np.arange(len(chunk)), sizes)
         in_range = (mzs > frames[0]) & (mzs <= frames[-1])
         mzs, ints, owner = mzs[in_range], ints[in_range], owner[in_range]
-        binned_all, remainder_all = np.zeros((len(todo), bin_num)), np.zeros((len(todo), bin_num))
+        binned_all, remainder_all = np.zeros((len(chunk), bin_num)), np.zeros((len(chunk), bin_num))
         if len(mzs):
             bins = np.digitize(mzs, frames, right = True)
             keys = owner * (bin_num + 1) + bins
@@ -1842,8 +1851,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             remainders = (mzs - frames[bins - 1]) * (ints == np.maximum.reduceat(ints[order], starts)[np.searchsorted(unique_keys, keys)])
             binned_all[unique_keys // (bin_num + 1), unique_keys % (bin_num + 1) - 1] = np.add.reduceat(ints[order], starts)
             remainder_all[unique_keys // (bin_num + 1), unique_keys % (bin_num + 1) - 1] = np.maximum.reduceat(remainders[order], starts)
-        for k, s in enumerate(todo):
-            merged[('bin', id(s), min_mz, max_mz, bin_num)] = (s, binned_all[k], remainder_all[k])
+        for k, s in enumerate(chunk):
+            nz = np.flatnonzero((binned_all[k] != 0) | (remainder_all[k] != 0)).astype(np.int16)
+            merged[('bin', id(s), min_mz, max_mz, bin_num)] = (s, nz, binned_all[k][nz], remainder_all[k][nz])
     for cluster in clusters:
         highest_intensity_index = np.argmax(cluster['intensity'])
         highest_intensity = cluster['intensity'][highest_intensity_index]
@@ -1865,7 +1875,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         key = (tuple(map(id, cluster['peak_d'])), mz_diff, min_mz, max_mz, bin_num)
         if key in merged:
             _, peaks, binned_intensities, mz_remainder = merged[key]
-            condensed_data.append([rep_mz, mean_rt, highest_intensity, peaks, binned_intensities.copy(), mz_remainder.copy(), len(cluster['RT']),
+            condensed_data.append([rep_mz, mean_rt, highest_intensity, peaks, binned_intensities, mz_remainder, len(cluster['RT']),
                                    cluster['precursor_charge'][highest_intensity_index]])
             continue
         # Cluster fragment peaks across spectra by mass proximity, then weight-average mass and sum intensity
@@ -1940,18 +1950,23 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 elif sum(ints) != 0:
                     pk[np.average(ms, weights = ints)] = sum(ints)
         peaks = dict(sorted(pk.items(), key = lambda x: x[1], reverse = True))
-        binned = []
-        for spec in cluster['peak_d']:
+        # The spectra binned (dense again from their occupied bins) and averaged
+        binned_intensities, mz_remainder = np.zeros((len(cluster['peak_d']), bin_num)), np.zeros((len(cluster['peak_d']), bin_num))
+        for row, spec in enumerate(cluster['peak_d']):
             k = ('bin', id(spec), min_mz, max_mz, bin_num)
             if k not in merged:
-                merged[k] = (spec, *bin_intensities(spec, frames))
-            binned.append(merged[k][1:])
-        binned_intensities, mz_remainder = zip(*binned)
-        binned_intensities = np.mean(np.array(binned_intensities), axis = 0)
-        mz_remainder = np.mean(np.array(mz_remainder), axis = 0)
+                b, r = bin_intensities(spec, frames)
+                nz = np.flatnonzero((b != 0) | (r != 0)).astype(np.int16)
+                merged[k] = (spec, nz, b[nz], r[nz])
+            nz, b, r = merged[k][1:]
+            binned_intensities[row, nz], mz_remainder[row, nz] = b, r
+        binned_intensities = np.mean(binned_intensities, axis = 0)
+        mz_remainder = np.mean(mz_remainder, axis = 0)
         # Bin intensity normalization
         binned_intensities = binned_intensities / binned_intensities.sum()
-        merged[key] = (cluster['peak_d'], peaks, binned_intensities.copy(), mz_remainder.copy())
+        # Read-only, as the tables condensed from these spectra share them (the reducing end and class checks condense a run up to 5 more times)
+        binned_intensities.flags.writeable = mz_remainder.flags.writeable = False
+        merged[key] = (cluster['peak_d'], peaks, binned_intensities, mz_remainder)
         num_spectra = len(cluster['RT'])
         rep_charge = cluster['precursor_charge'][highest_intensity_index]
         # Without MS1, the apex precursor intensity is the abundance: it tracks MS1 peak areas far better than summing or integrating
@@ -2007,7 +2022,7 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
         ref_counts = processed_df_use.loc[:, 'ref'].map(len) + processed_df_use.loc[:, 'tissue_ref'].map(len) +
                      processed_df_use.loc[:, 'disease_ref'].map(len))
     processed_df_use = processed_df_use[~(processed_df_use['glycan'].str.contains("}"))]
-    processed_df_use = processed_df_use.sort_values('ref_counts', ascending = False)
+    processed_df_use = processed_df_use.sort_values('ref_counts', ascending = False, kind = 'stable')
     small = np.array([0 < sum(x.values()) < 6 for x in processed_df_use.Composition], dtype = bool)
     # Only the topology map of compositions below 6 residues needs topologies; every run builds these maps (also for the other classes with accurate
     # MS1), so they are kept across calls
@@ -4112,6 +4127,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     if isinstance(model, CandyCrunchCNN) or (torch is not None and isinstance(model, torch.nn.Module)):
         # Predict glycans from spectra
         preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
+        del loader
         # Max over the 5 augmented copies of each test-time augmented input (they come first in the loader), a plain input has one copy
         tta = df_out.drop_duplicates('input_id')['tta'].values
         order = np.concatenate([np.flatnonzero(tta), np.flatnonzero(~tta)])

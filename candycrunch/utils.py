@@ -457,22 +457,13 @@ def read_raw_scan_table(filepath):
                 records = np.frombuffer(raw_records, {'names': list(columns), 'formats': [t for t, _ in columns.values()],
                                                                         'offsets': [o for _, o in columns.values()], 'itemsize': sum(sizes)})
                 trailer = {label: records[label].tolist() for label in columns}
-
-                # Parse HCD Energy separately because its type is 13 (UTF-16 string).
-                energy_idx = next(( i for i, (_, _, label) in enumerate(fields) if label == 'HCD Energy:' ), None)
-                if energy_idx is not None:
-                    energy_offset = sum(sizes[:energy_idx])
-                    energy_size = sizes[energy_idx]
-                    real_energy = []
-                    for i in range(n_scans):
-                        start = i * record_size + energy_offset
-                        raw_value = raw_records[start:start + energy_size]
-                        value = raw_value.decode('utf-16-le', 'replace').split('\x00')[0].strip()
-                        try:
-                            real_energy.append(value)
-                        except:
-                            real_energy.append(None)
-                    trailer['HCD Energy:'] = real_energy
+                # HCD Energy: is text on newer orbitraps (kind 12 one byte per character, 13 UTF-16), e.g., 30.00,42.00,72.00 for stepped energies, and a
+                # float on older ones, which the records above read
+                energy_idx = next((i for i, (_, _, label) in enumerate(fields) if label == 'HCD Energy:'), None)
+                if energy_idx is not None and fields[energy_idx][0] in (12, 13):
+                    energy_offset, energy_size = sum(sizes[:energy_idx]), sizes[energy_idx]
+                    trailer['HCD Energy:'] = [raw_records[i * record_size + energy_offset:i * record_size + energy_offset + energy_size].decode(
+                        'utf-16-le' if fields[energy_idx][0] == 13 else 'latin-1', 'replace').split('\x00')[0].strip() or None for i in range(n_scans)]
                 break
     # Scan events, one per scan, are self-describing: a preamble (120 bytes in version 62, 128 in 63 and 64, 136 from 66) with polarity at byte 4,
     # profile mode at 5, MS level at 6 and analyzer at 40, then counted reactions (isolation m/z, isolation width and energy as doubles, then the

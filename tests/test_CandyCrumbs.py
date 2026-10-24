@@ -247,6 +247,10 @@ def test_build_glycopeptide_input_modifications():
     assert abs(composition_to_mass('H5N4', peptide = peptide_to_glycowork('EmNcSK')) - composition_to_mass('H5N4') - sum(AA_masses[aa] for aa in 'EmNcSK')) < 1e-9
     # N-X-C (also as c) and an N-X ending the peptide are sites too, after the canonical N-X-S/T
     assert infer_glycosites('NGcK', 'N') == [0] and infer_glycosites('NGTKNGcR', 'N') == [0, 4] and infer_glycosites('AANK', 'N') == [2] and infer_glycosites('ANPK', 'N') == []
+    # deamidated Asn and Gln (PNGase F leaves released N-glycosites as Asp) are n and q, which weigh Asp and Glu and are no N-glycosite
+    gp = build_glycopeptide_input('ITANTTDEP', 'N4(Deamidated);T5(HexNAc(1)Hex(1))')
+    assert gp['peptide'] == 'ITAnTTDEP' and peptide_to_glycowork('nq') == 'N[Deamidated]Q[Deamidated]' and infer_glycosites('GLnSTK', 'N') == []
+    assert abs(AA_masses['n'] - AA_masses['D']) < 1e-9 and abs(AA_masses['q'] - AA_masses['E']) < 1e-9
 
 
 def test_rank_glycopeptide_structures():
@@ -376,6 +380,23 @@ def test_rank_glycopeptide_structures_published():
     assert 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-6)[Neu5Ac(a2-3)Gal(b1-3)]GalNAc' in top
     assert {re.sub(r'a2-[36]', 'a2-?', s) for s in top} == {
         'Neu5Ac(a2-?)Gal(b1-4)GlcNAc(b1-6)[Neu5Ac(a2-?)Gal(b1-3)]GalNAc'}
+
+
+def test_rank_glycopeptide_structures_hexnac_evidence():
+    # The HexNAc oxonium ions decide between O-glycan candidates with and without GlcNAc: a ratio (138 + 168) / (126 + 144) below 1 favours GalNAc-only
+    # ones, above 2 those with GlcNAc, and without these ions nothing is weighed; O-site candidates start with GalNAc unless o_glycan_root is None
+    base = {204.0867: 100.0, 366.1395: 60.0, 274.0921: 30.0, 292.1027: 40.0}
+    galnac = rank_glycopeptide_structures('TTNSATKI', 'T1(Hex(2)HexNAc(2)NeuAc(1))', base | {126.0550: 30.0, 144.0656: 40.0, 138.0550: 10.0, 168.0656: 5.0},
+                                          charge = 2, fragmentation_method = 'HCD')
+    assert galnac['oxonium_ratio'][0] < 1 and not any('GlcNAc' in s[0] for s in galnac[galnac['rank'] == 1]['structures'])
+    glcnac = rank_glycopeptide_structures('TTNSATKI', 'T1(Hex(2)HexNAc(2)NeuAc(1))', base | {126.0550: 5.0, 144.0656: 5.0, 138.0550: 60.0, 168.0656: 20.0},
+                                          charge = 2, fragmentation_method = 'HCD')
+    assert glcnac['oxonium_ratio'][0] > 2 and all('GlcNAc' in s[0] for s in glcnac[glcnac['rank'] == 1]['structures'])
+    plain = rank_glycopeptide_structures('TTNSATKI', 'T1(Hex(2)HexNAc(2)NeuAc(1))', base, charge = 2, fragmentation_method = 'HCD')
+    assert plain['oxonium_ratio'][0] is None and (plain['hexnac_evidence'] == 1).all()
+    rooted = rank_glycopeptide_structures('TTNSATKI', 'T1(Hex(1)HexNAc(1)NeuAc(1))', base, charge = 2, fragmentation_method = 'HCD')
+    every = rank_glycopeptide_structures('TTNSATKI', 'T1(Hex(1)HexNAc(1)NeuAc(1))', base, charge = 2, fragmentation_method = 'HCD', o_glycan_root = None)
+    assert all(s[0].endswith('GalNAc') for s in rooted['structures']) and len(every) > len(rooted)
 
 
 def test_candycrumbs_ms3_precursor():
