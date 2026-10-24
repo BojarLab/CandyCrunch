@@ -3348,7 +3348,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         # calibration of the weaker ones, so that a half-width at its floor cut the most abundant glycans of a run
         ab = np.nan_to_num(df_out['rel_abundance'].values.astype(float)) if 'rel_abundance' in df_out.columns else np.zeros(len(df_out))
         loud = (ab >= np.quantile(ab[known], 0.8)) & (ab > 0) if known.any() else np.zeros(len(df_out), dtype = bool)
-        keep |= loud & (np.abs(signed - window[0]) <= 2 * window[1])
+        keep = keep | (loud & (np.abs(signed - window[0]) <= 2 * window[1]))
     else:
         if len(known_ppm) >= 5:
             med = np.median(known_ppm)
@@ -3826,7 +3826,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                               among the peaks it did not report (e.g., O-glycans carried into an N-glycan release) and adds them
    | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable that takes a dataframe with one row per
    |                              (pooled spectrum, candidate composition) input, in input order (index m/z; columns spec_id, RT, intensity, peak_d,
-   |                              num_spectra, precursor_charge, charge (unsigned), composition, compositional_vector, annotation_score; run settings
+   |                              num_spectra, precursor_charge, charge (unsigned), composition, compositional_vector, annotation_score, and member_peaks
+   |                              and member_rts, the peak dictionaries and RTs of the MS2 spectra pooled into peak_d, as loaded and shared with the
+   |                              run's later passes, so not to be changed in place; run settings
    |                              glycan_class, mode, modification, mass_tag, lc, trap, sample_prep in .attrs) and returns, per row, a list of
    |                              (IUPAC structure, probability) tuples; temperature and test-time augmentation only apply to a CandyCrunch model
    | glycans (list): full list of glycans used for training CandyCrunch, and the vocabulary a callable model's structures are written like; don't change default without changing model
