@@ -293,6 +293,25 @@ def test_rank_glycopeptide_compositions():
     assert df['isotope_error'].tolist() == [0, 1]
 
 
+def test_glycopeptide_structure_chance_categories():
+    # As for compositions, a glycopeptide structure's fragments of kinds that were annotated no more often than by chance are not matched: backbone ions
+    # with part of a glycan other than an N-glycan's core HexNAc, glycan-only ions above 1+, metal adducts and NH3 on backbone ions
+    pep, glycan = 'EEQYNSTYR', 'GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc'
+    hexnac, hexose = mono_attributes['HexNAc']['mass']['HexNAc'], mono_attributes['Hex']['mass']['Hex']
+    y5 = sum(AA_masses[a] for a in pep[4:]) + WATER_MASS + PROTON_MASS
+    b4 = sum(AA_masses[a] for a in pep[:4]) + PROTON_MASS
+    peptide = sum(AA_masses[a] for a in pep) + WATER_MASS + PROTON_MASS
+    peaks = {'y5 + HexNAc': y5 + hexnac, 'peptide + 0,2X HexNAc': peptide + 83.037114, 'y5 + HexNAc(2)': y5 + 2 * hexnac,
+             'Hex(1)/HexNAc(1) 2+': (hexose + hexnac + 2 * PROTON_MASS) / 2, 'b4 - NH3': b4 - 17.026549, 'b4 + Na': b4 + 22.989218 - PROTON_MASS}
+    hits = CandyCrumbs({'peptide': pep, 'glycans': [glycan], 'glycosites': [4]}, list(peaks.values()), charge = 3, fragmentation_method = 'HCD')
+    found = {name: hits[m]['Domon-Costello nomenclatures'][0] if hits[m] else None for name, m in peaks.items()}
+    assert found['y5 + HexNAc'][0] == ['y_5'] and found['y5 + HexNAc'][1][0].startswith('Y_1_')
+    assert found['peptide + 0,2X HexNAc'][0] == ['Peptide'] and found['peptide + 0,2X HexNAc'][1][0].startswith('02X_1_')
+    for name in ('y5 + HexNAc(2)', 'Hex(1)/HexNAc(1) 2+', 'b4 - NH3', 'b4 + Na'):
+        assert found[name] is None, (name, found[name])
+
+
+
 def test_glycopeptide_nsite_pieces():
     # The reducing end of an N-glycan is HexNAc, so a piece of a composition still on the peptide has to contain one: the peptide + 0,2X Hex
     # mass is no longer the peptide with '02X Hex', and no Y/Z/X piece without HexNAc is offered
@@ -300,6 +319,25 @@ def test_glycopeptide_nsite_pieces():
     result = CandyCrumbs({'peptide': 'EEQYNSTYR', 'glycans': ['Hex3HexNAc4dHex1'], 'glycosites': [4]}, [m], charge = 3, simplify = False)
     pieces = [y for label in result[m]['Domon-Costello nomenclatures'] for y in label[1] if y[0] in 'YZ' or y[:3][-1] == 'X']
     assert pieces and all('HexNAc' in y for y in pieces)
+
+
+def test_glycopeptide_chance_categories():
+    # Fragment kinds that spectra of identified glycopeptides showed no more often than spectra shifted out of tolerance are not made for glycopeptide
+    # compositions: backbone ions with part of a glycan other than an N-glycan's core HexNAc, glycan-only ions above 1+, metal adducts and NH3 on backbone ions
+    pep, comp = 'EEQYNSTYR', {'Hex': 3, 'HexNAc': 4, 'dHex': 1}
+    hexnac, hexose = mono_attributes['HexNAc']['mass']['HexNAc'], mono_attributes['Hex']['mass']['Hex']
+    y5 = sum(AA_masses[a] for a in pep[4:]) + WATER_MASS + PROTON_MASS
+    b4 = sum(AA_masses[a] for a in pep[:4]) + PROTON_MASS
+    peptide = sum(AA_masses[a] for a in pep) + WATER_MASS + PROTON_MASS
+    peaks = {'y5 + HexNAc': y5 + hexnac, 'peptide + 0,2X HexNAc': peptide + 83.037114, 'y5 + HexNAc(2)': y5 + 2 * hexnac,
+             'Hex(1)/HexNAc(1) 2+': (hexose + hexnac + 2 * PROTON_MASS) / 2, 'b4 - NH3': b4 - 17.026549, 'b4 + Na': b4 + 22.989218 - PROTON_MASS}
+    hits = CandyCrumbs({'peptide': pep, 'glycans': [comp], 'glycosites': [4]}, list(peaks.values()), charge = 3, fragmentation_method = 'HCD')
+    found = {name: hits[m]['Domon-Costello nomenclatures'][0] if hits[m] else None for name, m in peaks.items()}
+    assert found['y5 + HexNAc'] == [['y_5'], ['Y HexNAc(1)']]
+    assert found['peptide + 0,2X HexNAc'] == [['Peptide'], ['02X HexNAc']]
+    for name in ('y5 + HexNAc(2)', 'Hex(1)/HexNAc(1) 2+', 'b4 - NH3', 'b4 + Na'):
+        assert found[name] is None, (name, found[name])
+
 
 
 def test_rank_glycopeptide_structures_published():

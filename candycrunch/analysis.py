@@ -839,6 +839,10 @@ ADDUCT_GLOBAL_MODS = {'+Na', '+K', '+Acetate'}
 REPEATABLE_GLOBAL_MODS = ('H2O', 'NH3')
 # metal cations on a free glycan's fragment: one carries the charge, more neutralize acidic groups or carry more charges ([F+2Na-H]+, [F+2Na]2+)
 METAL_GLOBAL_MODS = {'+Na', '+K'}
+# Global modifications a fragment of a glycopeptide composition can carry, by the kind of ion (glycan-only, intact peptide, backbone ion): in spectra of
+# identified glycopeptides (HCD, EThcD, ETD) only these were annotated more often than in the same spectra shifted out of tolerance; metal adducts, CH2O,
+# CO2, C3H8O4 and H2O + NH3 never were, nor NH3 or two waters on backbone ions
+GLYCOPEPTIDE_GLOBAL_MODS = {'No Peptide': {'H2O', '2H2O', 'C2H4O2'}, 'Peptide': {'H2O', '2H2O', 'NH3', '2NH3', 'C2H2O', 'C2H4O2'}, 'backbone': {'H2O'}}
 BASIC_RESIDUES = {'H', 'K', 'R', 'j', 'k'}
 # radical activation (electrons or UV photons) gives free glycans fragments one hydrogen atom off their even-electron mass (odd-electron ions) or two
 # (hydrogen-shifted ions), written as global modifications (M_+H, M_2-H|H2O) that are no cleavage
@@ -2553,14 +2557,20 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         # Per-glycan states: intact, fully cleaved off, or sub-fragmented; a glycan still on the peptide keeps its reducing end, so
         # only Y/Z ions and X cross-rings of the reducing-end residue qualify (B/C/A ones put, e.g., '35A Hex' on a peptide at the mass of
         # y8 + HexNAc). On an N-site that residue is HexNAc, so the piece has to contain one ('02X Hex' and 'Y Hex(2)/dHex(1)' were
-        # options on EEQYNSTYR), while O-sites also carry Man, Fuc, Glc, or Xyl
+        # options on EEQYNSTYR), while O-sites also carry Man, Fuc, Glc, or Xyl. X cross-rings only on an N-site: the peptide + 0,2X/0,4X HexNAc of
+        # N-glycopeptides were real, X cross-rings on O-glycopeptides as frequent as in the same spectra shifted out of tolerance
         glycan_options = []
         for g_idx in range(n_glycans):
             opts = [(['M'], glycan_totals[g_idx], 0), ([f'loss of glycan {g_idx + 1}'], 0.0, 1)]
             opts += [([gl], gm, gc) for gm, gl, gc in all_glycan_frags[g_idx] if gc > 0 and (
-                    gl.split(' ')[0] in ('Y', 'Z') or gl.split(' ')[0] in X_cross_rings) and (
+                    gl.split(' ')[0] in ('Y', 'Z') or (gl.split(' ')[0] in X_cross_rings and peptide_seq[glycosites[g_idx]] == 'N')) and (
                     peptide_seq[glycosites[g_idx]] != 'N' or 'HexNAc' in [c.split('(')[0] for c in gl.split(' ')[1].split('/')])]
             glycan_options.append(opts)
+        # A backbone ion keeps each glycan on its side whole, loses it, or keeps the core HexNAc of an N-glycan (y + HexNAc in HCD): in spectra of
+        # identified glycopeptides, backbone ions with any other part of a glycan were annotated no more often than in the same spectra shifted out of
+        # tolerance, while the intact peptide's Y/Z and X ions were real
+        backbone_options = [[o for o in opts if o[2] == 0 or o[0][0].startswith('loss of') or (peptide_seq[glycosites[g_idx]] == 'N' and o[0][0] == 'Y HexNAc(1)')]
+                            for g_idx, opts in enumerate(glycan_options)]
         # Intact peptide with any combination of glycan states
         for combo in product(*glycan_options):
             nc = sum(c[2] for c in combo)
@@ -2570,22 +2580,22 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         # Peptide backbone fragments; glycans outside the fragment are lost without costing a cleavage. They are most of the fragments (each backbone
         # ion with each glycan state), and few come near an observed mass, so with one glycan the masses are summed in numpy and only those near an
         # observed mass, as they are or after a global modification, are made (with a margin, a superset of what matching and the global modifications use)
-        offsets = [0.0] + ([global_mod_mass(g, mode_mass) for g in global_mods_dict] if not disable_global_mods else [])
+        offsets = [0.0] + ([global_mod_mass(g, mode_mass) for g in global_mods_dict if g in GLYCOPEPTIDE_GLOBAL_MODS['backbone']] if not disable_global_mods else [])
         targets = (np.asarray(window_masses, dtype = float)[:, None] - np.array(offsets)[None, :]).ravel()
-        opt_masses = np.array([c[1] for c in glycan_options[0]], dtype = float)
-        opt_cleavages = np.array([c[2] for c in glycan_options[0]])
+        opt_masses = np.array([c[1] for c in backbone_options[0]], dtype = float)
+        opt_cleavages = np.array([c[2] for c in backbone_options[0]])
         for ion_name, mass_fn, terminus in pep_ions:
             for i in range(first_i.get(ion_name, 1), n_aa):
                 pmass = mass_fn(i)
                 if pmass is None:
                     continue
                 plabel = f'{ion_name}_{i}'
-                opts = [glycan_options[j] if (gs < i if terminus == 'n' else gs >= n_aa - i)
+                opts = [backbone_options[j] if (gs < i if terminus == 'n' else gs >= n_aa - i)
                         else [([f'loss of glycan {j + 1}'], 0.0, 0)] for j, gs in enumerate(glycosites)]
-                if n_glycans == 1 and len(targets) and opts[0] is glycan_options[0]:
+                if n_glycans == 1 and len(targets) and opts[0] is backbone_options[0]:
                     keys = np.round(pmass + opt_masses + mode_mass, 5)
                     for k in np.flatnonzero((opt_cleavages < max_cleavages) & check_masses(targets, keys, mass_threshold + 2e-4)):
-                        frag_dict.setdefault(keys[k], []).append(([[plabel], list(glycan_options[0][k][0])], 1 + int(opt_cleavages[k])))
+                        frag_dict.setdefault(keys[k], []).append(([[plabel], list(backbone_options[0][k][0])], 1 + int(opt_cleavages[k])))
                     continue
                 for combo in product(*opts):
                     nc = 1 + sum(c[2] for c in combo)
@@ -2635,6 +2645,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                 base_mass, entries = base_entries[j]
                 new_mass = round(base_mass + adj_mass, 5)
                 for label, nc in entries:
+                    if is_glycopeptide and gmod not in GLYCOPEPTIDE_GLOBAL_MODS.get(label[0][0], GLYCOPEPTIDE_GLOBAL_MODS['backbone']):
+                        continue
                     if gmod in ('CO2', 'SO4', 'PO4'):
                         # as update_global_mods does for structures, a residue's own loss needs that residue on the fragment: in the glycans an ion keeps
                         # whole ('M' on a peptide) or in part ('B Hex(1)/Neu5Ac(1)', '02A Neu5Ac'), not in those it lost
@@ -2691,7 +2703,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                                        for i, (piece, *_) in enumerate(label[1:] if is_glycopeptide else [label]) if not piece.startswith('loss of'))
                         backbone = label[0][0] if is_glycopeptide else 'No Peptide'
                         if backbone == 'No Peptide':
-                            z_max = n_glycan
+                            # glycan-only ions of a glycopeptide were annotated at 2+ and above no more often than by chance
+                            z_max = 1 if is_glycopeptide else n_glycan
                         else:
                             ion, _, pos = backbone.partition('_')
                             pep_part = peptide_seq if backbone == 'Peptide' else peptide_seq[:int(pos)] if ion in N_TERM_IONS else peptide_seq[n_aa - int(pos):]
@@ -2969,8 +2982,30 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         frags, rf_names = [g for g, rf in zip(frags, rf_names) if rf is not None], [rf for rf in rf_names if rf is not None]
         names = {id(g): merge_gp_global_mods([rf] + dc) for g, rf, dc in zip(frags, rf_names, get_glycan_cleavages(nx_mono, frags, input_dict['glycosites'], chain_rank))}
         lability = {id(g): compute_fragment_lability(edge_lability, g) for g in frags}
+        n_sites = [input_dict['peptide'][site] == 'N' for site in input_dict['glycosites']]
+
+        def plausible(name, z):
+            # As for glycopeptide compositions: in spectra of identified glycopeptides, glycan-only ions above 1+, backbone ions with part of a glycan (a
+            # glycan lost whole is a Y_0/Z_0 piece; an N-glycan's core HexNAc, Y_1 cuts of all its chains, was real), X cross-rings on the intact peptide
+            # other than one of an N-glycan's core HexNAc alone (peptide + 0,2X), and global modifications outside GLYCOPEPTIDE_GLOBAL_MODS of their kind
+            # of ion were annotated no more often than in the same spectra shifted out of tolerance; the glycan-only ions keep all of theirs, which were real
+            backbone = next(x for x in name[0] if not x.startswith('M_'))
+            if backbone == 'No Peptide':
+                return abs(z) == 1
+            kind = 'Peptide' if backbone == 'Peptide' else 'backbone'
+            if not {x[2:] for sub in name for x in sub if x.startswith('M_')} <= GLYCOPEPTIDE_GLOBAL_MODS[kind]:
+                return False
+            for sub, n_site in zip(name[1:], n_sites):
+                pieces = [x for x in sub if not x.startswith('M_') and x != 'M' and not x.startswith('loss of')]
+                if kind == 'Peptide':
+                    if any(re.match(r'\d\dX', x) for x in pieces) and not (n_site and len(pieces) == 1 and re.fullmatch(r'\d\dX_1_[A-Za-z]+', pieces[0])):
+                        return False
+                elif pieces and not all(re.fullmatch(r'[YZ]_0_[A-Za-z]+', x) for x in pieces) and not (n_site and all(re.fullmatch(r'Y_1_[A-Za-z]+', x) for x in pieces)):
+                    return False
+            return True
+
         for fragment_properties in matches:
-            keep = [i for i, g in enumerate(fragment_properties[-1]) if id(g) in names]
+            keep = [i for i, g in enumerate(fragment_properties[-1]) if id(g) in names and plausible(names[id(g)], fragment_properties[3][i])]
             fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
             downstream_values.append((*fragment_properties, [[list(x) for x in names[id(g)]] for g in fragment_properties[-1]],
                                       [lability[id(g)] for g in fragment_properties[-1]]))
@@ -3384,7 +3419,7 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
 
 
 def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, intensities = None, charge = 2, glycosite = None, isotope_errors = None,
-                                   fragmentation_method = None, mass_threshold = 0.5, mass_threshold_ppm = 10, top_n_peaks = 100, isotope_penalty = 0.2, **kwargs):
+                                   fragmentation_method = None, mass_threshold = 0.2, mass_threshold_ppm = 10, top_n_peaks = 100, isotope_penalty = 0.2, **kwargs):
     """Ranks the glycan compositions that fit a glycopeptide's precursor (isobars such as Neu5Ac + Hex and Neu5Gc + Fuc, or compositions at other isotope
     errors of the precursor) by their fragment evidence in its MS2 spectrum\n
     | Arguments:
@@ -3398,7 +3433,8 @@ def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, inten
     | isotope_errors (list): per composition, how many isotope steps the precursor m/z is off for it (the m/z the instrument picked minus the composition's,
     |                        in 13C spacings); default:None (all 0)
     | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD', e.g., the activation column of load_spectra_filepath; default:None (all peptide ion types)
-    | mass_threshold (float): fragment mass tolerance in Da; default:0.5
+    | mass_threshold (float): fragment mass tolerance in Da, the tolerance of ion-trap spectra (at 0.5 Da a candidate one isotope heavier explains their
+    |                         13C peaks and the 2+ ions); default:0.2
     | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; None for low-resolution spectra; default:10
     | top_n_peaks (int): how many of the most intense peaks are scored; default:100
     | isotope_penalty (float): what each isotope step of isotope_errors costs a candidate's score; default:0.2
