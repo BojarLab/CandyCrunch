@@ -11,9 +11,9 @@ repo where one has cc_files/): <data_root>/cc_files, mz_maps, file_checklist.csv
 folder; without either only the test runs of tests/ are left out) and the output <data_root>/cc_training.
 
 Inputs: <cc_root>/<project>/**/<run>.cc (project = a map ID: GlycoPOST, PMC, MassIVE, ...), <maps>/df_mz_<project>[_<suffix>].csv (Mass, RT, glycan, optional
-sample columns whose names are substrings of the run names, optional reducing_end (a REDUCING_ENDS value or 'custom <tag mass>'), sialic_derivatization and
-trap per row, which set them for a run whose rows all agree) and the checklist row of the project (mode, LC_type, trap, glycan_type, reducing_end,
-sample_prep, sialic_derivatization, mass_tag).
+sample columns whose names are substrings of the run names, optional reducing_end (a REDUCING_ENDS value or 'custom <tag mass>'), sialic_derivatization,
+trap and lc (PGC, C18, HILIC or other) per row, which set them for a run whose rows all agree) and the checklist row of the project (mode, LC_type, trap,
+glycan_type, reducing_end, sample_prep, sialic_derivatization, mass_tag).
 Per run: the project's maps of the class its name gives (NG/OG, N-/O-glycans, GSL, a sample number ending in N or O; map class from the suffix _N, _O, _GSL,
 ...), those with a sample column found in the run name (rows where it is > 0), else every row of a map that names no run; glycan class from the maps' suffixes,
 else the run name, else the map's structures, else the checklist; map masses 0.5-1 off their structure's ion take its m/z; candidate compositions from the
@@ -56,7 +56,7 @@ import pandas as pd
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
-NON_SAMPLE = {'Mass', 'RT', 'glycan', 'added_db', 'removed_db', 'glycan_class', 'rt_group', 'charge', 'reducing_end', 'sialic_derivatization', 'trap'}
+NON_SAMPLE = {'Mass', 'RT', 'glycan', 'added_db', 'removed_db', 'glycan_class', 'rt_group', 'charge', 'reducing_end', 'sialic_derivatization', 'trap', 'lc'}
 # Class of a map by the first part of its suffix (_N_rt: N)
 SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid', 'milk': 'free'}
 LOG_COLUMNS = ['project', 'run', 'path', 'excluded', 'maps', 'glycan_class', 'rt_shift', 'rt_alignment', 'rt_anchors', 'masses_rescued', 'settings_fitted', 'status',
@@ -221,6 +221,9 @@ def convert_run(task):
         traps = task['mapping']['trap'] if task['mapping'] is not None and 'trap' in task['mapping'].columns else pd.Series(dtype = object)
         if len(traps) and traps.notna().all() and traps.nunique() == 1 and traps.iloc[0] in ('linear', 'orbitrap', 'amazon'):
             settings['trap'] = traps.iloc[0]
+        lcs = task['mapping']['lc'] if task['mapping'] is not None and 'lc' in task['mapping'].columns else pd.Series(dtype = object)
+        if len(lcs) and lcs.notna().all() and lcs.nunique() == 1 and lcs.iloc[0] in ('PGC', 'C18', 'HILIC', 'other'):
+            settings['lc'] = lcs.iloc[0]
         sias = task['mapping']['sialic_derivatization'] if task['mapping'] is not None and 'sialic_derivatization' in task['mapping'].columns else pd.Series(dtype = object)
         if len(sias) and sias.notna().all() and sias.nunique() == 1:
             from glycowork.motif.tokenization import SIALIC_DERIVATIZATIONS
