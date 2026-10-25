@@ -229,12 +229,26 @@ def convert_run(task):
             from glycowork.motif.tokenization import SIALIC_DERIVATIZATIONS
             if sias.iloc[0] in SIALIC_DERIVATIZATIONS:
                 settings['sialic_derivatization'] = sias.iloc[0]
+        # Residues wrap_inference leaves out of its candidate compositions by default (filter_out: Kdn, HexA, ...) stay in where the run's map lists them, as
+        # its rows of them could not label otherwise and their isobars (HexNAc + Kdn = Hex + Neu5Ac) would take the inputs
+        if task['mapping'] is not None:
+            from glycowork.motif.tokenization import glycan_to_composition
+            from candycrunch.prediction import wrap_inference
+            default_out = inspect.signature(wrap_inference).parameters['filter_out'].default
+            listed = set()
+            for g in task['mapping']['glycan'].dropna():
+                try:
+                    listed.update(k for k, v in glycan_to_composition(g).items() if v)
+                except Exception:
+                    pass
+            if listed & default_out:
+                settings['filter_out'] = default_out - listed
         tries = [settings] if 'modification' in settings else [dict(settings, modification = 'reduced'), dict(settings, modification = 'custom', mass_tag = None)]
 
         def attempt(s):
             nonlocal reused
             mapping, rescued = rescue_masses(task['mapping'], s) if task['mapping'] is not None else (pd.DataFrame(columns = ['Mass', 'RT', 'glycan']), 0)
-            key = hashlib.sha1((task['inputs_stamp'] + json.dumps(s, sort_keys = True, default = str)).encode()).hexdigest()
+            key = hashlib.sha1((task['inputs_stamp'] + json.dumps(s, sort_keys = True, default = lambda v: sorted(v) if isinstance(v, (set, frozenset)) else str(v))).encode()).hexdigest()
             if key not in used:
                 reused += key in cached
                 used[key] = cached[key] if key in cached else run_inputs(str(path), task['glycan_class'], **s)
