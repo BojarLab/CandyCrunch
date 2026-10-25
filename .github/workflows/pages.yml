@@ -1,0 +1,64 @@
+name: Web app
+
+# The in-browser CandyCrunch (web/) on GitHub Pages, built by packaging/build_web.py from each published release (or by hand): the page, this release's
+# candycrunch wheel, a glycowork wheel from the dev branch CI tests against, and the example run. Needs the repository's Pages source set to GitHub Actions
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a running one is not cancelled
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+
+    - name: Build the site
+      run: python packaging/build_web.py _site
+
+    # The example run on the built site in headless Chromium against the same run natively (tests/test_web.py): a Pyodide, onnxruntime-web, glycowork
+    # or candycrunch change that breaks the page fails here and is not deployed
+    - name: Install CandyCrunch natively and Playwright's Chromium
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install "glycowork @ git+https://github.com/BojarLab/glycowork.git@dev"
+        pip install . -r requirements-dev.txt playwright
+        python -m playwright install --with-deps chromium
+
+    - name: Test the site against the native run
+      run: pytest tests/test_web.py -n 0 -v -rs
+      env:
+        CC_WEB_SITE: _site
+
+    - name: Upload the site
+      uses: actions/upload-pages-artifact@v5
+      with:
+        path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v5

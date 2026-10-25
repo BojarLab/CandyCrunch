@@ -151,6 +151,15 @@ def test_derivatization_sites_match_glycowork():
             assert len(positions) == round(n) + 1, (prep, mono)
 
 
+def test_candycrumbs_permethylated_sialic_amides():
+    # sialic acids amidated before permethylation end as dimethylamides, whatever their linkage: the B1 ion 13.03 above the methyl ester's 376.20
+    out = CandyCrumbs('Neu5Ac(a2-?)Gal(b1-4)Glc', [389.23, 582.20], 0.5, charge = 1, mass_tag = calculate_adduct_mass('C6HNS'), sample_prep = 'permethylated',
+                      sialic_derivatization = ('dimethylamide', 'dimethylamide'))
+    assert 'B_1_Alpha' in out[389.23]['Domon-Costello nomenclatures'][0]
+    assert abs(out[389.23]['Theoretical fragment masses'][0] - 389.2282) < 1e-3
+    assert 'Y_2_Alpha' in out[582.20]['Domon-Costello nomenclatures'][0]
+
+
 def test_smiles_mono_attributes_reproduce_hand_tables():
     # The atom-level tables behind every residue without a hand table rebuild each hand table entry they name: masses (to the tables'
     # rounding), retained carbons and derivatized groups; 0,1A and 2,5X have no cut_type_dict name and 1,2X breaks adjacent ring bonds

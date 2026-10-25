@@ -773,7 +773,7 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
             pairs = values[num_scans:].reshape(-1, 2).astype(np.int64)
             offsets = np.concatenate([[0], np.cumsum(values[1:num_scans] // 2, dtype = np.int64), [len(pairs)]])
             steps = np.concatenate([[0], np.cumsum(pairs[:, 0])])
-            return offsets, steps[1:] - np.repeat(steps[offsets[:-1]], np.diff(offsets)) - 1, pairs[:, 1].astype(np.float64)
+            return offsets, steps[1:] - np.repeat(steps[offsets[:-1]], np.diff(offsets).astype(np.intp)) - 1, pairs[:, 1].astype(np.float64)
         tofs, ints = [], []
         scan_bytes = np.frombuffer(blob, '<u4', num_scans + 1).astype(np.int64) - 8
         for begin, end in zip(scan_bytes[:-1].tolist(), scan_bytes[1:].tolist()):
@@ -1363,7 +1363,10 @@ def fit_sialic_linkages(glycan, comp, scoring = False):
     unknown ones are set where the composition decides them (glycowork's resolve_sialic_linkages), and where the structure states other linkages, the
     composition's replace them, all of them if its sialic acids are of one kind, while a mix of a2-6 and a2-3 leaves them open (a2-3/6), as the mass does
     not say which sits where. With scoring (for CandyCrumbs, whose glycosidic fragment masses do not depend on that), every sialic acid gets one: the stated
-    ones as far as the composition has them, the rest its a2-6, then its a2-3 ones in written order. None if its sialic acids cannot have these linkages"""
+    ones as far as the composition has them, the rest its a2-6, then its a2-3 ones in written order. None if its sialic acids cannot have these linkages.
+    A composition without linkages (a derivatization making the same product of every sialic acid) leaves the structure as it is"""
+    if not any(comp.get(k) for keys in SIALIC_KEYS.values() for k in keys):
+        return glycan
     resolved = resolve_sialic_linkages(glycan, comp)
     sites = [s for s in _carboxyl_sites(resolved or glycan) if s[0] in SIALIC_KEYS]
     if resolved is not None and (not scoring or all(i is not None for _, i, _, _ in sites)):
@@ -1432,7 +1435,8 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
                 if sialic_derivatization is not None:
                     # every product its carboxyls can carry, a sialic acid of unknown linkage being either
                     sites = Counter(base if base == 'HexA' or i is None else SIALIC_KEYS[base][i] for base, i, _, _ in _carboxyl_sites(glycan))
-                    mz = np.array([mz + composition_to_mass(c, sialic_derivatization = sialic_derivatization) - composition_to_mass(c) for c in sialic_linkage_splits(sites)])
+                    mz = np.array([mz + composition_to_mass(c, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization) - composition_to_mass(c, sample_prep = sample_prep)
+                                   for c in sialic_linkage_splits(sites, sialic_derivatization = sialic_derivatization)])
             else:
                 mz = glycan + composition_to_mass({}, sample_prep = sample_prep,
                                                   modification = modification) - composition_to_mass({},
@@ -1753,7 +1757,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     # chained into one cluster reported between them, while a broad peak that kept triggering MS2 for minutes became a cluster every rt_diff
     if ms1 is not None and len(ms1[0]) > 5:
         rts1, mzs1, ints1, offs1 = ms1
-        keys1 = np.repeat(np.arange(len(rts1)) * 1e4, np.diff(offs1)) + mzs1.astype(np.float64)
+        keys1 = np.repeat(np.arange(len(rts1)) * 1e4, np.diff(offs1).astype(np.intp)) + mzs1.astype(np.float64)
         order1 = np.argsort(keys1, kind = 'stable')
         keys1, cum1, base1 = keys1[order1], np.concatenate([[0], np.cumsum(ints1[order1], dtype = np.float64)]), np.arange(len(rts1)) * 1e4
         clusters.sort(key = lambda c: c['apex_mz'])
@@ -2072,7 +2076,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
         pool_comps = pool_df.groupby('comp_str').first()['Composition']
         comps_in = [x for c, x in pool_comps.items() if not fallback or c not in comp_struct_map]
         if sialic_derivatization is not None:  # a linkage-specific derivatization gives each way of linking the sialic acids a mass of its own
-            comps_in = [split for x in comps_in for split in sialic_linkage_splits(x)]
+            comps_in = [split for x in comps_in for split in sialic_linkage_splits(x, sialic_derivatization = sialic_derivatization)]
         comp_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep, modification = modification,
                                                     sialic_derivatization = sialic_derivatization) + tag for x in comps_in])
         comps_with_none = [(x, pool_comp_map, pool_topo_map) for x in comps_in] + [None]
@@ -2425,8 +2429,8 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
         res_mass = {r: composition_to_mass({r: 1}, sample_prep = sample_prep) - base for r in ('Hex', 'HexNAc', 'dHex', 'Pen', 'Neu5Ac', 'Neu5Gc', 'Kdn', 'HexA', 'HexN')}
         cap = (base - composition_to_mass({})) / 2
     # A derivatized sialic acid leaves its ion, or is lost, as its a2-6 or its lactone-derived product
-    sia_masses = {sia: [res_mass[sia] + cap] if sialic_derivatization is None else [composition_to_mass({k: 1}, sialic_derivatization = sialic_derivatization) - composition_to_mass({})
-                                                                                   for k in SIALIC_KEYS[sia]] for sia in SIALIC_KEYS}
+    sia_masses = {sia: [res_mass[sia] + cap] if sialic_derivatization is None else [composition_to_mass({k: 1}, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization) -
+                                                                                   composition_to_mass({}, sample_prep = sample_prep) + cap for k in SIALIC_KEYS[sia]] for sia in SIALIC_KEYS}
     charges_abs = np.abs(df_out['charge'].values)
     raw_masses = df_out.index.values * charges_abs
     df_out['adduct'] = None
@@ -2731,7 +2735,7 @@ def make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = 'unde
             if filter_out.intersection(composition):
                 mass_dic[9999].append(k)
             elif sialic_derivatization is not None:
-                for split in sialic_linkage_splits(composition):
+                for split in sialic_linkage_splits(composition, sialic_derivatization = sialic_derivatization):
                     if (resolved := resolve_sialic_linkages(k, split)) is not None:
                         mass_dic.setdefault(composition_to_mass(split, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization), []).append(resolved)
             else:
@@ -3426,8 +3430,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                                  zip(df_out['predictions'], df_out['composition'])]
     else:
         # the sialic linkages of the composition are those whose derivatized mass is the precursor's, of the ones the structure allows
-        df_out['composition'] = [val if not k else next((c for c in sialic_linkage_splits(get_comp(k[0][0])) if resolve_sialic_linkages(k[0][0], c) is not None and mass_check(
-            obs, composition_to_mass(c, sialic_derivatization = sialic_derivatization), modification = modification, mass_tag = mass_tag, mode = mode,
+        df_out['composition'] = [val if not k else next((c for c in sialic_linkage_splits(get_comp(k[0][0]), sialic_derivatization = sialic_derivatization) if resolve_sialic_linkages(k[0][0], c) is not None and mass_check(
+            obs, composition_to_mass(c, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization), modification = modification, mass_tag = mass_tag, mode = mode,
             sample_prep = sample_prep, mass_tolerance = mass_tolerance)), val) for k, val, obs in zip(df_out['predictions'], df_out['composition'], df_out.index)]
     df_out['charge'] = round(df_out['composition'].apply(lambda x: composition_to_mass(x, sample_prep = sample_prep, modification = modification,
                                                                                        sialic_derivatization = sialic_derivatization)) /
@@ -3930,8 +3934,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Several glycan classes measured in one run (e.g., N- and O-glycans of one sample) are a list; a list of one class is that class
     classes = glycan_classes(glycan_class)
     glycan_class = classes[0] if len(classes) == 1 else classes
-    if sialic_derivatization is not None and sample_prep != 'underivatized':
-        raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans, not of {sample_prep} ones.")
+    if sialic_derivatization is not None and sample_prep not in ('underivatized', 'permethylated'):
+        raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans or of glycans permethylated after it, not of {sample_prep} ones.")
     # A pair of products read from JSON settings is a list, which the caches keyed by the settings cannot hold
     sialic_derivatization = tuple(sialic_derivatization) if isinstance(sialic_derivatization, list) else sialic_derivatization
     if not _return_intermediate:
@@ -4009,7 +4013,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         known = loaded_file['precursor_charge'].notna().values
         charges = np.abs(loaded_file['precursor_charge'].values[known].astype(float)).reshape(-1, 1)
         neutral = np.array([composition_to_mass(c, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization)
-                            for comp in df_use.groupby('comp_str').first()['Composition'] for c in ([comp] if sialic_derivatization is None else sialic_linkage_splits(comp))]) + (mass_tag or 0)
+                            for comp in df_use.groupby('comp_str').first()['Composition'] for c in ([comp] if sialic_derivatization is None else sialic_linkage_splits(comp, sialic_derivatization = sialic_derivatization))]) + (mass_tag or 0)
         mzs, z_all = loaded_file[idx_col].values[known], charges.ravel()
         def isotope_ppm(k, width):
             # The ppm errors of precursors (less k isotope spacings) to the composition ions of their charge, only for the compositions in a window of a
@@ -4212,9 +4216,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             _pred_comp = get_comp(_struct)
             if _pred_comp and sialic_derivatization is not None:
                 # the sialic linkages whose derivatized mass is the precursor's, which the structure then gets for CandyCrumbs
-                _pred_comp = next((c for c in sialic_linkage_splits(_pred_comp) if mass_check(
-                    df_out.index[_indices[0]], composition_to_mass(c, sialic_derivatization = sialic_derivatization), mode = mode, modification = modification,
-                    mass_tag = mass_tag, permitted_charges = [abs(int(df_out['charge'].iloc[_indices[0]]))], mass_tolerance = mass_tolerance)), None)
+                _pred_comp = next((c for c in sialic_linkage_splits(_pred_comp, sialic_derivatization = sialic_derivatization) if mass_check(
+                    df_out.index[_indices[0]], composition_to_mass(c, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization), mode = mode, modification = modification,
+                    sample_prep = sample_prep, mass_tag = mass_tag, permitted_charges = [abs(int(df_out['charge'].iloc[_indices[0]]))], mass_tolerance = mass_tolerance)), None)
                 _fitted = fit_sialic_linkages(_struct, _pred_comp, scoring = True) if _pred_comp else None
                 if _fitted is None:
                     continue

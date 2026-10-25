@@ -21,7 +21,7 @@ dependencies = [
     "glycowork>=1.11.1",
     "networkx",
     "scipy",
-    "torch>=2.3,<3; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    "torch>=2.3,<3; (platform_system != 'Darwin' or platform_machine != 'x86_64') and platform_system != 'Emscripten'",
     "torch>=2.2,<2.3; platform_system == 'Darwin' and platform_machine == 'x86_64'",
     "numpy<2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
     "numpy",

@@ -3,6 +3,7 @@ import os
 import pickle
 import random
 import struct
+import sys
 import zipfile
 import numpy as np
 
@@ -190,6 +191,25 @@ class CandyCrunchCNN:
         return {**self.__dict__, 'session': None}
 
     def __call__(self, mz, precursor, glycan_type, rt, mode, lc, modification, trap):
+        inputs = {'mz': mz, 'precursor': precursor, 'glycan_type': glycan_type, 'rt': rt, 'mode': mode, 'lc': lc, 'modification': modification, 'trap': trap}
+        if sys.platform == 'emscripten':
+            # In the browser (Pyodide), the page's onnxruntime-web (globalThis.ort, its threads set by the page) runs the graph. Its session.run is
+            # asynchronous, and run_sync waits for it, which needs JavaScript Promise Integration (Chrome and Edge 137+). Each output is copied out in
+            # JavaScript at once (a tensor read later from Python failed now and then with several threads)
+            import js
+            from pyodide.ffi import run_sync, to_js
+            if self.session is None:
+                self.session = (None, run_sync(js.ort.InferenceSession.create(to_js(self.onnx), to_js({'executionProviders': ['wasm']}, dict_converter = js.Object.fromEntries))))
+            outputs = []
+            for i in range(0, len(mz), 32):
+                feeds = js.Object.new()
+                for k, v in inputs.items():
+                    v = np.ascontiguousarray(v[i:i + 32])
+                    data = to_js(v.tobytes()).buffer
+                    setattr(feeds, k, js.ort.Tensor.new(*(('int64', js.BigInt64Array.new(data)) if v.dtype == np.int64 else ('float32', js.Float32Array.new(data))), to_js(list(v.shape))))
+                out = getattr(run_sync(self.session[1].run(feeds)), self.session[1].outputNames[0])
+                outputs.append(np.frombuffer(js.Float32Array.new(out.data).to_bytes(), np.float32).reshape([int(d) for d in out.dims]))
+            return np.concatenate(outputs)
         # The session is made at the first call in a process (a forked one cannot use its parent's threads) and again after set_num_threads;
         # onnxruntime is only imported here, as only the built app needs it
         if self.session is None or self.session[0] != (os.getpid(), _threads):
@@ -197,6 +217,5 @@ class CandyCrunchCNN:
             options = ort.SessionOptions()
             options.intra_op_num_threads = _threads
             self.session = ((os.getpid(), _threads), ort.InferenceSession(self.onnx, options, providers = ['CPUExecutionProvider']))
-        inputs = {'mz': mz, 'precursor': precursor, 'glycan_type': glycan_type, 'rt': rt, 'mode': mode, 'lc': lc, 'modification': modification, 'trap': trap}
         # 32 inputs per run: ONNX Runtime keeps the memory of its largest run (1.1 GB for 256 inputs, 0.14 GB for 32), and these runs are the fastest
         return np.concatenate([self.session[1].run(None, {k: v[i:i + 32] for k, v in inputs.items()})[0] for i in range(0, len(mz), 32)])

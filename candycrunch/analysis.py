@@ -25,7 +25,7 @@ import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
 from glycowork.motif.tokenization import map_to_basic as glycowork_map_to_basic, HYDROGEN_MASS, PROTON_MASS, ELECTRON_MASS, calculate_adduct_mass, \
     composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS, PEPTIDE_MODIFICATIONS, \
-    SIALIC_DERIVATIZATIONS, SIALIC_PRODUCTS, SIALIC_KEYS, _carboxyl_sites, modification_formula_dict
+    SIALIC_DERIVATIZATIONS, SIALIC_PRODUCTS, SIALIC_PRODUCT_CAPS, SIALIC_KEYS, _carboxyl_sites, modification_formula_dict
 from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
 from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
 from glycowork.motif.draw import plot_glycans_excel
@@ -370,19 +370,23 @@ def derivatize_carboxyls(glycan, sialic_derivatization):
     if products is None or len(products) != 2 or not set(products) <= SIALIC_PRODUCTS.keys():
         raise ValueError(f"Unknown sialic_derivatization {sialic_derivatization!r}; use one of {list(SIALIC_DERIVATIZATIONS)} or a pair of products for a2-6 and a2-3/8/9 sialic acids from {list(SIALIC_PRODUCTS)}.")
     deltas = [sum(calculate_adduct_mass(f) for f in SIALIC_PRODUCTS[p]) for p in products]
-    linked = {k: (base, i) for base, keys in SIALIC_KEYS.items() for i, k in enumerate(keys)} | {'HexA': ('HexA', 0)}
+    # a product permethylated after the derivatization has its N-H capped instead of the carboxyl
+    caps = [SIALIC_PRODUCT_CAPS[p] - 1 if SIALIC_PRODUCT_CAPS[p] is not None else 0 for p in products]
+    # one product for every sialic acid needs no linkages
+    same = products[0] == products[1]
+    linked = {k: (base, i) for base, keys in SIALIC_KEYS.items() for i, k in enumerate(keys)} | {'HexA': ('HexA', 0)} | ({base: (base, 0) for base in SIALIC_KEYS} if same else {})
     composition = glycan if isinstance(glycan, dict) else canonicalize_composition(glycan) if is_composition(glycan) else None
     if composition is not None:
-        if unknown := [k for k in SIALIC_KEYS if composition.get(k)]:
+        if not same and (unknown := [k for k in SIALIC_KEYS if composition.get(k)]):
             raise ValueError(f"A linkage-specific derivatization makes something else of each sialic acid by its linkage, which {unknown} of {glycan} do not give; write them as a2-6 or a2-3 (e.g., 'H5N4E1L1').")
         sites = [(*linked[k], linked[k][0]) for k in composition if k in linked]
     else:
         sites = _carboxyl_sites(glycan)
-        if unknown := [glycan[span[0]:span[1]] for _, i, span, _ in sites if i is None]:
+        if not same and (unknown := [glycan[span[0]:span[1]] for _, i, span, _ in sites if i is None]):
             raise ValueError(f"A linkage-specific derivatization makes something else of each sialic acid by its linkage, which is unknown for {unknown} in '{glycan}' "
                              f"(a2-3/6, a2-?, or the reducing end); glycowork's resolve_sialic_linkages fills it in from a linkage-resolved composition.")
         glycan_to_graph_monos(glycan)  # the tables of the residues as written, which the derivatized ones build on
-        sites = [(base, i, glycan[start:end], start, end) for base, i, (start, end), _ in sites]
+        sites = [(base, 0 if i is None else i, glycan[start:end], start, end) for base, i, (start, end), _ in sites]
     labels = {}
     for base, i, label, *_ in sites:
         new = label[:3] + '1' + CARBOXYL_TOKENS[products[i]] + label[3:] if base in SIALIC_KEYS else label + '6' + CARBOXYL_TOKENS[products[i]]
@@ -390,7 +394,7 @@ def derivatize_carboxyls(glycan, sialic_derivatization):
         if new_key not in mono_attributes and old_key in mono_attributes:
             carbon, table = 1 if base in SIALIC_KEYS else 6, mono_attributes[old_key]
             mono_attributes[new_key] = {'atoms': {new_key if f == old_key else f: a for f, a in table['atoms'].items()}} | {
-                prop: {new_key if f == old_key else f: v + deltas[i] * (prop == 'mass' and carbon in table['atoms'][f]) for f, v in table[prop].items()}
+                prop: {new_key if f == old_key else f: v + (deltas[i] if prop == 'mass' else caps[i] if prop == 'permethylated' else 0) * (carbon in table['atoms'][f]) for f, v in table[prop].items()}
                 for prop in ['mass', *DERIVATIZATION_MASSES] if prop in table}
         CARBOXYL_LABELS.add(new_key)
         labels[(label, i)] = new
@@ -2836,8 +2840,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     if not len(fragment_masses):
         return {}
     if sialic_derivatization is not None:
-        if sample_prep != 'underivatized':
-            raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans, not of {sample_prep} ones.")
+        if sample_prep not in ('underivatized', 'permethylated'):
+            raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans or of glycans permethylated after it, not of {sample_prep} ones.")
         if isinstance(input_string, dict) and 'peptide' in input_string:
             input_string = input_string | {'glycans': [derivatize_carboxyls(g, sialic_derivatization) for g in input_string.get('glycans', [])]}
         elif isinstance(input_string, str) and '*' in input_string:

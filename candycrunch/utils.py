@@ -109,7 +109,12 @@ def centroid_tof(mzs, ints, max_peaks = None):
     peak_ints = np.add.reduceat(ints, bounds)
     peak_mzs = np.add.reduceat(ints * mzs, bounds) / peak_ints
     if max_peaks is not None and len(peak_ints) > max_peaks:
-        top = np.sort(np.argpartition(peak_ints, -max_peaks)[-max_peaks:])
+        # The most intense centroids and, of those at the cut-off intensity, the first in m/z order: argpartition left which of these ties stay to its
+        # algorithm, which differs between numpy builds (x86 SIMD vs the browser's wasm), and so did the survey frames of a timsTOF run
+        kth = np.partition(peak_ints, -max_peaks)[-max_peaks]
+        above = np.flatnonzero(peak_ints > kth)
+        top = np.concatenate([above, np.flatnonzero(peak_ints == kth)[:max_peaks - len(above)]])
+        top.sort()
         peak_mzs, peak_ints = peak_mzs[top], peak_ints[top]
     return np.stack([peak_mzs, peak_ints], axis = 1)
 

@@ -10,7 +10,8 @@ def str_to_bool(value):
         return False
     raise argparse.ArgumentTypeError(f"expected True or False, got '{value}'")
 
-def main():
+def build_parser():
+    # The CLI's options, also the settings form of the in-browser page (web.py)
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
     parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker .d folders (timsTOF, ion traps), .mzML, .mzXML, .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g. N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
@@ -43,7 +44,12 @@ def main():
     parser.add_argument('--n_jobs', help='Number of processes: files processed in parallel, and fragment scoring within a file; default: 1', type=int, default=1)
     parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions', type=str_to_bool, required=False)
     parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)
-    args = parser.parse_args()
+    return parser
+
+def main(argv=None):
+    # argv: the options as a list (default: the command line)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if not args.output.endswith(('.csv', '.xlsx')):
         parser.error('--output has to end with .csv or .xlsx')
     if not os.path.isdir(os.path.dirname(os.path.abspath(args.output))):

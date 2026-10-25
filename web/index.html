@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CandyCrunch</title>
+<meta name="description" content="Glycan structures from LC-MS/MS spectra, predicted in your browser: your files are never uploaded.">
+<!-- Cross-origin isolation (GitHub Pages cannot send the headers), so onnxruntime-web can use several threads; without it, one thread -->
+<script src="coi-serviceworker.js"></script>
+<style>
+:root {
+  --bg: #fafaf8; --panel: #ffffff; --text: #1d1d1b; --muted: #5f5f5a; --line: #e2e1dc; --accent: #b4235a; --accent-text: #ffffff; --ok: #2f7d4f; --bad: #b3261e;
+  --code: #f2f1ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #a3a29b; --line: #34332f; --accent: #f06292; --accent-text: #1d1d1b; --ok: #7bc596; --bad: #f28b82;
+    --code: #2a2a27;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+header h1 { margin: 0; font-size: 28px; }
+header p { margin: 4px 0 0; color: var(--muted); }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-top: 16px; }
+section h2 { margin: 0 0 12px; font-size: 17px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button, .button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button:disabled { opacity: 0.5; cursor: default; }
+input[type=file] { display: none; }
+.files { margin: 10px 0 0; padding: 0; list-style: none; color: var(--muted); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px 16px; }
+.field label { display: block; font-weight: 600; font-size: 14px; }
+.field .help { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.field select, .field input[type=text], .field input[type=number] { width: 100%; font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); margin-top: 4px; }
+.checks { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
+.checks label { font-weight: 400; display: inline-flex; gap: 4px; align-items: center; }
+details { margin-top: 16px; }
+summary { cursor: pointer; font-weight: 600; }
+#status { margin-left: 4px; color: var(--muted); }
+#status.bad { color: var(--bad); }
+#status.ok { color: var(--ok); }
+#log { background: var(--code); border-radius: 8px; padding: 8px 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; font: 12.5px/1.45 ui-monospace, Consolas, monospace; margin: 8px 0 0; }
+.table-wrap { overflow: auto; max-height: 520px; border: 1px solid var(--line); border-radius: 8px; margin-top: 12px; }
+table { border-collapse: collapse; font-size: 13px; width: max-content; }
+th, td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); }
+.downloads a { color: var(--accent); margin-right: 14px; }
+.note { color: var(--muted); font-size: 13px; }
+footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
+footer a, header a { color: var(--accent); }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>CandyCrunch</h1>
+  <p>Glycan structures from LC-MS/MS spectra, predicted in this browser tab. Your files are read where they are and never uploaded.</p>
+</header>
+
+<section id="unsupported" class="hidden">
+  <h2>This browser cannot run CandyCrunch</h2>
+  <p>CandyCrunch needs JavaScript Promise Integration, which Chrome and Edge have from version 137. Please open this page in one of them, or install the
+  <a href="https://github.com/BojarLab/CandyCrunch">desktop app or Python package</a>.</p>
+</section>
+
+<section>
+  <h2>1. Spectra</h2>
+  <div class="row">
+    <label class="button" for="pick-files">Choose files</label>
+    <input type="file" id="pick-files" multiple accept=".raw,.mzML,.mzml,.mzXML,.mzxml,.mgf,.cc,.xlsx">
+    <label class="button" for="pick-folder">Choose a folder</label>
+    <input type="file" id="pick-folder" webkitdirectory>
+    <button id="example" type="button" disabled>Try the example run</button>
+  </div>
+  <p class="note">Thermo .raw, .mzML, .mzXML, .mgf, or a folder: a Bruker .d folder, or a folder of runs. Several runs are combined into one feature table.</p>
+  <ul class="files" id="files"></ul>
+</section>
+
+<section>
+  <h2>2. Settings</h2>
+  <div class="grid" id="primary"></div>
+  <details>
+    <summary>More options</summary>
+    <div class="grid" id="advanced" style="margin-top: 12px"></div>
+  </details>
+</section>
+
+<section>
+  <h2>3. Run</h2>
+  <div class="row">
+    <button class="primary" id="run" type="button" disabled>Run CandyCrunch</button>
+    <span id="status">Loading CandyCrunch…</span>
+  </div>
+  <details>
+    <summary>Log</summary>
+    <pre id="log"></pre>
+  </details>
+</section>
+
+<section id="results" class="hidden">
+  <h2>Results</h2>
+  <div class="downloads" id="downloads"></div>
+  <div class="table-wrap"><table id="table"></table></div>
+</section>
+
+<footer>
+  <span id="versions"></span>
+  · <a href="https://github.com/BojarLab/CandyCrunch">CandyCrunch on GitHub</a>
+  · Large runs need a desktop computer: a 700 MB Thermo .raw used under 2 GB of memory and about 6 minutes.
+</footer>
+</main>
+
+<script type="module">
+// Options the CLI has that the page sets itself or that cannot run in a browser (one process only)
+const HIDDEN = new Set(['spectra_filepath', 'output', 'n_jobs']);
+// Shown first; every other option of the CLI goes under More options
+const PRIMARY = ['glycan_class', 'mode', 'modification', 'sample_prep', 'lc', 'trap'];
+const $ = (id) => document.getElementById(id);
+const log = (text) => { $('log').textContent += text + '\n'; $('log').scrollTop = $('log').scrollHeight; };
+const status = (text, kind = '') => { $('status').textContent = text; $('status').className = kind; };
+let runs = [], files = [], params = [], ready = false, busy = false;
+
+// The worker, with one promise per request
+const worker = new Worker('worker.js', {type: 'module'});
+const pending = {};
+let nextId = 0;
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === 'log') return log(m.text);
+  if (m.type === 'status') return status(m.text + '…');
+  const p = pending[m.id];
+  delete pending[m.id];
+  m.type === 'done' ? p.resolve(m.result) : p.reject(new Error(m.text));
+};
+// A worker that cannot start (e.g. Pyodide or onnxruntime-web not loading) sends no message, only this
+worker.onerror = (e) => status('Loading failed: ' + (e.message || 'the worker did not start (see the browser console)'), 'bad');
+const call = (msg) => new Promise((resolve, reject) => { const id = nextId++; pending[id] = {resolve, reject}; worker.postMessage({id, ...msg}); });
+
+// Settings form from the CLI's options (candycrunch.web.parameters)
+function field(p) {
+  const div = document.createElement('div');
+  div.className = 'field';
+  const title = p.name.replace(/_/g, ' ') + (p.required ? ' *' : '');
+  let input;
+  if (p.choices && (p.nargs === '+' || p.nargs === '*')) {
+    input = document.createElement('div');
+    input.className = 'checks';
+    for (const c of p.choices) {
+      const l = document.createElement('label');
+      l.innerHTML = `<input type="checkbox" value="${c}"> ${c}`;
+      input.append(l);
+    }
+  } else if (p.choices || p.type === 'bool') {
+    input = document.createElement('select');
+    const options = p.type === 'bool' ? [['', 'default'], ['True', 'yes'], ['False', 'no']] : [['', p.required ? 'choose' : 'default'], ...p.choices.map((c) => [c, c])];
+    input.innerHTML = options.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+  } else {
+    input = document.createElement('input');
+    input.type = p.type === 'int' || p.type === 'float' ? 'number' : 'text';
+    if (p.type === 'float') input.step = 'any';
+    input.placeholder = p.nargs === '*' ? 'space-separated' : (p.default != null ? String(p.default) : 'default');
+  }
+  input.id = 'opt-' + p.name;
+  div.innerHTML = `<label for="${input.id}">${title}</label>`;
+  div.append(input);
+  const help = document.createElement('div');
+  help.className = 'help';
+  help.textContent = p.help || '';
+  div.append(help);
+  return div;
+}
+
+function argv() {
+  // The settings as CLI options; an empty field leaves the CLI's default
+  const out = [];
+  for (const p of params) {
+    const el = $('opt-' + p.name);
+    let values;
+    if (el.classList.contains('checks')) values = [...el.querySelectorAll('input:checked')].map((i) => i.value);
+    else if (p.nargs === '*' || p.nargs === '+') values = el.value.trim() ? el.value.trim().split(/\s+/) : [];
+    else values = el.value.trim() ? [el.value.trim()] : [];
+    if (p.required && !values.length) throw new Error(`Choose ${p.name.replace(/_/g, ' ')}`);
+    if (values.length) out.push(p.flag, ...values);
+  }
+  return out;
+}
+
+// The runs among the chosen files: a .d folder is one run (all its files are mounted), any other file of a spectra format is one run
+function setFiles(list) {
+  files = [];
+  const found = new Map();
+  for (const file of list) {
+    const path = file.webkitRelativePath || file.name;
+    const parts = path.split('/');
+    const d = parts.findIndex((x) => /\.d$/i.test(x));
+    if (d >= 0) {
+      const run = parts.slice(0, d + 1).join('/');
+      found.set(run, (found.get(run) || 0) + file.size);
+      files.push({path, file});
+    } else if (/\.(raw|mzml|mzxml|mgf|cc|xlsx)$/i.test(path)) {
+      found.set(path, file.size);
+      files.push({path, file});
+    }
+  }
+  runs = [...found.keys()];
+  $('files').innerHTML = runs.length ? [...found].map(([r, s]) => `<li>${r} (${(s / 2 ** 20).toFixed(1)} MB)</li>`).join('') : '<li>No spectra files found there.</li>';
+  update();
+}
+
+function update() {
+  $('run').disabled = !ready || busy || !runs.length;
+  $('example').disabled = !ready || busy;
+}
+
+async function run() {
+  let options;
+  try {
+    options = argv();
+  } catch (e) {
+    return status(e.message, 'bad');
+  }
+  const stem = runs.length === 1 ? runs[0].split('/').pop().replace(/\.[^.]+$/, '') : 'batch';
+  const args = ['--spectra_filepath', ...runs.map((r) => '/data/' + r), '--output', `/out/${stem}_candycrunch.csv`, ...options];
+  busy = true;
+  update();
+  $('results').classList.add('hidden');
+  log('candycrunch ' + args.join(' '));
+  const t0 = performance.now();
+  const timer = setInterval(() => status(`Running… ${Math.round((performance.now() - t0) / 1000)} s`), 1000);
+  try {
+    const out = await call({cmd: 'run', files, argv: args});
+    clearInterval(timer);
+    status(`Done in ${Math.round((performance.now() - t0) / 1000)} s`, 'ok');
+    show(out);
+  } catch (e) {
+    clearInterval(timer);
+    status(e.message, 'bad');
+  } finally {
+    busy = false;
+    update();
+  }
+}
+
+function show(out) {
+  const link = (data, name, type) => `<a href="${URL.createObjectURL(new Blob([data], {type}))}" download="${name}">${name}</a>`;
+  $('downloads').innerHTML = out.map((o) => link(o.data, o.name, 'text/csv') + (o.xlsx ? link(o.xlsx, o.name.replace(/\.csv$/, '.xlsx'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') : '')).join(' ');
+  const table = out.find((o) => o.columns);
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  $('table').innerHTML = table ? `<thead><tr>${table.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>` +
+    table.rows.map((r) => `<tr>${r.map((v) => `<td title="${esc(v).replace(/"/g, '&quot;')}">${esc(v)}</td>`).join('')}</tr>`).join('') + '</tbody>' : '';
+  $('results').classList.remove('hidden');
+}
+
+$('pick-files').onchange = (e) => setFiles(e.target.files);
+$('pick-folder').onchange = (e) => setFiles(e.target.files);
+$('run').onclick = run;
+$('example').onclick = async () => {
+  // A porcine gastric mucin O-glycan run (an excerpt of GPST000029), as the desktop app's self-test uses it
+  status('Fetching the example…');
+  const blob = await (await fetch('example/self_test.mzML')).blob();
+  setFiles([new File([blob], 'self_test.mzML')]);
+  for (const box of document.querySelectorAll('#opt-glycan_class input')) box.checked = box.value === 'O';
+  run();
+};
+
+if (typeof WebAssembly.Suspending !== 'function') {
+  $('unsupported').classList.remove('hidden');
+  status('Not supported in this browser', 'bad');
+} else {
+  // Threads only with cross-origin isolation (coi-serviceworker reloads the page once to get it)
+  const threads = self.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 1, 8) : 1;
+  call({cmd: 'init', threads}).then((r) => {
+    params = JSON.parse(r.parameters).filter((p) => !HIDDEN.has(p.name));
+    for (const p of params) $(PRIMARY.includes(p.name) ? 'primary' : 'advanced').append(field(p));
+    $('versions').textContent = `candycrunch ${r.versions.candycrunch} · glycowork ${r.versions.glycowork} · Python ${r.versions.python} · ${r.threads} thread${r.threads > 1 ? 's' : ''} for the model`;
+    ready = true;
+    status('Ready');
+    update();
+  }, (e) => status('Loading failed: ' + e.message, 'bad'));
+}
+</script>
+</body>
+</html>

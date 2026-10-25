@@ -309,7 +309,7 @@ def collect(args):
     # main process stays small)
     labelling = (BASE_DIR / 'training' / 'pipeline_labels.py').read_text(encoding = 'utf-8')
     glycowork = pathlib.Path(importlib.util.find_spec('glycowork').origin).parent
-    inputs_code = hashlib.sha1(b''.join(p.read_bytes() for p in sorted((BASE_DIR / 'candycrunch').glob('*.py')) if p.name not in ('gui.py', 'cli.py')) + b''.join(
+    inputs_code = hashlib.sha1(b''.join(p.read_bytes() for p in sorted((BASE_DIR / 'candycrunch').glob('*.py')) if p.name not in ('gui.py', 'cli.py', 'web.py')) + b''.join(
         p.read_bytes() for p in sorted(glycowork.joinpath('motif').glob('*.py')) + sorted(glycowork.joinpath('glycan_data').glob('*')) if p.is_file()) + next(
         ast.get_source_segment(labelling, f) for f in ast.parse(labelling).body if isinstance(f, ast.FunctionDef) and f.name == 'run_inputs').encode()).hexdigest()
     code = inputs_code.encode() + labelling.encode() + ''.join(
