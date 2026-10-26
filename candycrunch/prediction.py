@@ -1,5 +1,6 @@
 import ast
 import bisect
+import contextvars
 import copy
 import hashlib
 import inspect
@@ -38,7 +39,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           sialic_linkage_splits, resolve_sialic_linkages, _carboxyl_sites)
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
-from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2
+from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals
 from candycrunch.utils import read_mzml, read_mzxml, read_mgf, read_raw_scan_table, read_raw_packet, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir = os.path.dirname(__file__)
@@ -114,8 +115,21 @@ ISOTOPE_ABUNDANCES = {'C': [0.9893, 0.0107], 'H': [0.999885, 0.000115], 'N': [0.
                       'S': [0.9499, 0.0075, 0.0425, 0, 0.0001], 'P': [1.0]}
 
 
-def get_adduct_list(mode):
-    return NEGATIVE_ADDUCTS if mode == 'negative' else POSITIVE_ADDUCTS
+# The ions that carry the charge of the run's precursors in place of protons, from wrap_inference's / wrap_inference_batch's adducts (e.g., Li+ with lithium
+# salts in the mobile phase); the steps they run take their adducts from get_adduct_list
+RUN_ADDUCTS = contextvars.ContextVar('RUN_ADDUCTS', default = ())
+
+
+def get_adduct_list(mode, adducts = None):
+    # The run's own charge carriers first, then the mode's usual adducts
+    return list(dict.fromkeys([*(RUN_ADDUCTS.get() if adducts is None else adducts), *(NEGATIVE_ADDUCTS if mode == 'negative' else POSITIVE_ADDUCTS)]))
+
+
+def unactivated(filter_string):
+    # Some Thermo methods acquire dependent zoom scans as MS/MS events without activation (e.g., 899.40@cid0.00): the isolated precursor's isotopes, no
+    # fragments
+    stage = re.findall(r'([\d.]+)((?:@[a-z]+[\d.]+)+)', filter_string or '')
+    return bool(stage) and not any(float(e) for e in re.findall(r'@[a-z]+([\d.]+)', stage[-1][1]))
 
 
 def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotope_tolerance = 0.25, min_explained = 0.7, charges = None, isolation_mz = False,
@@ -340,7 +354,8 @@ def process_mzML_stack(filepath, num_peaks = 1000,
             # trained on; their 100 most intense peaks gave more glycans, with fewer false ones, on timsTOF data
             mz_i_dict = dict(zip(*peaks[peaks[:, 1].argsort()][-(min(num_peaks, TIMS_MS2_PEAKS) if tof else num_peaks):].T))
             if mz_i_dict:
-                if not spectrum['precursor']:
+                if not spectrum['precursor'] or unactivated(next((cv.get('value', '') for cv in spectrum['element'].iter('{http://psi.hupo.org/ms/mzml}cvParam')
+                                                                   if cv.get('accession') == 'MS:1000512'), '')):
                     continue
                 # The native ID keys the spectra, as scan numbers are not unique for non-Thermo native IDs (SCIEX cycle=1 experiment=2 and
                 # cycle=2 experiment=2 both give 2)
@@ -497,7 +512,7 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
             intensity_array = spectrum['intensity array']
             top_idx = np.argsort(intensity_array)[::-1][:num_peaks]
             mz_i_dict = dict(zip(mz_array[top_idx], intensity_array[top_idx]))
-            if mz_i_dict and spectrum['precursorMz']:
+            if mz_i_dict and spectrum['precursorMz'] and not unactivated(str(spectrum.get('filterLine', ''))):
                 precursor_mz = spectrum['precursorMz'][0]['precursorMz']
                 key = f"{spectrum['id']}_{precursor_mz}"
                 highest_i_dict[key] = mz_i_dict
@@ -630,6 +645,8 @@ def process_raw_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fals
         iso, half = float(stage[-1][0]) if stage else precursor_mz, (table['isolation_width'][i] or 0) / 2
         if not ((iso - 3 <= precursor_mz <= iso + 2.5) if half <= 2 else (iso - half <= precursor_mz <= iso + half)):
             precursor_mz = iso
+        if unactivated(filt):
+            continue
         if detected_mode is None:
             detected_mode = 'negative' if table['polarity'][i] == '-' else 'positive'
             detected_trap = {'ITMS': 'linear', 'FTMS': 'orbitrap'}.get(table['analyzer'][i])
@@ -2050,7 +2067,7 @@ def complementary_pairs(mz, peaks, charge, tolerance, n = 15):
 
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag,
                                 modification = 'reduced', sample_prep = 'underivatized', max_charge = -3, cross_class = None, ms1_ppm = None,
-                                sialic_derivatization = None):
+                                sialic_derivatization = None, adducts = ()):
     idx_col = 'm/z' if 'm/z' in df_in.columns else 'reducing_mass'
     red_masses = np.array(df_in[idx_col])
     known_charges = [None if pd.isna(c) else int(c) for c in df_in['precursor_charge'].values] if 'precursor_charge' in df_in.columns else [None] * len(red_masses)
@@ -2126,29 +2143,43 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
                 for m_all, y in zip(multi_all, matches):
                     if y:
                         m_all[charge] = y
-        valid_adducts = [(a, mass_dict[a]) for a in get_adduct_list(mode) if mass_dict.get(a, 999) != 999]
-        for _, adduct_mass in valid_adducts:
-            comps_out = _update(_match_chunked(comp_masses + adduct_mass), 1)
-        # Multiply-charged adduct ions: only fill gaps not explained by protonated or singly-charged adduct matches
+        valid_adducts = [(a, mass_dict[a]) for a in get_adduct_list(mode, adducts) if mass_dict.get(a, 999) != 999]
         threshold_dict = {2: 900, 3: 1500, 4: 3500}
-        for _, adduct_mass in valid_adducts:
-            for charge in range(2, abs(max_charge) + 1):
-                threshold = threshold_dict.get(charge, 9999)
-                if mode == 'negative':
-                    charged_adduct_masses = (comp_masses + adduct_mass - (charge - 1) * PROTON_MASS) / charge
-                else:
-                    charged_adduct_masses = (comp_masses + adduct_mass + (charge - 1) * PROTON_MASS) / charge
-                # Mask out compositions too small to realistically form multiply-charged adducts
-                charged_adduct_masses = np.where(comp_masses + adduct_mass > threshold, charged_adduct_masses, 9999)
-                comps_out = _update(_match_chunked(charged_adduct_masses), charge)
-        # Pure multi-adduct ions: e.g., [M + 2Na]_2+, [M + 3Na]_3+ ; only fill remaining gaps
-        for _, adduct_mass in valid_adducts:
-            for charge in range(2, abs(max_charge) + 1):
-                threshold = threshold_dict.get(charge, 9999)
-                # All charge carriers are the adduct (no protons): m/z = (M + z×adduct) / z
-                multi_adduct_masses = (comp_masses + charge * adduct_mass) / charge
-                multi_adduct_masses = np.where(comp_masses + charge * adduct_mass > threshold, multi_adduct_masses, 9999)
-                comps_out = _update(_match_chunked(multi_adduct_masses), charge)
+
+        def _fill_adducts(slots, ions):
+            nonlocal comps_out
+            comps_out = slots
+            for _, adduct_mass in ions:
+                comps_out = _update(_match_chunked(comp_masses + adduct_mass), 1)
+            # Multiply-charged adduct ions: only fill gaps not explained by protonated or singly-charged adduct matches
+            for _, adduct_mass in ions:
+                for charge in range(2, abs(max_charge) + 1):
+                    threshold = threshold_dict.get(charge, 9999)
+                    if mode == 'negative':
+                        charged_adduct_masses = (comp_masses + adduct_mass - (charge - 1) * PROTON_MASS) / charge
+                    else:
+                        charged_adduct_masses = (comp_masses + adduct_mass + (charge - 1) * PROTON_MASS) / charge
+                    # Mask out compositions too small to realistically form multiply-charged adducts
+                    charged_adduct_masses = np.where(comp_masses + adduct_mass > threshold, charged_adduct_masses, 9999)
+                    comps_out = _update(_match_chunked(charged_adduct_masses), charge)
+            # Pure multi-adduct ions: e.g., [M + 2Na]_2+, [M + 3Na]_3+ ; only fill remaining gaps
+            for _, adduct_mass in ions:
+                for charge in range(2, abs(max_charge) + 1):
+                    threshold = threshold_dict.get(charge, 9999)
+                    # All charge carriers are the adduct (no protons): m/z = (M + z×adduct) / z
+                    multi_adduct_masses = (comp_masses + charge * adduct_mass) / charge
+                    multi_adduct_masses = np.where(comp_masses + charge * adduct_mass > threshold, multi_adduct_masses, 9999)
+                    comps_out = _update(_match_chunked(multi_adduct_masses), charge)
+            return comps_out
+
+        # The run's own charge carriers (adducts) explain its precursors first, in-class, and protons and the usual adducts fill what they leave (as a gap fill
+        # after them, their chance matches at 0.5 Da would take most of its precursors); the usual adducts only fill what protons leave
+        plain = _fill_adducts(comps_out, [a for a in valid_adducts if a[0] not in adducts])
+        own = [a for a in valid_adducts if a[0] in adducts]
+        if own and not fallback:
+            comps_out = [o if o[0] else p for o, p in zip(_fill_adducts([(None, 0)] * len(red_masses), own), plain)]
+        elif own:
+            comps_out = _fill_adducts(plain, own)
     # A spectrum matched as singly charged whose most intense fragments come in pairs half a mass unit apart (domain_filter's sign of a multiply charged
     # precursor) also gets the multiply charged compositions of glycan_class at its m/z, and the annotation scores decide: ion traps read the 13C peak
     # of large [M-2H]2- next to a lighter [M-H]- composition (Hex5HexNAc4Neu5Ac1 965.8 as Hex1HexNAc1Neu5Ac2, Hex6HexNAc5Neu5Ac4 1585.1 as
@@ -2219,10 +2250,10 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
                                         sialic_derivatization = sialic_derivatization) + (mass_tag if mass_tag else 0) + offset
         charges_arr = np.abs(charge_vals[rows])
         spec_masses = mz_vals[rows] * charges_arr
-        is_adduct = any(
-            np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance) or
-            np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) * charges_arr - spec_masses) < mass_tolerance)
-            for adduct in adduct_list)
+        adducts = [adduct for adduct in adduct_list if
+                   np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance) or
+                   np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) * charges_arr - spec_masses) < mass_tolerance)]
+        is_adduct = bool(adducts)
         # Clusters of at least 20 MS2 spectra name a deisotoped pattern by its most intense peak (relabel), as their pooled noise puts a weak peak 1-3 Da
         # below most fragments, which deisotope_ms2 otherwise takes as their monoisotopic peak (10 or 40 spectra were worse)
         # Peaks above the heaviest fragment a precursor of this charge can give (its singly charged ion, plus a charge-reduced one) are noise or another
@@ -2257,7 +2288,8 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         jobs += [(CandyCrumbs, (glycan, unq_rounded_masses, fragment_tolerance),
                   dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative"),
                        disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + offset,
-                       sample_prep = sample_prep, ms3_precursor = ms3_precursor, sialic_derivatization = sialic_derivatization, mass_threshold_ppm = fragment_ppm))
+                       sample_prep = sample_prep, ms3_precursor = ms3_precursor, sialic_derivatization = sialic_derivatization, mass_threshold_ppm = fragment_ppm,
+                       metal_cations = precursor_metals(adducts)))
                  for ms3_precursor, unq_rounded_masses in pools.values()]
     # Every CandyCrumbs call first, so that n_jobs processes can share them
     results = iter(run_jobs(jobs, n_jobs))
@@ -3563,7 +3595,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in folded]]
     if mode == 'positive' and 'adduct' in df_out.columns:
         # In positive mode a metal adduct ion ([M+K+H]2+, [M+Na+H]2+, [M+2Na]2+, ...) is reported by the co-eluting (de)protonated ion of its composition,
-        # which takes its abundance and spectra count, whichever isomer each was given; without one it is no glycan peak
+        # which takes its abundance and spectra count, whichever isomer each was given; without one it is no glycan peak, unless it is one of the run's own
+        # charge carriers (adducts)
         # (as bool: an empty run's object mask selected columns instead of rows, and the result lost every column)
         plain = ~df_out['adduct'].apply(lambda a: isinstance(a, str)).values.astype(bool)
         comps = [stringify_dict(c) if isinstance(c, dict) else None for c in df_out['composition']]
@@ -3575,6 +3608,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 df_out.iat[j, ab] += df_out.iat[i, ab]
                 df_out.iat[j, ns] += df_out.iat[i, ns]
                 df_out.iat[j, xc] = df_out.iat[j, xc] + df_out.iat[i, xc]
+            else:
+                plain[i] = df_out['adduct'].iat[i] in RUN_ADDUCTS.get()
         df_out = df_out[plain]
     if 'adduct' in df_out.columns and sialic_derivatization is None:
         # A species seen only as an adduct is reported at the m/z of the (de)protonated ion of its charge, the m/z it is listed by elsewhere (and that its
@@ -3841,10 +3876,11 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                    rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False,
                    extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh = 300,
-                   filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True,
+                   filter_out = {'HexA'}, supplement = True,
                    experimental = True, mass_dic = None, sample_prep = 'underivatized',
                    taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
-                   sialic_derivatization = None, reducing_end_variants = None, n_jobs = 1, return_inputs = False, _return_intermediate = False, _loaded = None, _top_clusters = None,
+                   sialic_derivatization = None, reducing_end_variants = None, adducts = None, n_jobs = 1, return_inputs = False, _return_intermediate = False, _loaded = None,
+                   _top_clusters = None,
                    _condensed = None, _pair = None):
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
@@ -3884,7 +3920,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); below it, they are only allowed if more likely than every in-class structure of that composition; default:0.2
    | crumbs_thresh (float): threshold for annotation score to keep predictions; 2 lower for files with orbitrap or timsTOF survey scans, whose accurate precursor mass already confirms the composition; default:3
    | ppm_thresh (float): ppm error threshold for filtering; default:300
-   | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
+   | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); Ac is always left out of permethylated and peracetylated samples; default:{'HexA'}
    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
    | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
@@ -3907,6 +3943,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                               for; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid', as released
    |                               glycosphingolipid glycans form them, and for 'PA' glycosylamines, the PA glycan 2 H lighter, whose abundance and spectra
    |                               count for their glycan's row like those of unlabeled glycans)
+   | adducts (string or list): ions of glycowork's adduct table that carry the charge of the run's precursors in place of protons, e.g., 'Li+' for lithium salts in
+   |                           the mobile phase ([M+Li]+, [M+2Li]2+, [M+Li+H]2+, ...): their compositions come before the protonated ones, and fragments of such
+   |                           precursors carry them; the mode's usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered after protons;
+   |                           default:None
    | n_jobs (int): number of processes for fragment scoring (CandyCrumbs) and supporting peaks, which are pure Python; the model already uses every core.
    |               The processes stay up for later runs; a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS; default:1
    | return_inputs (bool): whether to return the model's inputs instead of predictions, as a callable model receives them (e.g., to build training data from
@@ -3921,6 +3961,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    """
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
     run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate', '_loaded', '_top_clusters', '_condensed', '_pair')}
+    adducts = [adducts] if isinstance(adducts, str) else list(adducts or [])
+    if unknown := [a for a in adducts if a not in mass_dict]:
+        raise ValueError(f"adducts {unknown} are not in glycowork's adduct table (e.g., 'Li+', 'Na+', 'Cl-').")
+    RUN_ADDUCTS.set(tuple(adducts))
     # Spectra already in memory are processed as if loaded from a file named after attrs['name']
     if isinstance(spectra_filepath, pd.DataFrame):
         spectra_filepath, _loaded = spectra_filepath.attrs.get('name', 'spectra'), spectra_filepath
@@ -3938,6 +3982,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans or of glycans permethylated after it, not of {sample_prep} ones.")
     # A pair of products read from JSON settings is a list, which the caches keyed by the settings cannot hold
     sialic_derivatization = tuple(sialic_derivatization) if isinstance(sialic_derivatization, list) else sialic_derivatization
+    # Permethylation's base strips O-acetyl esters and peracetylation acetylates every hydroxyl, so a derivatized glycan's Ac composition is another ion of its mass
+    filter_out = set(filter_out) | {'Ac'} if sample_prep != 'underivatized' else filter_out
     if not _return_intermediate:
         print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     if df_use is None:
@@ -4089,7 +4135,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, mass_tolerance, mode,
                                          mass_tag, modification = modification, max_charge = max_charge,
                                          sample_prep = sample_prep, cross_class = cross_class, ms1_ppm = 20 if accurate_ms1 else None,
-                                         sialic_derivatization = sialic_derivatization)
+                                         sialic_derivatization = sialic_derivatization, adducts = adducts)
     if _pair is not None:
         # and only compositions of the other class can give one of its structures, so only they go to the model
         pair_comps = set(df_use.loc[df_use['glycan_type'] == _pair[0], 'comp_str'])
@@ -4228,11 +4274,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                                   modification = modification, sialic_derivatization = sialic_derivatization) + _tag
             _charges_arr = np.array([abs(int(df_out['charge'].iloc[i])) for i in _indices])
             _spec_masses = np.array([df_out.index[i] * _charges_arr[j] for j, i in enumerate(_indices)])
-            _is_adduct = any(
-                np.any(np.abs(_pred_comp_mass + mass_dict.get(adduct, 999) - _spec_masses) < mass_tolerance) or
-                np.any(
-                    np.abs(_pred_comp_mass + mass_dict.get(adduct, 999) * _charges_arr - _spec_masses) < mass_tolerance)
-                for adduct in _adduct_list)
+            _adducts = [adduct for adduct in _adduct_list if
+                        np.any(np.abs(_pred_comp_mass + mass_dict.get(adduct, 999) - _spec_masses) < mass_tolerance) or
+                        np.any(np.abs(_pred_comp_mass + mass_dict.get(adduct, 999) * _charges_arr - _spec_masses) < mass_tolerance)]
+            _is_adduct = bool(_adducts)
             _row_charge = int(max(_charges_arr))
             _peak_dicts = [df_out['peak_d'].iloc[i] for i in _indices]
             _rounded_mass_rows = [[np.round(y, 1) for y in deisotope_ms2(d, _row_charge, 0.05, relabel = df_out['num_spectra'].iloc[i] >= 20)][:15] for d, i in zip(_peak_dicts, _indices)]
@@ -4243,7 +4288,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                       disable_global_mods = (not _is_adduct or mode == "negative"),
                                       disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2,
                                       mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0),
-                                      sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
+                                      sample_prep = sample_prep, sialic_derivatization = sialic_derivatization,
+                                      metal_cations = precursor_metals(_adducts))
             except Exception:
                 continue
             _tms = {}
@@ -4527,7 +4573,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         for offset, name in re_names.items():
             cands = assign_candidate_structures(df_cond.copy(), df_use, common_structure_map, topo_struct_map, mass_tolerance, mode, (mass_tag or 0) + offset,
                                                 modification = modification, max_charge = max_charge, sample_prep = sample_prep, cross_class = cross_class,
-                                                ms1_ppm = 20 if accurate_ms1 else None, sialic_derivatization = sialic_derivatization)
+                                                ms1_ppm = 20 if accurate_ms1 else None, sialic_derivatization = sialic_derivatization, adducts = adducts)
             # with a sialic derivatization the candidates carry their sialic linkages (Neu5Ac_a2-6), the run's structures their plain composition
             cands['comp_str'] = [stringify_dict(plain_composition(c)) if isinstance(c, dict) else None for c in cands['composition']]
             cands = cands[cands['comp_str'].isin(list(known))].drop_duplicates(['spec_id', 'comp_str'])
@@ -4694,10 +4740,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                          trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                          pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False,
                          extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh = 300,
-                         filter_out = {'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}, supplement = True,
+                         filter_out = {'HexA'}, supplement = True,
                          experimental = True, mass_dic = None, sample_prep = 'underivatized',
                          taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
-                         n_jobs = 1, sialic_derivatization = None, library_thresh = 0.9, reducing_end_variants = None):
+                         n_jobs = 1, sialic_derivatization = None, library_thresh = 0.9, reducing_end_variants = None, adducts = None):
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
@@ -4729,7 +4775,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | extra_thresh (float): prediction confidence threshold at which to allow cross-class predictions (e.g., N-glycans in O-glycan samples); below it, they are only allowed if more likely than every in-class structure of that composition; default:0.2
    | crumbs_thresh (float): threshold for annotation score to keep predictions; 2 lower for files with orbitrap or timsTOF survey scans, whose accurate precursor mass already confirms the composition; default:3
    | ppm_thresh (float): ppm error threshold for filtering; default:300
-   | filter_out (set): set of monosaccharide or modification types to filter out; default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'}
+   | filter_out (set): set of monosaccharide or modification types to filter out; Ac is always left out of permethylated and peracetylated samples; default:{'HexA'}
    | supplement (bool): whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True
    | experimental (bool): whether to impute missing predictions via database searches etc.; default:True
    | mass_dic (dict): dictionary of form mass : list of glycans; will be generated internally
@@ -4741,7 +4787,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | n_jobs (int): number of files to process in parallel (separate processes), and of processes for the supporting peaks of each file's rows; default:1
    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of the samples, as in wrap_inference; default:None
    | library_thresh (float): MS2 cosine at which a peak without a structure takes the structure of a matching peak of another file (see below); None turns this off; default:0.9
-   | reducing_end_variants (dict): other reducing ends that glycans of the samples may carry, as in wrap_inference; default:None\n
+   | reducing_end_variants (dict): other reducing ends that glycans of the samples may carry, as in wrap_inference; default:None
+   | adducts (string or list): ions that carry the charge of the samples' precursors in place of protons, as in wrap_inference; default:None\n
    | Returns:
    | :-
    | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column xic, and ms3 for files with MS3 spectra, as in wrap_inference)
@@ -4752,6 +4799,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     classes = glycan_classes(glycan_class)
     glycan_class = classes[0] if len(classes) == 1 else classes
     sialic_derivatization = tuple(sialic_derivatization) if isinstance(sialic_derivatization, list) else sialic_derivatization
+    filter_out = set(filter_out) | {'Ac'} if sample_prep != 'underivatized' else filter_out
     print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin(classes)])
@@ -4764,6 +4812,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     file_labels = [label if file_labels.count(label) == 1 else f"{label}_{i}" for i, label in enumerate(file_labels)]
     # Core inference per file via wrap_inference intermediate return; MS1 data is parked on disk so only one file's MS1 is in memory at a time
     ms1_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors = True)
+    RUN_ADDUCTS.set(tuple([adducts] if isinstance(adducts, str) else adducts or ()))
     inference_kwargs = dict(glycans = glycans, bin_num = bin_num, max_charge = max_charge,
                             frag_num = frag_num, modification = modification, mass_tag = mass_tag, lc = lc, trap = trap,
                             rt_min = rt_min, rt_max = rt_max, rt_diff = rt_diff, rt_max_default = rt_max_default,
@@ -4771,7 +4820,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                             crumbs_thresh = crumbs_thresh, ppm_thresh = ppm_thresh, filter_out = filter_out,
                             experimental = experimental, sample_prep = sample_prep, taxonomy_level = taxonomy_level,
                             taxonomy_filter = taxonomy_filter, sialic_derivatization = sialic_derivatization,
-                            reducing_end_variants = reducing_end_variants, _return_intermediate = True)
+                            reducing_end_variants = reducing_end_variants, adducts = adducts, _return_intermediate = True)
     # Worker processes load the default model themselves, so only a custom model has to be sent to them
     if model is not candycrunch:
         inference_kwargs['model'] = model

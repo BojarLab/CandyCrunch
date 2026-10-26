@@ -58,6 +58,7 @@ If you would like to run our main inference function from the command line, you 
 --sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
 --sialic_derivatization, type=string: linkage-specific sialic acid derivatization of underivatized samples; options are 'EE' (ethyl esterification), 'EEA' (ethyl esterification and amidation), 'ME' (methyl esterification), 'DMA' (dimethylamidation), and 'SALSA'; precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
 --reducing_end_variants, type=string(s): other reducing ends the glycans may carry: 'free' (glycans that escaped reduction or labelling, counted for their glycan) and/or 'ethyl_glycoside' (rows of their own); give none of them to turn this off; default: free, plus ethyl_glycoside for lipid <br />
+--adducts, type=string(s): ions that carry the charge of the precursors in place of protons, e.g. Li+ for lithium salts in the mobile phase ([M+Li]+, [M+2Li]2+, ...); the usual adducts (Na+, K+, NH4+ in positive, acetate, formate, HCO3- in negative mode) are always considered; default:None <br />
 --modification, type=string: reducing-end modification of glycans; options are 'reduced', '2AA', '2AB', 'procainamide', 'PA', or 'custom'; default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
@@ -68,7 +69,7 @@ If you would like to run our main inference function from the command line, you 
 --rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 --spectra, type=bool: whether to also output the actual spectra used for prediction, as a peak_d column; default:False <br />
 --get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
---filter_out, type=string(s): space-separated monosaccharide or modification types; compositions containing any of them are not considered (e.g., Pen if you know there is none); the list replaces the default, and giving none of them filters nothing; default: Ac Kdn HexA Pen HexN Me PCho PEtN <br />
+--filter_out, type=string(s): space-separated monosaccharide or modification types; compositions containing any of them are not considered (e.g., Pen if you know there is none); the list replaces the default, and giving none of them filters nothing; Ac is always left out of permethylated and peracetylated samples; default: HexA <br />
 --ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
 --pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
 --crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap or timsTOF survey scans); default:3 <br />
@@ -131,7 +132,7 @@ pred_thresh, type=float: prediction confidence threshold used for filtering; def
 temperature, type=float: the temperature factor used to calibrate logits; default:1.15 <br />
 spectra, type=bool: whether to also output the actual spectra used for prediction; default:False <br />
 get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
-filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); default:{'Ac', 'Kdn', 'HexA', 'Pen', 'HexN', 'Me', 'PCho', 'PEtN'} <br />
+filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); Ac is always left out of permethylated and peracetylated samples; default:{'HexA'} <br />
 ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
 crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap or timsTOF survey scans); default:3 <br />
 sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
@@ -149,6 +150,7 @@ experimental, type=bool: whether to impute missing predictions via database sear
 plot_glycans, type=bool: whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False <br />
 sialic_derivatization, type=string or tuple: linkage-specific sialic acid derivatization of underivatized samples, 'EE', 'EEA', 'ME', 'DMA', 'SALSA', or a pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
 reducing_end_variants, type=dict: other reducing ends the glycans may carry, as name: group on the free glycan's reducing end (formula or mass; 0 for a free reducing end), e.g. {'free': 0} or {'ethyl glycoside': 'C2H4'}; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid') <br />
+adducts, type=string or list: ions of glycowork's adduct table that carry the charge of the precursors in place of protons, e.g. 'Li+' for lithium salts in the mobile phase; their compositions come before the protonated ones; the usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered; default:None <br />
 n_jobs, type=int: number of processes for fragment scoring and supporting peaks (a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS); default:1
 
 </pre>

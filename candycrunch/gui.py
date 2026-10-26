@@ -61,7 +61,7 @@ for _arg, _default in zip(_batch_def.args.args[-len(_batch_def.args.defaults):],
         pass
 _constants = {node.targets[0].id: node.value for node in _tree.body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)}
 MZ_REF = ast.literal_eval(_constants['MZ_REF'])
-FILTER_CHOICES = sorted(set(ast.literal_eval(_constants['comp_vector_order'])) | DEFAULTS['filter_out'], key = str.lower)
+FILTER_CHOICES = sorted(set(ast.literal_eval(_constants['comp_vector_order'])) | DEFAULTS['filter_out'] | {'Ac', 'PCho', 'PEtN'}, key = str.lower)
 ANALYZER_TRAPS, MZXML_ANALYZER_TRAPS = ast.literal_eval(_constants['ANALYZER_TRAPS']), ast.literal_eval(_constants['MZXML_ANALYZER_TRAPS'])
 # What a run's name may say about its settings; a setting is only taken from the name if it names exactly one of its choices
 NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?glycans?|og|o(?![a-z0-9])|mucins?', 'lipid': r'gsls?|glycosphingolipids?|glycolipids?|gangliosides?',
@@ -83,6 +83,8 @@ SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethyl
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
                           ('Dimethylamidation (DMA)', 'DMA'), ('SALSA', 'SALSA'), ('Glycoqueuing, aniline (GQ)', 'GQ'), ('Glycoqueuing, d5/d0-aniline (GQ-d5)', 'GQ-d5')]
 SIALIC_TIP = 'Linkage-specific sialic acid derivatization: precursor masses then tell a2-6 from a2-3/8 sialic acids, and fragments carry the derivatized sialic acids'
+# Ions carrying the charge of the precursors in place of protons, as wrap_inference's adducts
+CHARGE_CARRIERS = [('None', None), ('Li+ (lithium salts in the mobile phase)', 'Li+')]
 LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
 FRAGMENT_TYPES = [('Automatic', None), ('Glycosidic only', 'glycosidic'), ('All cross-rings', 'cross_rings')]
@@ -1625,8 +1627,12 @@ class SettingsPanel(QScrollArea):
         self.inputs['sample_prep'] = _combo(SAMPLE_PREPS)
         self.sialic = _combo(SIALIC_DERIVATIZATIONS)
         self.sialic.setToolTip(SIALIC_TIP)
-        # As wide as their longest choice, these two made the panel wider than its view, which cut off its right edge (the hint, combo arrows, Restore defaults)
-        for box in (self.inputs['glycan_class'], self.sialic):
+        self.adducts = _combo(CHARGE_CARRIERS)
+        self.adducts.setToolTip('Protons and the usual adducts of the ion mode (Na+, K+, NH4+ in positive, acetate, formate, HCO3- in negative mode) are always '
+                                'considered. An extra charge carrier takes the place of protons where the mobile phase supplies it, e.g., Li+ with lithium '
+                                'acetate: precursors are read as [M+Li]+, [M+2Li]2+, ... first, and their fragments carry Li+')
+        # As wide as their longest choice, these three made the panel wider than its view, which cut off its right edge (the hint, combo arrows, Restore defaults)
+        for box in (self.inputs['glycan_class'], self.sialic, self.adducts):
             box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
@@ -1651,6 +1657,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('Tag mass', self.inputs['mass_tag'])
         form.addRow('Derivatization', self.inputs['sample_prep'])
         form.addRow('Sialic acid linkage', self.sialic)
+        form.addRow('Extra charge carrier', self.adducts)
         form.addRow('Chromatography', self.inputs['lc'])
         form.addRow('Mass analyzer', self.inputs['trap'])
         layout.addLayout(form)
@@ -1770,7 +1777,7 @@ class SettingsPanel(QScrollArea):
         self.files_changed.connect(lambda: self.show_experiment(self.current_experiment()))
         self.files_changed.connect(lambda: self.files.setFixedHeight(min(240, max(110, 6 + max(self.files.sizeHintForRow(0), self.files.fontMetrics().height() + 4) * sum(
             self.files.topLevelItem(i).childCount() + 1 for i in range(self.files.topLevelItemCount()))))))
-        for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic, self.model]:
+        for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic, self.adducts, self.model]:
             getattr(widget, {QComboBox: 'currentIndexChanged', QCheckBox: 'toggled', QLineEdit: 'textChanged'}.get(type(widget), 'valueChanged')).connect(
                 lambda *_: self.reset.setEnabled(any(v != DEFAULTS.get(k, v) for k, v in self.values().items())))
         self.set_values(DEFAULTS)
@@ -2011,6 +2018,7 @@ class SettingsPanel(QScrollArea):
         values['filter_out'] = {name for name, box in self.filter_boxes.items() if box.isChecked()}
         values['modification'], values['mass_tag'] = ('custom', None) if values['modification'] == 'unreduced' else (values['modification'], values['mass_tag'] if values['modification'] == 'custom' else None)
         values['sialic_derivatization'] = self.sialic.currentData()
+        values['adducts'] = self.adducts.currentData()
         values['model_file'] = self.model.currentData()
         # Classes measured together go to wrap_inference as a list
         if '+' in values['glycan_class']:
@@ -2048,6 +2056,8 @@ class SettingsPanel(QScrollArea):
             _set_combo(self.inputs['modification'], 'unreduced')
         self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom')
         self.sialic.setCurrentIndex(max(self.sialic.findData(values.get('sialic_derivatization')), 0) if values.get('sialic_derivatization') else 0)
+        adducts = values.get('adducts')
+        self.adducts.setCurrentIndex(max(self.adducts.findData(adducts if isinstance(adducts, str) or not adducts else adducts[0]), 0) if adducts else 0)
         # A model from a session or the last run that is not in the list is added if its file still exists, else the built-in model is shown
         model = values.get('model_file')
         if model and self.model.findData(model) < 0 and os.path.exists(model):
@@ -2688,10 +2698,11 @@ class ResultsView(QWidget):
         if not isinstance(peaks, dict) or not peaks or structure is None:
             return structure, ms3_groups, None
         preds = table['predictions'].iat[r]
+        from candycrunch.analysis import precursor_metals
         return structure, ms3_groups, ((structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]), _mass_tag(settings), settings['sample_prep']),
                                        dict(ms3 = [(p, n) for p, _, n in ms3_groups], candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [],
                                             sialic_derivatization = settings.get('sialic_derivatization'), ion_trap = settings.get('trap') in ('linear', 'amazon'),
-                                            metal_cations = 'adduct' not in table.columns or isinstance(table['adduct'].iat[r], str)))
+                                            metal_cations = 'adduct' not in table.columns or (precursor_metals([a]) if isinstance(a := table['adduct'].iat[r], str) else False)))
 
     def annotate(self):
         table, spectra = self.payload['tables'][self.source[0]]

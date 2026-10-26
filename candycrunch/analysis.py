@@ -84,7 +84,7 @@ mono_attributes = {
     'Global': {'mass': {'H2O': -18.0105546, 'NH3': -17.026549, 'CH2O': -30.0106, 'CH4O': -32.026215, 'C2H2O': -42.0106, 'CO2': -43.9898,
                         'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, 'C2H4O2': -60.0211,
                         '+Acetate': 59.013851,
-                        '+Na': +22.989218, '+K': 38.963158, '+H': HYDROGEN_MASS, '-H': -HYDROGEN_MASS}}
+                        '+Na': +22.989218, '+K': 38.963158, '+Li': 7.015454, '+H': HYDROGEN_MASS, '-H': -HYDROGEN_MASS}}
 }
 WATER_MASS = 18.0105546
 CH2_MASS = calculate_adduct_mass('CH2')
@@ -196,7 +196,7 @@ fragmentation_priors = {
     'global_mod': {
         'H2O': 0.9, 'NH3': 0.7, 'CH2O': 0.5, 'C2H2O': 0.4, 'CO2': 0.7,
         'C2H4O2': 0.3, 'SO4': 0.6, 'PO4': 0.6, 'C3H8O4': 0.2,
-        '+Acetate': 0.4, '+Na': 0.5, '+K': 0.3,
+        '+Acetate': 0.4, '+Na': 0.5, '+K': 0.3, '+Li': 0.5,
     },
     'multi_cleavage_penalty': {'glycosidic': 0.6, 'cross_ring': 0.35},
     # factor for a fragment one (odd-electron) or two hydrogen atoms off its even-electron mass, of radical activation methods (EED, EDD, NETD, UVPD, ETD)
@@ -210,7 +210,7 @@ fragmentation_priors = {
     # X_1 cross-rings retain the reducing end and are the diagnostic class; cross-rings on
     # non-reducing-terminal residues are strongly disfavored. Detected per-fragment via the M_+Na
     # token, so protonated and negative-mode fragments (where internal 02A/24A are diagnostic) are untouched.
-    'reducing_end_cross_ring': {'boost': 1.6, 'non_reducing_penalty': 0.2, 'adducts': {'+Na', '+K'}},
+    'reducing_end_cross_ring': {'boost': 1.6, 'non_reducing_penalty': 0.2, 'adducts': {'+Na', '+K', '+Li'}},
 }
 # What a linkage-specific sialic acid derivatization makes of a carboxyl, written into the residue: at C1 of a sialic acid (Neu1Et5Ac is the ethyl ester of
 # Neu5Ac, as glycowork writes its methyl ester Neu1Me5Ac), at C6 of a uronic acid (GlcA6Et)
@@ -843,12 +843,21 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
 
 GLYCAN_ONLY_GLOBAL_MODS = {'CH2O', 'C2H2O', 'C2H4O2', 'C3H8O4', 'CO2', 'SO4', 'PO4'}
 PEPTIDE_ONLY_GLOBAL_MODS = {'NH3'}
-ADDUCT_GLOBAL_MODS = {'+Na', '+K', '+Acetate'}
+ADDUCT_GLOBAL_MODS = {'+Na', '+K', '+Li', '+Acetate'}
 # Only small neutral losses realistically occur more than once on a single fragment; combining the
 # bulkier cross-ring losses would inflate the search space without describing real chemistry
 REPEATABLE_GLOBAL_MODS = ('H2O', 'NH3')
 # metal cations on a free glycan's fragment: one carries the charge, more neutralize acidic groups or carry more charges ([F+2Na-H]+, [F+2Na]2+)
-METAL_GLOBAL_MODS = {'+Na', '+K'}
+METAL_GLOBAL_MODS = {'+Na', '+K', '+Li'}
+# the ones a metal adduct precursor's fragments may carry unless its ion names another (precursor_metals): a +Li fragment lies one oxygen (16.0 Da) below the
+# +Na fragment of the same cleavage, so sodiated precursors would gain chance annotations
+DEFAULT_METAL_CATIONS = {'+Na', '+K'}
+
+
+def precursor_metals(adducts):
+    """metal_cations for the fragments of a precursor read as these adduct ions ('Li+', or ion names such as '[M+2Li]2+'): the metals of METAL_GLOBAL_MODS
+    beyond DEFAULT_METAL_CATIONS that they name, else True (the default ones)"""
+    return {f'+{m}' for a in adducts for m in re.findall(r'[A-Z][a-z]?', a)} & (METAL_GLOBAL_MODS - DEFAULT_METAL_CATIONS) or True
 # Global modifications a fragment of a glycopeptide composition can carry, by the kind of ion (glycan-only, intact peptide, backbone ion): in spectra of
 # identified glycopeptides (HCD, EThcD, ETD) only these were annotated more often than in the same spectra shifted out of tolerance; metal adducts, CH2O,
 # CO2, C3H8O4 and H2O + NH3 never were, nor NH3 or two waters on backbone ions
@@ -2065,7 +2074,7 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_f
                 if z > 1 and z > max_fragment_charge(graph, peptide = peptide):
                     continue
                 # metal cations beyond the fragment's charge each neutralize one of its acidic groups ([F+2Na-H]+ of a sialic acid salt)
-                if (mod := graph.global_mod) and ('+Na' in mod or '+K' in mod) and \
+                if (mod := graph.global_mod) and any(x in mod for x in METAL_GLOBAL_MODS) and \
                         (metals := sum(x in METAL_GLOBAL_MODS for x in parse_global_mod(mod))) > z and \
                         metals - z > sum(acidic_groups(d['string_labels']) for d in graph.nodes.values()):
                     continue
@@ -2151,8 +2160,9 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False, max_gl
     if disable_global_mods:
         return [None] + (list(HYDROGEN_SHIFTS) if hydrogen_shifts else []), []
     global_mods = [x for x in mono_attributes['Global']['mass'] if x not in ['CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS] and (x != 'CH4O' or sample_prep == 'permethylated')]
-    charge_mods = {-1: ['+Na', '+K'], 1: ['+Acetate']}
-    global_mods = [mod for mod in global_mods if mod not in charge_mods[np.sign(charge)] and (metal_cations or mod not in METAL_GLOBAL_MODS)]
+    charge_mods = {-1: ['+Na', '+K', '+Li'], 1: ['+Acetate']}
+    metals = DEFAULT_METAL_CATIONS if metal_cations is True else set(metal_cations or ())
+    global_mods = [mod for mod in global_mods if mod not in charge_mods[np.sign(charge)] and (mod in metals or mod not in METAL_GLOBAL_MODS)]
     labels = [v for v in nx.get_node_attributes(nx_mono, 'string_labels').values() if len(v) > 1]
     special_mod_residues = ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn', 'S', 'P']
     # residue by residue (the joined labels of Glc(a1-4)Ara contain GlcA), with every uronic acid (IdoA, GalA) as HexA and only phosphate
@@ -2527,7 +2537,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
     | max_global_mods (int): how many global modifications (metal cations on a free glycan's fragment included) may co-occur on one fragment; default:1
     | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; default:None
     | hydrogen_shifts (bool): whether free-glycan fragments also come one or two hydrogen atoms off their mass (radical activation); default:False
-    | metal_cations (bool): whether fragments can carry metal cations (Na+, K+; positive mode), which those of a (de)protonated precursor cannot; default:True\n
+    | metal_cations (bool or set): whether fragments can carry metal cations (positive mode; True: Na+ and K+), which those of a (de)protonated precursor
+    |                              cannot, or the ones they can carry (e.g., {'+Li'} for a lithiated precursor); default:True\n
     | Returns:
     | :-
     | Returns a dict keyed by observed mass, each pointing to an annotation dict or None
@@ -2544,8 +2555,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
     window_masses = extend_masses(fragment_masses, charge)
     # Global modifications (shared), set up first, as a glycopeptide's backbone fragments are only made near an observed mass, also after one of them
     if not disable_global_mods:
-        charge_exclude = {-1: ['+Na', '+K'], 1: ['+Acetate']}
-        excluded = set(charge_exclude.get(np.sign(charge), [])) | (set() if metal_cations else METAL_GLOBAL_MODS)
+        charge_exclude = {-1: ['+Na', '+K', '+Li'], 1: ['+Acetate']}
+        excluded = set(charge_exclude.get(np.sign(charge), [])) | (METAL_GLOBAL_MODS - (DEFAULT_METAL_CATIONS if metal_cations is True else set(metal_cations or ())))
         if not is_glycopeptide:
             excluded.add('NH3')
         global_mods_dict = {k: v for k, v in mono_attributes['Global']['mass'].items()
@@ -2831,7 +2842,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of an underivatized sample, 'EE', 'EEA', 'ME', 'DMA', 'SALSA', or a
     |                        pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; every sialic acid then needs its linkage (a2-6 or a2-3/8/9 in a
     |                        structure, E/L in a composition), and fragments keeping its C1 carry the product; default:None
-    | metal_cations (bool): whether fragments can carry metal cations (Na+, K+; positive mode), which those of a (de)protonated precursor cannot; default:True\n
+    | metal_cations (bool or set): whether fragments can carry metal cations (positive mode; True: Na+ and K+), which those of a (de)protonated precursor
+    |                              cannot, or the ones they can carry (e.g., {'+Li'} for a lithiated precursor); default:True\n
     | Returns:
     | :-
     | Returns a dict keyed by observed mass, each pointing to None or a dict of 'Theoretical fragment masses', 'Domon-Costello nomenclatures' and

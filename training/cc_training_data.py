@@ -12,7 +12,8 @@ folder; without either only the test runs of tests/ are left out) and the output
 
 Inputs: <cc_root>/<project>/**/<run>.cc (project = a map ID: GlycoPOST, PMC, MassIVE, ...), <maps>/df_mz_<project>[_<suffix>].csv (Mass, RT, glycan, optional
 sample columns whose names are substrings of the run names, optional reducing_end (a REDUCING_ENDS value or 'custom <tag mass>'), sialic_derivatization,
-trap and lc (PGC, C18, HILIC or other) per row, which set them for a run whose rows all agree) and the checklist row of the project (mode, LC_type, trap,
+trap and lc (PGC, C18, HILIC or other) and adduct (the ion carrying the charge of the row's Mass in place of protons, e.g. Li+) per row, which set them
+for a run whose rows all agree) and the checklist row of the project (mode, LC_type, trap,
 glycan_type, reducing_end, sample_prep, sialic_derivatization, mass_tag).
 Per run: the project's maps of the class its name gives (NG/OG, N-/O-glycans, GSL, a sample number ending in N or O; map class from the suffix _N, _O, _GSL,
 ...), those with a sample column found in the run name (rows where it is > 0), else every row of a map that names no run; glycan class from the maps' suffixes,
@@ -56,7 +57,8 @@ import pandas as pd
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
-NON_SAMPLE = {'Mass', 'RT', 'glycan', 'added_db', 'removed_db', 'glycan_class', 'rt_group', 'charge', 'reducing_end', 'sialic_derivatization', 'trap', 'lc'}
+NON_SAMPLE = {'Mass', 'RT', 'glycan', 'added_db', 'removed_db', 'glycan_class', 'rt_group', 'charge', 'reducing_end', 'sialic_derivatization', 'trap', 'lc',
+              'adduct'}
 # Class of a map by the first part of its suffix (_N_rt: N)
 SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid', 'milk': 'free'}
 LOG_COLUMNS = ['project', 'run', 'path', 'excluded', 'maps', 'glycan_class', 'rt_shift', 'rt_alignment', 'rt_anchors', 'masses_rescued', 'settings_fitted', 'status',
@@ -229,8 +231,11 @@ def convert_run(task):
             from glycowork.motif.tokenization import SIALIC_DERIVATIZATIONS
             if sias.iloc[0] in SIALIC_DERIVATIZATIONS:
                 settings['sialic_derivatization'] = sias.iloc[0]
-        # Residues wrap_inference leaves out of its candidate compositions by default (filter_out: Kdn, HexA, ...) stay in where the run's map lists them, as
-        # its rows of them could not label otherwise and their isobars (HexNAc + Kdn = Hex + Neu5Ac) would take the inputs
+        ions = task['mapping']['adduct'] if task['mapping'] is not None and 'adduct' in task['mapping'].columns else pd.Series(dtype = object)
+        if len(ions) and ions.notna().all() and ions.nunique() == 1:
+            settings['adducts'] = [ions.iloc[0]]
+        # Residues wrap_inference leaves out of its candidate compositions by default (filter_out: HexA) stay in where the run's map lists them, as
+        # its rows of them could not label otherwise and compositions of the same mass would take the inputs
         if task['mapping'] is not None:
             from glycowork.motif.tokenization import glycan_to_composition
             from candycrunch.prediction import wrap_inference
@@ -275,7 +280,7 @@ def convert_run(task):
         meta = dict(filename = path.stem, GlycoPost_ID = task['project'], reducing_end = end, sample_prep = settings['sample_prep'], mass_tag = settings.get('mass_tag'),
                     sialic_derivatization = str(settings['sialic_derivatization']) if settings.get('sialic_derivatization') else None,
                     fragmentation = task['row'].get('fragmentation'), ion_source = task['row'].get('ionization'), lc_checklist = task['row'].get('LC_type'),
-                    trap_checklist = task['row'].get('trap'))
+                    trap_checklist = task['row'].get('trap'), adducts = ' '.join(settings.get('adducts', ())) or None)
         # glycan_type (labelled) and glycan_types (unlabelled) are label_run's: the class code the model got, the run's class
         labelled = labelled.assign(**meta)
         unlabelled = unlabelled.assign(**meta)
