@@ -82,7 +82,7 @@ mono_attributes = {
             'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5], '15X': [1], '15A': [2, 3, 4, 5],
                       '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Pen': [1, 2, 3, 4, 5]}},
     'Global': {'mass': {'H2O': -18.0105546, 'NH3': -17.026549, 'CH2O': -30.0106, 'CH4O': -32.026215, 'C2H2O': -42.0106, 'CO2': -43.9898,
-                        'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, 'C2H4O2': -60.0211,
+                        'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, 'C2H4O2': -60.0211, 'CD3OH': -35.045046,
                         '+Acetate': 59.013851,
                         '+Na': +22.989218, '+K': 38.963158, '+Li': 7.015454, '+H': HYDROGEN_MASS, '-H': -HYDROGEN_MASS}}
 }
@@ -157,7 +157,8 @@ derivatization_sites = {
     'peracetylated': {'Hex': (2, 3, 4, 6), 'HexNAc': (3, 4, 6), 'HexN': (2, 3, 4, 6), 'dHex': (2, 3, 4),
                       'Pen': (2, 3, 4), 'HexA': (2, 3, 4), 'Neu5Ac': (4, 7, 8, 9), 'Neu5Gc': (4, 5, 7, 8, 9),
                       'Kdn': (4, 5, 7, 8, 9)}}
-DERIVATIZATION_MASSES = {'permethylated': CH2_MASS, 'peracetylated': calculate_adduct_mass('C2H2O')}
+# the mass of one derivatized group; deuteropermethylation (CD3 caps) derivatizes the permethylation sites, whose count tables it shares
+DERIVATIZATION_MASSES = {'permethylated': CH2_MASS, 'deuteropermethylated': CH2_MASS + calculate_adduct_mass('D3-H3'), 'peracetylated': calculate_adduct_mass('C2H2O')}
 # Substituents of modified monosaccharides (GlcNAc6S, Neu5Ac9Ac, ...) and of compositions, with how each changes the
 # number of derivatized groups as glycowork has it (an O-sulfate takes a hydroxyl out of permethylation: -1, ...)
 SUBSTITUENTS = {s: {'mass': composition_to_mass({s: 1}) - composition_to_mass({})} | {
@@ -215,7 +216,7 @@ fragmentation_priors = {
 # What a linkage-specific sialic acid derivatization makes of a carboxyl, written into the residue: at C1 of a sialic acid (Neu1Et5Ac is the ethyl ester of
 # Neu5Ac, as glycowork writes its methyl ester Neu1Me5Ac), at C6 of a uronic acid (GlcA6Et)
 CARBOXYL_TOKENS = {'ethyl ester': 'Et', 'methyl ester': 'Me', 'lactone': 'lactone', 'amide': 'N', 'methylamide': 'NMe', 'dimethylamide': 'NMe2',
-                   'isopropylamide': 'NiPr'}
+                   'isopropylamide': 'NiPr', 'anilide': 'NPh', 'd5-anilide': 'NPhD5'}
 CARBOXYL_LABELS = set()  # the residues derivatize_carboxyls made, which a composition counts like base residues
 linkage_lability = {
     ('Neu5Ac', '2-3'): 1.0, ('Neu5Ac', '2-6'): 0.3, ('Neu5Ac', '2-8'): 0.5,
@@ -338,7 +339,7 @@ def smiles_mono_attributes(label):
     if len(tables) == 1:
         return tables[0]
     table, full = tables
-    delta = {prop: full[prop][key] - table[prop][key] for prop in ['mass', *DERIVATIZATION_MASSES]}
+    delta = {prop: full[prop][key] - table[prop][key] for prop in ['mass', *derivatization_sites]}
     return {prop: {f: v + delta[prop] if prop != 'atoms' and (table['peracetylated'][f] > 0 or f == key) else v for f, v in values.items()}
             for prop, values in table.items()}
 
@@ -347,7 +348,7 @@ def smiles_mono_attributes(label):
 # agrees with every hand entry, as masses, retained carbons and derivatized groups do not depend on the stereochemistry
 for base, isomer in {'Hex': 'Glc', 'HexNAc': 'GlcNAc', 'HexN': 'GlcN', 'dHex': 'Fuc', 'HexA': 'GlcA', 'Pen': 'Xyl'}.items():
     generated = smiles_mono_attributes(isomer)
-    for prop in ('mass', 'atoms', *DERIVATIZATION_MASSES):
+    for prop in ('mass', 'atoms', *derivatization_sites):
         mono_attributes[base][prop] = generated[prop] | mono_attributes[base][prop]
 # inositol (GPI anchors) is a cyclitol without a ring oxygen and so without sugar cross-rings: only its residue, with the mass and derivatized groups of a Hex
 mono_attributes['Ins'] = {prop: {'Ins': values['Hex']} for prop, values in mono_attributes['Hex'].items()}
@@ -395,7 +396,7 @@ def derivatize_carboxyls(glycan, sialic_derivatization):
             carbon, table = 1 if base in SIALIC_KEYS else 6, mono_attributes[old_key]
             mono_attributes[new_key] = {'atoms': {new_key if f == old_key else f: a for f, a in table['atoms'].items()}} | {
                 prop: {new_key if f == old_key else f: v + (deltas[i] if prop == 'mass' else caps[i] if prop == 'permethylated' else 0) * (carbon in table['atoms'][f]) for f, v in table[prop].items()}
-                for prop in ['mass', *DERIVATIZATION_MASSES] if prop in table}
+                for prop in ['mass', *derivatization_sites] if prop in table}
         CARBOXYL_LABELS.add(new_key)
         labels[(label, i)] = new
     if composition is not None:
@@ -466,7 +467,7 @@ def glycan_to_graph_monos(glycan):
                    for f in frags}
         mono_attributes[key] = {'atoms': {key if f == base else f: base_attr['atoms'][f] for f in frags}} | {
             prop: {key if f == base else f: base_attr[prop][f] + sum(SUBSTITUENTS[s][prop] for s in in_frag[f])
-                   for f in frags} for prop in ['mass', *DERIVATIZATION_MASSES]}
+                   for f in frags} for prop in ['mass', *derivatization_sites]}
     adj_matrix = np.zeros((len(mono_mask_dic), len(mono_mask_dic)), dtype = int)
     # glycowork alternates monosaccharide (even) and linkage (odd) nodes, with edges pointing parent -> linkage -> child
     for parent, link in ggraph.edges():
@@ -844,6 +845,8 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
 GLYCAN_ONLY_GLOBAL_MODS = {'CH2O', 'C2H2O', 'C2H4O2', 'C3H8O4', 'CO2', 'SO4', 'PO4'}
 PEPTIDE_ONLY_GLOBAL_MODS = {'NH3'}
 ADDUCT_GLOBAL_MODS = {'+Na', '+K', '+Li', '+Acetate'}
+# the methanol only permethylated glycans lose, with its deuterated caps when deuteropermethylated
+METHANOL_LOSSES = {'permethylated': 'CH4O', 'deuteropermethylated': 'CD3OH'}
 # Only small neutral losses realistically occur more than once on a single fragment; combining the
 # bulkier cross-ring losses would inflate the search space without describing real chemistry
 REPEATABLE_GLOBAL_MODS = ('H2O', 'NH3')
@@ -2159,7 +2162,7 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False, max_gl
     precursor), and with hydrogen_shifts (radical activation) every modification, and none, also comes with each of HYDROGEN_SHIFTS"""
     if disable_global_mods:
         return [None] + (list(HYDROGEN_SHIFTS) if hydrogen_shifts else []), []
-    global_mods = [x for x in mono_attributes['Global']['mass'] if x not in ['CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS] and (x != 'CH4O' or sample_prep == 'permethylated')]
+    global_mods = [x for x in mono_attributes['Global']['mass'] if x not in ['CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS] and (x not in METHANOL_LOSSES.values() or x == METHANOL_LOSSES.get(sample_prep))]
     charge_mods = {-1: ['+Na', '+K', '+Li'], 1: ['+Acetate']}
     metals = DEFAULT_METAL_CATIONS if metal_cations is True else set(metal_cations or ())
     global_mods = [mod for mod in global_mods if mod not in charge_mods[np.sign(charge)] and (mod in metals or mod not in METAL_GLOBAL_MODS)]
@@ -2418,8 +2421,8 @@ def glycopeptide_string_to_input(gpep_string):
 
 
 def get_derivatization_count(mono_type, fragment_type, sample_prep = 'permethylated'):
-    """Returns the number of derivatized groups (methyls when permethylated, acetyls when peracetylated) a fragment keeps"""
-    return mono_attributes.get(mono_type, {}).get(sample_prep, {}).get(fragment_type, 0)
+    """Returns the number of derivatized groups (methyls when (deutero)permethylated, acetyls when peracetylated) a fragment keeps"""
+    return mono_attributes.get(mono_type, {}).get('permethylated' if sample_prep == 'deuteropermethylated' else sample_prep, {}).get(fragment_type, 0)
 
 
 def _build_composition_fragments(composition, re_bonus, sample_prep = 'underivatized',
@@ -2529,7 +2532,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
     | simplify (bool): whether to condense fragment options to the most likely; default:True
     | disable_global_mods (bool): whether to disable global modifications; default:False
     | disable_X_cross_rings (bool): whether to disable X-type cross-ring cleavages; default:None (disabled in positive mode)
-    | sample_prep (string): underivatized/permethylated/peracetylated
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
     | peptide_seq (string): amino acid sequence; when provided, generates glycopeptide fragments; default:None
     | glycosites (list): 0-indexed peptide positions for each glycan; inferred from sequence if None; default:None
     | glycan_class (string): 'N' or 'O', to infer glycosites; default:None (both)
@@ -2560,7 +2563,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         if not is_glycopeptide:
             excluded.add('NH3')
         global_mods_dict = {k: v for k, v in mono_attributes['Global']['mass'].items()
-                            if k not in ('CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS) and k not in excluded and (k != 'CH4O' or sample_prep == 'permethylated')}
+                            if k not in ('CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS) and k not in excluded and (k not in METHANOL_LOSSES.values() or k == METHANOL_LOSSES.get(sample_prep))}
         if max_global_mods > 1:
             repeatable = [x for x in global_mods_dict if x in REPEATABLE_GLOBAL_MODS or (x in METAL_GLOBAL_MODS and not is_glycopeptide)]
             for n in range(2, max_global_mods + 1):
@@ -2806,7 +2809,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
     | Arguments:
     | :-
-    | input_string (string): glycan in IUPAC-condensed format (or composition as dict/string)
+    | input_string (string or dict): glycan in IUPAC-condensed format, composition as dict/string, or glycopeptide as 'PEPT*glycan*IDE' or a dict with 'peptide', 'glycans', 'glycosites'
     | fragment_masses (list): all masses which are to be annotated with a fragment name
     | mass_threshold (float): the maximum tolerated mass difference around each observed mass at which to include fragments; default:None (0.5 Da, or 10 ppm for glycopeptides)
     | max_cleavages (int): maximum number of allowed concurrent fragmentations per mass; default:3
@@ -2822,7 +2825,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     | disable_A_cross_rings (bool or string): whether to strip out any A-type cross-rings, or 'non_reducing' for all but the A_R ions (cross-rings of the
     |                                         reducing-terminal residue) of fragments with a metal cation; default:None ('non_reducing' in positive mode for
     |                                         unreduced glycans (mass_tag 0), stripped for other positive-mode glycans)
-    | sample_prep (string): underivatized/permethylated/peracetylated
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
     | prior_weight (float): weighting of prior-informed scoring in simplify=True
     | glycan_class (string): "N" or "O" if relevant (only used to assign candidate sites in glycopeptides, nowhere else)
     | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD'/'EED'/'EDD'/'NETD'/'UVPD'; restricts peptide backbone ion types (not for
@@ -2839,7 +2842,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     |                        annotated as fragments of what that MS2 fragment can be in this glycan (within max_cleavages), with up to
     |                        max_cleavages cleavages that fragment does not have (at most one X cross-ring), and all are None if it cannot be any
     |                        fragment of it; glycan structures only; default:None
-    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of an underivatized sample, 'EE', 'EEA', 'ME', 'DMA', 'SALSA', or a
+    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of an underivatized sample (or of one permethylated after it), 'EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5', or a
     |                        pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; every sialic acid then needs its linkage (a2-6 or a2-3/8/9 in a
     |                        structure, E/L in a composition), and fragments keeping its C1 carry the product; default:None
     | metal_cations (bool or set): whether fragments can carry metal cations (positive mode; True: Na+ and K+), which those of a (de)protonated precursor
@@ -2851,15 +2854,24 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     """
     if not len(fragment_masses):
         return {}
+    # Any other sample_prep would be annotated at underivatized masses
+    if sample_prep not in ('underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated'):
+        raise ValueError(f"Unknown sample_prep {sample_prep!r}; CandyCrumbs annotates 'underivatized', 'permethylated', 'deuteropermethylated' or 'peracetylated' glycans.")
     if sialic_derivatization is not None:
-        if sample_prep not in ('underivatized', 'permethylated'):
-            raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans or of glycans permethylated after it, not of {sample_prep} ones.")
+        if sample_prep not in ('underivatized', 'permethylated', 'deuteropermethylated'):
+            raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans or of glycans (deutero)permethylated after it, not of {sample_prep} ones.")
+        if sample_prep in ('permethylated', 'deuteropermethylated') and 'lactone' in (SIALIC_DERIVATIZATIONS.get(sialic_derivatization, ()) if isinstance(sialic_derivatization, str) else sialic_derivatization):
+            raise ValueError(f"A lactone does not survive permethylation; give the product its sialic acids end up as, e.g., ('dimethylamide', 'methyl ester') instead of {sialic_derivatization!r}.")
         if isinstance(input_string, dict) and 'peptide' in input_string:
             input_string = input_string | {'glycans': [derivatize_carboxyls(g, sialic_derivatization) for g in input_string.get('glycans', [])]}
         elif isinstance(input_string, str) and '*' in input_string:
             input_string = re.sub(r'\*([^*]+)\*', lambda m: f'*{derivatize_carboxyls(m[1], sialic_derivatization)}*', input_string)
         else:
             input_string = derivatize_carboxyls(input_string, sialic_derivatization)
+    # Glycans in the order of their sites, as a peptide*glycan* string numbers them
+    if isinstance(input_string, dict) and input_string.get('peptide') and None not in (input_string.get('glycosites') or [None]) and len(input_string['glycosites']) == len(input_string.get('glycans', [])) > 1:
+        sites, glycans = zip(*sorted(zip(input_string['glycosites'], input_string['glycans']), key = lambda x: x[0]))
+        input_string = input_string | {'glycosites': list(sites), 'glycans': list(glycans)}
     if isinstance(input_string, dict) and 'peptide' in input_string and not input_string['peptide'] and len(input_string.get('glycans', [])) == 1:
         input_string = input_string['glycans'][0]
     glycopeptide_input = (isinstance(input_string, dict) and bool(input_string.get('peptide'))) or (
@@ -3049,7 +3061,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         lability = {id(g): compute_fragment_lability(edge_lability, g) for g in frags}
         n_sites = [input_dict['peptide'][site] == 'N' for site in input_dict['glycosites']]
 
-        def plausible(name, z):
+        def plausible(name, z, frag):
             # As for glycopeptide compositions: in spectra of identified glycopeptides, glycan-only ions above 1+, backbone ions with part of a glycan (a
             # glycan lost whole is a Y_0/Z_0 piece; an N-glycan's core HexNAc, Y_1 cuts of all its chains, was real), X cross-rings on the intact peptide
             # other than one of an N-glycan's core HexNAc alone (peptide + 0,2X), and global modifications outside GLYCOPEPTIDE_GLOBAL_MODS of their kind
@@ -3060,17 +3072,18 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
             kind = 'Peptide' if backbone == 'Peptide' else 'backbone'
             if not {x[2:] for sub in name for x in sub if x.startswith('M_')} <= GLYCOPEPTIDE_GLOBAL_MODS[kind]:
                 return False
-            for sub, n_site in zip(name[1:], n_sites):
+            for prefix, (sub, n_site) in enumerate(zip(name[1:], n_sites), 1):
                 pieces = [x for x in sub if not x.startswith('M_') and x != 'M' and not x.startswith('loss of')]
                 if kind == 'Peptide':
                     if any(re.match(r'\d\dX', x) for x in pieces) and not (n_site and len(pieces) == 1 and re.fullmatch(r'\d\dX_1_[A-Za-z]+', pieces[0])):
                         return False
-                elif pieces and not all(re.fullmatch(r'[YZ]_0_[A-Za-z]+', x) for x in pieces) and not (n_site and all(re.fullmatch(r'Y_1_[A-Za-z]+', x) for x in pieces)):
+                elif pieces and not all(re.fullmatch(r'[YZ]_0_[A-Za-z]+', x) for x in pieces) and not (n_site and all(re.fullmatch(r'Y_1_[A-Za-z]+', x) for x in pieces) and
+                                                                                                        sum(x.split('-')[0] == str(prefix) for x in frag) == 1):
                     return False
             return True
 
         for fragment_properties in matches:
-            keep = [i for i, g in enumerate(fragment_properties[-1]) if id(g) in names and plausible(names[id(g)], fragment_properties[3][i])]
+            keep = [i for i, g in enumerate(fragment_properties[-1]) if id(g) in names and plausible(names[id(g)], fragment_properties[3][i], g)]
             fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
             downstream_values.append((*fragment_properties, [[list(x) for x in names[id(g)]] for g in fragment_properties[-1]],
                                       [lability[id(g)] for g in fragment_properties[-1]]))
@@ -3146,8 +3159,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
             hit_dict[fragment_masses[i]] = None
     if peptide and isinstance(fragmentation_method, str) and fragmentation_method in CHARGE_REDUCING_METHODS:
         add_charge_reduced_ions(hit_dict, sum(AA_masses[aa] for aa in input_dict['peptide']) + WATER_MASS + sum(
-            composition_to_mass(glycan_to_composition(g)) - WATER_MASS for g in input_dict['glycans']), len(input_dict['glycans']), charge, mass_threshold,
-                                mass_threshold_ppm = mass_threshold_ppm)
+            mono_attributes[b]['mass'][b] for b in (map_to_basic(v, obfuscate_ptm = False) for v in node_labels.values() if len(v) > 1)), len(input_dict['glycans']),
+                                charge, mass_threshold, mass_threshold_ppm = mass_threshold_ppm)
     return hit_dict
 
 
@@ -3210,7 +3223,7 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
     | mass_tolerance (float): fragment tolerance in Da; default:0.3
     | top_n_peaks (int): how many of the most intense peaks can support a residue; default:20
     | mass_tag (float): mass of the glycan label or reducing end modification, as in CandyCrumbs; default:None (alditol)
-    | sample_prep (string): underivatized/permethylated/peracetylated
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
     | reference_glycans (list): known structures that define where a donor can attach; default:None (the CandyCrunch vocabulary)
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization, as in CandyCrumbs; the precursor mass then fixes how many sialic
     |                                          acids are a2-6 and how many a2-3/8/9, so placements and candidates with other counts are left out; default:None\n
@@ -3679,7 +3692,7 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
     |                         CandyCrumbs returns (['02A_5_Alpha'], ['Y_1_Alpha', 'M_+H'], ['I_HSO4'])
     | charge (int): charge state of the fragment ion, sign sets the ion mode; default:-1
     | mass_tag (float): mass of the glycan label or reducing end modification; default:None (alditol, 2 H)
-    | sample_prep (string): underivatized/permethylated/peracetylated
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
     | max_cleavages (int): maximum number of allowed concurrent fragmentations; default:3
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization, as in CandyCrumbs; default:None\n
     | Returns:
@@ -3687,6 +3700,8 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
     | Returns the m/z of the fragment, or None if it cannot exist on this glycan
     """
     if sialic_derivatization is not None:
+        if sample_prep in ('permethylated', 'deuteropermethylated') and 'lactone' in (SIALIC_DERIVATIZATIONS.get(sialic_derivatization, ()) if isinstance(sialic_derivatization, str) else sialic_derivatization):
+            raise ValueError(f"A lactone does not survive permethylation; give the product its sialic acids end up as, e.g., ('dimethylamide', 'methyl ester') instead of {sialic_derivatization!r}.")
         glycan = derivatize_carboxyls(glycan, sialic_derivatization)
     if isinstance(fragment, str):
         cuts = []
@@ -4069,8 +4084,11 @@ def identify_oxonium(mz, tolerance_ppm = 20):
 def resolve_spectrum_input(input_string):
     """Splits any CandyCrumbs input into its peptide, glycan and glycosite components"""
     if isinstance(input_string, dict) and 'peptide' in input_string:
-        return (input_string['peptide'], list(input_string.get('glycans', [])),
-                list(input_string.get('glycosites', [])))
+        glycans, sites = list(input_string.get('glycans', [])), list(input_string.get('glycosites', []))
+        # in site order, as CandyCrumbs numbers them
+        if None not in sites and len(sites) == len(glycans) > 1:
+            sites, glycans = map(list, zip(*sorted(zip(sites, glycans), key = lambda x: x[0])))
+        return input_string['peptide'], glycans, sites
     if isinstance(input_string, str) and '*' in input_string:
         parsed = glycopeptide_string_to_input(input_string)
         return parsed['peptide'], list(parsed['glycans']), list(parsed['glycosites'])
@@ -4336,7 +4354,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | mass_threshold (float): maximum tolerated mass difference for fragment matching; default:None (see CandyCrumbs)
     | max_cleavages (int): maximum concurrent fragmentations per mass; default:3
     | mass_tag (float): mass of the glycan label or reducing end modification; default:None
-    | sample_prep (string): underivatized/permethylated/peracetylated; default:'underivatized'
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
     | disable_global_mods (bool): whether to disable global modifications; default:False
     | prior_weight (float): weighting of prior-informed scoring; default:1.0
     | charge (int): charge state of the precursor ion; taken from the dataframe when available; default:None

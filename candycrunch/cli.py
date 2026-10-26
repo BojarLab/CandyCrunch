@@ -13,14 +13,14 @@ def str_to_bool(value):
 def build_parser():
     # The CLI's options, also the settings form of the in-browser page (web.py)
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
-    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker .d folders (timsTOF, ion traps), .mzML, .mzXML, .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
+    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, Bruker (timsTOF, ion traps) and Agilent MassHunter .d folders, .mzML, .mzXML, mzData (.mzdata/.mzdata.xml), .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g. N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
-    parser.add_argument('--modification', help='Reducing-end modification; custom: a label of --mass_tag Da', type=str, choices=['reduced', '2AA', '2AB', 'procainamide', 'PA', 'custom'], required=False)
-    parser.add_argument('--mass_tag', help='custom tag mass', type=float, required=False)
-    parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'peracetylated'], required=False)
-    parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples: EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA, GQ (glycoqueuing: aniline on every sialic acid, which tells no linkage), GQ-d5 (d5-aniline on a2-6, d0 on a2-3)', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5'], required=False)
+    parser.add_argument('--modification', help='Reducing-end modification: reduced (alditol), reduced_D (NaBD4), unreduced (free reducing end), a label, or custom: a label of --mass_tag Da', type=str, choices=['reduced', 'reduced_D', 'unreduced', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'custom'], required=False)
+    parser.add_argument('--mass_tag', help='Mass in Da of a --modification custom label', type=float, required=False)
+    parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated'], required=False)
+    parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples (or of samples permethylated after it): EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA, GQ (glycoqueuing: aniline on every sialic acid, which tells no linkage), GQ-d5 (d5-aniline on a2-6, d0 on a2-3)', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5'], required=False)
     parser.add_argument('--adducts', help='Ions that carry the charge of the precursors in place of protons, e.g. Li+ for lithium salts in the mobile phase; the usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered', type=str, nargs='+', required=False)
     parser.add_argument('--reducing_end_variants', help='Other reducing ends the glycans may carry: free (glycans that escaped reduction or labelling, counted for their glycan), ethyl_glycoside (rows of their own); default: free, plus ethyl_glycoside for lipid; give none of them to turn this off', type=str, nargs='*', choices=['free', 'ethyl_glycoside'], required=False)
     parser.add_argument('--lc', help='LC type', type=str, choices=['PGC', 'C18', 'other'], required=False)
@@ -56,15 +56,22 @@ def main(argv=None):
     if not os.path.isdir(os.path.dirname(os.path.abspath(args.output))):
         parser.error(f'the folder of --output {args.output} does not exist')
     # A timsTOF .d folder is one run (a shell completes it with a trailing separator); any other folder gives its runs
-    filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.d', '.mzml', '.mzxml', '.mgf', '.cc'))]
+    filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc'))]
                                                                               if os.path.isdir(p) and not p.lower().endswith('.d') else [p])]
     if not filepaths:
-        parser.error('no .raw/.d/.mzML/.mzXML/.mgf/.cc files found in --spectra_filepath')
+        parser.error('no .raw/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files found in --spectra_filepath')
     missing = [f for f in filepaths if not os.path.exists(f)]
     if missing:
         parser.error(f"not found: {', '.join(missing)}")
     if len(filepaths) > 1 and args.intra_cat_thresh is None:
         parser.error('--intra_cat_thresh is required when processing several files')
+    if (args.mass_tag is not None) != (args.modification == 'custom'):
+        parser.error('--mass_tag and --modification custom go together (glycans with a free reducing end: --modification unreduced)')
+    if args.max_charge == 0:
+        parser.error('--max_charge has to be at least 1 (the ion mode is set by --mode)')
+    # wrap_inference takes a free reducing end as a custom label without mass, as the app does
+    if args.modification == 'unreduced':
+        args.modification = 'custom'
     args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}
     # wrap_inference takes the ion mode from the sign of max_charge
     if args.mode or args.max_charge:

@@ -22,11 +22,15 @@ if git_build and not getattr(sys, "frozen", False):  # the app ships the glycowo
         else:
             from urllib.request import url2pathname
             checkout = url2pathname(source["url"].removeprefix("file:"))
-            commit = subprocess.run(["git", "-C", checkout, "rev-parse", "HEAD"], capture_output = True, text = True, check = True).stdout.strip()
+            commit = subprocess.run(["git", "-C", checkout, "rev-parse", "HEAD"], capture_output = True, text = True, check = True,
+                                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
             fix = f"git pull in {checkout}" + ("" if source["dir_info"].get("editable") else ", then pip install --no-deps it again")
         stamp = max(f.stat().st_mtime for f in pathlib.Path(__file__).parent.glob("*.py"))
         cache_file = pathlib.Path.home() / ".candycrunch" / "glycowork_check.json"
-        cache = json.loads(cache_file.read_text()) if cache_file.exists() else {}
+        try:
+            cache = json.loads(cache_file.read_text())
+        except (OSError, ValueError):  # none yet, or left half-written by another process: asked again and rewritten
+            cache = {}
         age = time.time() - cache.get("checked", 0)
         if cache.get("commit") != commit or (cache.get("stamp") != stamp and age > 3600) or age > 86400:
             cache = {"commit": commit, "stamp": stamp, "checked": time.time(), "behind": 0}

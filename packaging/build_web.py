@@ -14,6 +14,9 @@ parser.add_argument('out', help = 'folder to build the site into (replaced)')
 parser.add_argument('--glycowork', default = 'glycowork @ git+https://github.com/BojarLab/glycowork.git@dev', help = 'pip requirement or path of the glycowork to build')
 args = parser.parse_args()
 out = pathlib.Path(args.out)
+# Replaced only if it is empty or an earlier build: a slip such as . would delete everything in it
+if out.exists() and any(out.iterdir()) and not (out / 'wheels' / 'manifest.json').exists():
+    sys.exit(f'{out} is neither empty nor an earlier site build; give a new folder')
 shutil.rmtree(out, ignore_errors = True)
 shutil.copytree(ROOT / 'web', out)
 wheels = out / 'wheels'

@@ -63,12 +63,13 @@ _constants = {node.targets[0].id: node.value for node in _tree.body if isinstanc
 MZ_REF = ast.literal_eval(_constants['MZ_REF'])
 FILTER_CHOICES = sorted(set(ast.literal_eval(_constants['comp_vector_order'])) | DEFAULTS['filter_out'] | {'Ac', 'PCho', 'PEtN'}, key = str.lower)
 ANALYZER_TRAPS, MZXML_ANALYZER_TRAPS = ast.literal_eval(_constants['ANALYZER_TRAPS']), ast.literal_eval(_constants['MZXML_ANALYZER_TRAPS'])
+MZDATA_ANALYZER_TRAPS = ast.literal_eval(_constants['MZDATA_ANALYZER_TRAPS'])
 # What a run's name may say about its settings; a setting is only taken from the name if it names exactly one of its choices
 NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?glycans?|og|o(?![a-z0-9])|mucins?', 'lipid': r'gsls?|glycosphingolipids?|glycolipids?|gangliosides?',
                                'free': r'milk|hmos?'},
               'modification': {'reduced': r'(?<!non-)reduced|alditols?', 'unreduced': r'un-?reduced|non-?reduced', '2AB': r'2-?ab', '2AA': r'2-?aa', 'procainamide': r'procainamide',
                                'PA': r'pa-?label\w*|pyridylamin\w*|2-?aminopyridin\w*'},
-              'sample_prep': {'permethylated': r'permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
+              'sample_prep': {'permethylated': r'permethyl\w*', 'deuteropermethylated': r'deutero-?permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
 BATCH_KEYS = ('intra_cat_thresh', 'top_n_isomers', 'n_jobs')
 FEATURES = '\x00features'
 GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharides (e.g., milk)', 'free'), ('Glycolipid glycans', 'lipid'),
@@ -77,8 +78,9 @@ GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharide
 CLASS_ORDER = ['N', 'O', 'free', 'lipid']
 # 'unreduced' exists only in the app: wrap_inference takes a free reducing end as a custom label without mass (its reducing end check calls that 'unreduced')
 REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('Unreduced (free reducing end)', 'unreduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'),
-                 ('PA (2-aminopyridine)', 'PA'), ('Other label (enter its mass)', 'custom')]
-SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethylated'), ('Peracetylated', 'peracetylated')]
+                 ('PA (2-aminopyridine)', 'PA'), ('Reduced with NaBD4 (alditol-d1)', 'reduced_D'), ('APTS', 'APTS'), ('Aminoxy TMT', 'aminoxyTMT'),
+                 ('Girard P', 'GirardP'), ('Other label (enter its mass)', 'custom')]
+SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethylated'), ('Deuteropermethylated (CD3)', 'deuteropermethylated'), ('Peracetylated', 'peracetylated')]
 # Linkage-specific sialic acid derivatizations of underivatized samples, as wrap_inference's sialic_derivatization
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
                           ('Dimethylamidation (DMA)', 'DMA'), ('SALSA', 'SALSA'), ('Glycoqueuing, aniline (GQ)', 'GQ'), ('Glycoqueuing, d5/d0-aniline (GQ-d5)', 'GQ-d5')]
@@ -91,7 +93,7 @@ FRAGMENT_TYPES = [('Automatic', None), ('Glycosidic only', 'glycosidic'), ('All 
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD'), ('EED', 'EED'),
                   ('EDD', 'EDD'), ('NETD', 'NETD'), ('UVPD', 'UVPD')]
-SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mgf', '.cc')
+SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc')
 # What can be wrong with a peak's prediction, for misprediction reports from the spectrum view; the value tags the report
 MISPREDICTIONS = [('Choose what is wrong…', None), ('Wrong structure (the composition is right)', 'structure'), ('Wrong composition', 'composition'),
                   ('No structure, though it is a glycan', 'missing'), ('Not a glycan (noise, contaminant, adduct, or isotope)', 'not_glycan'),
@@ -258,6 +260,40 @@ def _load_model(path):
 def _check_model(path):
     """Loads a model file in a process of its own (the window never imports torch): the number of structures it predicts, or why it cannot be used"""
     return len(_load_model(path)[1])
+
+
+def _restore_arrow(data):
+    """pyarrow's own unpickling of an array (pandas 3 text columns with pyarrow installed), checked: it takes a file's offsets and lengths as they are,
+    so a crafted file could make pandas read outside the array's memory"""
+    from pyarrow.lib import _restore_array
+    array = _restore_array(data)
+    array.validate(full = True)
+    return array
+
+
+# What saved results are made of, as pandas 2.2-3 and NumPy 1-2 pickle them with protocols 4 (Python 3.12) and 5 (3.14): frames, indexes, blocks,
+# arrays, dtypes and scalars, and pandas 3 text columns (numpy- or pyarrow-backed)
+SESSION_GLOBALS = {('builtins', 'slice'), ('builtins', 'bytearray'), ('numpy', 'dtype'), ('numpy', 'ndarray'),
+                   ('numpy._core.multiarray', '_reconstruct'), ('numpy._core.multiarray', 'scalar'), ('numpy._core.numeric', '_frombuffer'),
+                   ('numpy.core.multiarray', '_reconstruct'), ('numpy.core.multiarray', 'scalar'), ('numpy.core.numeric', '_frombuffer'),
+                   ('pandas.core.frame', 'DataFrame'), ('pandas.core.indexes.base', 'Index'), ('pandas.core.indexes.range', 'RangeIndex'),
+                   ('pandas', 'DataFrame'), ('pandas', 'Index'), ('pandas', 'RangeIndex'), ('pandas', 'StringDtype'),
+                   ('pandas.core.indexes.base', '_new_Index'), ('pandas.core.internals.managers', 'BlockManager'),
+                   ('pandas._libs.internals', '_unpickle_block'), ('pandas._libs.arrays', '__pyx_unpickle_NDArrayBacked'),
+                   ('pandas.arrays', 'StringArray'), ('pandas.arrays', 'ArrowStringArray'), ('pyarrow.lib', 'type_for_alias'), ('pyarrow.lib', 'py_buffer')}
+
+
+class _SessionUnpickler(pickle.Unpickler):
+    """Reads saved results with nothing but SESSION_GLOBALS allowed (as weights_only does for models): pickle calls whatever a file names, so results
+    from someone else naming anything else (os.system) would run code when opened by a double-click"""
+
+    def find_class(self, module, name):
+        if (module, name) == ('pyarrow.lib', '_restore_array'):
+            return _restore_arrow
+        if (module, name) not in SESSION_GLOBALS:
+            raise pickle.UnpicklingError(f'it names {module}.{name}, which is no part of CandyCrunch results: a file like this could run code on this '
+                                         'computer, so it was not opened')
+        return super().find_class(module, name)
 
 
 def _extract_peak_data(path, mz, charge, rt):
@@ -433,12 +469,13 @@ def _detect_run(path, results):
     charges, number of MS2 spectra) on results"""
     found, charges, n_ms2, ext = {}, {}, 0, os.path.splitext(os.path.normpath(path))[1].lower()
     try:
-        if ext in ('.mzml', '.mzxml', '.mgf'):
+        if ext in ('.mzml', '.mzxml', '.mzdata', '.xml', '.mgf'):
             # Only tags and their attributes are read, never the binary data, in chunks cut after a tag (mgf: a line); the first chunk holds the instruments
             mode_re, filter_re, charge_re, ms2_re = [re.compile(x) if x else None for x in {
                 '.mzml': (rb'"MS:10001(29|30)"', rb'"MS:1000512"[^>]*?value="(ITMS|FTMS)[^"]* ms2 ', rb'"MS:1000041"[^>]*?value="(\d+)"', rb'"MS:1000511"[^>]*?value="2"'),
                 '.mzxml': (rb'polarity="([+-])"', rb'filterLine="(ITMS|FTMS)[^"]* ms2 ', rb'precursorCharge="(\d+)"', rb'msLevel="2"'),
-                '.mgf': (rb'(?m)^CHARGE=\d+([+-])', None, rb'(?m)^CHARGE=(\d+)', rb'(?m)^BEGIN IONS')}[ext]]
+                '.mzdata': (rb'name="Polarity" value="(Positive|Negative)', None, rb'name="ChargeState" value="(\d+)"', rb'<spectrumInstrument msLevel="2"'),
+                '.mgf': (rb'(?m)^CHARGE=\d+([+-])', None, rb'(?m)^CHARGE=(\d+)', rb'(?m)^BEGIN IONS')}['.mzdata' if ext == '.xml' else ext]]
             cut, tail, header = b'\n' if ext == '.mgf' else b'>', b'', None
             with open(path, 'rb') as file:
                 while True:
@@ -447,7 +484,7 @@ def _detect_run(path, results):
                     end = text.rfind(cut) + 1 if chunk else len(text)
                     text, tail, header = text[:end], text[end:], text if header is None else header
                     if 'mode' not in found and (match := mode_re.search(text)):
-                        found['mode'] = {b'29': 'negative', b'30': 'positive', b'-': 'negative', b'+': 'positive'}[match.group(1)]
+                        found['mode'] = {b'29': 'negative', b'30': 'positive', b'-': 'negative', b'+': 'positive', b'Negative': 'negative', b'Positive': 'positive'}[match.group(1)]
                     if 'trap' not in found and filter_re and (match := filter_re.search(text)):
                         found['trap'] = {b'ITMS': 'linear', b'FTMS': 'orbitrap'}[match.group(1)]
                     for z in charge_re.findall(text):
@@ -461,6 +498,10 @@ def _detect_run(path, results):
             elif 'trap' not in found and ext == '.mzxml':
                 instrument = b' '.join(re.findall(rb'<(?:msModel|msMassAnalyzer)[^>]*value="([^"]*)"', header)).decode(errors = 'replace').lower()
                 found['trap'] = next((t for a, t in MZXML_ANALYZER_TRAPS.items() if a in instrument), None)
+            elif 'trap' not in found and ext in ('.mzdata', '.xml'):
+                # The analyzer terms of an mzData file, their names and values in lower-case letters only, as the loader reads them
+                analyzers = re.sub(rb'[^a-z]', b'', b''.join(re.findall(rb'(?:name|value)="([^"]*)"', b''.join(re.findall(rb'(?s)<analyzer>(.*?)</analyzer>', header)))).lower()).decode()
+                found['trap'] = next((t for a, t in MZDATA_ANALYZER_TRAPS.items() if a in analyzers), None)
             elif 'trap' not in found and ext == '.mgf' and b'NativeID:"scanId=' in header:
                 # Agilent MassHunter native IDs (in msconvert's titles): a Q-TOF, read as TOF by the loader
                 found['trap'] = 'other'
@@ -500,6 +541,12 @@ def _detect_run(path, results):
             finally:
                 db.close()
             found.update(mode = {'+': 'positive', '-': 'negative'}.get(polarity[0] if polarity else None), trap = 'other')
+        elif ext == '.d' and os.path.exists(os.path.join(path, 'AcqData', 'MSScan.bin')):
+            from candycrunch.utils import read_masshunter_scans
+            scans = read_masshunter_scans(path)
+            ms2 = scans[scans['level'] == 2]
+            charges, n_ms2 = {int(z): int(k) for z, k in zip(*np.unique(ms2['charge'][ms2['charge'] > 0], return_counts = True))}, len(ms2)
+            found.update(mode = ('negative' if scans['polarity'][0] == 1 else 'positive') if len(scans) else None, trap = 'other')
     except Exception:
         # An unreadable file is reported when it is run; here it only tells nothing
         pass
@@ -1126,7 +1173,7 @@ class SpectrumPanel(QWidget):
         reading of a lone Neu5Ac (supporting_ions) was measured on; the request is drawn for the panel's current size and settings"""
         size = self.stack.size()
         choice = self.fragment_types.currentData()
-        if choice == 'glycosidic' or (choice is None and sample_prep == 'permethylated'):
+        if choice == 'glycosidic' or (choice is None and sample_prep in ('permethylated', 'deuteropermethylated')):
             kwargs = {'disable_X_cross_rings': True, 'disable_A_cross_rings': True} | kwargs
         elif choice == 'cross_rings':
             kwargs = {'disable_X_cross_rings': False, 'disable_A_cross_rings': False} | kwargs
@@ -1607,7 +1654,7 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, Bruker timsTOF .d (DDA-PASEF), mzML, mzXML, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, Bruker timsTOF (DDA-PASEF) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -1657,7 +1704,6 @@ class SettingsPanel(QScrollArea):
         form.addRow('Tag mass', self.inputs['mass_tag'])
         form.addRow('Derivatization', self.inputs['sample_prep'])
         form.addRow('Sialic acid linkage', self.sialic)
-        form.addRow('Extra charge carrier', self.adducts)
         form.addRow('Chromatography', self.inputs['lc'])
         form.addRow('Mass analyzer', self.inputs['trap'])
         layout.addLayout(form)
@@ -1737,6 +1783,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('RT until', self.inputs['rt_max'])
         form.addRow('Peak width', self.inputs['rt_diff'])
         form.addRow('Mass tolerance', self.inputs['ppm_thresh'])
+        form.addRow('Extra charge carrier', self.adducts)
         form.addRow('Min. confidence', self.inputs['pred_thresh'])
         form.addRow('Fragment score above', self.inputs['crumbs_thresh'])
         form.addRow('Cross-class confidence', self.inputs['extra_thresh'])
@@ -3423,6 +3470,9 @@ class MainWindow(QMainWindow):
         self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
         if self.store.value('settings'):
             stored = json.loads(self.store.value('settings'))
+            # Settings stored before only changed ones were kept hold every default of their release, and filter_out's was this set until bddfc58
+            if set(stored.get('filter_out', ())) == {'Ac', 'HexA', 'HexN', 'Kdn', 'Me', 'PCho', 'PEtN', 'Pen'}:
+                del stored['filter_out']
             self.settings.set_values({**DEFAULTS, **stored, 'filter_out': set(stored.get('filter_out', DEFAULTS['filter_out']))})
         # The panes as the user left them: settings and results, table and details, details and spectrum, MS3 spectrum and fragments, CandyCrumbs
         # form and spectrum (restoreState only holds the log dock, so every start reset them)
@@ -3636,18 +3686,18 @@ class MainWindow(QMainWindow):
         count = len(self.settings.paths())
         self.settings.add_paths(paths)
         if paths and len(self.settings.paths()) == count:
-            self.statusBar().showMessage('No new runs added. CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mgf, and .cc or .xlsx made by extract_spectra; '
+            self.statusBar().showMessage('No new runs added. CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mzData, mgf, and .cc or .xlsx made by extract_spectra; '
                                          'a folder adds its runs but not its .xlsx files, which are added one by one', 10000)
 
     def choose_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Add LC-MS/MS runs', self.store.value('folder', os.path.expanduser('~')),
-                                                'Spectra (*.raw *.RAW *.mzML *.mzXML *.mgf *.cc *.xlsx);;All files (*)')
+                                                'Spectra (*.raw *.RAW *.mzML *.mzXML *.mzdata *.xml *.mgf *.cc *.xlsx);;All files (*)')
         if paths:
             self.store.setValue('folder', os.path.dirname(paths[0]))
             self.add_runs(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add a timsTOF .d folder, or every .raw, .d, mzML, mzXML, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (timsTOF, Agilent MassHunter), or every .raw, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
             self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith('.d') else path)
             self.add_runs([path])
@@ -3696,7 +3746,8 @@ class MainWindow(QMainWindow):
                                 'add them again:\n\n' + '\n'.join(missing))
             return
         settings = self.settings.values()
-        self.store.setValue('settings', json.dumps({**settings, 'filter_out': sorted(settings['filter_out'])}))
+        # Only the settings that differ from the defaults, so that a later release's defaults reach those left at theirs
+        self.store.setValue('settings', json.dumps({k: sorted(v) if k == 'filter_out' else v for k, v in settings.items() if k not in DEFAULTS or v != DEFAULTS[k]}))
         self.weights = {**STAGE_WEIGHTS, **json.loads(self.store.value('stage_weights', '{}'))}
         self.runner.submit(experiments, self.weights)
         self.started, self.stage_text = time.time(), 'Waiting for the CandyCrunch model to load' if self.status_text.text().startswith('Loading') else 'Starting'
@@ -3705,8 +3756,8 @@ class MainWindow(QMainWindow):
         self.file_progress, self.fraction, self.first_report, self.stage_times = dict.fromkeys(map(os.path.normcase, files), 0.0), 0.0, None, []
         # Experiments run one after the other, so a batch's harmonization belongs to the experiment of the latest file that reported
         self.groups, self.tail_progress, self.active = [[os.path.normcase(f) for f in paths] for _, paths, _ in experiments], [0.0] * len(experiments), 0
-        # A timsTOF .d folder counts with the size of its files
-        self.file_sizes = {os.path.normcase(f): max(sum(os.path.getsize(os.path.join(f, x)) for x in os.listdir(f)) if os.path.isdir(f) else os.path.getsize(f), 1)
+        # A .d folder counts with the size of its files, also those in subfolders (Agilent's AcqData)
+        self.file_sizes = {os.path.normcase(f): max(sum(os.path.getsize(os.path.join(d, x)) for d, _, xs in os.walk(f) for x in xs) if os.path.isdir(f) else os.path.getsize(f), 1)
                            if os.path.exists(f) else 1 for f in files}
         self.history = {}
         self.run_button.setEnabled(False)
@@ -3927,7 +3978,7 @@ class MainWindow(QMainWindow):
             return
         try:
             with open(path, 'rb') as file:
-                payload = pickle.load(file)
+                payload = _SessionUnpickler(file).load()
         except Exception as error:
             QMessageBox.critical(self, 'Open results', f'Could not read {path}:\n{error}')
             return

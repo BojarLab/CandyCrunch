@@ -149,7 +149,7 @@ function field(p) {
   if (p.choices && (p.nargs === '+' || p.nargs === '*')) {
     input = document.createElement('div');
     input.className = 'checks';
-    for (const c of p.choices) {
+    for (const c of p.nargs === '*' ? [...p.choices, 'none'] : p.choices) {
       const l = document.createElement('label');
       l.innerHTML = `<input type="checkbox" value="${c}"> ${c}`;
       input.append(l);
@@ -162,7 +162,7 @@ function field(p) {
     input = document.createElement('input');
     input.type = p.type === 'int' || p.type === 'float' ? 'number' : 'text';
     if (p.type === 'float') input.step = 'any';
-    input.placeholder = p.nargs === '*' ? 'space-separated' : (p.default != null ? String(p.default) : 'default');
+    input.placeholder = p.nargs === '*' ? 'space-separated, or none' : (p.default != null ? String(p.default) : 'default');
   }
   input.id = 'opt-' + p.name;
   div.innerHTML = `<label for="${input.id}">${title}</label>`;
@@ -184,7 +184,9 @@ function argv() {
     else if (p.nargs === '*' || p.nargs === '+') values = el.value.trim() ? el.value.trim().split(/\s+/) : [];
     else values = el.value.trim() ? [el.value.trim()] : [];
     if (p.required && !values.length) throw new Error(`Choose ${p.name.replace(/_/g, ' ')}`);
-    if (values.length) out.push(p.flag, ...values);
+    // 'none' gives such an option no values (e.g., no reducing end variants); an empty field keeps the CLI's default
+    if (p.nargs === '*' && values.includes('none')) out.push(p.flag);
+    else if (values.length) out.push(p.flag, ...values);
   }
   return out;
 }
@@ -224,6 +226,8 @@ async function run() {
     return status(e.message, 'bad');
   }
   const stem = runs.length === 1 ? runs[0].split('/').pop().replace(/\.[^.]+$/, '') : 'batch';
+  // Several runs need the RT tolerance of their harmonization, which the CLI requires; this is the desktop app's default
+  if (runs.length > 1 && !options.includes('--intra_cat_thresh')) options.push('--intra_cat_thresh', '1.0');
   const args = ['--spectra_filepath', ...runs.map((r) => '/data/' + r), '--output', `/out/${stem}_candycrunch.csv`, ...options];
   busy = true;
   update();
@@ -239,6 +243,7 @@ async function run() {
   } catch (e) {
     clearInterval(timer);
     status(e.message, 'bad');
+    $('log').parentElement.open = true;
   } finally {
     busy = false;
     update();

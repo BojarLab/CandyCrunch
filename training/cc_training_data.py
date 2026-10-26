@@ -13,7 +13,7 @@ folder; without either only the test runs of tests/ are left out) and the output
 Inputs: <cc_root>/<project>/**/<run>.cc (project = a map ID: GlycoPOST, PMC, MassIVE, ...), <maps>/df_mz_<project>[_<suffix>].csv (Mass, RT, glycan, optional
 sample columns whose names are substrings of the run names, optional reducing_end (a REDUCING_ENDS value or 'custom <tag mass>'), sialic_derivatization,
 trap and lc (PGC, C18, HILIC or other) and adduct (the ion carrying the charge of the row's Mass in place of protons, e.g. Li+) per row, which set them
-for a run whose rows all agree) and the checklist row of the project (mode, LC_type, trap,
+for a run whose rows all agree; charge, the row's ion charge, raises max_charge where it exceeds the default) and the checklist row of the project (mode, LC_type, trap,
 glycan_type, reducing_end, sample_prep, sialic_derivatization, mass_tag).
 Per run: the project's maps of the class its name gives (NG/OG, N-/O-glycans, GSL, a sample number ending in N or O; map class from the suffix _N, _O, _GSL,
 ...), those with a sample column found in the run name (rows where it is > 0), else every row of a map that names no run; glycan class from the maps' suffixes,
@@ -234,6 +234,10 @@ def convert_run(task):
         ions = task['mapping']['adduct'] if task['mapping'] is not None and 'adduct' in task['mapping'].columns else pd.Series(dtype = object)
         if len(ions) and ions.notna().all() and ions.nunique() == 1:
             settings['adducts'] = [ions.iloc[0]]
+        # Ions of a higher charge than the default (3 underivatized, 4 derivatized) that the maps list in their charge column raise max_charge to theirs
+        charges = pd.to_numeric(task['mapping']['charge'], errors = 'coerce').abs() if task['mapping'] is not None and 'charge' in task['mapping'].columns else pd.Series(dtype = float)
+        if charges.max() > abs(settings['max_charge']):
+            settings['max_charge'] = int(charges.max()) * int(np.sign(settings['max_charge']))
         # Residues wrap_inference leaves out of its candidate compositions by default (filter_out: HexA) stay in where the run's map lists them, as
         # its rows of them could not label otherwise and compositions of the same mass would take the inputs
         if task['mapping'] is not None:
@@ -266,7 +270,7 @@ def convert_run(task):
             done = [(s['sample_prep'], s['modification']) for s in tries]
             # A sialic acid derivatization only exists on underivatized glycans
             other = [attempt(dict({k: v for k, v in settings.items() if k != 'sialic_derivatization' or prep == 'underivatized'}, sample_prep = prep, modification = end,
-                                  mass_tag = None, max_charge = (4 if prep != 'underivatized' else 3) * int(np.sign(settings['max_charge']))))
+                                  mass_tag = None, max_charge = max(4 if prep != 'underivatized' else 3, int(charges.max()) if charges.max() > 0 else 0) * int(np.sign(settings['max_charge']))))
                      for prep in ('underivatized', 'permethylated') for end in ('reduced', 'custom') if (prep, end) not in done]
             if other and max(len(r[0]) for r in other):
                 best, fitted = max(other, key = lambda r: len(r[0])), True

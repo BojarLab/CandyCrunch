@@ -10,7 +10,8 @@ def load_checkpoint(model_path, device=None, temperature=1.15):
     device defaults to CUDA when available, otherwise CPU. temperature is the
     inference calibration factor, independent of contrastive training temperature.
     The returned dictionary contains model, glycans, bin_num, comp_vector_order,
-    and temperature. Pass it with wrap_inference(spectra_path, "N", **loaded).
+    and temperature. Pass it with wrap_inference(spectra_path, "N", **{k: v for k, v in loaded.items() if k != "comp_vector_order"});
+    comp_vector_order has to equal candycrunch.prediction.comp_vector_order, which wrap_inference encodes compositions with.
     """
     checkpoint = torch.load(Path(model_path).expanduser(), map_location="cpu", weights_only=True)
     required = {"model_class", "model_kwargs", "state_dict", "glycans", "comp_vector_order"}

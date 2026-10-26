@@ -133,7 +133,7 @@ DERIVATIZATION_GLYCANS = ['Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]
 
 
 @pytest.mark.parametrize("glycan", DERIVATIZATION_GLYCANS)
-@pytest.mark.parametrize("sample_prep", ['underivatized', 'permethylated', 'peracetylated'])
+@pytest.mark.parametrize("sample_prep", ['underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated'])
 def test_candycrumbs_precursor_matches_glycowork(glycan, sample_prep):
     # The intact ion is the sum of every residue, substituent, derivatization and reducing-end table CandyCrumbs uses
     for mass_tag, modification in ((2 * HYDROGEN_MASS, 'reduced'), (0, None)):
@@ -158,6 +158,16 @@ def test_candycrumbs_permethylated_sialic_amides():
     assert 'B_1_Alpha' in out[389.23]['Domon-Costello nomenclatures'][0]
     assert abs(out[389.23]['Theoretical fragment masses'][0] - 389.2282) < 1e-3
     assert 'Y_2_Alpha' in out[582.20]['Domon-Costello nomenclatures'][0]
+
+
+def test_candycrumbs_deuteropermethylated():
+    # CD3 caps weigh 3.0188 Da more than CH3 ones and methanol leaves as CD3OH, while a native O-methyl stays CH3: the B1 ion of GalOMe is 228.18, three
+    # caps above permethylated Gal's 219.12 and three below deuteropermethylated Gal's 231.20
+    masses = [309.29, 359.26, 394.31, 607.47]
+    out = CandyCrumbs('Neu5Ac(a2-3)Gal(b1-3)GalNAc', masses, 0.02, charge = 1, sample_prep = 'deuteropermethylated')
+    assert [out[m]['Domon-Costello nomenclatures'][0] for m in masses] == [['Y_1_Alpha'], ['B_1_Alpha', 'M_CD3OH'], ['B_1_Alpha'], ['B_2_Alpha']]
+    out = CandyCrumbs('GalOMe(b1-3)GalNAc', [228.18, 231.20], 0.02, charge = 1, sample_prep = 'deuteropermethylated')
+    assert out[228.18]['Domon-Costello nomenclatures'][0] == ['B_1_Alpha'] and out[231.20] is None
 
 
 def test_smiles_mono_attributes_reproduce_hand_tables():

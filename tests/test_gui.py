@@ -341,6 +341,36 @@ def test_gui_save_image(app, tmp_path, monkeypatch):
     assert any(t.startswith('510.19 ') for t in texts) and '990.00' in texts
 
 
+def test_gui_session_files(app):
+    import io
+    import pickle
+    import numpy as np
+    import candycrunch.prediction as cp
+    from candycrunch import gui
+    # Saved results open as they were saved, with the pickle protocols of Python 3.12 and 3.14 (which pickles numpy arrays differently): a real run's
+    # tables and spectra, curated, plus an MS1 record of numpy arrays
+    df, spectra = cp.wrap_inference(gui.EXAMPLE_RUN, 'O', spectra = True)
+    view = gui.ResultsView(gui.GlycanImages())
+    view.set_results({'experiments': [{'name': 'Example', 'files': [gui.EXAMPLE_RUN], 'settings': dict(gui.DEFAULTS), 'tables': {'example': (df, spectra)},
+                                       'features': None}], 'elapsed': 1.0, 'finished': '2026-10-26 10:00'})
+    view.select_row(0)
+    view.curate('Gal(b1-4)GlcNAc', 'reassigned')
+    table = view.payload['tables']['example'][0]
+    table['xic'] = [[{'times': np.arange(10, 11, 0.5, dtype = np.float32), 'trace': np.ones(2, np.float32), 'area': np.float64(1.0),
+                      'scan': (np.array([530.2]), np.array([1.0]))}]] * len(table)
+    for protocol in (4, 5):
+        data = pickle.dumps(view.session, protocol)
+        assert pickle.dumps(gui._SessionUnpickler(io.BytesIO(data)).load()) == pickle.dumps(pickle.loads(data))
+
+    class Code:
+        def __reduce__(self):
+            return os.system, ('echo opened',)
+
+    # Anything else a pickle names is refused before it can run
+    with pytest.raises(pickle.UnpicklingError, match = 'system, which is no part of CandyCrunch results'):
+        gui._SessionUnpickler(io.BytesIO(pickle.dumps({'experiments': [], 'code': Code()}))).load()
+
+
 def test_gui_unreduced_and_detection(app):
     import multiprocessing as mp
     import time

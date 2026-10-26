@@ -838,6 +838,42 @@ def test_bruker_yep(tmp_path, model):
     assert df['analyzer'].tolist() == [df.attrs['detected_trap']] * 2 and df['polarity'].tolist() == ['-'] * 2 and df['isolation_width'].isna().all()
 
 
+def test_agilent_masshunter(tmp_path):
+    # An Agilent MassHunter .d folder: AcqData/MSScan.bin (header with the offset of the first record at byte 88, one 284-byte record per scan),
+    # MSTS.xml (number of scans), MSMassCal.bin (per scan: a count, A, t0, polynomial step) and MSPeak.bin (per scan: float64 flight times, then
+    # float32 abundances); m/z = (A (t - t0))^2. MS2 records give the isolation target and MassHunter's charge state
+    from candycrunch.utils import MASSHUNTER_SCAN
+    a, t0 = 0.000572794, 1024.818
+    survey = [(675.36, 2e6), (965.844, 9e5), (965.844 + 1.003355 / 2, 6e5), (965.844 + 1.003355, 3e5), (966.47, 4e3)]
+    fragments = [(290.09, 1e4), (675.3, 1e4), (800.3, 3e4), (965.85, 5e4), (966.35, 4e4)]
+    scans = [(1, 2.5, 1, survey, 0.0, 0), (2, 2.51, 2, fragments, 965.846, 2), (3, 2.52, 2, fragments, 675.3605, 1)]
+    records, peaks, calibration = np.zeros(len(scans), dtype = MASSHUNTER_SCAN), bytes(68), bytes(72)
+    for k, (scan, rt, level, spectrum, mz, charge) in enumerate(scans):
+        records[k] = (scan, rt, level, 0, 10.0 * (level - 1), mz, charge, len(calibration), 2, len(peaks), len(spectrum))
+        calibration += struct.pack('<i10d', 10, a, t0, 19996.0, 92106.0, *[0.0] * 6)
+        peaks += np.array([np.sqrt(m) / a + t0 for m, _ in spectrum], dtype = '<f8').tobytes() + np.array([i for _, i in spectrum], dtype = '<f4').tobytes()
+    folder = tmp_path / 'run.d'
+    (folder / 'AcqData').mkdir(parents = True)
+    (folder / 'AcqData' / 'MSScan.bin').write_bytes(bytes(88) + struct.pack('<i', 228) + bytes(136) + records.tobytes())
+    (folder / 'AcqData' / 'MSTS.xml').write_text(f'<TimeSegments><TimeSegment><NumOfScans>{len(scans)}</NumOfScans></TimeSegment></TimeSegments>')
+    (folder / 'AcqData' / 'MSMassCal.bin').write_bytes(calibration)
+    (folder / 'AcqData' / 'MSPeak.bin').write_bytes(peaks)
+    df = load_spectra_filepath(str(folder), extract_ms1 = True)
+    # Both precursors move onto their monoisotopic survey centroids; MassHunter's charge 2 is kept, its charge 1 counts as undetermined
+    assert np.allclose(df['m/z'], [965.844, 675.36], atol = 1e-4)
+    assert df['precursor_charge'].tolist()[0] == 2 and np.isnan(df['precursor_charge'].tolist()[1])
+    # The doubly charged precursor's envelope is no fragment (without a charge state the envelope is not known, as in Q-TOF mzML); flight times give back the m/z
+    assert sorted(df['peak_d'][0]) == pytest.approx([290.09, 675.3, 800.3], abs = 1e-6) and len(df['peak_d'][1]) == 5
+    assert df['RT'].tolist() == [2.51, 2.52] and df['scan'].tolist() == [2, 3] and df['collision_energy'].tolist() == [10.0, 10.0]
+    assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof' and df.attrs['detected_mode'] == 'positive'
+    assert df['analyzer'].tolist() == ['tof'] * 2 and df['polarity'].tolist() == ['+'] * 2 and df['activation'].tolist() == ['HCD'] * 2
+    assert len(df.attrs['ms1'][0]) == 1 and df.attrs['ms1'][1][0] == pytest.approx(675.36, abs = 1e-4)
+    # A run stored as profile spectra only is refused with a hint
+    (folder / 'AcqData' / 'MSPeak.bin').unlink()
+    with pytest.raises(ValueError, match = 'profile spectra only'):
+        load_spectra_filepath(str(folder))
+
+
 def test_tims_scans(tmp_path):
     # msconvert writes a timsTOF run, unless asked to combine ion mobility scans, as one spectrum per scan (native ID frame=f scan=s), each at its
     # frame's retention time. Each frame becomes one survey scan and each precursor's scans one MS2 spectrum, centroided on the TOF grid; taken one
@@ -1063,6 +1099,56 @@ def test_agilent_mgf(tmp_path):
     assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof' and df['intensity'].isna().all()
     # wrap_inference sets missing intensities to 0 before condensing
     assert condense_dataframe(df.assign(intensity = 0))['num_spectra'].tolist() == [2, 2]
+
+
+def test_mzdata(tmp_path):
+    # An Agilent MassHunter Q-TOF run as MzDataExport writes it (GPST000097): mzData 1.05 without a namespace, PSI terms with names, peak-detected spectra
+    # as base64 of 64-bit m/z and 32-bit intensities, the isolation target as precursor m/z with a charge state for some precursors (1 for others)
+
+    def cv(acc, name, value):
+        return f'<cvParam cvLabel="psi" accession="{acc}" name="{name}" value="{value}" />'
+
+    def spectrum(i, level, rt, peaks, precursor = None, charge = None, endian = 'little'):
+        arrays = ''.join(f'<{kind}><data precision="{bits}" endian="{endian}" length="{len(values)}">{base64.b64encode(np.array(values, dtype = (">" if endian == "big" else "<") + dtype).tobytes()).decode()}'
+                         f'</data></{kind}>' for kind, bits, dtype, values in (('mzArrayBinary', 64, 'f8', [m for m, _ in peaks]), ('intenArrayBinary', 32, 'f4', [x for _, x in peaks])))
+        prec = (f'<precursorList count="1"><precursor msLevel="2" spectrumRef="1"><ionSelection>{cv("PSI:1000040", "MassToChargeRatio", precursor)}'
+                f'{cv("PSI:1000041", "ChargeState", charge) if charge else ""}</ionSelection><activation>{cv("PSI:1000044", "FragmentationMode", "CID")}'
+                f'{cv("PSI:1000045", "CollisionEnergy", 20.5)}</activation></precursor></precursorList>') if precursor else ''
+        return (f'<spectrum id="{i}"><spectrumDesc><spectrumSettings><acqSpecification spectrumType="discrete" methodOfCombination="average" count="1">'
+                f'<acquisition acqNumber="{1000 + i}" /></acqSpecification><spectrumInstrument msLevel="{level}">{cv("PSI:1000036", "ScanMode", "Scan")}'
+                f'{cv("PSI:1000037", "Polarity", "Positive")}{cv("PSI:1000038", "TimeInMinutes", rt)}</spectrumInstrument></spectrumSettings>{prec}</spectrumDesc>'
+                f'{arrays}</spectrum>')
+
+    rng = np.random.default_rng(0)
+    survey = [(500.2, 2e5), (608.3163, 8e5), (608.8180, 4.8e5), (609.3197, 1.8e5), (609.82, 5e4), (1001.353, 3e5), (1002.356, 1.5e5)]
+    envelope = [(608.3163, 9e4), (608.8180, 5e4), (609.3197, 2e4)]
+    fragments = [(float(m), 1e4 * (k + 1)) for k, m in enumerate(np.linspace(200, 590, 20))] + [(float(m), float(x)) for m, x in zip(rng.uniform(100, 1200, 300), rng.uniform(5, 30, 300))]
+    small = [(204.0867, 900.0), (366.1395, 500.0), (528.1923, 300.0), (1001.35, 50.0)]
+    text = ('<?xml version="1.0" encoding="utf-8"?><mzData version="1.05" accessionNumber="psi-ms:100"><description><instrument><analyzerList count="1"><analyzer>'
+            f'{cv("PSI:1000010", "AnalyzerType", "QuadrupoleTimeOfFlight")}</analyzer></analyzerList></instrument></description><spectrumList count="4">'
+            f'{spectrum(1, 1, 22.40, survey)}{spectrum(2, 2, 22.42, fragments + envelope, 608.321, 2)}{spectrum(3, 2, 22.43, small, 1001.36, 1)}'
+            f'{spectrum(4, 2, 22.44, small, 1001.36, endian = "big")}</spectrumList></mzData>')
+    path = tmp_path / 'run.mzdata.xml'
+    path.write_text(text)
+    df = load_spectra_filepath(str(path), extract_ms1 = True)
+    # The isolation targets (8 and 7 ppm off) move onto their survey centroids and, without a header intensity, take the survey centroids around them
+    assert np.allclose(df['m/z'], [608.3163, 1001.353, 1001.353], atol = 1e-4) and np.allclose(df['intensity'], [1.51e6, 4.5e5, 4.5e5])
+    assert df['precursor_charge'].tolist()[0] == 2 and np.isnan(df['precursor_charge'].tolist()[1:]).all()
+    # TOF MS2 keep their 100 most intense peaks, and the unfragmented envelope of a precursor with a charge state goes; big-endian arrays read the same
+    assert len(df['peak_d'][0]) == 100 and not any(608.2 < m < 609.5 for m in df['peak_d'][0]) and df['peak_d'][1] == df['peak_d'][2] == dict(small)
+    assert df['scan'].tolist() == [2, 3, 4] and df['RT'].tolist() == [22.42, 22.43, 22.44] and df['collision_energy'].tolist() == [20.5] * 3
+    assert df['activation'].tolist() == ['HCD'] * 3 and df['analyzer'].tolist() == ['tof'] * 3 and df['polarity'].tolist() == ['+'] * 3
+    assert df.attrs['detected_mode'] == 'positive' and df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof' and len(df.attrs['ms1'][0]) == 1
+    # A .cc keeps it all; an .mzdata file reads the same, a cut-short download says so, and an .xml that is no mzData is no spectra file
+    assert load_spectra_filepath(extract_spectra(str(path), str(tmp_path / 'run.cc')))['m/z'].tolist() == df['m/z'].tolist()
+    (tmp_path / 'run.mzdata').write_text(text)
+    assert load_spectra_filepath(str(tmp_path / 'run.mzdata'))['m/z'].tolist() == df['m/z'].tolist()
+    (tmp_path / 'cut.mzdata.xml').write_text(text[:len(text) // 2])
+    with pytest.raises(ValueError, match = 'not a complete mzData file'):
+        load_spectra_filepath(str(tmp_path / 'cut.mzdata.xml'))
+    (tmp_path / 'other.xml').write_text('<?xml version="1.0"?><config/>')
+    with pytest.raises(FileNotFoundError):
+        load_spectra_filepath(str(tmp_path / 'other.xml'))
 
 
 def test_spectra_scan_activation(tmp_path):
