@@ -93,7 +93,7 @@ FRAGMENT_TYPES = [('Automatic', None), ('Glycosidic only', 'glycosidic'), ('All 
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD'), ('EED', 'EED'),
                   ('EDD', 'EDD'), ('NETD', 'NETD'), ('UVPD', 'UVPD')]
-SPECTRA_SUFFIXES = ('.raw', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc')
+SPECTRA_SUFFIXES = ('.raw', '.wiff', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc')
 # What can be wrong with a peak's prediction, for misprediction reports from the spectrum view; the value tags the report
 MISPREDICTIONS = [('Choose what is wrong…', None), ('Wrong structure (the composition is right)', 'structure'), ('Wrong composition', 'composition'),
                   ('No structure, though it is a glycan', 'missing'), ('Not a glycan (noise, contaminant, adduct, or isotope)', 'not_glycan'),
@@ -541,6 +541,13 @@ def _detect_run(path, results):
             finally:
                 db.close()
             found.update(mode = {'+': 'positive', '-': 'negative'}.get(polarity[0] if polarity else None), trap = 'other')
+        elif ext == '.wiff':
+            from candycrunch.utils import read_compound_file
+            # SCIEX IDA: per cycle and dependent scan a 32-byte slot whose float64 m/z is 0 where no precursor was chosen; no charge states, and the ion
+            # mode is not decoded
+            dde = read_compound_file(path).get('SampleSubtree/Sample1/DDERealTimeData', b'')
+            n_ms2 = int((np.frombuffer(dde[32:len(dde) - (len(dde) - 32) % 32], '<f8')[::4] > 0).sum()) if len(dde) > 32 else 0
+            found.update(trap = 'other')
         elif ext == '.d' and os.path.exists(os.path.join(path, 'AcqData', 'MSScan.bin')):
             from candycrunch.utils import read_masshunter_scans
             scans = read_masshunter_scans(path)
@@ -1654,7 +1661,7 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, Bruker timsTOF (DDA-PASEF) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker timsTOF (DDA-PASEF) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -3691,13 +3698,13 @@ class MainWindow(QMainWindow):
 
     def choose_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Add LC-MS/MS runs', self.store.value('folder', os.path.expanduser('~')),
-                                                'Spectra (*.raw *.RAW *.mzML *.mzXML *.mzdata *.xml *.mgf *.cc *.xlsx);;All files (*)')
+                                                'Spectra (*.raw *.RAW *.wiff *.mzML *.mzXML *.mzdata *.xml *.mgf *.cc *.xlsx);;All files (*)')
         if paths:
             self.store.setValue('folder', os.path.dirname(paths[0]))
             self.add_runs(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (timsTOF, Agilent MassHunter), or every .raw, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (timsTOF, Agilent MassHunter), or every .raw, .wiff, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
             self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith('.d') else path)
             self.add_runs([path])
@@ -3756,8 +3763,9 @@ class MainWindow(QMainWindow):
         self.file_progress, self.fraction, self.first_report, self.stage_times = dict.fromkeys(map(os.path.normcase, files), 0.0), 0.0, None, []
         # Experiments run one after the other, so a batch's harmonization belongs to the experiment of the latest file that reported
         self.groups, self.tail_progress, self.active = [[os.path.normcase(f) for f in paths] for _, paths, _ in experiments], [0.0] * len(experiments), 0
-        # A .d folder counts with the size of its files, also those in subfolders (Agilent's AcqData)
-        self.file_sizes = {os.path.normcase(f): max(sum(os.path.getsize(os.path.join(d, x)) for d, _, xs in os.walk(f) for x in xs) if os.path.isdir(f) else os.path.getsize(f), 1)
+        # A .d folder counts with the size of its files, also those in subfolders (Agilent's AcqData), a .wiff file with its .wiff.scan
+        self.file_sizes = {os.path.normcase(f): max(sum(os.path.getsize(os.path.join(d, x)) for d, _, xs in os.walk(f) for x in xs) if os.path.isdir(f) else
+                                                    os.path.getsize(f) + (os.path.getsize(f + '.scan') if os.path.exists(f + '.scan') else 0), 1)
                            if os.path.exists(f) else 1 for f in files}
         self.history = {}
         self.run_button.setEnabled(False)

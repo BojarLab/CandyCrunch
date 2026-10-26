@@ -313,7 +313,7 @@ def excluded_stems(exclusion_csv):
     # Run names keep their dots (a stem cut at the first dot, as in '...-35C-0.6ul-...', matched no run); test runs that are not tracked (tests/untracked:
     # the timsTOF serum and GPST000750 sets, misprediction reports) count as well
     stems = {p.stem for folder in ('data', 'untracked') for p in (BASE_DIR / 'tests' / folder).rglob('*')
-             if p.suffix.lower() in ('.raw', '.mzml', '.mzxml', '.xlsx', '.d', '.cc', '.mgf')}
+             if p.suffix.lower() in ('.raw', '.wiff', '.mzml', '.mzxml', '.xlsx', '.d', '.cc', '.mgf')}
     if exclusion_csv and pathlib.Path(exclusion_csv).exists():
         ex = pd.read_csv(exclusion_csv)
         stems |= {str(f).rsplit('.', 1)[0] for f in ex['filename']} | {str(f).rsplit('.', 1)[0] for f in ex.get('matched_to', pd.Series(dtype = str)).dropna()}
@@ -469,8 +469,8 @@ def main(args):
                     pd.DataFrame([info]).reindex(columns = LOG_COLUMNS).to_csv(log, mode = 'a', header = not log.exists(), index = False)
                     print(f"  {info['project']}/{info['run']}: {info['status']}, {info.get('labelled', 0)} labelled / {info.get('inputs', 0)} inputs"
                           f" ({info.get('glycan_class')}, {info.get('maps') or 'no map'}) {info['seconds']} s" + (f" {info.get('error')}" if info['status'] == 'error' else ''), flush = True)
-    # The merged tables only when a run changed (writing them takes minutes)
-    if tasks or not (pathlib.Path(args.out) / 'train.pkl').exists():
+    # The merged tables only when a run changed (writing them takes minutes), and none before a first run is written (every .cc still being copied)
+    if (tasks or not (pathlib.Path(args.out) / 'train.pkl').exists()) and (pathlib.Path(args.out) / 'runs').is_dir():
         n_train, n_pretrain, n_runs = merge(args.out, excluded_stems(args.exclusion), args.pretrain_peaks, args.exclude_runs,
                                             dict(checklist = args.checklist, maps = args.maps, exclusion = args.exclusion))
         print(f'{n_runs} runs: {n_train} labelled inputs in train.pkl, {n_pretrain} unlabelled in pretrain/', flush = True)

@@ -104,8 +104,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    |                      only on the composition's most intense inputs at each charge above crumbs_thresh, as many as the mapping has rows of that composition)
    | mz_tolerance (float): maximum distance between an input's m/z and a mapping Mass; default:0.5 (mapping masses are literature values)
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
-   |                    5 compositions it lists once; if their median deviation exceeds 1 min, the mapping counts as RT-less; with at least 10 of them, as a
-   |                    function of RT and of the number of charged residues where that fits them better); default:1.0 (2.0 only added labels away from the
+   |                    5 compositions it lists once; with at least 10 of them, as a function of RT and of the number of charged residues where that fits
+   |                    them better; if their median deviation from it exceeds 1 min, the mapping counts as RT-less); default:1.0 (2.0 only added labels away from the
    |                    glycans' peaks)
    | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3\n
    | Returns:
@@ -182,10 +182,10 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     given_rts = map_rts.copy()
     n_acid = np.array([acidic_count(dict(k)) for k in keys], dtype = float)
     row_shift = np.full(len(map_rts), rt_shift)
-    # Anchors that disagree mean the mapping's RTs come from another gradient or LC than the run, so its rows count as RT-less
-    if len(offsets) >= 5 and np.median(np.abs(np.array(offsets) - np.median(offsets))) > 1.0:
-        rt_shift, map_rts, alignment = 0.0, np.full(len(map_rts), np.nan), 'dropped'
-    elif len(offsets) >= 10:
+    # Anchors that disagree mean the mapping's RTs come from another gradient or LC than the run, so its rows count as RT-less; with >= 10 anchors that is
+    # judged after fitting the drift, as a gradient of another slope scatters the plain offsets as well
+    scatter = float(np.median(np.abs(np.array(offsets) - np.median(offsets)))) if len(offsets) >= 5 else 0.0
+    if len(offsets) >= 10:
         # On PGC the offset also moves with retention time and with every charged residue (on study maps, after the median shift, up to 88% of the
         # disialylated rows of a map sat over 1 min off), so with >= 10 anchors it is fitted as in wrap_inference_batch: a + b * RT + c * acidic residues,
         # each term only where the anchors span it, iteratively reweighted from the median (Huber, then Tukey's biweight), and used if its anchors scatter less
@@ -201,9 +201,12 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             if np.median(np.abs(r)) < np.median(np.abs(y - np.median(y))):
                 coefs = iter(beta[1:])
                 b, c = float(next(coefs)) if use_rt else 0.0, float(next(coefs)) if use_acid else 0.0
-                row_shift = beta[0] + b * np.clip(map_rts, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
+                row_shift = beta[0] + b * map_rts + c * np.minimum(n_acid, a.max())
                 rt_shift = float(np.nanmedian(row_shift[~np.isnan(map_rts)]))
                 alignment = 'model'
+                scatter = float(np.median(np.abs(r - np.median(r))))
+    if len(offsets) >= 5 and scatter > 1.0:
+        rt_shift, map_rts, row_shift, alignment = 0.0, np.full(len(map_rts), np.nan), np.zeros(len(map_rts)), 'dropped'
     map_rts = map_rts + row_shift
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
     near = [[k for k in np.flatnonzero(np.abs(masses - mz) <= mz_tolerance) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]

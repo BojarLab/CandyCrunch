@@ -40,7 +40,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals
-from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
+from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir = os.path.dirname(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
@@ -1146,6 +1146,66 @@ def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extr
     df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
     # As for Agilent Q-TOF mzML: MS2 analyzer 'other', survey scans 'tof'
+    df_out.attrs['detected_trap'], df_out.attrs['detected_ms1_trap'] = 'other', 'tof'
+    if extract_ms1:
+        df_out.attrs['ms1'] = ms1
+    return df_out
+
+
+def process_wiff_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
+    """function extracting all MS/MS spectra from a SCIEX .wiff file (TripleTOF or QSTAR information-dependent acquisition; its .wiff.scan beside it)\n
+   | Arguments:
+   | :-
+   | filepath (string): absolute path to the .wiff file
+   | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
+   | Returns:
+   | :-
+   | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge (SCIEX stores none), intensity if True, scan (the native ID
+   | msconvert gives the spectrum), activation and the SPECTRUM_DETAILS as in process_mzML_stack (of them analyzer, scan window lower limit and
+   | header_shift), from the profile spectra centroided as TOF data
+   """
+    ms1_rts, ms1_mzs, ms1_ints = [], [], []
+    peak_ds, rts, mzs, scans, ms1_scans, intensities, details = [], [], [], [], [], [], []
+    for scan in read_wiff(filepath):
+        peaks = scan['peaks']
+        if scan['ms_level'] == 1:
+            ms1_rts.append(scan['rt'])
+            ms1_mzs.append(peaks[:, 0].astype(np.float32))
+            ms1_ints.append(peaks[:, 1].astype(np.float32))
+        elif len(peaks):
+            mz = scan['precursor']['mz']
+            # As for Q-TOF mzML: without a charge state the unfragmented precursor envelope is not known, and the 100 most intense centroids are kept
+            peaks = peaks[(peaks[:, 0] < mz) | (peaks[:, 0] > mz)]
+            top = peaks[np.argsort(peaks[:, 1], kind = 'stable')[::-1][:min(num_peaks, TIMS_MS2_PEAKS)]]
+            peak_ds.append(dict(zip(top[:, 0].tolist(), top[:, 1].tolist())))
+            mzs.append(mz)
+            rts.append(scan['rt'])
+            scans.append(f"sample=1 period=1 cycle={scan['cycle']} experiment={scan['experiment']}")
+            ms1_scans.append(len(ms1_rts) - 1)
+            # SPECTRUM_DETAILS: analyzer and scan window; header_shift holds the header m/z until refinement
+            details.append(('tof', None, None, None, scan['scan_low'], mz))
+            # The precursor intensity is the survey peak's height IDA chose it by, else the summed survey centroids within 1.5 m/z
+            intensities.append(scan['precursor']['i'] if scan['precursor']['i'] > 0 else
+                               float(ms1_ints[-1][(ms1_mzs[-1] >= mz - 1.5) & (ms1_mzs[-1] < mz + 1.5)].sum()) if ms1_mzs else np.nan)
+    df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': [None] * len(mzs)})
+    if intensity:
+        df_out['intensity'] = intensities
+    # A Q-TOF collision cell is beam-type CID, which the mzML of such runs names as such and the pipeline reads as HCD
+    df_out['scan'], df_out['activation'] = scans, ['HCD'] * len(df_out)
+    df_out = df_out.assign(**{c: [d[k] for d in details] for k, c in enumerate(SPECTRUM_DETAILS)})
+    ms1 = (np.array(ms1_rts), np.concatenate(ms1_mzs) if ms1_mzs else np.zeros(0, np.float32),
+           np.concatenate(ms1_ints) if ms1_ints else np.zeros(0, np.float32),
+           np.concatenate([[0], np.cumsum([len(m) for m in ms1_mzs], dtype = np.int64)]))
+    # SCIEX's precursor m/z is the survey peak IDA fragmented (its centroid here within 0.4 ppm), refined with TOF tolerances as for other TOF mzML
+    df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, [True] * len(mzs), mz_tolerance = 0.05, isotope_tolerance = 0.02,
+                                              charges = [None] * len(mzs), isolation_mz = True)
+    df_out = df_out[~drop].reset_index(drop = True)
+    df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
+    # The polarity of a .wiff scan is not decoded (no negative-mode run was at hand), so the ion mode is the one wrap_inference is given
+    df_out.attrs['detected_mode'] = None
+    # As for SCIEX Q-TOF mzML: MS2 analyzer 'other', survey scans 'tof'
     df_out.attrs['detected_trap'], df_out.attrs['detected_ms1_trap'] = 'other', 'tof'
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
@@ -3011,7 +3071,8 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     """loads the MS2 spectra of a run file into the table wrap_inference works on\n
    | Arguments:
    | :-
-   | spectra_filepath (string): a Thermo .raw file, a Bruker .d folder (timsTOF or ion trap), an mzML, mzXML or mgf file, or a .cc/.xlsx file from extract_spectra
+   | spectra_filepath (string): a Thermo .raw file, a SCIEX .wiff file (its .wiff.scan beside it), a Bruker .d folder (timsTOF or ion trap), an mzML, mzXML or
+   |                            mgf file, or a .cc/.xlsx file from extract_spectra
    | extract_ms1 (bool): whether to also keep the survey scans (attrs['ms1']), for XIC quantification and precursor refinement; default:False\n
    | Returns:
    | :-
@@ -3032,6 +3093,8 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
             # The XML parser's ParseError (a SyntaxError) does not say that the file is incomplete or no mzML/mzXML at all
             raise ValueError(f"{os.path.basename(spectra_filepath)} is not a complete {'mzML' if ext == '.mzml' else 'mzXML'} file ({e}); it may have been cut "
                              f"short while being copied or converted") from e
+    if ext == ".wiff":
+        return process_wiff_stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext == ".raw":
         if os.path.isdir(spectra_filepath):
             raise ValueError(f"{os.path.basename(os.path.normpath(spectra_filepath))} is a Waters .raw folder, which CandyCrunch cannot read; convert it to mzML "
@@ -3154,7 +3217,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         storage = DictStorage()
         loaded_file = storage.read(spectra_filepath, 'peak_d')
         return loaded_file
-    raise FileNotFoundError(f"{os.path.basename(os.path.normpath(spectra_filepath))} is not a file type CandyCrunch reads (Thermo .raw, Bruker or Agilent MassHunter .d folder, "
+    raise FileNotFoundError(f"{os.path.basename(os.path.normpath(spectra_filepath))} is not a file type CandyCrunch reads (Thermo .raw, SCIEX .wiff, Bruker or Agilent MassHunter .d folder, "
                             f".mzML, .mzXML, mzData, .mgf, or .cc/.xlsx made by extract_spectra)")
 
 
@@ -3163,7 +3226,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
 try:
     SPECTRA_LOADER = hashlib.sha1(''.join([inspect.getsource(inspect.getmodule(read_mzml))] + [inspect.getsource(f) for f in (
         refine_precursor_mz, refine_tof_precursors, process_mzML_stack, process_mzXML_stack, process_raw_stack, process_tdf_stack, process_yep_stack,
-        process_masshunter_stack,
+        process_masshunter_stack, process_wiff_stack,
         process_mzdata_stack, load_spectra_filepath)]).encode()).hexdigest()[:12]
 except (OSError, TypeError):
     SPECTRA_LOADER = None
@@ -3172,10 +3235,10 @@ REGION_RT = 3.0
 
 
 def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xlsx', region = None):
-    """extracts the MS/MS spectra of a .raw/.d/.mzML/.mzXML/.mgf file into a lightweight .xlsx or .cc file that wrap_inference reads directly\n
+    """extracts the MS/MS spectra of a .raw/.wiff/.d/.mzML/.mzXML/.mgf file into a lightweight .xlsx or .cc file that wrap_inference reads directly\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw", ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), or ".mgf"
+   | spectra_filepath (string): absolute filepath ending in ".raw", ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), or ".mgf"
    | output_filepath (string): .xlsx or .cc filepath to write; default:None (spectra_filepath with the extension of file_format)
    | file_format (string): 'xlsx' (opens in Excel; MS2 and MS3 spectra) or 'cc' (compact binary file that also keeps the survey scans, so predictions
    |                       from it are quantified by XIC areas, as from the original file); an output_filepath ending in .cc writes 'cc'; default:'xlsx'
@@ -4070,7 +4133,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
-   | spectra_filepath (string or dataframe): absolute filepath ending in ".raw" (Thermo), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to a file containing
+   | spectra_filepath (string or dataframe): absolute filepath ending in ".raw" (Thermo), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to a file containing
    |                            spectra or preprocessed spectra; MS3 spectra in it (.raw/.mzML/.mzXML, or .xlsx from extract_spectra) are used automatically, as fragment
    |                            evidence and to rank isomers; or a dataframe of spectra as load_spectra_filepath returns them (survey scans in attrs['ms1'], named by
    |                            attrs['name']), such as the pseudo-spectra of a DIA run
@@ -4181,7 +4244,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         if df_use.empty:
             raise ValueError(f"No {'+'.join(classes)} glycans of {taxonomy_level} '{taxonomy_filter}' in df_glycan; check taxonomy_level and taxonomy_filter")
     multiplier = -1 if mode == 'negative' else 1
-    loaded_file = _loaded.copy() if _loaded is not None else load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.d', '.cc')))
+    loaded_file = _loaded.copy() if _loaded is not None else load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc')))
     ms1 = loaded_file.attrs.pop('ms1', None)
     # The spectra as loaded, for processing the file again with another reducing end without reading it again
     loaded_spectra = None if _return_intermediate else loaded_file.copy()
@@ -4938,7 +5001,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
-   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to files containing spectra
+   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to files containing spectra
    | glycan_class (string or list): glycan class as string, options are "O", "N", "lipid", "free", or a list of the classes measured together in one
    |                               run (e.g., ["N", "O"]): candidate compositions and database structures then come from all of them, each candidate goes to
    |                               the model as a glycan of its own class, and only structures outside all of them need extra_thresh.
@@ -5019,7 +5082,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         inference_kwargs['model'] = model
     # The reducing end check of wrap_inference, on the first file: all files are then processed with the reducing end it takes over. The file is read once,
     # with its MS1 data, which the check does not need; when files are processed one after the other, the first one's prediction then takes it as read
-    first = load_spectra_filepath(spectra_filepath_list[0], extract_ms1 = spectra_filepath_list[0].lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.d', '.cc')))
+    first = load_spectra_filepath(spectra_filepath_list[0], extract_ms1 = spectra_filepath_list[0].lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc')))
     ms1 = first.attrs.pop('ms1', None)
     condensed = {}
     best, _ = check_reducing_end(spectra_filepath_list[0], glycan_class, {**inference_kwargs, 'model': model, 'df_use': df_use}, loaded = first, condensed = condensed)

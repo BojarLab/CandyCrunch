@@ -874,6 +874,122 @@ def test_agilent_masshunter(tmp_path):
         load_spectra_filepath(str(folder))
 
 
+def test_sciex_wiff(tmp_path):
+    # A SCIEX .wiff (OLE compound file, version 3 here: streams below 4096 bytes in the root's mini stream) with the streams read_wiff takes: per experiment
+    # ExperimentHeaderEx (bins summed per point at 56, mass range at 66), and of Sample1 the scan index Idx, the IDA slots DDERealTimeData, TDCInfo (TOF bin in
+    # ns) and TOFCalibrationData (default and per-scan A, t0); the .wiff.scan beside it holds each spectrum as a run-length byte code of its TOF profile
+    from candycrunch.utils import WIFF_SCAN, read_compound_file
+
+    def compound_file(streams):
+        # Small streams in 64-byte mini sectors of the mini stream, the others, the mini stream, the mini FAT, the directory and the FAT in 512-byte sectors
+        sectors, fat, ministream, minifat = [], [], b'', []
+
+        def place(data, table, size):
+            first = len(table)
+            n = max(1, -(-len(data) // size))
+            table += list(range(first + 1, first + n)) + [0xFFFFFFFE]
+            return first, data.ljust(n * size, b'\0')
+
+        entries = [['Root Entry', 5, -1, -1, -1, 0, 0]]
+        for path, data in streams.items():
+            parent = 0
+            for k, name in enumerate(path.split('/')):
+                child = next((i for i, e in enumerate(entries) if e[0] == name and e[7:] == [parent]), None)
+                if child is None:
+                    child = len(entries)
+                    entries.append([name, 2 if k == len(path.split('/')) - 1 else 1, -1, -1, -1, 0, 0, parent])
+                    # Siblings as a chain of right links under their parent's child link
+                    last = entries[parent][4]
+                    while last != -1 and entries[last][3] != -1:
+                        last = entries[last][3]
+                    entries[last if last != -1 else parent][3 if last != -1 else 4] = child
+                parent = child
+            if len(data) < 4096:
+                start, block = place(data, minifat, 64)
+                ministream += block
+            else:
+                start, block = place(data, fat, 512)
+                sectors.append(block)
+            entries[parent][5:7] = [start, len(data)]
+        entries[0][5:7] = list(place(ministream, fat, 512)[:1]) + [len(ministream)]
+        sectors.append(ministream.ljust(-(-len(ministream) // 512) * 512, b'\0'))
+        first_minifat, block = place(np.array(minifat, '<u4').tobytes(), fat, 512)
+        sectors.append(block)
+        directory = b''.join(e[0].encode('utf-16-le').ljust(64, b'\0') + struct.pack('<HBB3i16x4x16x', 2 * len(e[0]) + 2, e[1], 1, *e[2:5]) +
+                             struct.pack('<IQ', *e[5:7]) for e in entries)
+        first_dir, block = place(directory, fat, 512)
+        sectors.append(block)
+        n_fat = -(-(len(fat) + 1) * 4 // 512)
+        fat += [0xFFFFFFFD] * n_fat
+        sectors.append(np.array(fat, '<u4').tobytes().ljust(n_fat * 512, b'\xff'))
+        header = (b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' + bytes(16) + struct.pack('<5H6x', 0x3E, 3, 0xFFFE, 9, 6) +
+                  struct.pack('<9I', 0, n_fat, first_dir, 0, 4096, first_minifat, -(-len(minifat) * 4 // 512), 0xFFFFFFFE, 0) +
+                  struct.pack('<109I', *range(len(fat) - n_fat, len(fat)), *[0xFFFFFFFF] * (109 - n_fat)))
+        return header + b''.join(sectors)
+
+    def spectrum(first, summed, peaks):
+        # Each peak as five points around the stored point nearest its m/z (point k at TOF bin first + summed (k + 1)), coded as intensities (below 7C, or
+        # 7C/7D/7E + 1/2/4 bytes) and gaps of empty points (80-FB, or FC/FD/FE + 1/2/4 bytes), FF at the end and FF padding to 4 bytes; gives the m/z of
+        # the peaks' central points
+        code, pos, centres = bytearray(), 0, []
+        for mz, heights in sorted(peaks):
+            centre = round(((np.sqrt(mz) / a + t0) / bin_ns - first) / summed - 1)
+            centres.append((a * ((first + summed * (centre + 1)) * bin_ns - t0)) ** 2)
+            for step, value in zip(range(centre - 2, centre + 3), heights):
+                gap = step - pos
+                code += b'' if not gap else bytes([0x80 + gap]) if gap < 0x7C else b'\xfc' + bytes([gap]) if gap < 256 else b'\xfd' + struct.pack('<H', gap) if gap < 65536 else b'\xfe' + struct.pack('<I', gap)
+                code += bytes([value]) if value < 0x7C else b'\x7c' + bytes([value]) if value < 256 else b'\x7d' + struct.pack('<H', value) if value < 65536 else b'\x7e' + struct.pack('<I', value)
+                pos = step + 1
+        block = b'\xff' * 4 + struct.pack('<I', first) + b'\0' + code + b'\xff'
+        return block + b'\xff' * (-len(block) % 4), centres
+
+    a, t0, bin_ns = 0.000702096, 0.04, 0.0251173474
+    envelope = [(965.844, (300, 9000, 31869, 9000, 300)), (965.844 + 1.003355 / 2, (200, 6000, 21000, 6000, 200)), (965.844 + 1.003355, (50, 1500, 5000, 1500, 50)),
+                (675.36, (100, 2000, 70000, 2000, 100))]
+    fragments = [(290.09, (30, 200, 300, 200, 30)), (800.3, (40, 255, 700, 255, 40)), (1500.7, (5, 50, 124, 50, 5))]
+    # Two cycles of a survey scan and two dependent scans: the first dependent scan of each cycle fragmented a precursor, the second found none (no data)
+    rows = [(1000.0, 1389000, 4, envelope), (1150.0, 400000, 8, fragments), (1300.0, None, 8, None), (1600.0, 1389100, 4, envelope),
+            (1750.0, 400100, 8, fragments), (1900.0, None, 8, None)]
+    scan_file, index, centres = bytearray(44), np.zeros(len(rows), WIFF_SCAN), []
+    for k, (rt, first, summed, peaks) in enumerate(rows):
+        block, mzs = spectrum(first, summed, peaks) if peaks else (b'', [])
+        centres.append(mzs)
+        index[k] = (len(scan_file) - 44, len(block), rt, 0, 0, 0)
+        scan_file += block
+    slots = np.zeros((2, 2, 4))
+    slots[0, 0, [0, 2]], slots[1, 0, [0, 2]] = (965.846, 31869), (675.3605, 70000)
+    calibration = struct.pack('<2dI', a, t0, 0) + struct.pack('<I', len(rows)) + b''.join(struct.pack('<2dI', a, t0, 0) for _ in rows)
+    streams = {f'MethodSubtree/Method1/DeviceMethod0/Period0/Experiment{e}/ExperimentHeaderEx': bytes(56) + struct.pack('<I6x2d4x', 8 if e else 4, 50.0 if e else 600.0, 2000.0)
+               for e in range(3)}
+    streams.update({'SampleSubtree/Sample1/Idx': bytes(32) + index.tobytes(), 'SampleSubtree/Sample1/DDERealTimeData': bytes(32) + slots.tobytes(),
+                    'SampleSubtree/Sample1/TDCInfo': bytes(32) + struct.pack('<d', bin_ns) + bytes(32), 'SampleSubtree/Sample1/TOFCalibrationData': bytes(32) + calibration,
+                    # A stream above the mini stream cutoff, read from regular sectors
+                    'SampleSubtree/Sample1/Log': bytes(range(256)) * 20})
+    path = tmp_path / 'run.wiff'
+    path.write_bytes(compound_file(streams))
+    assert read_compound_file(str(path)) == streams
+    (tmp_path / 'run.wiff.scan').write_bytes(bytes(scan_file))
+    for default_only in (False, True):
+        if default_only:
+            # Without per-scan records every scan takes the default calibration
+            streams['SampleSubtree/Sample1/TOFCalibrationData'] = bytes(32) + calibration[:20] + struct.pack('<I', 0)
+            path.write_bytes(compound_file(streams))
+        df = load_spectra_filepath(str(path), extract_ms1 = True)
+        # Both precursors move onto their survey centroids, a few mDa from the IDA m/z; SCIEX stores no charge states
+        assert np.allclose(df['m/z'], [centres[0][1], centres[3][0]], atol = 1e-5) and df['precursor_charge'].isna().all()
+        assert [sorted(d) for d in df['peak_d']] == [pytest.approx(centres[1], abs = 1e-5), pytest.approx(centres[4], abs = 1e-5)]
+        assert df['intensity'].tolist() == [31869, 70000] and df['RT'].tolist() == pytest.approx([1150.0 / 60000, 1750.0 / 60000])
+        assert df['scan'].tolist() == ['sample=1 period=1 cycle=1 experiment=2', 'sample=1 period=1 cycle=2 experiment=2'] and df['scan_low'].tolist() == [50.0, 50.0]
+        assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof' and df.attrs['detected_mode'] is None
+        assert df['analyzer'].tolist() == ['tof'] * 2 and df['activation'].tolist() == ['HCD'] * 2
+        rts, mzs, ints, offsets = df.attrs['ms1']
+        assert len(rts) == 2 and np.allclose(mzs[:offsets[1]], centres[0], atol = 1e-4) and ints[:offsets[1]].tolist() == [74200, 50469, 33400, 8100]
+    # The spectra live in the .wiff.scan, which has to come with the .wiff
+    (tmp_path / 'run.wiff.scan').unlink()
+    with pytest.raises(ValueError, match = 'wiff.scan beside it'):
+        load_spectra_filepath(str(path))
+
+
 def test_tims_scans(tmp_path):
     # msconvert writes a timsTOF run, unless asked to combine ion mobility scans, as one spectrum per scan (native ID frame=f scan=s), each at its
     # frame's retention time. Each frame becomes one survey scan and each precursor's scans one MS2 spectrum, centroided on the TOF grid; taken one
