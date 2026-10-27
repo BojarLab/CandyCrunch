@@ -40,7 +40,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals
-from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
+from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, read_baf, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir = os.path.dirname(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
@@ -831,8 +831,8 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         from zstandard import decompress as zstd_decompress
     tdf = os.path.join(filepath, 'analysis.tdf')
     if not os.path.exists(tdf):
-        raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no analysis.tdf. CandyCrunch reads timsTOF .d folders directly; other Bruker "
-                         f"data (.tsf without ion mobility, .baf of amaZon, maXis, compact) has to be converted to mzML or mzXML with msconvert first.")
+        raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no analysis.tdf, analysis.baf or Analysis.yep. CandyCrunch reads timsTOF, "
+                         f"Q-TOF and ion trap .d folders directly; other Bruker data (.tsf without ion mobility, MALDI) has to be converted to mzML or mzXML with msconvert first.")
     # Read-only, so nothing is written next to the data (journal files) and a file the acquisition software still holds open can be read
     db = sqlite3.connect(pathlib.Path(tdf).resolve().as_uri() + '?mode=ro', uri = True)
     try:
@@ -1088,24 +1088,25 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
     return df_out
 
 
-def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
+def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False, spectra = None):
     """function extracting all MS/MS spectra from an Agilent MassHunter .d folder (Q-TOF; AcqData with MSScan.bin and MSPeak.bin)\n
    | Arguments:
    | :-
    | filepath (string): absolute path to the .d folder
    | num_peaks (int): max number of peaks to extract from spectrum; default:1000
    | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
-   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False
+   | spectra (iterable): the spectra of another Q-TOF reader (dicts as read_masshunter yields them, read_baf's), to process instead of the folder's; default:None\n
    | Returns:
    | :-
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, activation and the
-   | SPECTRUM_DETAILS as in process_mzML_stack (of them analyzer, polarity, collision energy and header_shift), from the centroided spectra MassHunter
-   | stores next to its profile spectra
+   | SPECTRUM_DETAILS as in process_mzML_stack (of them analyzer, polarity, collision energy, header_shift, and isolation width and scan window where
+   | the reader gives them), from the centroided spectra MassHunter stores next to its profile spectra
    """
     ms1_rts, ms1_mzs, ms1_ints = [], [], []
     peak_ds, rts, mzs, charges, scans, ms1_scans, intensities, details = [], [], [], [], [], [], [], []
     detected_mode = None
-    for scan in read_masshunter(filepath):
+    for scan in (read_masshunter(filepath) if spectra is None else spectra):
         detected_mode = detected_mode or ('negative' if scan['polarity'] == '-' else 'positive')
         peaks = scan['peaks']
         if scan['ms_level'] == 1:
@@ -1114,7 +1115,7 @@ def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extr
             ms1_ints.append(peaks[:, 1].astype(np.float32))
         elif scan['ms_level'] == 2 and scan['precursor'] and len(peaks):
             mz, charge = scan['precursor']['mz'], scan['precursor']['charge']
-            # Charge 1 counts as undetermined, as Agilent's charge 1 in mzML
+            # Charge 1 counts as undetermined, as Agilent's charge 1 in mzML and Bruker's in mzXML
             charge = charge if charge and charge > 1 else None
             # As for Q-TOF mzML: the unfragmented precursor envelope is not a fragment, and the 100 most intense centroids are kept; with a charge state it is cut
             # from 0.05 below the isolation target, as the monoisotopic peak often lies a few ppm below it
@@ -1126,8 +1127,8 @@ def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extr
             charges.append(charge)
             scans.append(scan['scan'])
             ms1_scans.append(len(ms1_rts) - 1)
-            # SPECTRUM_DETAILS: analyzer, polarity and collision energy; header_shift holds the header m/z until refinement
-            details.append(('tof', scan['polarity'], scan['collision_energy'], None, None, mz))
+            # SPECTRUM_DETAILS: analyzer, polarity, and collision energy; header_shift holds the header m/z until refinement
+            details.append(('tof', scan['polarity'], scan['collision_energy'], scan.get('isolation_width'), scan.get('scan_low'), mz))
             # As for mzML without precursor intensities, the summed survey centroids within 1.5 m/z of the precursor
             intensities.append(float(ms1_ints[-1][(ms1_mzs[-1] >= mz - 1.5) & (ms1_mzs[-1] < mz + 1.5)].sum()) if ms1_mzs else np.nan)
     df_out = pd.DataFrame({'m/z': mzs, 'peak_d': peak_ds, 'RT': rts, 'precursor_charge': charges})
@@ -1145,11 +1146,27 @@ def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extr
     df_out = df_out[~drop].reset_index(drop = True)
     df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
-    # As for Agilent Q-TOF mzML: MS2 analyzer 'other', survey scans 'tof'
+    # As for Agilent and Bruker Q-TOF mzML: MS2 analyzer 'other', survey scans 'tof'
     df_out.attrs['detected_trap'], df_out.attrs['detected_ms1_trap'] = 'other', 'tof'
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
     return df_out
+
+
+def process_baf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
+    """function extracting all MS/MS spectra from a Bruker Q-TOF .d folder (maXis, impact, compact, micrOTOF-Q; with an analysis.baf)\n
+   | Arguments:
+   | :-
+   | filepath (string): absolute path to the .d folder
+   | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
+   | Returns:
+   | :-
+   | Returns a pandas dataframe of spectra as process_masshunter_stack, from the line (centroided) spectra the instrument stores next to its profile spectra
+   """
+    # Bruker's isolation mass and charge states (1 for undetermined) behave like MassHunter's, so the Q-TOF conventions of that stack hold
+    return process_masshunter_stack(filepath, num_peaks = num_peaks, intensity = intensity, extract_ms1 = extract_ms1, spectra = read_baf(filepath))
 
 
 def process_wiff_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
@@ -3071,7 +3088,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     """loads the MS2 spectra of a run file into the table wrap_inference works on\n
    | Arguments:
    | :-
-   | spectra_filepath (string): a Thermo .raw file, a SCIEX .wiff file (its .wiff.scan beside it), a Bruker .d folder (timsTOF or ion trap), an mzML, mzXML or
+   | spectra_filepath (string): a Thermo .raw file, a SCIEX .wiff file (its .wiff.scan beside it), a Bruker .d folder (timsTOF, Q-TOF or ion trap), an mzML, mzXML or
    |                            mgf file, or a .cc/.xlsx file from extract_spectra
    | extract_ms1 (bool): whether to also keep the survey scans (attrs['ms1']), for XIC quantification and precursor refinement; default:False\n
    | Returns:
@@ -3082,9 +3099,11 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     # A timsTOF .d is a folder, which may come with a trailing separator
     ext = os.path.splitext(os.path.normpath(spectra_filepath))[1].lower()
     if ext == ".d":
-        # timsTOF folders hold an analysis.tdf, the ion traps (esquire, HCT, amaZon) an Analysis.yep, Agilent MassHunter runs (Q-TOF) an AcqData/MSScan.bin
+        # timsTOF folders hold an analysis.tdf, the ion traps (esquire, HCT, amaZon) an Analysis.yep, Bruker Q-TOF runs an analysis.baf, Agilent MassHunter
+        # runs (Q-TOF) an AcqData/MSScan.bin
         stack = (process_yep_stack if os.path.exists(os.path.join(spectra_filepath, 'Analysis.yep')) else process_masshunter_stack
-                 if os.path.exists(os.path.join(spectra_filepath, 'AcqData', 'MSScan.bin')) else process_tdf_stack)
+                 if os.path.exists(os.path.join(spectra_filepath, 'AcqData', 'MSScan.bin')) else process_baf_stack
+                 if os.path.exists(os.path.join(spectra_filepath, 'analysis.baf')) else process_tdf_stack)
         return stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext in (".mzml", ".mzxml"):
         try:
@@ -3226,7 +3245,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
 try:
     SPECTRA_LOADER = hashlib.sha1(''.join([inspect.getsource(inspect.getmodule(read_mzml))] + [inspect.getsource(f) for f in (
         refine_precursor_mz, refine_tof_precursors, process_mzML_stack, process_mzXML_stack, process_raw_stack, process_tdf_stack, process_yep_stack,
-        process_masshunter_stack, process_wiff_stack,
+        process_masshunter_stack, process_baf_stack, process_wiff_stack,
         process_mzdata_stack, load_spectra_filepath)]).encode()).hexdigest()[:12]
 except (OSError, TypeError):
     SPECTRA_LOADER = None
@@ -3238,7 +3257,7 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
     """extracts the MS/MS spectra of a .raw/.wiff/.d/.mzML/.mzXML/.mgf file into a lightweight .xlsx or .cc file that wrap_inference reads directly\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw", ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), or ".mgf"
+   | spectra_filepath (string): absolute filepath ending in ".raw", ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF, Q-TOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), or ".mgf"
    | output_filepath (string): .xlsx or .cc filepath to write; default:None (spectra_filepath with the extension of file_format)
    | file_format (string): 'xlsx' (opens in Excel; MS2 and MS3 spectra) or 'cc' (compact binary file that also keeps the survey scans, so predictions
    |                       from it are quantified by XIC areas, as from the original file); an output_filepath ending in .cc writes 'cc'; default:'xlsx'
@@ -4133,7 +4152,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     """wrapper function to get & curate CandyCrunch predictions\n
    | Arguments:
    | :-
-   | spectra_filepath (string or dataframe): absolute filepath ending in ".raw" (Thermo), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to a file containing
+   | spectra_filepath (string or dataframe): absolute filepath ending in ".raw" (Thermo), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF, Q-TOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to a file containing
    |                            spectra or preprocessed spectra; MS3 spectra in it (.raw/.mzML/.mzXML, or .xlsx from extract_spectra) are used automatically, as fragment
    |                            evidence and to rank isomers; or a dataframe of spectra as load_spectra_filepath returns them (survey scans in attrs['ms1'], named by
    |                            attrs['name']), such as the pseudo-spectra of a DIA run
@@ -5001,7 +5020,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
-   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to files containing spectra
+   | spectra_filepath_list (list): list of absolute filepaths ending in ".raw" (Thermo), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF, Q-TOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", ".cc", or ".xlsx" pointing to files containing spectra
    | glycan_class (string or list): glycan class as string, options are "O", "N", "lipid", "free", or a list of the classes measured together in one
    |                               run (e.g., ["N", "O"]): candidate compositions and database structures then come from all of them, each candidate goes to
    |                               the model as a glycan of its own class, and only structures outside all of them need extra_thresh.

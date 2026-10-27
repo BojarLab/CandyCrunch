@@ -13,7 +13,7 @@ def str_to_bool(value):
 def build_parser():
     # The CLI's options, also the settings form of the in-browser page (web.py)
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
-    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, ion traps) and Agilent MassHunter .d folders, .mzML, .mzXML, mzData (.mzdata/.mzdata.xml), .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
+    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion traps) and Agilent MassHunter .d folders, .mzML, .mzXML, mzData (.mzdata/.mzdata.xml), .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g. N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
@@ -55,7 +55,7 @@ def main(argv=None):
         parser.error('--output has to end with .csv or .xlsx')
     if not os.path.isdir(os.path.dirname(os.path.abspath(args.output))):
         parser.error(f'the folder of --output {args.output} does not exist')
-    # A timsTOF .d folder is one run (a shell completes it with a trailing separator); any other folder gives its runs
+    # A .d folder is one run (a shell completes it with a trailing separator); any other folder gives its runs
     filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.wiff', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc'))]
                                                                               if os.path.isdir(p) and not p.lower().endswith('.d') else [p])]
     if not filepaths:

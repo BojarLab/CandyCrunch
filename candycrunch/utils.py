@@ -1,4 +1,4 @@
-"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Agilent MassHunter .d and SCIEX .wiff spectra files, on the standard library and numpy"""
+"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Agilent MassHunter .d, Bruker Q-TOF .d and SCIEX .wiff spectra files, on the standard library and numpy"""
 import base64
 import heapq
 import itertools
@@ -853,6 +853,100 @@ def read_wiff(filepath):
             peaks = centroid_tof((a * (t - t0)) ** 2, point_ints[bounds[k - k0]:bounds[k - k0 + 1]], max_peaks = None if experiment else TIMS_MS1_PEAKS)
             yield dict(scan = row, cycle = cycle + 1, experiment = experiment + 1, ms_level = 2 if experiment else 1, rt = float(scans['rt'][row]) / 60000,
                        peaks = peaks, precursor = precursor, scan_low = scan_low[experiment])
+
+
+def read_baf(folder, peaks = True):
+    """iterates over the spectra of a Bruker .d folder of an otofControl Q-TOF (maXis, impact, compact, micrOTOF-Q, timsTOF without ion mobility; with an
+    analysis.baf), from the line (centroided) spectra the instrument stores next to its profile spectra\n
+   | Arguments:
+   | :-
+   | folder (string): absolute path to the .d folder
+   | peaks (bool): whether to read the spectra or only their headers (peaks then None); default:True\n
+   | Returns:
+   | :-
+   | Yields a dict per spectrum: scan (Bruker's spectrum number), ms_level, rt (min), peaks ((n, 2) array of centroid m/z and intensity), precursor (mz, the
+   | isolation mass, and charge, None for survey scans; the charge None where Bruker determined none), polarity ('+'/'-'), collision_energy,
+   | isolation_width and scan_low (the lower end of the acquisition range)
+   """
+    name = os.path.basename(os.path.normpath(folder))
+    # analysis.baf is a chain of blocks (uint32 byte length, uint16 type, the signature A0 BF, then a uint32 header length): 3001 defines the acquisition
+    # parameters (per entry its byte length, number, value type and flags, then the offsets of its names, the short name at byte 20), 2001 holds the
+    # method's parameter values in sets of (uint16 number, 8-byte value) records, one set per acquisition key; per spectrum a 2002 header, a 1001 profile
+    # and a 1002 line spectrum follow. Sub-blocks have the same frame
+    with open(os.path.join(folder, 'analysis.baf'), 'rb') as f:
+        size, pos, ids, method, spectrum, headers, n_read = os.fstat(f.fileno()).st_size, 0, None, {}, None, 0, 0
+        while pos + 8 <= size:
+            f.seek(pos)
+            length, kind = struct.unpack('<2I', f.read(8))
+            if length < 8 or kind >> 16 != 0xbfa0:
+                break
+            kind &= 0xffff
+            block = f.read(length - 8) if kind in (0x3001, 0x2001, 0x2002) or (kind == 0x1002 and peaks and spectrum) else b''
+            subs, j = {}, struct.unpack_from('<I', block, 0)[0] - 8 if kind in (0x2001, 0x2002) else len(block)
+            while j + 8 <= len(block):
+                sub_length, sub_kind = struct.unpack_from('<2I', block, j)
+                if sub_length < 8 or sub_kind >> 16 != 0xbfa0:
+                    break
+                subs.setdefault(sub_kind & 0xffff, block[j:j + sub_length])
+                j += sub_length
+            if kind == 0x3001:
+                ids = {}
+                for key in ('Mode_IonPolarity', 'Mode_ScanBegin', 'MSMS_IsolationMass_Act', 'MSMS_PreCursorChargeState', 'Collision_Energy_Act',
+                            'Quadrupole_IsolationResolution_Act', 'Calibration_Tof2CalC1'):
+                    i = next((m.start() for m in re.finditer(re.escape(key.encode() + b'\x00'), block) if m.start() >= 20 and
+                              struct.unpack_from('<H', block, m.start() - 12)[0] == 20), None)
+                    if i is not None:
+                        ids[key] = struct.unpack_from('<H', block, i - 18)[0]
+            elif kind == 0x2001 and 0x000d in subs:
+                # The first set of the method's values (sub-block 000D: header length, number of records, acquisition key)
+                header, n = struct.unpack_from('<2I', subs[0x000d], 8)
+                method = {struct.unpack_from('<H', subs[0x000d], j)[0]: subs[0x000d][j + 2:j + 10] for j in range(header, header + 10 * n, 10)}
+            elif kind == 0x2002 and ids is not None:
+                # Spectrum header: segment, spectrum number, ..., RT in ms, ..., acquisition key; its sub-blocks are 1 the spectrum's parameter values
+                # (header length, number of records, records as in 2001), 5 the precursor list (count, then a float32 m/z per MS level above 1) and 6
+                # the TOF calibration
+                values = dict(method)
+                if 1 in subs:
+                    header, n = struct.unpack_from('<2I', subs[1], 8)
+                    values.update({struct.unpack_from('<H', subs[1], j)[0]: subs[1][j + 2:j + 10] for j in range(header, header + 10 * n, 10)})
+
+                def value(key, code = '<d'):
+                    return struct.unpack(code, values[ids[key]])[0] if ids.get(key) in values else None
+
+                levels = struct.unpack_from('<I', subs[5], 12)[0] if 5 in subs else 0
+                mz = value('MSMS_IsolationMass_Act') or (struct.unpack_from('<f', subs[5], 16)[0] if levels else None)
+                spectrum = dict(scan = struct.unpack_from('<I', block, 8)[0], ms_level = levels + 1, rt = struct.unpack_from('<I', block, 16)[0] / 60000,
+                                peaks = None, precursor = dict(mz = mz, charge = value('MSMS_PreCursorChargeState', '<q') or None) if levels and mz else None,
+                                polarity = '-' if value('Mode_IonPolarity', '<q') == 1 else '+', collision_energy = value('Collision_Energy_Act'),
+                                isolation_width = value('Quadrupole_IsolationResolution_Act') if levels else None, scan_low = value('Mode_ScanBegin'))
+                calibration, headers = subs.get(6), headers + 1
+                if not peaks:
+                    yield spectrum
+                    spectrum = None
+            elif kind == 0x1002 and spectrum and struct.unpack_from('<I', block, 4)[0] == spectrum['scan']:
+                # Line spectrum: after a 44-byte header (number of arrays at 12, of lines at 16), the line count and the offsets of the arrays from there:
+                # the lines' float64 positions on the digitizer's time axis (in sample steps), their float32 intensities and signal to noise ratios
+                n, (_, at_positions, at_intensities) = struct.unpack_from('<I', block, 16)[0], struct.unpack_from('<3I', block, 44)
+                positions = np.frombuffer(block, '<f8', n, 44 + at_positions)
+                # TOF calibration as for timsTOF frames: digitizer delay and time base, then C0-C4; flight time t = C0 + sqrt(1e12 / C1 * (m/z + C4)) +
+                # C2 * m/z, solved in closed form. The spectrum's C1 carries the temperature compensation as the method's C1 times 1 + e: m/z come from
+                # the method's C1, divided by 1 + e, as Bruker's DataAnalysis gives them (with the spectrum's C1 they drift by 2 e, ppm over a run);
+                # a method C1 far from the spectrum's belongs to another calibration and is not used
+                if calibration is None or len(calibration) < 72 or struct.unpack_from('<d', calibration, 56)[0]:
+                    raise ValueError(f"{name} uses a mass calibration CandyCrunch does not know (not a Bruker Q-TOF); convert it to mzML with msconvert first.")
+                delay, timebase, c0, c1, c2, _, c4 = struct.unpack_from('<7d', calibration, 16)
+                reference = value('Calibration_Tof2CalC1')
+                reference = reference if reference and abs(reference / c1 - 1) < 1e-4 else c1
+                a, q = np.sqrt(1e12 / reference), positions * timebase + delay - c0 + c2 * c4
+                x = 2 * q / (a + np.sqrt(a * a + 4 * c2 * q))
+                spectrum['peaks'] = np.column_stack([(x * x - c4) * reference / c1, np.frombuffer(block, '<f4', n, 44 + at_intensities)])
+                yield spectrum
+                spectrum, n_read = None, n_read + 1
+            pos += length
+    if ids is None:
+        raise ValueError(f"{name} has no readable analysis.baf; convert it to mzML with msconvert first.")
+    if peaks and headers and not n_read:
+        raise ValueError(f"{name} holds profile spectra only (no line spectra in its analysis.baf); convert it to mzML with msconvert (with peak picking) first.")
 
 
 def mz_order(mzs, rts, charges, compositions):

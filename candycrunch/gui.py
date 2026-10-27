@@ -549,6 +549,14 @@ def _detect_run(path, results):
             dde = read_compound_file(path).get('SampleSubtree/Sample1/DDERealTimeData', b'')
             n_ms2 = int((np.frombuffer(dde[32:len(dde) - (len(dde) - 32) % 32], '<f8')[::4] > 0).sum()) if len(dde) > 32 else 0
             found.update(trap = 'other')
+        elif ext == '.d' and os.path.exists(os.path.join(path, 'analysis.baf')):
+            from candycrunch.utils import read_baf
+            ms2 = [s for s in read_baf(path, peaks = False) if s['ms_level'] == 2 and s['precursor']]
+            for s in ms2:
+                if s['precursor']['charge']:
+                    charges[s['precursor']['charge']] = charges.get(s['precursor']['charge'], 0) + 1
+            n_ms2 = len(ms2)
+            found.update(mode = ('negative' if ms2[0]['polarity'] == '-' else 'positive') if ms2 else None, trap = 'other')
         elif ext == '.d' and os.path.exists(os.path.join(path, 'AcqData', 'MSScan.bin')):
             from candycrunch.utils import read_masshunter_scans
             scans = read_masshunter_scans(path)
@@ -1662,7 +1670,7 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker timsTOF (DDA-PASEF) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF DDA-PASEF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -1926,7 +1934,7 @@ class SettingsPanel(QScrollArea):
         existing, target = set(self.paths()), self.current_experiment()
         empty = target is None or not target.childCount()
         for path in map(os.path.normpath, paths):
-            # A timsTOF .d folder is one run; any other folder adds its runs
+            # A .d folder is one run; any other folder adds its runs
             found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith('.d') else [path]
             for file in found:
                 if file.lower().endswith(SPECTRA_SUFFIXES + ('.xlsx',)) and os.path.abspath(file) not in existing:
@@ -4322,7 +4330,7 @@ class MainWindow(QMainWindow):
             self.add_runs(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (timsTOF, Agilent MassHunter), or every .raw, .wiff, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (Bruker, Agilent MassHunter), or every .raw, .wiff, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
             self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith('.d') else path)
             self.add_runs([path])

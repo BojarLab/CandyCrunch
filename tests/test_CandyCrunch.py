@@ -880,6 +880,59 @@ def test_bruker_yep(tmp_path, model):
     assert df['analyzer'].tolist() == [df.attrs['detected_trap']] * 2 and df['polarity'].tolist() == ['-'] * 2 and df['isolation_width'].isna().all()
 
 
+def test_bruker_baf(tmp_path):
+    # A Bruker Q-TOF .d folder (otofControl): analysis.baf blocks (length, type with the A0 BF signature, header length) with the parameter definitions
+    # (3001: entries with their number and short name at byte 20), the method's values (2001: a set of (number, 8-byte value) records), and per spectrum a
+    # header (2002: number, RT in ms; sub-blocks with its values, precursor list and TOF calibration), a profile (1001, not read) and a line spectrum (1002:
+    # float64 positions on the digitizer's time axis, float32 intensities). The spectra's C1 is the method's times 1 + e (temperature compensation)
+    delay, timebase, c0, c1, c2, c4, e = 17312.0, 0.2, 312.48, 155567.06, 9.18e-05, -0.00143, -1.2e-06
+    names = {'Mode_IonPolarity': 0, 'Mode_ScanBegin': 1213, 'Collision_Energy_Act': 1480, 'MSMS_IsolationMass_Act': 1521, 'MSMS_PreCursorChargeState': 1538,
+             'Quadrupole_IsolationResolution_Act': 1449, 'Calibration_Tof2CalC1': 1149}
+
+    def block(kind, header, body = b''):
+        return struct.pack('<3I', 12 + len(header) + len(body), 0xbfa00000 | kind, 12 + len(header)) + header + body
+
+    def records(values):
+        return b''.join(struct.pack('<H', k) + (struct.pack('<q', v) if isinstance(v, int) else struct.pack('<d', v)) for k, v in values.items())
+
+    def line_spectrum(number, peaks):
+        positions = np.array([(c0 + np.sqrt(1e12 / c1 * (m * (1 + e) + c4)) + c2 * m * (1 + e) - delay) / timebase for m, _ in peaks], dtype = '<f8')
+        n = len(peaks)
+        return block(0x1002, struct.pack('<4I', number, number, 3, n) + bytes(24), struct.pack('<4I', n, 40, 40 + 8 * n, 40 + 12 * n) + bytes(24) +
+                     positions.tobytes() + np.array([i for _, i in peaks], dtype = '<f4').tobytes() + np.ones(n, dtype = '<f4').tobytes())
+
+    definitions = b''.join(struct.pack('<2HBBH6H', 20 + len(name) + 1, number, 5, 1, 0, 20, 0, 0, 0, 0, 0) + name.encode() + b'\x00' for name, number in names.items())
+    data = block(0x3001, b'', definitions) + block(0x2001, bytes(8), block(0x000d, struct.pack('<2I', 3, 0x200), records({0: 1, 1213: 50.0, 1149: c1})))
+    survey = [(675.36, 2e6), (965.844, 9e5), (965.844 + 1.003355 / 2, 6e5), (965.844 + 1.003355, 3e5), (966.47, 4e3)]
+    fragments = [(290.09, 1e4), (675.3, 1e4), (800.3, 3e4), (965.85, 5e4), (966.35, 4e4)]
+    for number, rt, precursor, charge, peaks in [(1, 150000, None, 0, survey), (2, 150600, 965.844, 2, fragments), (3, 151200, 675.3605, 1, fragments)]:
+        values = {1480: 25.0, 1449: 4.0} if precursor else {1480: 7.0}
+        values.update({1521: precursor, 1538: charge} if precursor else {})
+        subs = (block(0x0001, struct.pack('<I', len(values)), records(values)) +
+                block(0x0005, struct.pack('<I', 1 if precursor else 0), struct.pack('<f', precursor) if precursor else b'') +
+                block(0x0006, struct.pack('<I', 10), struct.pack('<7d3I2d', delay, timebase, c0, c1 * (1 + e), c2, 0.0, c4, 3, 68, 2, 26.1, 25.6) + bytes(24)))
+        data += (block(0x2002, struct.pack('<5I', 1, number, 3, rt, 0) + struct.pack('<If', 0x200, -1.0), subs) + block(0x1001, bytes(32)) +
+                 line_spectrum(number, peaks))
+    folder = tmp_path / 'run.d'
+    folder.mkdir()
+    (folder / 'analysis.baf').write_bytes(data)
+    df = load_spectra_filepath(str(folder), extract_ms1 = True)
+    # Both precursors move onto their monoisotopic survey centroids; Bruker's charge 2 is kept, its charge 1 counts as undetermined
+    assert np.allclose(df['m/z'], [965.844, 675.36], atol = 1e-4)
+    assert df['precursor_charge'].tolist()[0] == 2 and np.isnan(df['precursor_charge'].tolist()[1])
+    # The line positions give back the m/z through the TOF calibration and the temperature factor; the doubly charged precursor's envelope is no fragment
+    assert sorted(df['peak_d'][0]) == pytest.approx([290.09, 675.3, 800.3], abs = 1e-6) and len(df['peak_d'][1]) == 5
+    assert np.allclose(df['RT'], [2.51, 2.52]) and df['scan'].tolist() == [2, 3] and df['collision_energy'].tolist() == [25.0, 25.0]
+    assert df['isolation_width'].tolist() == [4.0, 4.0] and df['scan_low'].tolist() == [50.0, 50.0]
+    assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof' and df.attrs['detected_mode'] == 'negative'
+    assert df['analyzer'].tolist() == ['tof'] * 2 and df['polarity'].tolist() == ['-'] * 2 and df['activation'].tolist() == ['HCD'] * 2
+    assert len(df.attrs['ms1'][0]) == 1 and df.attrs['ms1'][1][0] == pytest.approx(675.36, abs = 1e-4)
+    # A run stored as profile spectra only is refused with a hint
+    (folder / 'analysis.baf').write_bytes(data.replace(struct.pack('<I', 0xbfa01002), struct.pack('<I', 0xbfa01003)))
+    with pytest.raises(ValueError, match = 'profile spectra only'):
+        load_spectra_filepath(str(folder))
+
+
 def test_agilent_masshunter(tmp_path):
     # An Agilent MassHunter .d folder: AcqData/MSScan.bin (header with the offset of the first record at byte 88, one 284-byte record per scan),
     # MSTS.xml (number of scans), MSMassCal.bin (per scan: a count, A, t0, polynomial step) and MSPeak.bin (per scan: float64 flight times, then
