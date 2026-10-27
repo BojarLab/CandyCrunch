@@ -2344,9 +2344,12 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
         def _update(chunked, charge, replace = False):
             # Only overwrite where this scenario found a match, the slot is still empty (or, with replace, holds z = 1 matches that the
             # spectrum rules out and domain_filter would empty; for the fallback, a match that the spectrum rules out or, with accurate survey
-            # scans, that misses the precursor m/z by more than ms1_ppm, by an allowed one), and any known charge agrees
+            # scans, that misses the precursor m/z by more than ms1_ppm, by an allowed one; with accurate survey scans also in-class, a match that
+            # misses it by more than ms1_ppm by one within it: GPST000712's FM3 [M+2Na]2+ 684.326 was Hex6HexNAc2dHex1P1 [M+Na+2H]3+, 0.33 Da off),
+            # and any known charge agrees
             return [(y, charge) if ((not x[0] or (replace and heavy and x[1] == 1) or (fallback and (out[min(x[1], 2) - 1] or (
-                    ms1_ppm and x[0][1] > ms1_ppm * mz / 1e6)) and not out[min(charge, 2) - 1])) and y and (kc is None or kc == charge)) else x
+                    ms1_ppm and x[0][1] > ms1_ppm * mz / 1e6)) and not out[min(charge, 2) - 1]) or (ms1_ppm and y and x[0][1] > ms1_ppm * mz / 1e6 >= y[1]
+                    and not out[min(charge, 2) - 1])) and y and (kc is None or kc == charge)) else x
                     for x, y, kc, heavy, out, mz in zip(comps_out, chunked, known_charges, heavy_frags, ruled_out, red_masses)]
 
         # Try each charge state separately; higher charges produce lower observed m/z for the same neutral mass, so a ruled-out singly charged
@@ -2366,30 +2369,26 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
         valid_adducts = [(a, mass_dict[a]) for a in get_adduct_list(mode, adducts) if mass_dict.get(a, 999) != 999]
         threshold_dict = {2: 900, 3: 1500, 4: 3500}
 
-        def _fill_adducts(slots, ions):
+        def _fill_adducts(slots, ions, carriers = False):
             nonlocal comps_out
             comps_out = slots
             for _, adduct_mass in ions:
                 comps_out = _update(_match_chunked(comp_masses + adduct_mass), 1)
-            # Multiply-charged adduct ions: only fill gaps not explained by protonated or singly-charged adduct matches
-            for _, adduct_mass in ions:
-                for charge in range(2, abs(max_charge) + 1):
-                    threshold = threshold_dict.get(charge, 9999)
-                    if mode == 'negative':
-                        charged_adduct_masses = (comp_masses + adduct_mass - (charge - 1) * PROTON_MASS) / charge
-                    else:
-                        charged_adduct_masses = (comp_masses + adduct_mass + (charge - 1) * PROTON_MASS) / charge
-                    # Mask out compositions too small to realistically form multiply-charged adducts
-                    charged_adduct_masses = np.where(comp_masses + adduct_mass > threshold, charged_adduct_masses, 9999)
-                    comps_out = _update(_match_chunked(charged_adduct_masses), charge)
-            # Pure multi-adduct ions: e.g., [M + 2Na]_2+, [M + 3Na]_3+ ; only fill remaining gaps
-            for _, adduct_mass in ions:
-                for charge in range(2, abs(max_charge) + 1):
-                    threshold = threshold_dict.get(charge, 9999)
-                    # All charge carriers are the adduct (no protons): m/z = (M + z×adduct) / z
-                    multi_adduct_masses = (comp_masses + charge * adduct_mass) / charge
-                    multi_adduct_masses = np.where(comp_masses + charge * adduct_mass > threshold, multi_adduct_masses, 9999)
-                    comps_out = _update(_match_chunked(multi_adduct_masses), charge)
+            # Multiply-charged adduct ions with protons, then pure multi-adduct ions (e.g., [M + 2Na]_2+, [M + 3Na]_3+), each only filling gaps; the run's own
+            # charge carriers (carriers) carry every charge, so their pure ions come first (GPST000712's Man5 [M+2Na]2+ 801.386 was Hex1HexNAc1Neu5Ac3
+            # [M+Na+H]2+, 8 ppm off)
+            for pure in ((True, False) if carriers else (False, True)):
+                for _, adduct_mass in ions:
+                    for charge in range(2, abs(max_charge) + 1):
+                        threshold = threshold_dict.get(charge, 9999)
+                        if pure:
+                            # All charge carriers are the adduct (no protons): m/z = (M + z×adduct) / z
+                            charged_adduct_masses = np.where(comp_masses + charge * adduct_mass > threshold, (comp_masses + charge * adduct_mass) / charge, 9999)
+                        else:
+                            # Mask out compositions too small to realistically form multiply-charged adducts
+                            charged_adduct_masses = np.where(comp_masses + adduct_mass > threshold, (comp_masses + adduct_mass + (
+                                charge - 1) * (-PROTON_MASS if mode == 'negative' else PROTON_MASS)) / charge, 9999)
+                        comps_out = _update(_match_chunked(charged_adduct_masses), charge)
             return comps_out
 
         # The run's own charge carriers (adducts) explain its precursors first, in-class, and protons and the usual adducts fill what they leave (as a gap fill
@@ -2397,9 +2396,10 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
         plain = _fill_adducts(comps_out, [a for a in valid_adducts if a[0] not in adducts])
         own = [a for a in valid_adducts if a[0] in adducts]
         if own and not fallback:
-            comps_out = [o if o[0] else p for o, p in zip(_fill_adducts([(None, 0)] * len(red_masses), own), plain)]
+            comps_out = [o if o[0] and not (ms1_ppm and p[0] and o[0][1] > ms1_ppm * mz / 1e6 >= p[0][1]) else p
+                         for o, p, mz in zip(_fill_adducts([(None, 0)] * len(red_masses), own, carriers = True), plain, red_masses)]
         elif own:
-            comps_out = _fill_adducts(plain, own)
+            comps_out = _fill_adducts(plain, own, carriers = True)
     # A spectrum matched as singly charged whose most intense fragments come in pairs half a mass unit apart (domain_filter's sign of a multiply charged
     # precursor) also gets the multiply charged compositions of glycan_class at its m/z, and the annotation scores decide: ion traps read the 13C peak
     # of large [M-2H]2- next to a lighter [M-H]- composition (Hex5HexNAc4Neu5Ac1 965.8 as Hex1HexNAc1Neu5Ac2, Hex6HexNAc5Neu5Ac4 1585.1 as

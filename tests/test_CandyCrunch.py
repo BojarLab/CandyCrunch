@@ -596,6 +596,30 @@ def test_label_run_mapping_rules(monkeypatch):
     assert labelled.attrs['rt_alignment'] == 'none' and labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6]
 
 
+def test_label_inputs_accurate_ms1():
+    # With accurate survey scans an input takes a mapping row only within ppm_tolerance of its Mass or of its first two 13C peaks at the input's charge, a Mass
+    # with fewer decimals within half its last one: 720.3207 (another ion, 655 ppm off N3H3 [M+2Na]2+ 719.8493) is only labelled at 0.5 m/z, the 13C pick
+    # of N4H5S2 [M+3Na]3+ is, and so is an input 29 ppm off a Mass given as 1031.5
+    import training.pipeline_labels as pl
+    comps = [{'Hex': 5, 'HexNAc': 2}, {'Hex': 3, 'HexNAc': 3}, {'Hex': 5, 'HexNAc': 4, 'Neu5Ac': 2}, {'Hex': 4, 'HexNAc': 4, 'dHex': 1}]
+    glycans = ['Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc', 'GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc',
+               'Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc',
+               'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc']
+    mzs, masses, charges = [801.3864, 720.3207, 946.1202 + 1.003355 / 3 + 3e-4, 1031.53], [801.3859, 719.8493, 946.1202, 1031.5], [2, 2, 3, 2]
+    inputs = pd.DataFrame({'spec_id': range(4), 'RT': [10.0, 11.0, 12.0, 13.0], 'intensity': 1e5, 'peak_d': [{500.0: 1.0}] * 4, 'rt_range': [(r, r) for r in range(10, 14)],
+                           'num_spectra': 3, 'composition': comps, 'charge': charges, 'annotation_score': 12.0, 'model_input': [np.zeros((3, 1), np.float32)] * 4,
+                           'RT2': 0.3, 'glycan_type': 1, 'compositional_vector': [np.zeros(12)] * 4}, index = pd.Index(mzs, name = 'm/z'))
+    inputs.attrs.update(mode = 'positive', trap = 'other', lc = 'C18', modification = None, mass_tag = None, sample_prep = 'permethylated', ms1_trap = 'tof', accurate_ms1 = True)
+    mapping = pd.DataFrame({'Mass': masses, 'RT': [10.0, 11.0, 12.0, 13.0], 'glycan': glycans})
+    labelled, unlabelled = pl.label_inputs(inputs, mapping)
+    assert sorted(labelled['spec_id']) == [0, 2, 3] and [r['status'] for r in labelled.attrs['map_rows']] == ['labelled', 'no_input_at_mass', 'labelled', 'labelled']
+    assert labelled['mz_error'].tolist() == pytest.approx([0.0005, 1.003355 / 3 + 3e-4, 0.03])
+    # Without accurate survey scans every input within 0.5 m/z of a Mass takes its row
+    inputs.attrs['accurate_ms1'] = False
+    labelled, _ = pl.label_inputs(inputs, mapping)
+    assert sorted(labelled['spec_id']) == [0, 1, 2, 3]
+
+
 def test_member_spectra_repool(monkeypatch):
     # The member spectra run_inputs keeps of a pooled input re-pool to the input the model got: their summed binned intensities, normalized, and the mean
     # of their m/z remainders over every member (one without a peak in the binned range counts too)
@@ -659,6 +683,24 @@ def test_run_inputs_activation_split(monkeypatch):
     monkeypatch.setattr(pl, 'load_spectra_filepath', lambda *args, **kwargs: loaded.assign(activation = 'CID'))
     inputs = pl.run_inputs('run.cc', 'N')
     assert calls == [['CID'] * 3] and 'activation' not in inputs.columns and inputs.attrs['activation'] == 'CID'
+
+
+def test_charge_carrier_candidates():
+    # A sodiated permethylated run (free reducing end, adducts Na+) with accurate survey scans (ms1_ppm): every charge is carried by Na+, so Man5 [M+2Na]2+ 801.3864 is no
+    # Hex1HexNAc1Neu5Ac3 [M+Na+H]2+ (8 ppm off) and FM3 [M+2Na]2+ 684.3261 no Hex6HexNAc2dHex1P1 [M+Na+2H]3+ (0.33 Da off), the matches tried first before;
+    # and a match within ms1_ppm replaces an in-class one further off: Hex5HexNAc2Neu5Ac1 [M+Na+H]2+ 970.9818 is no Hex5HexNAc3P1 [M+2Na]2+ (43 ppm off)
+    comp_map, df_use, topo_map = create_struct_maps(df_glycan, ['N'], filter_out = {'HexA'}, phylo_level = 'Class', phylo_filter = 'Mammalia')
+    peaks = {300.0: 1.0, 1500.0: 0.5}
+    candidates = lambda ms1_ppm: assign_candidate_structures(pd.DataFrame({'m/z': [801.3864, 684.3261, 970.9818], 'peak_d': [peaks] * 3}), df_use, comp_map, topo_map,
+                                                             0.5, 'positive', 0, modification = None, sample_prep = 'permethylated', max_charge = 4, ms1_ppm = ms1_ppm,
+                                                             adducts = ['Na+'])
+    out = candidates(20)
+    found = {(s, stringify_dict(c), z) for s, c, z in zip(out['spec_id'], out['composition'], out['charge'])}
+    assert (0, 'Hex5HexNAc2', 2) in found and (1, 'Hex3HexNAc2dHex1', 2) in found and (2, 'Hex5HexNAc2Neu5Ac1', 2) in found
+    assert not {f for f in found if f[1] in ('Hex1HexNAc1Neu5Ac3', 'Hex6HexNAc2dHex1P1', 'Hex5HexNAc3P1')}
+    # Without accurate survey scans the first match within 0.5 Da stays
+    out = candidates(None)
+    assert 'Hex5HexNAc3P1' in {stringify_dict(c) for s, c in zip(out['spec_id'], out['composition']) if s == 2}
 
 
 def test_ms1_peak_regrouping():

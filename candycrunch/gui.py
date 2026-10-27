@@ -38,7 +38,7 @@ try:
                                    QToolButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QTextBrowser, QListWidget,
                                    QListWidgetItem, QTreeWidget, QTreeWidgetItem, QTableView, QAbstractItemView, QSplitter, QStackedWidget, QTabWidget, QScrollArea,
                                    QFrame, QFileDialog, QMessageBox, QInputDialog, QDockWidget, QProgressBar, QStyledItemDelegate, QStyleOptionViewItem,
-                                   QStyle, QMenu, QCompleter, QSizePolicy, QToolTip)
+                                   QStyle, QMenu, QCompleter, QSizePolicy, QToolTip, QTableWidget, QTableWidgetItem, QHeaderView)
 except ImportError as error:
     raise ImportError('The CandyCrunch app needs PySide6, which comes with: pip install "candycrunch[gui]"') from error
 from matplotlib.figure import Figure
@@ -3184,6 +3184,566 @@ class CrumbsTab(QWidget):
                                self.charge.currentData(), _mass_tag(settings), self.sample_prep.currentData(), **kwargs)
 
 
+class CompareTab(QWidget):
+    """Differential abundance between groups of runs of one experiment: glycowork's differential expression (two groups) or ANOVA (three or more) on its
+    feature table, run in a process of its own; the groups and the last comparison are kept with the experiment, so they are saved with the results"""
+    done = Signal(object, object, object)
+    # The groups or the comparison changed, so the results need saving
+    changed = Signal()
+    status = Signal(str)
+    log = Signal(str)
+    # How glycowork's result columns are shown: title, decimals ('p' for p-values) and tooltip; other columns are shown under their own names
+    COLUMNS = {'Mean abundance': ('Mean (imputed)', 2, 'Mean relative abundance (%) over the compared runs, with missing values imputed as tested'),
+               'Log2FC': ('Log2FC', 2, None), 'F statistic': ('F', 2, 'F statistic of the one-way ANOVA (variance-moderated)'),
+               'Effect size': ('Effect size', 2, None), 'p-val': ('p', 'p', 'p-value of the test'),
+               'corr p-val': ('q', 'p', 'p-value corrected for multiple testing (Benjamini-Hochberg); significant below the sample-size adjusted alpha'),
+               'corr Levene p-val': ('Variance p', 'p', "Corrected p-value of Levene's test: low where the groups differ in their spread"),
+               'Equivalence p-val': ('Equivalence p', 'p', 'Corrected p-value of the equivalence test (TOST): low where the groups are the same within a '
+                                                         'small effect, for features the test does not find different'),
+               'Residual p-val': ('Residual p', 'p', 'p-value of the part of this motif not explained by the more specific motifs it contains'),
+               'Redistribution p-val': ('Redistribution p', 'p', 'p-value of a shift among the more specific motifs this motif contains'),
+               'Residual effect size': ('Residual effect', 2, 'Effect size of the part of this motif not explained by the more specific motifs it contains'),
+               'Explained by': ('Explained by', None, 'More specific motifs this motif contains, with their effect sizes'),
+               'Found in': ('Found in', None, 'Runs of each group in which this was found; one missing from every run of a group is tested on its detection '
+                                             "(Fisher's exact test), as its log-ratio there is no measurement"),
+               'Features': ('Features', 0, 'Features of the feature table with this structure (or composition), summed')}
+
+    def __init__(self, images):
+        super().__init__()
+        self.images, self.session, self.experiment, self.result, self.pool, self.row, self.busy = images, None, None, None, None, None, None
+        self.absent, self.volcano_rows = np.zeros(0, bool), {}
+        form_widget = QWidget()
+        form_widget.setObjectName('settings')
+        form_widget.setMinimumWidth(330)
+        form_widget.setMaximumWidth(460)
+        layout = QVBoxLayout(form_widget)
+        layout.setContentsMargins(14, 8, 14, 14)
+        layout.addWidget(_label('Experiment'))
+        self.experiments = QComboBox()
+        self.experiments.setToolTip('Only runs harmonized together, in one experiment, share a feature table and can be compared')
+        layout.addWidget(self.experiments)
+        layout.addWidget(_label('Groups'))
+        layout.addWidget(_label('Give each run its group (such as control or treated); runs without a group are left out, and the first group is the '
+                                'reference. For a paired comparison of two groups (the same subjects in both), give both runs of a subject the same pair.',
+                                'hint'))
+        self.runs = QTableWidget(0, 3)
+        self.runs.setHorizontalHeaderLabels(['Run', 'Group', 'Pair'])
+        self.runs.verticalHeader().setVisible(False)
+        self.runs.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.runs.horizontalHeader().setHighlightSections(False)
+        self.runs.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.runs.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
+        self.runs.setWordWrap(False)
+        layout.addWidget(self.runs, 1)
+        buttons = QHBoxLayout()
+        self.set_group, self.guess = QPushButton('Set group…'), QPushButton('Guess from run names')
+        self.set_group.setToolTip('Gives the selected runs one group')
+        self.guess.setToolTip('Groups runs whose names differ only in a leading number or a trailing replicate number (ctrl_1, ctrl_2, tumor_1, ...)')
+        buttons.addWidget(self.set_group)
+        buttons.addWidget(self.guess)
+        layout.addLayout(buttons)
+        layout.addWidget(_label('Comparison'))
+        form = QFormLayout()
+        self.level = _combo([('Glycans', False), ('Motifs', True)])
+        self.level.setToolTip('Glycans: each structure (or, without one, composition); motifs: glycowork\'s known motifs and its exhaustive monosaccharide and '
+                              'linkage features, counted on the features with a structure')
+        self.transform = _combo([('Automatic', None), ('CLR', 'CLR'), ('ALR', 'ALR')])
+        self.transform.setToolTip('Log-ratio transform of the relative abundances, which removes their compositional bias: centered (CLR, with a scale model) '
+                                  'or additive against the most stable glycan (ALR); automatic is ALR for more than 50 N-glycans, else CLR')
+        self.min_samples = _spin(0, 100, 5, suffix = ' % of runs')
+        self.min_samples.setValue(10)
+        self.min_samples.setToolTip('Glycans found in fewer runs are left out of the test')
+        self.impute = QCheckBox('Impute missing values')
+        self.impute.setChecked(True)
+        self.impute.setToolTip('Replaces abundances of 0 by glycowork\'s biosynthetic imputation from related glycans of the same run, instead of a pseudocount')
+        form.addRow('Compare', self.level)
+        form.addRow('Transform', self.transform)
+        form.addRow('Found in at least', self.min_samples)
+        form.addRow('', self.impute)
+        layout.addLayout(form)
+        self.plan = _label('', 'hint')
+        layout.addWidget(self.plan)
+        self.go = QPushButton('Compare groups')
+        self.go.setObjectName('run')
+        layout.addWidget(self.go)
+        top = QHBoxLayout()
+        top.setContentsMargins(8, 6, 8, 4)
+        self.summary = _label('', 'hint')
+        self.summary.setTextFormat(Qt.RichText)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('Filter by glycan, motif, or composition')
+        self.search.setClearButtonEnabled(True)
+        self.export = QToolButton()
+        self.export.setText('Export')
+        self.export.setPopupMode(QToolButton.InstantPopup)
+        self.export.setMenu(QMenu(self))
+        top.addWidget(self.search, 1)
+        top.addWidget(self.export)
+        self.model, self.proxy = TableModel(images), TableProxy()
+        self.proxy.setSourceModel(self.model)
+        self.table = QTableView()
+        self.table.setModel(self.proxy)
+        self.table.setSortingEnabled(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(58)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setHighlightSections(False)
+        self.table.setItemDelegateForColumn(0, StructureDelegate(images, self.table))
+        self.volcano, self.by_group, self.posthoc = ChartView(), ChartView(), QTableWidget(0, 6)
+        self.posthoc.setHorizontalHeaderLabels(['Group', 'vs group', 'Difference', 'p (adjusted)', '95% interval', 'Significant'])
+        self.posthoc.verticalHeader().setVisible(False)
+        self.posthoc.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.posthoc.horizontalHeader().setStretchLastSection(True)
+        self.posthoc.horizontalHeaderItem(2).setToolTip('Mean of the second group minus the mean of the first, on the transformed abundances')
+        self.posthoc_note = _label('', 'hint')
+        posthoc = QWidget()
+        posthoc_layout = QVBoxLayout(posthoc)
+        posthoc_layout.addWidget(self.posthoc_note)
+        posthoc_layout.addWidget(self.posthoc, 1)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.addTab(self.volcano, 'Volcano plot')
+        self.tabs.addTab(self.by_group, 'By group')
+        self.tabs.addTab(posthoc, 'Post-hoc tests')
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.addWidget(self.table)
+        self.splitter.addWidget(self.tabs)
+        self.splitter.setSizes([380, 420])
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(10, 8, 10, 0)
+        summary_row.addWidget(self.summary, 1)
+        right_layout.addLayout(summary_row)
+        right_layout.addLayout(top)
+        right_layout.addWidget(self.splitter, 1)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(form_widget)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(1, 1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(splitter)
+        self.experiments.currentIndexChanged.connect(self.show_experiment)
+        self.runs.itemChanged.connect(self.store_groups)
+        self.set_group.clicked.connect(self.set_selected_group)
+        self.guess.clicked.connect(self.guess_groups)
+        self.go.clicked.connect(self.run)
+        self.done.connect(self.finished)
+        self.search.textChanged.connect(self.proxy.set_needle)
+        self.table.selectionModel().selectionChanged.connect(self.selection_changed)
+        self.volcano.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and event.artist in self.volcano_rows and
+                                        self.select_row(int(self.volcano_rows[event.artist][event.ind[0]])))
+        self.tabs.currentChanged.connect(lambda: self.row is not None and self.draw_selection())
+        self.set_session(None)
+
+    def set_session(self, session):
+        """The experiments of new or opened results that can be compared: those with a feature table of at least four runs. New results of runs that
+        had groups (the same experiment run again, with other settings) keep them"""
+        earlier = {(e['name'], run): (c['groups'].get(run, ''), c['pairs'].get(run, '')) for e in (self.session or {}).get('experiments', [])
+                   if (c := e.get('comparison')) for run in c['groups']}
+        for experiment in (session or {}).get('experiments', []):
+            kept = {run: earlier[(experiment['name'], run)] for run in experiment['tables'] if (experiment['name'], run) in earlier}
+            if 'comparison' not in experiment and kept:
+                experiment['comparison'] = {'groups': {run: g for run, (g, _) in kept.items()}, 'pairs': {run: p for run, (_, p) in kept.items() if p},
+                                            'options': {}, 'result': None}
+        self.session, self.experiment = session, None
+        experiments = [e for e in (session or {}).get('experiments', []) if e.get('features') is not None and len(self.run_names(e)) >= 4]
+        self.experiments.blockSignals(True)
+        self.experiments.clear()
+        for experiment in experiments:
+            self.experiments.addItem(experiment['name'], id(experiment))
+        self.experiments.blockSignals(False)
+        self.experiments.setEnabled(len(experiments) > 1)
+        self.show_experiment()
+
+    def run_names(self, experiment):
+        return [run for run in experiment['tables'] if run in experiment['features'].columns]
+
+    def current(self):
+        return next((e for e in (self.session or {}).get('experiments', []) if id(e) == self.experiments.currentData()), None)
+
+    def show_experiment(self):
+        self.experiment = experiment = self.current()
+        for widget in (self.runs, self.set_group, self.guess, self.level, self.transform, self.min_samples, self.impute):
+            widget.setEnabled(experiment is not None)
+        self.runs.blockSignals(True)
+        self.runs.setRowCount(0)
+        if experiment is None:
+            self.runs.blockSignals(False)
+            self.update_plan()
+            self.show_result(None, 'Comparing groups of runs needs at least four runs predicted together: put the runs of every group into one experiment '
+                                   'on the Predict tab (its runs are harmonized onto one feature table) and run CandyCrunch.' if self.session else
+                             'Run CandyCrunch on the runs of every group in one experiment, or open such results, to compare the groups.')
+            return
+        comparison = experiment.setdefault('comparison', {'groups': {}, 'pairs': {}, 'options': {}, 'result': None})
+        for run in self.run_names(experiment):
+            row = self.runs.rowCount()
+            self.runs.insertRow(row)
+            name = QTableWidgetItem(run)
+            name.setFlags(name.flags() & ~Qt.ItemIsEditable)
+            name.setToolTip(run)
+            self.runs.setItem(row, 0, name)
+            self.runs.setItem(row, 1, QTableWidgetItem(comparison['groups'].get(run, '')))
+            self.runs.setItem(row, 2, QTableWidgetItem(comparison['pairs'].get(run, '')))
+        self.runs.blockSignals(False)
+        self.runs.resizeColumnsToContents()
+        self.runs.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        options = comparison['options']
+        _set_combo(self.level, options.get('motifs', False))
+        _set_combo(self.transform, options.get('transform'))
+        self.min_samples.setValue(round(100 * options.get('min_samples', 0.1)))
+        self.impute.setChecked(options.get('impute', True))
+        self.update_plan()
+        self.show_result(comparison['result'])
+
+    def groups(self):
+        """{run: group} and {run: pair} as the run list holds them (blank cells left out)"""
+        cells = [[(self.runs.item(r, c).text().strip() if self.runs.item(r, c) else '') for c in range(3)] for r in range(self.runs.rowCount())]
+        return {run: g for run, g, _ in cells if g}, {run: p for run, g, p in cells if g and p}
+
+    def store_groups(self):
+        if self.experiment is not None:
+            self.experiment['comparison']['groups'], self.experiment['comparison']['pairs'] = self.groups()
+            self.changed.emit()
+            self.update_plan()
+
+    def set_selected_group(self):
+        rows = sorted({index.row() for index in self.runs.selectionModel().selectedRows()})
+        if not rows:
+            self.status.emit('Select the runs of a group first')
+            return
+        names = list(dict.fromkeys(self.groups()[0].values()))
+        text, ok = QInputDialog.getItem(self, 'Set group', f'Group of the {len(rows)} selected run{"s" if len(rows) > 1 else ""} (empty: leave them out):', names,
+                                        0, True)
+        if ok:
+            self.runs.blockSignals(True)
+            for r in rows:
+                self.runs.item(r, 1).setText(text.strip())
+            self.runs.blockSignals(False)
+            self.store_groups()
+
+    def guess_groups(self):
+        """Groups runs by their names without a leading number (sample index, date) and trailing replicate numbers, if that gives two or more groups of
+        two or more runs and every run a group"""
+        names = [self.runs.item(r, 0).text() for r in range(self.runs.rowCount())]
+        stems = [re.sub(r'(?:[\s._-]+(?:rep(?:licate)?|r|tech|bio)?[\s._-]*\d+|\d+)+$', '', re.sub(r'^\d+[\s._-]+', '', name), flags = re.IGNORECASE) or name
+                 for name in names]
+        counts = {s: stems.count(s) for s in stems}
+        if len(counts) < 2 or len(counts) == len(names) or min(counts.values()) < 2:
+            self.status.emit('The run names do not tell the groups apart; give each run its group')
+            return
+        self.runs.blockSignals(True)
+        for r, stem in enumerate(stems):
+            self.runs.item(r, 1).setText(stem)
+        self.runs.blockSignals(False)
+        self.store_groups()
+        self.status.emit(f'Guessed {len(counts)} groups from the run names; check them')
+
+    def options(self):
+        return {'motifs': self.level.currentData(), 'transform': self.transform.currentData(), 'min_samples': self.min_samples.value() / 100,
+                'impute': self.impute.isChecked()}
+
+    def update_plan(self):
+        """Says which test the groups make for, or what they are missing"""
+        groups, pairs = self.groups() if self.experiment is not None else ({}, {})
+        members = {}
+        for run, g in groups.items():
+            members.setdefault(g, []).append(run)
+        sizes, test = ', '.join(f'{html.escape(g)} ({len(m)})' for g, m in members.items()), 'paired' if pairs else "Welch's"
+        ready = len(members) >= 2 and min(len(m) for m in members.values()) >= 2 and not (pairs and len(members) > 2)
+        if self.experiment is None:
+            text = ''
+        elif len(members) < 2 or min(len(m) for m in members.values()) < 2:
+            text = 'Give at least two groups of at least two runs each.' + (f' Now: {sizes}.' if sizes else '')
+        elif len(members) == 2:
+            text = (f'{sizes}: {test} t-test of each glycan (variance-moderated), with Benjamini-Hochberg correction; fold changes are '
+                    f'{html.escape(list(members)[1])} over {html.escape(list(members)[0])}.')
+        else:
+            text = f"{sizes}: one-way ANOVA of each glycan (variance-moderated), with Benjamini-Hochberg correction and Tukey's post-hoc tests." + (
+                ' Pairs only work for two groups: clear them.' if pairs else '')
+        self.plan.setText(text)
+        self.go.setEnabled(self.busy is None and ready)
+
+    def run(self):
+        experiment = self.experiment
+        if experiment is None or self.busy is not None:
+            return
+        groups, pairs = self.groups()
+        experiment['comparison']['options'] = options = self.options()
+        runs = [run for run in self.run_names(experiment) if run in groups]
+        columns = [c for c in ('top1_pred', 'composition', 'excluded') if c in experiment['features'].columns] + runs
+        if self.pool is None:
+            # One process for every comparison of the session, so glycowork is imported once; the window stays responsive while it runs
+            self.pool = ProcessPoolExecutor(1, mp_context = mp.get_context('spawn'))
+        from candycrunch.differential import compare_groups
+        self.busy = experiment
+        self.go.setEnabled(False)
+        self.go.setText('Comparing…')
+        self.status.emit('Comparing groups with glycowork…')
+        future = self.pool.submit(compare_groups, experiment['features'][columns].copy(), {run: groups[run] for run in runs}, pairs, **options)
+        future.add_done_callback(lambda future: future.cancelled() or self.done.emit(experiment, None if future.exception() else future.result(), future.exception()))
+
+    def finished(self, experiment, result, error):
+        self.busy = None
+        self.go.setText('Compare groups')
+        if error is not None:
+            if not isinstance(error, ValueError):
+                # A crashed process cannot take the next comparison
+                self.shutdown()
+            self.update_plan()
+            QMessageBox.warning(self, 'Compare groups', f'The comparison did not run:\n{error}')
+            return
+        experiment['comparison']['result'] = result
+        if result['log'].strip():
+            self.log.emit(result['log'])
+        self.changed.emit()
+        self.update_plan()
+        if experiment is self.experiment:
+            self.show_result(result)
+        self.status.emit('Compared ' + ' and '.join(result['groups']) if len(result['groups']) == 2 else f'Compared {len(result["groups"])} groups')
+
+    def shutdown(self):
+        if self.pool is not None:
+            pool, self.pool = self.pool, None
+            for process in list(getattr(pool, '_processes', {}).values()):
+                process.terminate()
+            pool.shutdown(wait = False, cancel_futures = True)
+
+    def stale(self, result):
+        """Whether the feature table was curated (structures assigned, features excluded) since the comparison"""
+        from candycrunch.differential import abundance_table
+        with IMPORT_LOCK:
+            table, _ = abundance_table(self.experiment['features'], list(result['input'].columns[1:]), motifs = result['motifs'])
+        return not table.equals(result['input'])
+
+    def showEvent(self, event):
+        # curation on the Predict tab may have changed the feature table since the comparison was shown
+        super().showEvent(event)
+        if self.experiment is not None and self.experiment['comparison']['result'] is not None:
+            self.show_result(self.experiment['comparison']['result'], keep_row = self.row)
+
+    def show_result(self, result, message = None, keep_row = None):
+        self.result, self.row = result, None
+        menu = self.export.menu()
+        menu.clear()
+        self.export.setEnabled(result is not None)
+        self.tabs.setTabVisible(2, result is not None and len(result['groups']) > 2)
+        if result is None:
+            self.summary.setText(html.escape(message or 'Give the runs their groups, then compare them.'))
+            self.model.set_table(pd.DataFrame({'excluded': [], 'curation': []}), [])
+            for chart in (self.volcano, self.by_group):
+                chart.figure.clear()
+                chart.canvas.draw_idle()
+            return
+        df = result['table'].assign(excluded = False, curation = '')
+        two = len(result['groups']) == 2
+        significant = int(df['significant'].sum())
+        what = 'motifs' if result['motifs'] else 'glycans'
+        groups = ' vs '.join(f'{html.escape(g)} ({len(result["members"][g])})' for g in result['groups'])
+        stale = ' <b>The feature table was curated since: compare again to include the changes.</b>' if self.stale(result) else ''
+        # missing from every run of a group: glycowork tests these on their detection
+        present = result['values'].fillna(0) > 0
+        self.absent = ~np.logical_and.reduce([present[result['members'][g]].any(axis = 1).to_numpy() for g in result['groups']])
+        absent = (f" {int(self.absent.sum())} {what} missing from every run of a group are tested on their detection (Fisher's exact test)."
+                  if self.absent.any() else '')
+        self.summary.setText(f'{groups}: {result["test"]}, {result["transform"]}-transformed, alpha = {result["alpha"]:.3f} (adjusted for {sum(map(len, result["members"].values()))} '
+                             f'runs). <b>{significant} of {len(df)} {what}</b> differ significantly.{absent}{stale}')
+        labels = df['Glycan'].tolist()
+        columns = [{'title': 'Motif' if result['motifs'] else 'Glycan', 'kind': 'structure', 'raw': labels, 'text': labels, 'image': labels}]
+        for g in result['groups']:
+            columns.append(_number_column(f'{g} (%)', df[f'Mean in {g}'], 2, f'Mean relative abundance (%) in {g}, as measured (before imputation)'))
+        tips = {'Log2FC': f'Log2 fold change of {result["groups"][1]} over {result["groups"][0]}, on the transformed abundances' if two else None,
+                'Effect size': "Cohen's d, on the transformed abundances" if two else 'Omega squared: the share of the variance the groups explain'}
+        for name in [c for c in df.columns if c not in ('Glycan', 'significant', 'excluded', 'curation') and not c.startswith('Mean in ')]:
+            title, decimals, tip = self.COLUMNS.get(name, (name, 2 if pd.api.types.is_numeric_dtype(df[name]) else None, None))
+            if decimals is None:
+                texts = [v if isinstance(v, str) else '' for v in df[name]]
+                columns.append({'title': title, 'kind': 'text', 'raw': texts, 'text': texts, 'tip': tip})
+            else:
+                column = _number_column(title, df[name], 2 if decimals == 'p' else decimals, tips.get(name) or tip)
+                if decimals == 'p':
+                    column['text'] = ['' if v is None else f'{v:.2g}' for v in column['raw']]
+                columns.append(column)
+            if name == ('Log2FC' if two else 'F statistic'):
+                texts = ['yes' if s else '' for s in df['significant']]
+                columns.append({'title': 'Significant', 'kind': 'text', 'raw': texts, 'text': texts, 'tip': f'Corrected p-value below alpha = {result["alpha"]:.3f}'})
+        self.model.set_table(df, columns)
+        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(0, 250)
+        titles = [c['title'] for c in columns]
+        self.table.sortByColumn(titles.index('q'), Qt.AscendingOrder)
+        self.proxy.set_needle(self.search.text())
+        menu.addAction('Results as CSV…', lambda: self.export_results('csv'))
+        menu.addAction('Results as Excel…', lambda: self.export_results('xlsx'))
+        if not result['motifs']:
+            menu.addAction('Results as Excel with SNFG drawings…', lambda: self.export_results('snfg'))
+        menu.addSeparator()
+        menu.addAction('Plot as image…', self.save_plot)
+        if two:
+            menu.addAction('Volcano plot (glycowork)…', self.save_volcano)
+        self.draw_volcano(self.volcano.figure)
+        self.select_row(keep_row if keep_row is not None and keep_row < len(df) else (self.proxy.mapToSource(self.proxy.index(0, 0)).row() if len(df) else None))
+
+    def select_row(self, row):
+        if row is None:
+            self.row = None
+            return
+        index = self.proxy.mapFromSource(self.model.index(row, 0))
+        if not index.isValid():
+            self.search.clear()
+            index = self.proxy.mapFromSource(self.model.index(row, 0))
+        self.table.selectRow(index.row())
+        self.table.scrollTo(index)
+
+    def selection_changed(self):
+        rows = self.table.selectionModel().selectedRows()
+        if rows and self.result is not None:
+            self.row = self.proxy.mapToSource(rows[0]).row()
+            self.draw_selection()
+
+    def volcano_axes(self):
+        """x, y and colors of the volcano plot: fold change (two groups) or effect size (ANOVA) against the corrected p-value. The log2 fold change of
+        one missing from every run of a group is that of glycowork's floor (some 20), so it is drawn at the edge of the others"""
+        df, two = self.result['table'], len(self.result['groups']) == 2
+        x = df['Log2FC' if two else 'Effect size'].astype(float).values
+        if two and self.absent.any():
+            edge = 1.15 * np.abs(x[~self.absent]).max(initial = 1)
+            x = np.where(self.absent, np.sign(x) * edge, x)
+        q = df['corr p-val'].astype(float).values
+        # an underflowed 0 at the smallest p-value above it
+        y = -np.log10(np.clip(q, q[q > 0].min() if (q > 0).any() else 1e-300, None))
+        colors = np.where(df['significant'].values.astype(bool), np.where(x > 0, CANDY, LILAC) if two else LILAC, '#cccccc')
+        return x, y, colors, two
+
+    def draw_volcano(self, figure, small = True):
+        figure.clear()
+        ax = figure.add_axes([0.09, 0.14, 0.86, 0.8] if small else [0.12, 0.12, 0.83, 0.82])
+        x, y, colors, two = self.volcano_axes()
+        # those tested on detection as triangles pointing to the group they were found in
+        self.volcano_rows = {}
+        for rows, marker in ((~self.absent, 'o'), (self.absent & (x > 0), '>'), (self.absent & (x <= 0), '<')):
+            if rows.any():
+                points = ax.scatter(x[rows], y[rows], s = 34 if marker != 'o' else 28, c = colors[rows], marker = marker if two else 'D' if marker != 'o' else 'o',
+                                    edgecolors = 'white', linewidths = 0.5, picker = 4)
+                self.volcano_rows[points] = np.flatnonzero(rows)
+        if self.absent.any():
+            ax.text(0.99, 0.98, f'{"Triangles at the edges" if two else "Diamonds"}: missing from every run of a group, tested on detection', transform = ax.transAxes,
+                    ha = 'right', va = 'top', fontsize = 7, color = MUTED)
+        ax.axhline(-np.log10(self.result['alpha']), color = MUTED, linestyle = '--', linewidth = 0.8)
+        if two:
+            ax.axvline(0, color = '#dddddd', linewidth = 0.8)
+            a, b = self.result['groups']
+            ax.set_xlabel(f'Log2 fold change, {b} over {a}', fontsize = 8)
+        else:
+            ax.set_xlabel('Effect size (omega squared)', fontsize = 8)
+        ax.set_ylabel('-log10 corrected p-value', fontsize = 8)
+        ax.tick_params(labelsize = 7)
+        ax.spines[['top', 'right']].set_visible(False)
+        if small:
+            # The selection marker is drawn over the plot, as on the glycan map
+            self.marker = ax.scatter([], [], s = 0, facecolors = 'none', edgecolors = INK, linewidths = 1.4)
+        figure.canvas.draw_idle()
+
+    def draw_selection(self):
+        if self.row is None or self.result is None:
+            return
+        x, y, _, _ = self.volcano_axes()
+        self.marker.set_offsets([[x[self.row], y[self.row]]])
+        self.marker.set_sizes([140])
+        if self.volcano.isVisible():
+            self.volcano.canvas.draw_idle()
+        label = self.result['table']['Glycan'].iat[self.row]
+        if self.by_group.isVisible():
+            figure = self.by_group.figure
+            figure.clear()
+            ax = figure.add_axes([0.1, 0.14, 0.86, 0.78])
+            values = self.result['values'].loc[label] if label in self.result['values'].index else None
+            for k, g in enumerate(self.result['groups']):
+                runs = self.result['members'][g]
+                v = np.array([0.0 if values is None or pd.isna(values.get(run)) else float(values.get(run)) for run in runs])
+                offsets = np.linspace(-0.12, 0.12, len(v)) if len(v) > 1 else np.zeros(1)
+                ax.scatter(k + offsets, v, s = 30, color = LILAC, edgecolors = 'white', linewidths = 0.5, zorder = 3)
+                ax.hlines(v.mean(), k - 0.25, k + 0.25, color = INK, linewidth = 1.2)
+            ax.set_xticks(range(len(self.result['groups'])), self.result['groups'], fontsize = 8)
+            ax.set_xlim(-0.6, len(self.result['groups']) - 0.4)
+            ax.set_ylabel(f'{"Motif" if self.result["motifs"] else "Relative"} abundance (%), as measured', fontsize = 8)
+            ax.set_title(label if len(label) < 90 else label[:87] + '…', fontsize = 8)
+            ax.tick_params(axis = 'y', labelsize = 7)
+            ax.spines[['top', 'right']].set_visible(False)
+            self.by_group.canvas.draw_idle()
+        if len(self.result['groups']) > 2:
+            table = self.result['posthoc'].get(label)
+            self.posthoc.setRowCount(0 if table is None else len(table))
+            self.posthoc_note.setText(f"Tukey's honestly significant difference tests of {label}, on the transformed abundances" if table is not None else
+                                      "Tukey's tests are run for the glycans the ANOVA finds significant (with at least two runs measured in each group).")
+            rows = [] if table is None else table[['group1', 'group2', 'meandiff', 'p-adj', 'lower', 'upper', 'reject']].itertuples(index = False)
+            for r, (a, b, difference, p, lower, upper, reject) in enumerate(rows):
+                for c, text in enumerate((str(a), str(b), f'{difference:.2f}', f'{p:.2g}', f'{lower:.2f} to {upper:.2f}', 'yes' if reject else '')):
+                    self.posthoc.setItem(r, c, QTableWidgetItem(text))
+            self.posthoc.resizeColumnsToContents()
+
+    def export_results(self, kind):
+        result = self.result
+        stem = '_vs_'.join(re.sub(r'[^\w.-]+', '_', g) for g in result['groups'])
+        suffix = '.csv' if kind == 'csv' else '.xlsx'
+        path, _ = QFileDialog.getSaveFileName(self, 'Export comparison', os.path.join(QSettings().value('folder', os.path.expanduser('~')), stem + suffix),
+                                              'CSV (*.csv)' if kind == 'csv' else 'Excel (*.xlsx)')
+        if not path:
+            return
+        posthoc = pd.concat([table.assign(Glycan = glycan) for glycan, table in result['posthoc'].items()], ignore_index = True) if result['posthoc'] else None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if kind == 'snfg':
+                with IMPORT_LOCK:
+                    from glycowork.motif.draw import plot_glycans_excel
+                plot_glycans_excel(result['table'], path, glycan_col_num = 'Glycan')
+            elif kind == 'csv':
+                result['table'].to_csv(path, index = False)
+                if posthoc is not None:
+                    posthoc.to_csv(os.path.splitext(path)[0] + '_posthoc.csv', index = False)
+            else:
+                # with the post-hoc tests and the abundances compared, so the numbers can be followed up
+                with pd.ExcelWriter(path) as writer:
+                    result['table'].to_excel(writer, sheet_name = 'Comparison', index = False)
+                    if posthoc is not None:
+                        posthoc.to_excel(writer, sheet_name = 'Post-hoc tests', index = False)
+                    result['values'].rename_axis('Motif' if result['motifs'] else 'Glycan').to_excel(writer, sheet_name = 'Abundances (%)')
+                    pd.DataFrame([(run, g) for g, runs in result['members'].items() for run in runs], columns = ['Run', 'Group']).to_excel(
+                        writer, sheet_name = 'Groups', index = False)
+            self.status.emit(f'Exported {os.path.basename(path)}')
+        except Exception as error:
+            QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def save_plot(self):
+        path, _ = QFileDialog.getSaveFileName(self, 'Save plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.png'),
+                                              'PNG image (*.png);;SVG image (*.svg);;PDF (*.pdf)')
+        if path:
+            figure = Figure(figsize = (6, 4.5))
+            FigureCanvasAgg(figure)
+            self.draw_volcano(figure, small = False)
+            figure.savefig(path, dpi = 300)
+
+    def save_volcano(self):
+        path, _ = QFileDialog.getSaveFileName(self, 'Save volcano plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.svg'),
+                                              'SVG image (*.svg);;PDF (*.pdf);;PNG image (*.png)')
+        if not path:
+            return
+        from candycrunch.differential import save_volcano
+        if self.pool is None:
+            self.pool = ProcessPoolExecutor(1, mp_context = mp.get_context('spawn'))
+        self.status.emit('Drawing the volcano plot…')
+        self.pool.submit(save_volcano, self.result, path).add_done_callback(
+            lambda future: self.status.emit(f'Could not save the volcano plot: {future.exception()}' if future.exception() else f'Saved {os.path.basename(path)}'))
+
+
 class ReportDialog(QDialog):
     """The report form, for bug reports, given an error, crash reports, and given a peak (ResultsView.peak_report), misprediction reports: what happened in the
     user's words, an address for a reply, and everything that would be sent, readable before sending"""
@@ -3332,10 +3892,11 @@ class MainWindow(QMainWindow):
         self.split.addWidget(self.pages)
         self.split.setStretchFactor(1, 1)
         self.split.setSizes([360, 1100])
-        self.crumbs = CrumbsTab(self.images)
+        self.crumbs, self.compare = CrumbsTab(self.images), CompareTab(self.images)
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self.split, 'Predict')
+        self.tabs.addTab(self.compare, 'Compare groups')
         self.tabs.addTab(self.crumbs, 'CandyCrumbs')
         self.setCentralWidget(self.tabs)
         self.log = QPlainTextEdit()
@@ -3422,6 +3983,9 @@ class MainWindow(QMainWindow):
         self.results.experiment_shown.connect(self.settings.select_experiment)
         self.results.report_peak.connect(lambda peak: self.open_report(peak = peak))
         self.results.open_in_crumbs.connect(lambda request: (self.tabs.setCurrentWidget(self.crumbs), self.crumbs.load(request)))
+        self.compare.changed.connect(lambda: setattr(self.results, 'dirty', True))
+        self.compare.status.connect(lambda text: self.statusBar().showMessage(text, 6000))
+        self.compare.log.connect(self.append_log)
         self.settings.inputs['taxonomy_level'].currentTextChanged.connect(self.load_taxa)
         self.taxa_ready.connect(lambda taxa: self.settings.taxa.setModel(QStringListModel(taxa, self.settings.taxa)))
         self.images.ready.connect(self.image_ready)
@@ -3482,8 +4046,9 @@ class MainWindow(QMainWindow):
                 del stored['filter_out']
             self.settings.set_values({**DEFAULTS, **stored, 'filter_out': set(stored.get('filter_out', DEFAULTS['filter_out']))})
         # The panes as the user left them: settings and results, table and details, details and spectrum, MS3 spectrum and fragments, CandyCrumbs
-        # form and spectrum (restoreState only holds the log dock, so every start reset them)
-        self.splitters = (self.split, self.results.splitter, self.results.splitter.widget(1), self.results.ms3_tab, self.crumbs.findChild(QSplitter))
+        # form and spectrum, comparison table and plots (restoreState only holds the log dock, so every start reset them)
+        self.splitters = (self.split, self.results.splitter, self.results.splitter.widget(1), self.results.ms3_tab, self.crumbs.findChild(QSplitter),
+                          self.compare.splitter)
         if self.store.value('geometry'):
             self.restoreGeometry(self.store.value('geometry'))
             self.restoreState(self.store.value('state'))
@@ -3896,6 +4461,7 @@ class MainWindow(QMainWindow):
                                     'or open the log (View > Log) for details.')
             return
         self.results.set_results(payload)
+        self.compare.set_session(self.results.session)
         self.session_path = None
         self.update_title()
         self.pages.setCurrentWidget(self.results)
@@ -3991,6 +4557,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'Open results', f'Could not read {path}:\n{error}')
             return
         self.results.set_results(payload)
+        self.compare.set_session(self.results.session)
         self.session_path = path
         self.remember(path)
         self.update_title()
@@ -4043,6 +4610,7 @@ class MainWindow(QMainWindow):
         self.store.setValue('state', self.saveState())
         self.store.setValue('splitters', [splitter.saveState() for splitter in self.splitters])
         self.runner.shutdown()
+        self.compare.shutdown()
         if self.session:
             # Waits a little for the session's end to reach Sentry, as the process ends right after; nothing counts for the session after this
             session, self.session = self.session, None

@@ -11,7 +11,7 @@ import pandas as pd
 from glycowork.glycan_data.loader import stringify_dict
 from glycowork.motif.processing import canonicalize_iupac
 from glycowork.motif.tokenization import glycan_to_composition
-from candycrunch.prediction import acidic_count, bin_intensities, load_spectra_filepath, plain_composition, wrap_inference
+from candycrunch.prediction import ISOTOPE_SPACING, acidic_count, bin_intensities, load_spectra_filepath, plain_composition, wrap_inference
 
 SPECTRUM_COLUMNS = ['spec_id', 'peak_d', 'RT', 'rt_range', 'intensity', 'num_spectra', 'model_input', 'RT2']
 # Where a label's structure came from: its mapping row's RT as the mapping gives it (fewer than 5 anchors), shifted by the median offset, by the fitted
@@ -76,7 +76,7 @@ def run_inputs(spectra_filepath, glycan_class, **inference_kwargs):
     return inputs.drop(columns = ['binned_intensities', 'mz_remainder', 'member_peaks'], errors = 'ignore')
 
 
-def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_window = 1.0, **inference_kwargs):
+def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_window = 1.0, ppm_tolerance = 20, **inference_kwargs):
     """labels the model inputs of a run from a mapping of its glycans\n
    | Arguments:
    | :-
@@ -85,6 +85,7 @@ def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_wi
    | glycan_class (string): glycan class of the run, as for wrap_inference
    | mz_tolerance (float): as for label_inputs; default:0.5
    | rt_window (float): as for label_inputs; default:1.0
+   | ppm_tolerance (float): as for label_inputs; default:20
    | **inference_kwargs: further wrap_inference arguments; modification (and sample_prep, lc, ... where they differ from the defaults) have to be given,
    |                     as its reducing-end and glycan-class checks are skipped\n
    | Returns:
@@ -92,10 +93,10 @@ def label_run(spectra_filepath, mapping, glycan_class, mz_tolerance = 0.5, rt_wi
    | Returns label_inputs' labeled inputs and unlabelled pooled spectra of the run's inputs (run_inputs)
    """
     return label_inputs(run_inputs(spectra_filepath, glycan_class, **inference_kwargs), mapping, mz_tolerance = mz_tolerance, rt_window = rt_window,
-                        crumbs_thresh = inference_kwargs.get('crumbs_thresh', 3))
+                        crumbs_thresh = inference_kwargs.get('crumbs_thresh', 3), ppm_tolerance = ppm_tolerance)
 
 
-def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_thresh = 3):
+def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_thresh = 3, ppm_tolerance = 20):
     """labels the model inputs of a run from a mapping of its glycans\n
    | Arguments:
    | :-
@@ -107,7 +108,10 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    |                    5 compositions it lists once; with at least 10 of them, as a function of RT and of the number of charged residues where that fits
    |                    them better; if their median deviation from it exceeds 1 min, the mapping counts as RT-less); default:1.0 (2.0 only added labels away from the
    |                    glycans' peaks)
-   | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3\n
+   | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3
+   | ppm_tolerance (float): with accurate survey scans (the inputs' attrs accurate_ms1), the maximum distance in ppm of a mapping Mass, of its first two
+   |                        13C peaks or of one 13C spacing below it at the input's charge instead of mz_tolerance, widened to half the last decimal the
+   |                        mapping gives the Mass with (1171.58: 0.005) and at most mz_tolerance; default:20\n
    | Returns:
    | :-
    | (1) labeled inputs: index m/z, columns spec_id (pooled spectrum), peak_d, RT, rt_range, intensity, num_spectra, model_input (the spectrum as the model
@@ -156,6 +160,22 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         map_rts.append(float(rt))
         row_ids.append(row_id)
     masses, map_rts = np.array(masses), np.array(map_rts)
+    # Which inputs fit which rows: within mz_tolerance of the Mass, with accurate survey scans within ppm_tolerance of it or of its first two 13C peaks at the
+    # input's charge (13C picks: GPST000578 and 651 at z = 3), a Mass given with fewer decimals widened to half its last one (an integer Mass keeps
+    # mz_tolerance). Further off is another ion, also with the row's composition among its candidates: at 0.5 m/z GPST000712's 720.321 took N3H3 [M+2Na]2+
+    # 719.849, and in the audited test runs with accurate survey scans labels from their ground truths went to ions 42-660 ppm off its peaks within 1.5 min
+    mz_values = inputs.index.to_numpy(dtype = float)
+    if settings.get('accurate_ms1'):
+        decimals = np.array([next((d for d in range(7) if round(m, d) == m), 6) for m in masses])
+        tolerances = np.minimum(mz_tolerance, np.maximum(ppm_tolerance * masses / 1e6, 0.5 * 10.0 ** -decimals))
+        spacing = ISOTOPE_SPACING / np.nan_to_num(np.abs(inputs['charge'].to_numpy(dtype = float)), nan = 1.0)[:, None]
+        fits = np.zeros((len(mz_values), len(masses)), bool)
+        # One spacing below: the precursor picked one peak below the monoisotopic one (large z = 3-4 sialylated ions sit 1.00 Da light, with high annotation
+        # scores and mostly a correct-mass input of the same glycan at the same RT)
+        for k in range(-1, 3):
+            fits |= np.abs(mz_values[:, None] - masses[None, :] - k * spacing) <= tolerances[None, :]
+    else:
+        fits = np.abs(mz_values[:, None] - masses[None, :]) <= mz_tolerance
     input_keys = [tuple(sorted(plain_composition(c).items())) if isinstance(c, dict) else None for c in inputs['composition']]
     # Inputs from the most intense down (spectrum counts without precursor intensities); crumbs_thresh as the pipeline's gate
     by_intensity = np.lexsort((-inputs['num_spectra'].to_numpy(dtype = float), -inputs['intensity'].fillna(0).to_numpy(dtype = float)))
@@ -172,7 +192,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     offsets, anchor_rts, anchor_acid = [], [], []
     for k in range(len(keys)):
         if not np.isnan(map_rts[k]) and single[keys[k]] == 1:
-            hit = next((i for i in first.get(keys[k], []) if abs(inputs.index[i] - masses[k]) <= mz_tolerance), None)
+            hit = next((i for i in first.get(keys[k], []) if fits[i, k]), None)
             if hit is not None:
                 offsets.append(inputs['RT'].iloc[hit] - map_rts[k])
                 anchor_rts.append(map_rts[k])
@@ -209,8 +229,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         rt_shift, map_rts, row_shift, alignment = 0.0, np.full(len(map_rts), np.nan), np.zeros(len(map_rts)), 'dropped'
     map_rts = map_rts + row_shift
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
-    near = [[k for k in np.flatnonzero(np.abs(masses - mz) <= mz_tolerance) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
-            for mz, rt, key in zip(inputs.index, inputs['RT'], input_keys)]
+    near = [[k for k in np.flatnonzero(fits[i]) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
+            for i, (rt, key) in enumerate(zip(inputs['RT'], input_keys))]
     windowed = {k for n in near for k in n}
     # A run holds about as many peaks of a composition as the mapping lists isomers of it, plus PGC tails, isotope picks and noise, so a row without RT only
     # labels the most intense inputs of its composition at each charge whose fragments pass the pipeline's crumbs_thresh, as many as the mapping has rows of
@@ -253,7 +273,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     # What became of each mapping row, from the first step it failed (rows with inputs at their mass but of other compositions are the mass-check
     # failures map curation looks for)
     kept_orders = set(labelled['order'])
-    mz_values, key_ids = inputs.index.to_numpy(dtype = float), {}
+    key_ids = {}
     input_ids = np.array([key_ids.setdefault(k, len(key_ids)) for k in input_keys])
     takes, labels = defaultdict(list), Counter()
     for i, n in enumerate(near):
@@ -263,7 +283,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         if k is not None and i in kept_orders:
             labels[k] += 1
     for k, row_id in enumerate(row_ids):
-        at_mass = np.abs(mz_values - masses[k]) <= mz_tolerance
+        at_mass = fits[:, k]
         if not at_mass.any():
             status = 'no_input_at_mass'
         elif not (at_mass & (input_ids == key_ids.get(keys[k], -1))).any():
