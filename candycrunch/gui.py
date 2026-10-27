@@ -42,6 +42,7 @@ try:
 except ImportError as error:
     raise ImportError('The CandyCrunch app needs PySide6, which comes with: pip install "candycrunch[gui]"') from error
 from matplotlib.figure import Figure
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -3211,7 +3212,7 @@ class CompareTab(QWidget):
     def __init__(self, images):
         super().__init__()
         self.images, self.session, self.experiment, self.result, self.pool, self.row, self.busy = images, None, None, None, None, None, None
-        self.absent, self.volcano_rows = np.zeros(0, bool), {}
+        self.absent, self.volcano_rows, self.cartoon_wanted = np.zeros(0, bool), {}, set()
         form_widget = QWidget()
         form_widget.setObjectName('settings')
         form_widget.setMinimumWidth(330)
@@ -3339,6 +3340,12 @@ class CompareTab(QWidget):
         self.table.selectionModel().selectionChanged.connect(self.selection_changed)
         self.volcano.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and event.artist in self.volcano_rows and
                                         self.select_row(int(self.volcano_rows[event.artist][event.ind[0]])))
+        self.redraw = QTimer(self)
+        self.redraw.setSingleShot(True)
+        self.redraw.setInterval(250)
+        self.redraw.timeout.connect(lambda: self.result is not None and (self.draw_volcano(self.volcano.figure), self.draw_selection()))
+        images.ready.connect(lambda key: key[1] is True and key[0] in self.cartoon_wanted and self.redraw.start())
+        self.volcano.canvas.mpl_connect('resize_event', lambda event: self.result is not None and self.redraw.start())
         self.tabs.currentChanged.connect(lambda: self.row is not None and self.draw_selection())
         self.set_session(None)
 
@@ -3581,8 +3588,7 @@ class CompareTab(QWidget):
         self.proxy.set_needle(self.search.text())
         menu.addAction('Results as CSV…', lambda: self.export_results('csv'))
         menu.addAction('Results as Excel…', lambda: self.export_results('xlsx'))
-        if not result['motifs']:
-            menu.addAction('Results as Excel with SNFG drawings…', lambda: self.export_results('snfg'))
+        menu.addAction('Results as Excel with SNFG drawings…', lambda: self.export_results('snfg'))
         menu.addSeparator()
         menu.addAction('Plot as image…', self.save_plot)
         if two:
@@ -3645,10 +3651,57 @@ class CompareTab(QWidget):
         ax.set_ylabel('-log10 corrected p-value', fontsize = 8)
         ax.tick_params(labelsize = 7)
         ax.spines[['top', 'right']].set_visible(False)
+        self.add_cartoons(ax, x, y)
         if small:
             # The selection marker is drawn over the plot, as on the glycan map
             self.marker = ax.scatter([], [], s = 0, facecolors = 'none', edgecolors = INK, linewidths = 1.4)
         figure.canvas.draw_idle()
+
+    def add_cartoons(self, ax, x, y):
+        """SNFG drawings of the most significant glycans or motifs (up to 15; GlycoDraw draws named motifs, not those defined by a glyco-regex), each next to its point where it covers no other point or drawing and stays within the
+        plot, outward first (one without such a place is left out); one still being rendered is added when it is ready (cartoon_wanted)"""
+        df, figure = self.result['table'], ax.figure
+        ax.autoscale_view()
+        bottom, top = ax.get_ylim()
+        # room above the most significant points
+        ax.set_ylim(bottom, top + 0.25 * (top - bottom))
+        frame, placed, self.cartoon_wanted = ax.get_window_extent(), [], set()
+        per_pt = figure.dpi / 72
+        gap = 6 * per_pt
+        points = ax.transData.transform(np.column_stack([x, y]))
+        for i in [i for i in np.argsort(-y, kind = 'stable') if df['significant'].iat[i]][:15]:
+            image = self.images.get(df['Glycan'].iat[i])
+            if image is None:
+                self.cartoon_wanted.add(df['Glycan'].iat[i])
+                continue
+            if image.isNull():
+                continue
+            # 0.18 pt per pixel of the compact drawings (0.8 px per SVG unit), so their sizes compare as the glycans do: an N-glycan is about 60 x 22 pt
+            scale = min(0.18, 90 / image.width()) * per_pt
+            w, h = image.width() * scale, image.height() * scale
+            px, py = ax.transData.transform((x[i], y[i]))
+            side = -1 if x[i] < 0 and len(self.result['groups']) == 2 else 1
+            for dx, dy in ((w / 2 + gap, h / 2 + gap), (w / 2 + gap, 0), (0, h / 2 + 2 * gap), (w / 2 + gap, -h / 2 - gap), (-w / 2 - gap, h / 2 + gap),
+                           (w / 2 + gap, 1.5 * h + 2 * gap), (0, -h / 2 - 2 * gap), (-w / 2 - gap, 0), (w + 3 * gap, h + 3 * gap), (0, 1.5 * h + 4 * gap),
+                           (w + 3 * gap, 0), (-w - 3 * gap, h + 3 * gap)):
+                cx, cy = px + side * dx, py + dy
+                box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+                if box[0] >= frame.x0 and box[2] <= frame.x1 and box[1] >= frame.y0 and box[3] <= frame.y1 and not any(
+                        box[0] < b[2] + gap and b[0] < box[2] + gap and box[1] < b[3] + gap and b[1] < box[3] + gap for b in placed) and not (
+                        (points[:, 0] > box[0] - gap / 2) & (points[:, 0] < box[2] + gap / 2) & (points[:, 1] > box[1] - gap / 2) & (points[:, 1] < box[3] + gap / 2)).any():
+                    break
+            else:
+                continue
+            placed.append(box)
+            # Shrunk to its pixels at this figure's dpi by Qt's area-averaging scaler (matplotlib's filter left thin strokes grainy); zoom 1 / per_pt keeps
+            # those pixels 1:1 on screen and in a 300 dpi export, and their size in points in SVG and PDF
+            small = image.scaled(QSize(max(1, round(w)), max(1, round(h))), Qt.IgnoreAspectRatio, Qt.SmoothTransformation).convertToFormat(QImage.Format_RGBA8888)
+            pixels = np.frombuffer(small.constBits(), np.uint8).reshape(small.height(), small.bytesPerLine())[:, :4 * small.width()].reshape(small.height(), small.width(), 4)
+            # a connector only where the drawing is not right next to its point (there it was a stray dash)
+            far = np.hypot(max(box[0] - px, px - box[2], 0), max(box[1] - py, py - box[3], 0)) > 3 * gap
+            ax.add_artist(AnnotationBbox(OffsetImage(pixels.copy(), zoom = 1 / per_pt), (x[i], y[i]), xybox = ((cx - px) / per_pt, (cy - py) / per_pt),
+                                         boxcoords = 'offset points', frameon = False, annotation_clip = False, zorder = 1,
+                                         arrowprops = dict(arrowstyle = '-', color = '#c8c0d0', linewidth = 0.6, shrinkA = 0, shrinkB = 4) if far else None))
 
     def draw_selection(self):
         if self.row is None or self.result is None:
@@ -3726,7 +3779,7 @@ class CompareTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, 'Save plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.png'),
                                               'PNG image (*.png);;SVG image (*.svg);;PDF (*.pdf)')
         if path:
-            figure = Figure(figsize = (6, 4.5))
+            figure = Figure(figsize = self.volcano.figure.get_size_inches(), dpi = 300)
             FigureCanvasAgg(figure)
             self.draw_volcano(figure, small = False)
             figure.savefig(path, dpi = 300)

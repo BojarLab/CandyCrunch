@@ -110,7 +110,7 @@ def compare_groups(features, groups, pairs = None, motifs = False, transform = N
 
 
 def save_volcano(result, path):
-    """saves glycowork's volcano plot of a two-group comparison, with SNFG drawings of the significant glycans (not for motifs)\n
+    """saves glycowork's volcano plot of a two-group comparison, with SNFG drawings of the significant glycans or motifs\n
    | Arguments:
    | :-
    | result (dict): output of compare_groups for two groups
@@ -119,7 +119,4 @@ def save_volcano(result, path):
     import matplotlib
     matplotlib.use('Agg')
     from glycowork.motif.analysis import get_volcano
-    get_volcano(result['table'], y_thresh = result['alpha'], annotate_volcano = not result['motifs'], filepath = path,
-                title = f'{result["groups"][1]} vs {result["groups"][0]}')
-    # without SNFG drawings get_volcano leaves the figure open
-    matplotlib.pyplot.close('all')
+    get_volcano(result['table'], y_thresh = result['alpha'], filepath = path, title = f'{result["groups"][1]} vs {result["groups"][0]}')

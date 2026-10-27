@@ -125,6 +125,11 @@ def test_gui_compare_groups():
         time.sleep(0.05)
     result = session['experiments'][0]['comparison']['result']
     assert result is not None and tab.model.rowCount() == len(result['table']) and 'differ significantly' in tab.summary.text()
+    start = time.time()
+    while not tab.volcano.figure.axes[0].artists and time.time() - start < 60:
+        app.processEvents()
+        time.sleep(0.05)
+    assert tab.volcano.figure.axes[0].artists and not tab.cartoon_wanted
     tab.tabs.setCurrentWidget(tab.by_group)
     tab.select_row(0)
     assert not tab.tabs.isTabVisible(2) and tab.row == 0
