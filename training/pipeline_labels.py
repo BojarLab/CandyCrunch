@@ -106,7 +106,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    | mz_tolerance (float): maximum distance between an input's m/z and a mapping Mass; default:0.5 (mapping masses are literature values)
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
    |                    5 compositions it lists once; with at least 10 of them, as a function of RT and of the number of charged residues where that fits
-   |                    them better; if their median deviation from it exceeds 1 min, the mapping counts as RT-less); default:1.0 (2.0 only added labels away from the
+   |                    them better; if their median deviation from it exceeds 1 min, the mapping counts as RT-less, unless at least 5 and 40% of them agree within
+   |                    1 min, whose median then shifts it); default:1.0 (2.0 only added labels away from the
    |                    glycans' peaks)
    | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3
    | ppm_tolerance (float): with accurate survey scans (the inputs' attrs accurate_ms1), the maximum distance in ppm of a mapping Mass, of its first two
@@ -226,7 +227,15 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                 alignment = 'model'
                 scatter = float(np.median(np.abs(r - np.median(r))))
     if len(offsets) >= 5 and scatter > 1.0:
-        rt_shift, map_rts, row_shift, alignment = 0.0, np.full(len(map_rts), np.nan), np.zeros(len(map_rts)), 'dropped'
+        # Unless enough anchors agree: in fraction runs and others with isomers the mapping does not list, a composition it lists once has its strongest
+        # input at another isomer, 10-50 min off, while the rest still sit on the mapping's gradient
+        o = np.array(offsets)
+        agree = np.abs(o - o[np.argmax([np.sum(np.abs(o - x) <= 1.0) for x in o])]) <= 1.0
+        if agree.sum() >= 5 and agree.mean() >= 0.4:
+            rt_shift, alignment = float(np.median(o[agree])), 'median'
+            row_shift = np.full(len(map_rts), rt_shift)
+        else:
+            rt_shift, map_rts, row_shift, alignment = 0.0, np.full(len(map_rts), np.nan), np.zeros(len(map_rts)), 'dropped'
     map_rts = map_rts + row_shift
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
     near = [[k for k in np.flatnonzero(fits[i]) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]

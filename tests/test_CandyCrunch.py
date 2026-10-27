@@ -933,6 +933,59 @@ def test_bruker_baf(tmp_path):
         load_spectra_filepath(str(folder))
 
 
+def test_waters_raw(tmp_path):
+    # A Waters MassLynx .raw folder (Fast DDA): _FUNCTNS.INF (a 416-byte record per function: scan type, ionization mode, centroid and lock mass bits; mass
+    # range at 160), per function an .IDX (30-byte or older 22-byte records: points, bit 30 for calibrated m/z, TIC, RT, offset), an .STS (parameter
+    # definitions, then a record per scan) and a .DAT of 12-byte centroids or 8-byte continuum points (intensity and m/z as mantissa and exponent); the
+    # continuum MS/MS function is stored uncalibrated and takes the header's calibration, a polynomial in sqrt(m/z) (here sqrt(m/z) = c0 + c1 sqrt(stored))
+    cal = [4e-3, 0.9998, 0.0, 0.0, 0.0, 0.0]
+    folder = tmp_path / 'run.raw'
+    folder.mkdir()
+
+    def pack(value, bits, shift):
+        e = int(np.floor(np.log2(value))) + 1 if value else 0
+        return round(value * 2.0 ** (bits - e)) | e << shift if value else 0
+
+    def function(k, head, scans, width, size, sts):
+        data, index = b'', b''
+        for rt, peaks in scans:
+            info = len(peaks) | (1 << 30 if width == 12 else 0)
+            index += struct.pack('<2I2f6sQ', 0, info, 0.0, rt, b'', len(data)) if size == 30 else struct.pack('<2I2f6s', len(data), info, 0.0, rt, b'')
+            data += b''.join(struct.pack('<2I', pack(i, 21, 22), pack(m, 27, 27)) + bytes(width - 8) for m, i in peaks)
+        defs = b''.join(struct.pack('<3H', number, 3, at) + name.ljust(26, b'\x00') + struct.pack('<H', 4) + bytes(14)
+                        for number, at, name in [(62, 0, b'Collision Energy'), (77, 4, b'Set Mass')])
+        stats = struct.pack('<4H', 32 + len(defs), 1, 8, 2) + bytes(24) + defs + b''.join(struct.pack('<2f', ce, mass) for ce, mass in sts)
+        for suffix, content in (('IDX', index), ('DAT', data), ('STS', stats)):
+            (folder / f'_FUNC{k:03d}.{suffix}').write_bytes(content)
+        return struct.pack('<H', head) + bytes(158) + struct.pack('<f', 50.0) + bytes(124) + struct.pack('<f', 2000.0) + bytes(124)
+
+    # Survey scan (function 1, ES-: ionization mode 9, centroided): a 3+ glycan at 965.844 and a 1+ one at 675.36
+    survey = [(675.36, 2e6), (965.844, 9e5), (965.844 + 1.003355 / 3, 1e6), (965.844 + 2 * 1.003355 / 3, 6e5), (1200.5, 3e4)]
+    # MS/MS (function 2, continuum): each fragment a peak of points evenly spaced in sqrt(m/z), as on the TOF grid, flanked by zeros
+    fragments = [290.09, 512.2, 800.3]
+    profile = [(((np.sqrt(f) + 2.2e-4 * k - cal[0]) / cal[1]) ** 2, h) for f in fragments for k, h in zip(range(-3, 4), [0, 20, 70, 100, 70, 20, 0])]
+    # The DDA set masses sit above the survey centroids: on the 13C peak of the 3+ ion, and 0.06 above the 1+ one; function 3 is the lock mass reference
+    (folder / '_FUNCTNS.INF').write_bytes(function(1, 18 | 9 << 5 | 0x400, [(10.0, survey)], 12, 30, [(4.0, 0.0)]) +
+                                          function(2, 16 | 9 << 5, [(10.01, profile), (10.02, profile)], 8, 22, [(25.0, 965.844 + 1.003355 / 3 + 0.03), (20.0, 675.42)]) +
+                                          function(3, 18 | 9 << 5 | 0x400 | 0x8000, [(10.015, [(554.2615, 5e4)])], 12, 30, [(4.0, 0.0)]))
+    (folder / '_HEADER.TXT').write_text('\n'.join(f'$$ Cal Function {k}: ' + ','.join(map(str, cal)) + ',T1' for k in (1, 2, 3)))
+    assert [s['scan'] for s in candycrunch.utils.read_waters(str(folder), peaks = False)] == ['function=1 process=0 scan=1', 'function=2 process=0 scan=1',
+                                                                                             'function=2 process=0 scan=2']
+    df = load_spectra_filepath(str(folder), extract_ms1 = True)
+    # The 3+ precursor walks down its isotopes from the 13C peak, the 1+ one is found 0.06 below its set mass; MassLynx stores no charge states
+    assert np.allclose(df['m/z'], [965.844, 675.36], atol = 1e-4) and df['precursor_charge'].isna().all()
+    # Continuum points are calibrated and centroided (calibrated centroids are not calibrated again); the lock mass function is no survey scan
+    assert sorted(df['peak_d'][0]) == pytest.approx(fragments, abs = 1e-3) and list(df['peak_d'][0].values()) == pytest.approx([280] * 3)
+    assert len(df.attrs['ms1'][0]) == 1 and not np.any(np.abs(df.attrs['ms1'][1] - 554.2615) < 0.01) and df.attrs['ms1'][1][0] == pytest.approx(675.36, abs = 1e-4)
+    assert df['scan'].tolist() == ['function=2 process=0 scan=1', 'function=2 process=0 scan=2'] and np.allclose(df['RT'], [10.01, 10.02])
+    assert df['collision_energy'].tolist() == [25.0, 20.0] and df['scan_low'].tolist() == [50.0, 50.0] and df['polarity'].tolist() == ['-'] * 2
+    assert df.attrs['detected_mode'] == 'negative' and df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof'
+    # Ion mobility (HDMS) runs keep their spectra in .cdt files, which are not read
+    (folder / '_func002.cdt').write_bytes(b'')
+    with pytest.raises(ValueError, match = 'ion mobility'):
+        load_spectra_filepath(str(folder))
+
+
 def test_agilent_masshunter(tmp_path):
     # An Agilent MassHunter .d folder: AcqData/MSScan.bin (header with the offset of the first record at byte 88, one 284-byte record per scan),
     # MSTS.xml (number of scans), MSMassCal.bin (per scan: a count, A, t0, polynomial step) and MSPeak.bin (per scan: float64 flight times, then

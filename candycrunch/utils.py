@@ -1,4 +1,4 @@
-"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Agilent MassHunter .d, Bruker Q-TOF .d and SCIEX .wiff spectra files, on the standard library and numpy"""
+"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Waters .raw, Agilent MassHunter .d, Bruker Q-TOF .d and SCIEX .wiff spectra files, on the standard library and numpy"""
 import base64
 import heapq
 import itertools
@@ -69,13 +69,15 @@ def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
     return np.stack([peak_mzs, peak_ints], axis = 1)
 
 
-def centroid_tof(mzs, ints, max_peaks = None):
+def centroid_tof(mzs, ints, max_peaks = None, valley = 0.7, min_height = 0):
     """centroids the summed TOF points of a timsTOF frame (or of one precursor's PASEF scans), which sit on the TOF digitizer grid, evenly spaced in sqrt(m/z)\n
    | Arguments:
    | :-
    | mzs (array): m/z values of the points, repeated where several ion mobility scans hit the same TOF bin
    | ints (array): their intensities
-   | max_peaks (int): keep only this many of the most intense centroids; default:None (all)\n
+   | max_peaks (int): keep only this many of the most intense centroids; default:None (all)
+   | valley (float): split a run where the smoothed signal dips below this share of the smaller of the two maxima around it; default:0.7
+   | min_height (float): only points above this share of their peak's apex weigh its m/z; default:0 (all)\n
    | Returns:
    | :-
    | Returns an (n, 2) array of centroid m/z and intensity: points of one TOF bin are summed, runs of neighboring bins are split where the signal
@@ -105,10 +107,11 @@ def centroid_tof(mzs, ints, max_peaks = None):
     bounds = np.flatnonzero(is_bound)
     tops, pos = np.maximum.reduceat(smooth, bounds), np.searchsorted(bounds, minima)
     is_bound = starts.copy()
-    is_bound[minima[smooth[minima] < 0.7 * np.minimum(tops[pos - 1], tops[pos])]] = True
+    is_bound[minima[smooth[minima] < valley * np.minimum(tops[pos - 1], tops[pos])]] = True
     bounds = np.flatnonzero(is_bound)
     peak_ints = np.add.reduceat(ints, bounds)
-    peak_mzs = np.add.reduceat(ints * mzs, bounds) / peak_ints
+    weights = ints * (ints >= min_height * np.maximum.reduceat(ints, bounds)[np.cumsum(is_bound) - 1]) if min_height else ints
+    peak_mzs = np.add.reduceat(weights * mzs, bounds) / np.add.reduceat(weights, bounds)
     if max_peaks is not None and len(peak_ints) > max_peaks:
         # The most intense centroids and, of those at the cut-off intensity, the first in m/z order: argpartition left which of these ties stay to its
         # algorithm, which differs between numpy builds (x86 SIMD vs the browser's wasm), and so did the survey frames of a timsTOF run
@@ -947,6 +950,101 @@ def read_baf(folder, peaks = True):
         raise ValueError(f"{name} has no readable analysis.baf; convert it to mzML with msconvert first.")
     if peaks and headers and not n_read:
         raise ValueError(f"{name} holds profile spectra only (no line spectra in its analysis.baf); convert it to mzML with msconvert (with peak picking) first.")
+
+
+# MassLynx scan index records (_FUNCnnn.IDX) by their size: the number of points in the low 22 bits of info (bit 30: m/z already calibrated), TIC, RT in
+# minutes and the scan's byte offset in the .DAT, a uint32 at 0 in the 22-byte records of older runs, a uint64 at 22 in the 30-byte ones
+WATERS_INDEX = [np.dtype({'names': ['info', 'tic', 'rt', 'offset'], 'formats': ['<u4', '<f4', '<f4', '<u8' if size == 30 else '<u4'],
+                          'offsets': [4, 8, 12, 22 if size == 30 else 0], 'itemsize': size}) for size in (30, 22)]
+
+
+def read_waters(folder, peaks = True):
+    """iterates over the scans of a Waters MassLynx .raw folder of a Q-TOF (SYNAPT, Xevo G2, Q-Tof Premier) run with a survey and MS/MS functions (DDA,
+    e.g., Fast DDA), in acquisition order; the lock mass function and functions of other scan types are skipped\n
+   | Arguments:
+   | :-
+   | folder (string): absolute path to the .raw folder
+   | peaks (bool): whether to read the spectra or only their headers (peaks then None); default:True\n
+   | Returns:
+   | :-
+   | Yields a dict per scan: scan (msconvert's native ID, 'function=f process=0 scan=s'), ms_level, rt (min), peaks ((n, 2) array of centroid m/z and
+   | intensity; continuum scans are centroided), precursor (mz, the DDA set mass, and charge None, as MassLynx stores none; None for survey scans),
+   | polarity ('+'/'-'), collision_energy and scan_low (the lower end of the function's mass range)
+   """
+    name = os.path.basename(os.path.normpath(folder))
+    # File names differ in case between MassLynx versions (_FUNC001.DAT, _func001.cdt, _inlet.inf)
+    files = {x.lower(): os.path.join(folder, x) for x in os.listdir(folder)}
+    if '_functns.inf' not in files:
+        raise ValueError(f"{name} is no Waters MassLynx .raw folder (no _FUNCTNS.INF).")
+    with open(files['_functns.inf'], 'rb') as f:
+        functions = f.read()
+    # Uncalibrated scans (continuum data) take the header's calibration of their function, a polynomial in sqrt(m/z) ('T1') whose square is the m/z
+    with open(files['_header.txt'], 'rb') as f:
+        calibrations = {int(k): v.split(',') for k, v in re.findall(r'Cal Function (\d+): ([^\r\n]+)', f.read().decode('latin-1'))}
+    scans = []
+    # _FUNCTNS.INF: a 416-byte record per function, first a uint16 (bits 0-4 the scan type, 16 TOF MS/MS and 18 TOF MS; bits 5-9 the ionization mode,
+    # odd for the negative ones such as ES-; bit 10 centroided data; bit 15 the lock mass reference function), the float32 mass range at 160 and 288
+    for k in range(len(functions) // 416):
+        head, low = struct.unpack_from('<H', functions, 416 * k)[0], struct.unpack_from('<f', functions, 416 * k + 160)[0]
+        stem = f'_func{k + 1:03d}'
+        if head & 0x8000 or head & 31 not in (16, 18) or stem + '.idx' not in files or not os.path.getsize(files[stem + '.idx']):
+            continue
+        if stem + '.cdt' in files:
+            raise ValueError(f"{name} holds ion mobility (HDMS) data, which CandyCrunch cannot read; convert it to mzML with msconvert first.")
+        with open(files[stem + '.idx'], 'rb') as f:
+            index = f.read()
+        size = os.path.getsize(files[stem + '.dat'])
+        # The index layout whose offsets step through the .DAT in points of 8 (continuum) or 12 bytes (centroids)
+        for record in WATERS_INDEX:
+            rows = np.frombuffer(index, dtype = record, count = len(index) // record.itemsize)
+            n = rows['info'].astype(np.int64) & 0x3fffff
+            width = size // max(int(n.sum()), 1)
+            if (len(index) % record.itemsize == 0 and width in (8, 12) and size == width * n.sum() and
+                    np.array_equal(rows['offset'], np.concatenate([[0], np.cumsum(n * width)[:-1]]))):
+                break
+        else:
+            raise ValueError(f"{name} has a MassLynx scan index CandyCrunch does not know; convert it to mzML with msconvert first.")
+        # _FUNCnnn.STS: per scan a record of the parameters its header defines (48 bytes each from byte 32: uint16 number, type 0-3 for uint8, int16,
+        # int32, float32, offset in the record, then the name); of them the DDA set mass and the collision energy
+        with open(files[stem + '.sts'], 'rb') as f:
+            stats = f.read()
+        start, _, length, count = struct.unpack_from('<4H', stats, 0)
+        fields = {stats[j + 6:j + 32].split(b'\x00')[0]: struct.unpack_from('<2H', stats, j + 2) for j in range(32, 32 + 48 * count, 48)}
+
+        def stat(key):
+            if key not in fields or not length or len(stats) < start + length * len(rows):
+                return [None] * len(rows)
+            kind, at = fields[key]
+            return np.frombuffer(stats, np.dtype({'names': ['v'], 'formats': [['<u1', '<i2', '<i4', '<f4'][kind]], 'offsets': [at], 'itemsize': length}),
+                                 len(rows), start)['v'].tolist()
+
+        scans += [(float(row['rt']), k, j, head, low, width, row, mz, energy) for j, (row, mz, energy) in enumerate(zip(rows, stat(b'Set Mass'), stat(b'Collision Energy')))]
+    handles = {}
+    try:
+        for rt, k, j, head, low, width, row, mz, energy in sorted(scans, key = lambda s: s[:3]):
+            spectrum = dict(scan = f'function={k + 1} process=0 scan={j + 1}', ms_level = 2 if head & 31 == 16 else 1, rt = rt, peaks = None,
+                            precursor = dict(mz = mz, charge = None) if head & 31 == 16 and mz else None, polarity = '-' if head >> 5 & 1 else '+',
+                            collision_energy = energy, scan_low = low)
+            if peaks:
+                n = int(row['info']) & 0x3fffff
+                f = handles[k] if k in handles else handles.setdefault(k, open(files[f'_func{k + 1:03d}.dat'], 'rb'))
+                f.seek(int(row['offset']))
+                words = np.fromfile(f, '<u4', n * width // 4).reshape(n, width // 4).astype(np.int64)
+                # A point is two (continuum) or three (centroid) uint32: the intensity as a 22-bit mantissa (bits 0-21) and a 5-bit exponent (22-26), the
+                # m/z as a 27-bit mantissa and a 5-bit exponent (27-31); the third word is not needed
+                ints = np.ldexp((words[:, 0] & 0x3fffff).astype(np.float64), (words[:, 0] >> 22 & 31) - 21)
+                mzs = np.ldexp((words[:, 1] & 0x7ffffff).astype(np.float64), (words[:, 1] >> 27) - 27)
+                if not int(row['info']) >> 30 & 1 and n:
+                    if calibrations.get(k + 1, [''])[-1].strip() != 'T1':
+                        raise ValueError(f"{name} uses a mass calibration CandyCrunch does not know; convert it to mzML with msconvert first.")
+                    mzs = np.polyval(np.array(calibrations[k + 1][:-1], dtype = np.float64)[::-1], np.sqrt(mzs)) ** 2
+                # Continuum scans are centroided as MassLynx does by default (its centroid top of 80%): the m/z from the points above 20% of a peak's apex,
+                # the intensity summed over the peak
+                spectrum['peaks'] = np.column_stack([mzs, ints]) if head & 0x400 else centroid_tof(mzs, ints, valley = 0.9, min_height = 0.2)
+            yield spectrum
+    finally:
+        for f in handles.values():
+            f.close()
 
 
 def mz_order(mzs, rts, charges, compositions):

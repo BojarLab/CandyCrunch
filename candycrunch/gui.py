@@ -521,6 +521,12 @@ def _detect_run(path, results):
                 if key in f.files:
                     z = np.abs(np.ascontiguousarray(f[key].T).view(meta['dtypes'][key]).ravel().astype(float))
                     charges = {int(c): int(k) for c, k in zip(*np.unique(z[~np.isnan(z)], return_counts = True))}
+        elif ext == '.raw' and os.path.isdir(path):
+            from candycrunch.utils import read_waters
+            # A Waters .raw folder: its MS/MS scans with a DDA set mass, from the scan index and statistics; MassLynx stores no charge states
+            ms2 = [s for s in read_waters(path, peaks = False) if s['precursor']]
+            n_ms2 = len(ms2)
+            found.update(mode = ('negative' if ms2[0]['polarity'] == '-' else 'positive') if ms2 else None, trap = 'other')
         elif ext == '.raw':
             from candycrunch.utils import read_raw_scan_table
             table = read_raw_scan_table(path)
@@ -1670,7 +1676,7 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF DDA-PASEF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, Waters .raw folders, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF DDA-PASEF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -1934,8 +1940,8 @@ class SettingsPanel(QScrollArea):
         existing, target = set(self.paths()), self.current_experiment()
         empty = target is None or not target.childCount()
         for path in map(os.path.normpath, paths):
-            # A .d folder is one run; any other folder adds its runs
-            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith('.d') else [path]
+            # A .d or Waters .raw folder is one run; any other folder adds its runs
+            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith(('.d', '.raw')) else [path]
             for file in found:
                 if file.lower().endswith(SPECTRA_SUFFIXES + ('.xlsx',)) and os.path.abspath(file) not in existing:
                     existing.add(os.path.abspath(file))
@@ -4319,7 +4325,7 @@ class MainWindow(QMainWindow):
         count = len(self.settings.paths())
         self.settings.add_paths(paths)
         if paths and len(self.settings.paths()) == count:
-            self.statusBar().showMessage('No new runs added. CandyCrunch reads Thermo .raw, Bruker .d, mzML, mzXML, mzData, mgf, and .cc or .xlsx made by extract_spectra; '
+            self.statusBar().showMessage('No new runs added. CandyCrunch reads Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, mgf, and .cc or .xlsx made by extract_spectra; '
                                          'a folder adds its runs but not its .xlsx files, which are added one by one', 10000)
 
     def choose_files(self):
@@ -4330,9 +4336,9 @@ class MainWindow(QMainWindow):
             self.add_runs(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (Bruker, Agilent MassHunter), or every .raw, .wiff, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (Bruker, Agilent MassHunter) or Waters .raw folder, or every .raw, .wiff, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
-            self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith('.d') else path)
+            self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith(('.d', '.raw')) else path)
             self.add_runs([path])
 
     def dragEnterEvent(self, event):
@@ -4389,7 +4395,7 @@ class MainWindow(QMainWindow):
         self.file_progress, self.fraction, self.first_report, self.stage_times = dict.fromkeys(map(os.path.normcase, files), 0.0), 0.0, None, []
         # Experiments run one after the other, so a batch's harmonization belongs to the experiment of the latest file that reported
         self.groups, self.tail_progress, self.active = [[os.path.normcase(f) for f in paths] for _, paths, _ in experiments], [0.0] * len(experiments), 0
-        # A .d folder counts with the size of its files, also those in subfolders (Agilent's AcqData), a .wiff file with its .wiff.scan
+        # A .d or Waters .raw folder counts with the size of its files, also those in subfolders (Agilent's AcqData), a .wiff file with its .wiff.scan
         self.file_sizes = {os.path.normcase(f): max(sum(os.path.getsize(os.path.join(d, x)) for d, _, xs in os.walk(f) for x in xs) if os.path.isdir(f) else
                                                     os.path.getsize(f) + (os.path.getsize(f + '.scan') if os.path.exists(f + '.scan') else 0), 1)
                            if os.path.exists(f) else 1 for f in files}
