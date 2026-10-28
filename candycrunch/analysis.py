@@ -502,24 +502,40 @@ def mono_graph_to_nx(mono_graph, directed = True):
     return gr
 
 
-def enumerate_subgraphs(nx_mono):
+def enumerate_subgraphs(nx_mono, masks = False):
     """Returns the node sets of all connected induced subgraphs of a graph\n
     | Arguments:
     | :-
-    | nx_mono (networkx_object): monosaccharide only graph\n
+    | nx_mono (networkx_object): monosaccharide only graph
+    | masks (bool): whether to also return each node set as a bit mask (bit i for the i-th node in sorted order); default:False\n
     | Returns:
     | :-
-    | Returns a list of node sets, one per connected induced subgraph (nx_mono.subgraph(node_set) gives the subgraph)
+    | Returns a list of node sets, one per connected induced subgraph (nx_mono.subgraph(node_set) gives the subgraph), and with masks, a list of their masks
     """
-    all_subgraphs = []
-    if nx_mono.number_of_nodes() > 1:
-        # one search collects all sizes, a search per size would repeat every smaller level; the stable sort by size
-        # restores the order of concatenated per-size searches
-        neighbor_dict = {v: set(nx_mono.predecessors(v)) | set(nx_mono.successors(v)) for v in nx_mono.nodes}
+    n = nx_mono.number_of_nodes()
+    by_size = [[] for _ in range(n)]
+    if n > 1:
+        # extend_subgraph's search (with all_sizes) with the extension and neighbors as bit masks; one search collects all sizes, a search per size would
+        # repeat every smaller level, and each size keeps the order of its own search
+        nodes = sorted(nx_mono)
+        bit = {v: 1 << i for i, v in enumerate(nodes)}
+        neighbor_bits = {v: sum(bit[u] for u in set(nx_mono.predecessors(v)) | set(nx_mono.successors(v))) for v in nx_mono}
+
+        def extend(subgraph, mask, extension, above, neighbors):
+            by_size[len(subgraph)].append((subgraph, mask))
+            if len(subgraph) < n - 1:
+                while extension:
+                    low = extension & -extension
+                    extension ^= low
+                    w = nodes[low.bit_length() - 1]
+                    extend(subgraph | {w}, mask | low, extension | (neighbor_bits[w] & ~neighbors & above), above, neighbors | neighbor_bits[w])
+
         for node in nx_mono.nodes():
-            extend_subgraph({node}, {x for x in neighbor_dict[node] if x > node}, node, nx_mono.number_of_nodes() - 1,
-                            all_subgraphs, neighbor_dict, nx_mono, all_sizes = True)
-    return sorted(all_subgraphs, key = len)
+            # the nodes after this one
+            above = -(bit[node] << 1)
+            extend({node}, bit[node], neighbor_bits[node] & above, above, neighbor_bits[node])
+    found = [x for size in by_size for x in size]
+    return ([s for s, _ in found], [m for _, m in found]) if masks else [s for s, _ in found]
 
 
 def enumerate_k_graphs(nx_mono, k):
@@ -1091,7 +1107,7 @@ _GLYCAN_GRAPHS = {}
 def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = 3,
                           fragment_masses = [], subgraphs = None,
                           threshold = 0.5, mass_tag = None, charge = -1, sample_prep = 'underivatized',
-                          disable_A_cross_rings = False, threshold_ppm = None, peptide_ion_types = None):
+                          disable_A_cross_rings = False, threshold_ppm = None, peptide_ion_types = None, max_cross_rings = None):
     """Calculates the graph and mass of all possible fragments of the input\n
     | Arguments:
     | :-
@@ -1110,7 +1126,8 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     |                                         residue on fragments with a metal cation; default: False
     | threshold_ppm (float): relative tolerance in ppm on top of threshold, as match_fragment_properties applies it (a fragment it could never match
     |                        is not made); default:None
-    | peptide_ion_types (set): the peptide backbone ion types to make, as CandyCrumbs names only those of its fragmentation method; default:None (all)\n
+    | peptide_ion_types (set): the peptide backbone ion types to make, as CandyCrumbs names only those of its fragmentation method; default:None (all)
+    | max_cross_rings (int): most cross-ring cleavages (A or X) a fragment may have, as CandyCrumbs and supporting_ions use no others; default:None (any)\n
     | Returns:
     | :-
     | Returns a dict of lists of Fragments by their mass
@@ -1150,11 +1167,15 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
         key = (tuple(nx_mono), tuple(nx_mono.edges()), max_cleavages)
         cached = _NODE_SETS.get(key)
         if cached is None:
-            sets = enumerate_subgraphs(nx_mono)
-            # which nodes each set holds, as a matrix: a node is a cut terminal if one of its neighbors is outside the set
+            sets, masks = enumerate_subgraphs(nx_mono, masks = True)
+            # which nodes each set holds, as a matrix (read off the sets' bit masks while they fit an int64): a node is a cut terminal if one of its neighbors
+            # is outside the set
             pos = {v: j for j, v in enumerate(node_list)}
-            member = np.zeros((len(sets), len(node_list)), dtype = bool)
-            member[np.repeat(np.arange(len(sets)), [len(x) for x in sets]), [pos[v] for x in sets for v in x]] = True
+            if len(node_list) < 64:
+                member = (np.array(masks, dtype = np.uint64)[:, np.newaxis] >> np.array([sorted(node_list).index(v) for v in node_list], dtype = np.uint64)) & np.uint64(1) == 1
+            else:
+                member = np.zeros((len(sets), len(node_list)), dtype = bool)
+                member[np.repeat(np.arange(len(sets)), [len(x) for x in sets]), [pos[v] for x in sets for v in x]] = True
             cuts = np.zeros(len(sets), dtype = int)
             for j, v in enumerate(node_list):
                 if v not in all_other_terminals:
@@ -1194,44 +1215,55 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
                 incident[v].append((u, d['bond_label'], False))
             if len(_TERMINAL_OPTIONS) > 50000:
                 _TERMINAL_OPTIONS.clear()
-            # per node set and node: whether the node has a cut bond, whether it is the root of the set, and which of its bonds stay in the set (bit k for its
-            # k-th bond), which only depend on the topology, so they are kept with its node sets
-            if membership is not None and len(membership) > 2:
-                member, cut, is_root, bonds = membership[1:]
-            else:
-                if membership is not None:
-                    member = membership[1]
+            # Per node set and node: whether the node has a cut bond, whether it is the root of the set, and which of its bonds stay in the set (bit k for its
+            # k-th bond), and from these the terminals, sets left to the full calculation and kinds of terminal below, which only depend on the topology (and
+            # which nodes are reducing ends), so they are kept with its node sets
+            topology = membership[5].get(tuple(red_ends)) if membership is not None and len(membership) > 2 else None
+            if topology is None:
+                if membership is not None and len(membership) > 2:
+                    member, cut, is_root, bonds = membership[1:5]
                 else:
-                    sets = [subgraphs[i] for i in set_idx]
-                    member = np.zeros((len(sets), len(node_list)), dtype = bool)
-                    member[np.repeat(np.arange(len(sets)), [len(x) for x in sets]), [pos[v] for x in sets for v in x]] = True
-                cut = np.column_stack([member[:, j] & ~member[:, [pos[u] for u in neighbor_dict[v]]].all(axis = 1) for j, v in enumerate(node_list)])
-                is_root = np.column_stack([member[:, j] & ~member[:, [pos[u] for u in succ_sets[v]]].any(axis = 1) for j, v in enumerate(node_list)])
-                is_root &= np.cumsum(is_root, axis = 1) == 1
-                bonds = np.zeros(member.shape, dtype = np.uint8 if max(map(len, incident.values())) <= 8 else np.int64)
-                for j, v in enumerate(node_list):
-                    for k, (u, _, _) in enumerate(incident[v]):
-                        bonds[:, j] |= member[:, pos[u]].astype(bonds.dtype) << k
+                    if membership is not None:
+                        member = membership[1]
+                    else:
+                        sets = [subgraphs[i] for i in set_idx]
+                        member = np.zeros((len(sets), len(node_list)), dtype = bool)
+                        member[np.repeat(np.arange(len(sets)), [len(x) for x in sets]), [pos[v] for x in sets for v in x]] = True
+                    cut = np.column_stack([member[:, j] & ~member[:, [pos[u] for u in neighbor_dict[v]]].all(axis = 1) for j, v in enumerate(node_list)])
+                    is_root = np.column_stack([member[:, j] & ~member[:, [pos[u] for u in succ_sets[v]]].any(axis = 1) for j, v in enumerate(node_list)])
+                    is_root &= np.cumsum(is_root, axis = 1) == 1
+                    bonds = np.zeros(member.shape, dtype = np.uint8 if max(map(len, incident.values())) <= 8 else np.int64)
+                    for j, v in enumerate(node_list):
+                        for k, (u, _, _) in enumerate(incident[v]):
+                            bonds[:, j] |= member[:, pos[u]].astype(bonds.dtype) << k
+                    if membership is not None:
+                        membership[2:] = [cut, is_root, bonds, {}]
+                # a terminal has a cut bond, or is a leaf or the reducing end of the glycan
+                other = np.array([v in all_other_terminals for v in node_list])
+                terminal = cut | (member & other)
+                # node sets with too many cleavages, which their nodes alone tell (enumerated ones are filtered above), are skipped, and ones with two reducing
+                # ends are left to the full calculation
+                allowed = (cut & ~other).sum(axis = 1) <= max_cleavages if check_cuts else np.ones(len(member), dtype = bool)
+                two_reds = member[:, [pos[v] for v in red_ends]].sum(axis = 1) >= 2
+                active = allowed & ~two_reds
+                # each terminal's options, looked up once per node and kind of terminal (root or not, which of its bonds stay in the set)
+                rows, cols = np.nonzero(terminal & active[:, np.newaxis])
+                degree = np.array([len(incident[v]) for v in node_list])
+                uniq, first, inverse = np.unique((cols.astype(np.int64) << 32) | (is_root[rows, cols].astype(np.int64) << degree[cols]) | bonds[rows, cols].astype(np.int64),
+                                                 return_index = True, return_inverse = True)
+                # the inner nodes and bonds of each set, and how many peptide terminals it has
+                edges = np.array([[pos[u], pos[v]] for u, v in nx_edge_dict], dtype = int).reshape(-1, 2)
+                topology = (member, allowed, two_reds, active, rows, cols, uniq.tolist(), first.tolist(), inverse.ravel(), member & ~terminal,
+                            (member[:, edges[:, 0]] & member[:, edges[:, 1]]).sum(axis = 1),
+                            (terminal & np.array([v.split('-')[0] == '0' for v in node_list])).sum(axis = 1) if peptide_graph else None)
                 if membership is not None:
-                    membership[2:] = [cut, is_root, bonds]
-            # a terminal has a cut bond, or is a leaf or the reducing end of the glycan
-            other = np.array([v in all_other_terminals for v in node_list])
-            terminal = cut | (member & other)
-            # node sets with too many cleavages, which their nodes alone tell (enumerated ones are filtered above), are skipped, and ones with two reducing
-            # ends are left to the full calculation
-            allowed = (cut & ~other).sum(axis = 1) <= max_cleavages if check_cuts else np.ones(len(member), dtype = bool)
-            two_reds = member[:, [pos[v] for v in red_ends]].sum(axis = 1) >= 2
-            active = allowed & ~two_reds
-            # each terminal's options, looked up once per node and kind of terminal (root or not, which of its bonds stay in the set)
-            rows, cols = np.nonzero(terminal & active[:, np.newaxis])
-            degree = np.array([len(incident[v]) for v in node_list])
-            uniq, first, inverse = np.unique((cols.astype(np.int64) << 32) | (is_root[rows, cols].astype(np.int64) << degree[cols]) | bonds[rows, cols].astype(np.int64),
-                                             return_index = True, return_inverse = True)
+                    membership[5][tuple(red_ends)] = topology
+            member, allowed, two_reds, active, rows, cols, uniq, first, inverse, inner, inner_bonds, peptide_terminals = topology
             opt_table, opt_ids = [], np.full(member.shape, -1)
             # a terminal's options are kept by its label, bonds (label, direction), whether it is the root (bit len(bonds)) and which bonds stay (bit k for the
             # k-th), whether it is the reducing end, and the settings
             signatures = {v: (node_dict[v], tuple((label, child) for _, label, child in incident[v]), red_ends.get(v, False), settings) for v in node_list}
-            for code, f in zip(uniq.tolist(), first.tolist()):
+            for code, f in zip(uniq, first):
                 v = node_list[code >> 32]
                 # read once with get, as another thread (the app's annotation) may clear the store in between
                 key = (signatures[v], code & 0xFFFFFFFF)
@@ -1253,19 +1285,20 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
                                                    sample_prep = sample_prep,
                                                    root_label = node_dict[v] if bonus else None)) - mode_mass
                     bonus = reducing_end_bonus(mono_perms[0], mass_tag, sample_prep = sample_prep, root_label = node_dict[v]).tolist() if bonus else None
-                    # last, its residue, bond and reducing-end masses per option as one array, as the exact calculation sums them
+                    # then its residue, bond and reducing-end masses per option as one array, as the exact calculation sums them, and whether each option is a
+                    # cross-ring
                     opt = _TERMINAL_OPTIONS[key] = (vals, np.array(
                         [mod_count([[m], [a]], None) for m, a in zip(mono_perms[0], atom_perms[0])], dtype = int),
                                                     mono_perms[0], atom_perms[0], mono_m[0], atom_m[0],
                                                     vals.min(initial = np.inf), vals.max(initial = -np.inf), bonus,
-                                                    np.array([mono_m[0], atom_m[0], bonus or [0.0] * len(vals)], dtype = float).reshape(3, -1))
+                                                    np.array([mono_m[0], atom_m[0], bonus or [0.0] * len(vals)], dtype = float).reshape(3, -1),
+                                                    np.array([m in A_cross_rings or m in X_cross_rings for m in mono_perms[0]], dtype = int))
                 opt_table.append(opt)
-            opt_ids[rows, cols] = inverse.ravel()
-            # the global modifications of each node set, by the labels it holds
+            opt_ids[rows, cols] = inverse
+            # the global modifications of each node set, by the labels it holds (bit k for the k-th)
             labels = sorted(set(node_dict.values()))
-            holds = np.zeros(len(member), dtype = object if len(labels) > 62 else np.int64)
-            for k, label in enumerate(labels):
-                holds += member[:, [pos[v] for v in node_list if node_dict[v] == label]].any(axis = 1).astype(holds.dtype) * (1 << k)
+            holds = np.bitwise_or.reduce(np.where(member, np.array([1 << labels.index(node_dict[v]) for v in node_list],
+                                                                   dtype = object if len(labels) > 62 else np.int64), 0), axis = 1)
             uniq, first, gid = np.unique(holds, return_index = True, return_inverse = True)
             gid, global_table = gid.ravel(), []
             for present, f in zip(uniq.tolist(), first.tolist()):
@@ -1282,14 +1315,13 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             offsets = np.cumsum(lens) - lens
             flat_masses = np.concatenate([o[0] for o in opt_table] + [np.zeros(1)])
             flat_counts = np.concatenate([o[1] for o in opt_table] + [np.zeros(1, dtype = int)])
+            flat_rings = np.concatenate([o[10] for o in opt_table] + [np.zeros(1, dtype = int)])
             lightest = np.array([o[6] for o in opt_table] + [0.0])[opt_ids].sum(axis = 1) + np.array([o[5] for o in global_table])[gid]
             heaviest = np.array([o[7] for o in opt_table] + [0.0])[opt_ids].sum(axis = 1) + np.array([o[6] for o in global_table])[gid]
-            edges = np.array([[pos[u], pos[v]] for u, v in nx_edge_dict], dtype = int).reshape(-1, 2)
-            base = (member & ~terminal) @ np.array([full_masses[v] for v in node_list]) + mode_mass - (
-                (member[:, edges[:, 0]] & member[:, edges[:, 1]]).sum(axis = 1) * deriv_mass if deriv_mass else 0)
+            base = inner @ np.array([full_masses[v] for v in node_list]) + mode_mass - (inner_bonds * deriv_mass if deriv_mass else 0)
             if peptide_graph:
                 # the options of each peptide terminal carry the water of the peptide's termini, which a fragment gains once
-                base -= WATER_MASS * np.maximum((terminal & np.array([v.split('-')[0] == '0' for v in node_list])).sum(axis = 1) - 1, 0)
+                base -= WATER_MASS * np.maximum(peptide_terminals - 1, 0)
             caps = max_cleavages - np.array([o[3].min() for o in global_table])[gid]
             # sets of other labels mostly have the same global modifications, so they are checked together
             same = {}
@@ -1302,30 +1334,34 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             g_pad = np.zeros((len(global_table), g_width)), np.full((len(global_table), g_width), max_cleavages + 1), np.zeros((len(global_table), g_width), dtype = bool)
             for k, o in enumerate(global_table):
                 g_pad[0][k, :len(o[0])], g_pad[1][k, :len(o[0])], g_pad[2][k, :len(o[0])] = o[2], o[3], o[4]
-            prepared = (member, allowed, two_reds, active, opt_table, opt_ids, gid, global_table, lens, offsets, flat_masses, flat_counts, base, base + lightest,
-                        base + heaviest, caps, same, group, flat_options, g_pad)
+            # each set's terminal options in node order, the empty option (-1) after them
+            slots = np.take_along_axis(opt_ids, np.argsort(opt_ids < 0, axis = 1, kind = 'stable'), axis = 1)
+            prepared = (member, allowed, two_reds, active, opt_table, opt_ids, gid, global_table, lens, offsets, flat_masses, flat_counts, flat_rings, base,
+                        base + lightest, base + heaviest, caps, same, group, flat_options, g_pad, slots, (slots >= 0).sum(axis = 1))
             if prep_key is not None:
                 if len(_PREPARED) > 1000:
                     _PREPARED.clear()
                 _PREPARED[prep_key] = prepared
-        (member, allowed, two_reds, active, opt_table, opt_ids, gid, global_table, lens, offsets, flat_masses, flat_counts, base, lightest, heaviest, caps, same,
-         group, flat_options, g_pad) = prepared
+        (member, allowed, two_reds, active, opt_table, opt_ids, gid, global_table, lens, offsets, flat_masses, flat_counts, flat_rings, base, lightest, heaviest,
+         caps, same, group, flat_options, g_pad, slots, n_terminals) = prepared
         first = np.searchsorted(targets, lightest - threshold - 2e-6, 'right')
         rows = np.flatnonzero(active & (first < len(targets)) & (np.append(targets, np.inf)[first] < heaviest + threshold + 2e-6))
         # every combination of options of these sets, with its index in the product of the set's terminal options in node order, built terminal by terminal
-        # (the k-th terminal of a set in node order; a set with fewer terminals takes the empty option, the last); cleavage counts only add up, so
-        # partial combinations over the cap are dropped as they appear
-        slots = np.take_along_axis(opt_ids[rows], np.argsort(opt_ids[rows] < 0, axis = 1, kind = 'stable'), axis = 1)
+        # (the k-th terminal of a set in node order; a set with fewer terminals takes the empty option, the last); cleavage and cross-ring counts only add
+        # up, so partial combinations over the caps are dropped as they appear
+        slots = slots[rows]
         c_set, c_mass, c_count, c_index = np.arange(len(rows)), np.zeros(len(rows)), np.zeros(len(rows), dtype = int), np.zeros(len(rows), dtype = np.int64)
-        for k in range(int((slots >= 0).sum(axis = 1).max(initial = 0))):
+        c_rings, ring_cap = np.zeros(len(rows), dtype = int), max_cleavages if max_cross_rings is None else max_cross_rings
+        for k in range(int(n_terminals[rows].max(initial = 0))):
             o = slots[c_set, k]
             n = lens[o]
             src = np.repeat(np.arange(len(c_set)), n)
             local = np.arange(len(src)) - np.repeat(np.cumsum(n) - n, n)
             option = np.repeat(offsets[o], n) + local
             c_set, c_mass, c_count, c_index = c_set[src], c_mass[src] + flat_masses[option], c_count[src] + flat_counts[option], c_index[src] * n[src] + local
-            ok = c_count <= caps[rows[c_set]]
-            c_set, c_mass, c_count, c_index = c_set[ok], c_mass[ok], c_count[ok], c_index[ok]
+            c_rings = c_rings[src] + flat_rings[option]
+            ok = (c_count <= caps[rows[c_set]]) & (c_rings <= ring_cap)
+            c_set, c_mass, c_count, c_index, c_rings = c_set[ok], c_mass[ok], c_count[ok], c_index[ok], c_rings[ok]
         c_slot, c_set = c_set, rows[c_set]
         # the combinations with any global modification near a wanted mass are the only ones the full calculation has to do, as it would keep no other
         near = np.zeros(len(c_set), dtype = bool)
@@ -1393,9 +1429,14 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
                 continue
         # the surviving node set as the node and successor dicts a copy of its subgraph view has (its node order, each node's out-edges in parent order,
         # attribute dicts copied), built straight from the parent graph's dicts, as networkx adds nodes and edges one by one; glycopeptide subgraphs
-        # are copied in parent order, as the first reducing end temporary_root_calc_func finds depends on it
-        node_data = {v: nx_mono._node[v].copy() for v in nodes}
-        succ = {u: {v: d.copy() for v, d in nx_mono._succ[u].items() if v in node_data} for u in node_data}
+        # are copied in parent order, as the first reducing end temporary_root_calc_func finds depends on it. The Fragments of sets the precheck found keep
+        # the parent graph's attribute dicts, which they only read and annotate_subgraph copies
+        if opts:
+            node_data = {v: nx_mono._node[v] for v in nodes}
+            succ = {u: {v: d for v, d in nx_mono._succ[u].items() if v in node_data} for u in node_data}
+        else:
+            node_data = {v: nx_mono._node[v].copy() for v in nodes}
+            succ = {u: {v: d.copy() for v, d in nx_mono._succ[u].items() if v in node_data} for u in node_data}
         if opts:
             # the options the precheck took, whose combinations near a wanted mass are checked below
             bonus_root_mass, root_node = bool(reds) and red_ends[reds[0]], root
@@ -1440,6 +1481,9 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
                                            sample_prep = sample_prep, root_label = node_dict.get(bonus_root_node) if bonus_root_mass else None))
             counts = (row_counts[:, np.newaxis] + global_counts).ravel()
             keep = (counts <= max_cleavages) & ~((counts > m_thresh) & has_adduct)
+            if max_cross_rings is not None:
+                keep &= np.repeat(sum(np.array([m in A_cross_rings or m in X_cross_rings for m in perms], dtype = int)[perm_indices[:, t]]
+                                      for t, perms in enumerate(mono_mod_perms)) <= max_cross_rings, len(subg_global_mods))
             if not unfiltered:
                 idx = np.searchsorted(padded[1:-1], initial_masses)
                 # with threshold_ppm, within it too (with the 5-decimal rounding of the fragment masses match_fragment_properties compares)
@@ -1539,9 +1583,9 @@ def rank_chains(nx_mono):
     node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
     og_root = next(v for v, d in nx_mono.out_degree() if d == 0)
     og_leaves = set(v for v, d in nx_mono.in_degree() if d == 0)
-    leaf_chains = [nx.shortest_path(nx_mono, source = og_leaf) for og_leaf in og_leaves]
+    leaf_chains = [nx.shortest_path(nx_mono, source = og_leaf, target = og_root) for og_leaf in og_leaves]
     basic = {n: map_to_basic(v, obfuscate_ptm = False) for n, v in node_dict.items()}
-    main_chains = sorted([branch_path[og_root] for branch_path in leaf_chains],
+    main_chains = sorted(leaf_chains,
                          key = lambda x: sum(mono_attributes[basic[n]]['mass'][basic[n]] for n in x), reverse = True)
     return zip(ranks, main_chains)
 
@@ -1880,40 +1924,47 @@ def score_fragment_prior(dc_name, charge, chain_lengths = None):
     """
     if not dc_name:
         return 0.0
-    mode = np.sign(charge)
-    cleavage_weights = fragmentation_priors['cleavage_type'].get(mode, fragmentation_priors['cleavage_type'][-1])
     re_weights = fragmentation_priors['reducing_end_cross_ring']
-    cation_adduct = any(c.startswith('M_') and any(a in c for a in re_weights['adducts']) for c in dc_name)
+    # each cleavage is read once (prior_term); most fragment names are new, but made of a few cleavages
+    terms = [prior_term(cut, 1 if charge > 0 else -1 if charge < 0 else 0) for cut in dc_name]
+    cation_adduct = any(t[3] for t in terms)
     score = 0.0
-    n_cleavages = hydrogens = 0
-    for cut in dc_name:
-        parts = cut.split('_')
-        if parts[0] == 'M':
-            # a hydrogen shift scales the whole fragment's prior, everything else adds its own
-            components = parse_global_mod('_'.join(parts[1:]))
-            other = [x for x in components if x not in HYDROGEN_ATOMS]
-            hydrogens += len(components) - len(other)
-            if other or not components:
-                score += math.prod(fragmentation_priors['global_mod'].get(x, 0.2) for x in other) if other else 0.2
+    n_cleavages = hydrogens = n_cross = 0
+    for cut_score, cleaves, shift, _, cross in terms:
+        hydrogens += shift
+        if cut_score is None:
             continue
-        if parts[0] == 'I':
-            score += fragmentation_priors['chain_ion' if parts[1] in CHAIN_IONS else 'small_ion']
-            n_cleavages += 1
-            continue
-        cut_score = cleavage_weights.get(parts[0], 0.1)
-        if cation_adduct and (parts[0] in A_cross_rings or parts[0] in X_cross_rings):
+        if cation_adduct and cross:
             # the reducing-terminal residue: X_1, or an A cross-ring numbered by the length of its chain (A_R)
-            reducing = parts[1] == '1' if parts[0] in X_cross_rings else chain_lengths is not None and chain_lengths.get(parts[2]) == int(parts[1])
+            parts = cross[1]
+            reducing = parts[1] == '1' if cross[0] else chain_lengths is not None and chain_lengths.get(parts[2]) == int(parts[1])
             cut_score *= re_weights['boost'] if reducing else re_weights['non_reducing_penalty']
         score += cut_score
-        n_cleavages += 1
+        n_cleavages += cleaves
+        n_cross += cross is not None
     if n_cleavages > 1:
-        n_cross = sum(1 for c in dc_name if c.split('_')[0] in A_cross_rings or c.split('_')[0] in X_cross_rings)
         n_glyco = n_cleavages - n_cross
         penalties = fragmentation_priors['multi_cleavage_penalty']
         score *= penalties['glycosidic'] ** (max(n_glyco - 1, 0) if n_glyco else 0)
         score *= penalties['cross_ring'] ** (n_cross if n_glyco else max(n_cross - 1, 0))
     return score * fragmentation_priors['hydrogen_shift'].get(hydrogens, 1.0)
+
+
+@lru_cache(maxsize = 65536)
+def prior_term(cut, mode):
+    """score_fragment_prior's reading of one cleavage name in an ion mode (sign of the charge): its prior (None if it adds none), cleavages, hydrogen
+    shifts, whether it is a metal adduct, and for a cross-ring (whether it is an X, its name split at '_'), else None"""
+    parts = cut.split('_')
+    if parts[0] == 'M':
+        # a hydrogen shift scales the whole fragment's prior, everything else adds its own
+        components = parse_global_mod('_'.join(parts[1:]))
+        other = [x for x in components if x not in HYDROGEN_ATOMS]
+        prior = (math.prod(fragmentation_priors['global_mod'].get(x, 0.2) for x in other) if other else 0.2) if other or not components else None
+        return prior, 0, len(components) - len(other), cut.startswith('M_') and any(a in cut for a in fragmentation_priors['reducing_end_cross_ring']['adducts']), None
+    if parts[0] == 'I':
+        return fragmentation_priors['chain_ion' if parts[1] in CHAIN_IONS else 'small_ion'], 1, 0, False, None
+    cleavage_weights = fragmentation_priors['cleavage_type'].get(mode, fragmentation_priors['cleavage_type'][-1])
+    return cleavage_weights.get(parts[0], 0.1), 1, 0, False, (parts[0] in X_cross_rings, parts) if parts[0] in A_cross_rings or parts[0] in X_cross_rings else None
 
 
 def count_cleavages(dc_name):
@@ -1997,7 +2048,7 @@ def glycopeptide_frag_to_string(pep_gr, subg):
     return pep_part + '*' + '*'.join(glycan_strings)
 
 
-def priority_filter(dc_names, diffs, peptide = False, charge = -1, lability = None, chain_lengths = None):
+def priority_filter(dc_names, diffs, peptide = False, charge = -1, lability = None, chain_lengths = None, ranks = None):
     """Filters Domon-Costello fragment names by number of cleavages, fragmentation prior, and difference from observed mass\n
     | Arguments:
     | :-
@@ -2006,7 +2057,8 @@ def priority_filter(dc_names, diffs, peptide = False, charge = -1, lability = No
     | peptide (bool): whether the input is a glycopeptide; default:False
     | charge (int): charge state of the precursor ion; default:-1
     | lability (list): lability score of each fragment; default:None (DEFAULT_LABILITY for all)
-    | chain_lengths (dict): residues per chain rank of the glycan, as score_fragment_prior takes them; default:None\n
+    | chain_lengths (dict): residues per chain rank of the glycan, as score_fragment_prior takes them; default:None
+    | ranks (dict): fragment_rank of each name by its id, if already at hand; default:None\n
     | Returns:
     | :-
     | Returns the fragment names sorted by number of cleavages (none for the intact precursor), prior score, observed mass difference and lability,
@@ -2017,9 +2069,10 @@ def priority_filter(dc_names, diffs, peptide = False, charge = -1, lability = No
         sorted_frags = sorted(zip(dc_names, diffs, lability),
                               key = lambda x: (count_gp_cleavages(x[0]), -score_gp_prior(x[0], charge), x[1]))
     else:
-        lengths = None if chain_lengths is None else tuple(chain_lengths.items())
-        sorted_frags = sorted(zip(dc_names, diffs, lability),
-                              key = lambda x: ((rank := fragment_rank(tuple(x[0]), charge, chain_lengths = lengths))[0], -rank[1], x[1], -x[2]))
+        if ranks is None:
+            lengths = None if chain_lengths is None else tuple(chain_lengths.items())
+            ranks = {id(x): fragment_rank(tuple(x), charge, chain_lengths = lengths) for x in dc_names}
+        sorted_frags = sorted(zip(dc_names, diffs, lability), key = lambda x: ((rank := ranks[id(x[0])])[0], -rank[1], x[1], -x[2]))
     return [f[0] for f in sorted_frags], [f[1] for f in sorted_frags], [f[2] for f in sorted_frags]
 
 
@@ -2088,7 +2141,7 @@ def match_fragment_properties(subg_frags, mass, mass_threshold, charge, sorted_f
 
 
 def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = None, charge = -1, prior_weight = 1.0,
-                       lability_scores = None, mass_threshold = 0.5, chain_lengths = None):
+                       lability_scores = None, mass_threshold = 0.5, chain_lengths = None, ranks = None):
     """Sorts a list of possible fragments for each observed mass into a list of one fragment per observed mass\n
     | Arguments:
     | :-
@@ -2101,7 +2154,8 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
     | prior_weight (float): scaling factor for fragmentation prior contribution to scoring; default:1.0
     | lability_scores (list): a nested list of the lability score of each fragment option; default:None
     | mass_threshold (float): mass tolerance, which scales the mass difference term for glycopeptides; default:0.5
-    | chain_lengths (dict): residues per chain rank of the glycan, as score_fragment_prior takes them; default:None\n
+    | chain_lengths (dict): residues per chain rank of the glycan, as score_fragment_prior takes them; default:None
+    | ranks (dict): fragment_rank of each name by its id, if already at hand; default:None\n
     | Returns:
     | :-
     | Returns a nested list with each list containing a single fragment or being empty
@@ -2123,10 +2177,12 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
     # how many of the fragments chosen so far contain each cleavage, so an option's overlap with them is one lookup per cleavage
     seen_cuts = Counter()
     order = sorted(range(len(dc_names)), key = lambda j: -intensities[j]) if intensities else list(range(len(dc_names)))
-    lengths = None if chain_lengths is None else tuple(chain_lengths.items())
+    if ranks is None:
+        lengths = None if chain_lengths is None else tuple(chain_lengths.items())
+        ranks = {id(f): fragment_rank(tuple(f), charge, chain_lengths = lengths) for names in dc_names for f in names}
     for i in order:
-        possible_frags = sorted(dc_names[i], key = lambda f: fragment_rank(tuple(f), charge, chain_lengths = lengths)[0])
-        cleavages = [fragment_rank(tuple(f), charge, chain_lengths = lengths)[0] for f in possible_frags]
+        possible_frags = sorted(dc_names[i], key = lambda f: ranks[id(f)][0])
+        cleavages = [ranks[id(f)][0] for f in possible_frags]
         if not possible_frags or len(possible_frags[0]) == 0:
             continue
         if cleavages[0] <= 1:
@@ -2136,7 +2192,7 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
             frag_options = [x for x, c in zip(possible_frags, cleavages) if c == min_cleavages]
             # a shared global modification is not evidence of a shared cleavage
             max_overlaps_seen = [sum(seen_cuts[c] for c in set(f) if c[0] != 'M') for f in frag_options]
-            prior_scores = [fragment_rank(tuple(f), charge, chain_lengths = lengths)[1] for f in frag_options]
+            prior_scores = [ranks[id(f)][1] for f in frag_options]
             if lability_scores and lability_scores[i]:
                 option_lability = [l for c, l in zip(cleavages, lability_scores[i]) if c == min_cleavages]
             else:
@@ -2149,7 +2205,8 @@ def simplify_fragments(dc_names, peptide = False, diffs = None, intensities = No
             else:
                 scores = [overlap + prior_weight * (prior + lability)
                           for overlap, prior, lability in zip(max_overlaps_seen, prior_scores, option_lability)]
-            max_overlap_idx = np.argsort(scores, kind = 'stable')[-1]
+            # the best score, the last of tied ones
+            max_overlap_idx = max(range(len(scores)), key = lambda j: (scores[j], j))
             observed_frags[i] = [frag_options[max_overlap_idx]]
         seen_cuts.update(set(observed_frags[i][0]))
     return observed_frags
@@ -3022,11 +3079,14 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     # a glycopeptide's backbone ions are only made in the types its fragmentation method gives, as only those are named
     allowed_ion_types = (PEPTIDE_ION_TYPES[fragmentation_method] if isinstance(fragmentation_method, (str, type(None))) else set(fragmentation_method)) if (
         input_dict['peptide']) else None
+    # at most one ring cleavage per fragment of a glycan (outside MS3): an A on its root plus an X on a leaf (or two X) has fewer cuts than a B/Y internal ion
+    # with a neutral loss, so such readings outranked it (246.99 of TEST_DICTS[3] as 02X + 24A instead of B + Y - C2H4O2)
     subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages,
                                        max_cleavages = max_cleavages, fragment_masses = fragment_masses,
                                        subgraphs = subgraphs, threshold = mass_threshold, mass_tag = mass_tag,
                                        charge = charge, sample_prep = sample_prep,
-                                       disable_A_cross_rings = disable_A_cross_rings, threshold_ppm = mass_threshold_ppm, peptide_ion_types = allowed_ion_types)
+                                       disable_A_cross_rings = disable_A_cross_rings, threshold_ppm = mass_threshold_ppm, peptide_ion_types = allowed_ion_types,
+                                       max_cross_rings = None if input_dict['peptide'] or parents is not None else 1)
     sorted_frag_keys = sorted(subg_frags.keys())
     if input_dict['peptide']:
         # each glycan's chains are ranked once, on the integer nodes of the free glycan: rank_chains orders equal-mass chains (the two arms
@@ -3096,10 +3156,11 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         # every fragment is named once, as it can match several observed masses (each gets its own copy of the names)
         graphs = [g for gs in subg_frags.values() for g in gs]
         names = dict(zip(map(id, graphs), subgraphs_to_domon_costello(nx_mono, graphs, chain_rank)))
-        rings = {id(g): sum(m in A_cross_rings or m in X_cross_rings for m in g.mono_mods) for g in graphs}
         # a fragment's lability only depends on its node set
         set_lability = {id(g.nodes): g for g in graphs}
         set_lability = {k: compute_fragment_lability(edge_lability, g) for k, g in set_lability.items()}
+        # every fragment is ranked once (fragment_rank), and each copy of its names (and each small ion) is looked up by its id when ranking
+        lengths, frag_ranks, ranks = tuple((rank, len(chain)) for rank, chain in chain_rank), {}, {}
         for observed_mass in fragment_masses:
             fragment_properties = match_fragment_properties(subg_frags, observed_mass, mass_threshold, charge,
                                                             sorted_frag_keys, mass_threshold_ppm = mass_threshold_ppm)
@@ -3118,11 +3179,6 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                     if ms3_keep[(id(g), z)]:
                         keep.append(i)
                 fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
-            else:
-                # at most one ring cleavage per fragment: an A on its root plus an X on a leaf (or two X) has fewer cuts than a B/Y internal ion with a
-                # neutral loss, so such readings outranked it (246.99 of TEST_DICTS[3] as 02X + 24A instead of B + Y - C2H4O2)
-                keep = [i for i, g in enumerate(fragment_properties[4]) if rings[id(g)] <= 1]
-                fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
             dc_names = [list(names[id(sg)]) for sg in fragment_properties[-1]]
             lability = [set_lability[id(sg.nodes)] for sg in fragment_properties[-1]]
             # an ion named without a graph: one without a residue, which its fragmentation prior puts ahead of any single cleavage, or an open-chain ion
@@ -3133,17 +3189,22 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                                        [abs(observed_mass - m) for _, m in hits] + list(fragment_properties[2]),
                                        [int(np.sign(charge))] * len(hits) + list(fragment_properties[3]), [None] * len(hits) + list(fragment_properties[4])]
                 dc_names, lability = [[t] for t, _ in hits] + dc_names, [DEFAULT_LABILITY] * len(hits) + lability
+            for x, sg in zip(dc_names, fragment_properties[-1]):
+                if (rank := frag_ranks.get(key := x[0] if sg is None else id(sg))) is None:
+                    rank = frag_ranks[key] = fragment_rank(tuple(x), charge, chain_lengths = lengths)
+                ranks[id(x)] = rank
             downstream_values.append((*fragment_properties, dc_names, lability))
     chain_lengths = None if peptide else {rank: len(chain) for rank, chain in chain_rank}
-    filtered_results = [priority_filter(x[5], x[2], peptide = peptide, charge = charge, lability = x[6], chain_lengths = chain_lengths) if x[0]
-                        else ([], [], []) for x in downstream_values]
+    filtered_results = [priority_filter(x[5], x[2], peptide = peptide, charge = charge, lability = x[6], chain_lengths = chain_lengths,
+                                        ranks = None if peptide else ranks) if x[0] else ([], [], []) for x in downstream_values]
     filtered_dc_names = [r[0] for r in filtered_results]
     if simplify:
         filtered_diffs = [r[1] for r in filtered_results]
         filtered_lability = [r[2] for r in filtered_results]
         filtered_dc_names = simplify_fragments(filtered_dc_names, peptide = peptide, diffs = filtered_diffs,
                                                intensities = intensities, charge = charge, prior_weight = prior_weight,
-                                               lability_scores = filtered_lability, mass_threshold = mass_threshold, chain_lengths = chain_lengths)
+                                               lability_scores = filtered_lability, mass_threshold = mass_threshold, chain_lengths = chain_lengths,
+                                               ranks = None if peptide else ranks)
     for i, frag_dc_names in enumerate(filtered_dc_names):
         if frag_dc_names:
             filtered_properties = list(zip(*downstream_values[i]))
@@ -3335,7 +3396,7 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
                 global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = True)
                 subg_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, [], max_cleavages = 2, fragment_masses = [observed[i][0] for i in relevant],
                                                    threshold = mass_tolerance, mass_tag = mass_tag, charge = charge, sample_prep = sample_prep,
-                                                   disable_A_cross_rings = charge > 0 or g in alternatives) if relevant else {}
+                                                   disable_A_cross_rings = charge > 0 or g in alternatives, max_cross_rings = 1) if relevant else {}
             except Exception:
                 _EXPLAINED[key] = None
                 continue

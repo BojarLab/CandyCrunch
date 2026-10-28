@@ -638,6 +638,25 @@ def test_label_inputs_open_rows():
     assert labelled['spec_id'].tolist() == [0] and len(unlabelled) == 2
     assert [r['status'] for r in labelled.attrs['map_rows']] == ['labelled', 'no_structure', 'open_row_nearer', 'no_structure']
 
+
+def test_label_inputs_own_rt():
+    # Mapping RTs read in the run itself (rt_own, from a map's RT_<run> column) are never dropped: each composition's strongest input sits 3-20 min from
+    # its row (another peak of it), which scatters the anchors past the drop rule, yet the weak inputs 0.2 min from the rows are the mapped peaks
+    import training.pipeline_labels as pl
+    glycans = ['Gal(b1-4)GlcNAc', 'Gal(b1-4)Glc', 'GlcNAc(b1-4)GlcNAc', 'Fuc(a1-2)Gal(b1-4)Glc', 'Gal(b1-4)Gal(b1-4)Glc', 'Neu5Ac(a2-3)Gal(b1-4)Glc']
+    comps = [{'Hex': 1, 'HexNAc': 1}, {'Hex': 2}, {'HexNAc': 2}, {'Hex': 2, 'dHex': 1}, {'Hex': 3}, {'Hex': 2, 'Neu5Ac': 1}]
+    masses, rts, off = [100.0 * (k + 1) for k in range(6)], [10.0 * (k + 1) for k in range(6)], [3.0, -5.0, 8.0, -12.0, 15.0, 20.0]
+    inputs = pd.DataFrame({'spec_id': range(12), 'RT': [t + 0.2 for t in rts] + [t + o for t, o in zip(rts, off)], 'intensity': [1e4] * 6 + [1e6] * 6,
+                           'peak_d': [{50.0: 1.0}] * 12, 'rt_range': [(0.0, 0.0)] * 12, 'num_spectra': 3, 'composition': comps * 2, 'charge': 1,
+                           'annotation_score': 12.0, 'model_input': [np.zeros((3, 1), np.float32)] * 12, 'RT2': 0.3, 'glycan_type': 1,
+                           'compositional_vector': [np.zeros(12)] * 12}, index = pd.Index(masses * 2, name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'other', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    mapping = pd.DataFrame({'Mass': masses, 'RT': rts, 'glycan': glycans})
+    labelled, _ = pl.label_inputs(inputs, mapping)
+    assert labelled.attrs['rt_alignment'] == 'dropped' and sorted(labelled['spec_id']) == list(range(6, 12))
+    labelled, _ = pl.label_inputs(inputs, mapping.assign(rt_own = True))
+    assert labelled.attrs['rt_alignment'] == 'none' and sorted(labelled['spec_id']) == list(range(6)) and (labelled['rt_error'].abs() < 0.3).all()
+
 def test_member_spectra_repool(monkeypatch):
     # The member spectra run_inputs keeps of a pooled input re-pool to the input the model got: their summed binned intensities, normalized, and the mean
     # of their m/z remainders over every member (one without a peak in the binned range counts too)

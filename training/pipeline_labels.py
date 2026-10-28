@@ -110,7 +110,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
    |                    5 compositions it lists once; with at least 10 of them, as a function of RT and of the number of charged residues where that fits
    |                    them better; if their median deviation from it exceeds 1 min, the mapping counts as RT-less, unless at least 5 and 40% of them agree within
-   |                    1 min, whose median then shifts it); default:1.0 (2.0 only added labels away from the
+   |                    1 min, whose median then shifts it, or its rows with RT carry rt_own (RTs read in the run itself), which then stay unshifted);
+   |                    default:1.0 (2.0 only added labels away from the
    |                    glycans' peaks)
    | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3
    | ppm_tolerance (float): with accurate survey scans (the inputs' attrs accurate_ms1), the maximum distance in ppm of a mapping Mass, of its first two
@@ -261,9 +262,14 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         # input at another isomer, 10-50 min off, while the rest still sit on the mapping's gradient
         o = np.array(offsets)
         agree = np.abs(o - o[np.argmax([np.sum(np.abs(o - x) <= 1.0) for x in o])]) <= 1.0
+        own = mapping.loc[row_ids, 'rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(row_ids), bool)
         if agree.sum() >= 5 and agree.mean() >= 0.4:
             rt_shift, alignment = float(np.median(o[agree])), 'median'
             row_shift = np.full(len(map_rts), rt_shift)
+        elif own.any() and (own | np.isnan(map_rts)).all():
+            # RTs read in the run itself (rt_own, a map's RT_<run> column) are already on its time axis and stay unshifted: on long gradients a
+            # composition's strongest input sits minutes from the row of another of its peaks, which scatters the anchors without any drift
+            rt_shift, row_shift, alignment = 0.0, np.zeros(len(map_rts)), 'none'
         else:
             rt_shift, map_rts, row_shift, alignment = 0.0, np.full(len(map_rts), np.nan), np.zeros(len(map_rts)), 'dropped'
     map_rts = map_rts + row_shift
@@ -295,24 +301,27 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                     continue
             kept.append(k)
         near[i] = kept
-    # Every structure of those rows, nearest RT first
-    nearest = [sorted(n, key = lambda k: np.nan_to_num(abs(map_rts[k] - rt))) for n, rt in zip(near, inputs['RT'])]
+    # Every structure of those rows, nearest RT first; among rows equally near (one peak's rows at several charges share its RT) the row of the input's
+    # own ion first, so mz_error and the row's label count are the input's own
+    nearest = [sorted(n, key = lambda k: (np.nan_to_num(abs(map_rts[k] - rt)), not fits[i, k])) for i, (n, rt) in enumerate(zip(near, inputs['RT']))]
     candidates = [list(dict.fromkeys(structures[k] for k in n)) for n in nearest]
-    # On PGC a2-6 isomers elute before their a2-3 isomers (343 of 368 given pairs of the study maps), so where a composition's two rows without RT differ only
-    # in sialic linkages, its two kept inputs at a charge more than 0.5 min apart split them: the earlier takes the row with fewer a2-3 linkages
-    if settings.get('lc') == 'PGC':
-        blank = lambda s: re.sub(r'(Neu5[AG]c)\(a2-[36]\)', r'\1', s)
-        pairs = defaultdict(list)
+    # On PGC a2-6 isomers elute before their a2-3 isomers (343 of 368 given pairs of the study maps), on HILIC after them (the a2-3 standard of the
+    # 3,6-sialylated standard runs elutes first of their three peaks), so where an input's rows without RT are of structures that differ only in sialic
+    # linkages (and the arm they sit on), each with another number of a2-3 linkages, as many kept inputs at a charge, each more than 0.5 min from the
+    # next, split the structures in that order
+    if settings.get('lc') in ('PGC', 'HILIC'):
+        blank = lambda s: re.sub(r'Man\(a1-[36/]+\)', 'Man', re.sub(r'(Neu5[AG]c)\(a2-[36]\)', r'\1', s))
+        groups = defaultdict(list)
         for i, n in enumerate(nearest):
-            s = [structures[k] for k in n]
-            if (len(n) == 2 and np.isnan(map_rts[n]).all() and blank(s[0]) == blank(s[1]) and not re.search(r'Neu5[AG]c\(a2-(\?|\d/)', s[0] + s[1])
-                    and s[0].count('(a2-3)') != s[1].count('(a2-3)')):
-                pairs[tuple(sorted(n)), inputs['charge'].iloc[i], acts[i]].append(i)
-        for (rows, _, _), members in pairs.items():
-            if len(members) == 2 and abs(inputs['RT'].iloc[members[0]] - inputs['RT'].iloc[members[1]]) > 0.5:
-                early, late = sorted(members, key = lambda i: inputs['RT'].iloc[i])
-                fewer, more = sorted(rows, key = lambda k: structures[k].count('(a2-3)'))
-                candidates[early], candidates[late] = [structures[fewer]], [structures[more]]
+            s = list(dict.fromkeys(structures[k] for k in n))
+            if (len(s) >= 2 and np.isnan(map_rts[n]).all() and len({blank(x) for x in s}) == 1 and not re.search(r'Neu5[AG]c\(a2-(\?|\d/)', ''.join(s))
+                    and len({x.count('(a2-3)') for x in s}) == len(s)):
+                groups[tuple(sorted(s)), inputs['charge'].iloc[i], acts[i]].append(i)
+        for (s, _, _), members in groups.items():
+            members = sorted(members, key = lambda i: inputs['RT'].iloc[i])
+            if len(members) == len(s) and (np.diff(inputs['RT'].iloc[members].to_numpy()) > 0.5).all():
+                for i, g in zip(members, sorted(s, key = lambda x: x.count('(a2-3)'), reverse = settings['lc'] == 'HILIC')):
+                    candidates[i] = [g]
     source = {'none': 'rt', 'median': 'rt_median', 'model': 'rt_model', 'dropped': 'rt_dropped'}[alignment]
     first_row = [n[0] if n else None for n in nearest]
     inputs = inputs.assign(glycan_candidates = candidates, precursor_charge = inputs['charge'], composition = [stringify_dict(c) for c in inputs['composition']],

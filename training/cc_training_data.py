@@ -110,6 +110,8 @@ def maps_for_run(project, path, maps_dir):
             if f'RT_{cols[0]}' in rows.columns:
                 own = pd.to_numeric(rows[f'RT_{cols[0]}'], errors = 'coerce')
                 rows['RT'] = own.where(own > 0, rows['RT'])
+                # RTs read in this run itself, which label_inputs never drops
+                rows['rt_own'] = own > 0
             named.append((rows, cls, m.name, (path.name.startswith(str(cols[0])), len(str(cols[0])))))
         else:
             # Maps whose sample columns name no run (samples, not files) apply as a whole, as in the snapshot's extraction
@@ -280,6 +282,13 @@ def convert_run(task):
         map_rows = pd.DataFrame(labelled.attrs.pop('map_rows'))
         # A run without mapping rows (none of the project's maps names it) has no records, and its status counts are empty
         map_rows = map_rows if len(map_rows) else pd.DataFrame(columns = ['Mass', 'RT', 'glycan', 'status', 'inputs', 'labels'])
+        # Stepped-isolation runs without survey scans give each MS2 spectrum its isolation window's nominal centre as precursor (every precursor on a
+        # whole m/z, as 814.000 / 816.000), so their inputs' compositions and labels would be wrong: such a run keeps no inputs
+        precursors = np.concatenate([labelled.index.to_numpy(float), unlabelled.index.to_numpy(float)])
+        on_grid = len(precursors) >= 20 and np.mean(np.abs(precursors - np.round(precursors)) < 0.002) >= 0.9
+        if on_grid:
+            labelled, unlabelled = labelled.iloc[:0], unlabelled.iloc[:0]
+            map_rows = map_rows.assign(status = 'no_precursor_mz')
         info.update(rt_shift = labelled.attrs.get('rt_shift'), rt_alignment = labelled.attrs.get('rt_alignment'), rt_anchors = labelled.attrs.get('rt_anchors'),
                     masses_rescued = rescued, settings_fitted = fitted, inputs_cached = f'{reused}/{len(used)}')
         end = settings['modification'] if settings['modification'] != 'custom' else ('free' if settings.get('mass_tag') is None else f"custom {settings['mass_tag']}")
@@ -291,7 +300,7 @@ def convert_run(task):
         labelled = labelled.assign(**meta)
         unlabelled = unlabelled.assign(**meta)
         mapped = mapping[mapping['glycan'].notna()]
-        info.update(status = 'ok', settings = json.dumps({k: v for k, v in settings.items()}, default = str), inputs = len(labelled) + len(unlabelled),
+        info.update(status = 'no_precursor_mz' if on_grid else 'ok', settings = json.dumps({k: v for k, v in settings.items()}, default = str), inputs = len(labelled) + len(unlabelled),
                     labelled = len(labelled), unique = int((labelled['glycan_match_status'] == 'unique').sum()), structures = labelled['glycan'].nunique(),
                     map_rows = len(mapped), map_rows_with_rt = int(pd.to_numeric(mapped.get('RT', pd.Series(dtype = float)), errors = 'coerce').notna().sum()),
                     map_row_status = json.dumps(map_rows.loc[map_rows['status'] != 'no_structure', 'status'].value_counts().to_dict()), unlabelled = len(unlabelled))
