@@ -1810,7 +1810,7 @@ def ms2_vector(peak_ds, max_mz):
     return np.sqrt(v) / (np.linalg.norm(np.sqrt(v)) + 1e-12)
 
 
-def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None, merged = None, ms1 = None):
+def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None, merged = None, ms1 = None, top_n = None):
     """groups spectra and combines the clusters into averaged and binned spectra\n
     | Arguments:
     | :-
@@ -1823,7 +1823,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     | mz_ppm (float): relative mass tolerance (ppm) for assigning spectra to the same peak, used instead of mz_diff; default:None
     | merged (dict): pooled spectra of clusters and binned spectra, kept by the caller across calls on the same spectra (the reducing end and glycan class
     |                checks condense a file up to 5 times, nearly always into the same clusters); default:None
-    | ms1 (tuple): accurate survey scans (rts, mzs, intensities, scan offsets), along whose precursor traces clusters are split and placed; default:None\n
+    | ms1 (tuple): accurate survey scans (rts, mzs, intensities, scan offsets), along whose precursor traces clusters are split and placed; default:None
+    | top_n (int): only the top_n most intense clusters (by apex intensity, then number of spectra) are pooled and returned, indexed by their row among all
+    |              clusters; default:None (all)\n
     | Returns:
     | :-
     | Returns a dataframe that has one row per RT-Mass cluster
@@ -1905,12 +1907,22 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     # (with mz_ppm an absolute mz_ppm / 1e6 m/z, i.e., only tails at the apex's own m/z: mz_ppm of the apex m/z, as the chain and peak joins use, lost
     # 0.009 F1 on GPST000403 and 0.002 on GPST000134 and gained nowhere)
     mz_diff_use = mz_ppm / 1e6 if mz_ppm else mz_diff
-    # Each cluster's MS2 vector is made once, and again only after it took up more spectra
+    merged = {} if merged is None else merged
+    # Each cluster's MS2 vector is made once, and again only after it took up more spectra; the same spectra make the same vector in every call on them
+    # (kept in merged as its nonzero bins, with the spectra so their ids stay theirs)
     vectors = {}
+
     def vector(cl):
         if vectors.get(id(cl), (0, None))[0] != len(cl['peak_d']):
-            vectors[id(cl)] = (len(cl['peak_d']), ms2_vector(cl['peak_d'], max_mz))
+            key = ('vector', tuple(map(id, cl['peak_d'])), max_mz)
+            if key not in merged:
+                v = ms2_vector(cl['peak_d'], max_mz)
+                merged[key] = (list(cl['peak_d']), np.flatnonzero(v), v[v != 0])
+            v = np.zeros(int(max_mz) + 1)
+            v[merged[key][1]] = merged[key][2]
+            vectors[id(cl)] = (len(cl['peak_d']), v)
         return vectors[id(cl)][1]
+
     by_apex = sorted(clusters, key = lambda c: -c['apex_int'])
     # Only the clusters before the first one less than ten times as intense (by_apex order) and within mz_diff_use are looked at, found with numpy: looping over
     # every stronger cluster made this quadratic (10 million iterations, 40% of condensing a 16,000-cluster run)
@@ -2137,9 +2149,14 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 h['apex_int'], h['apex_mz'], h['apex_rt'], h['xic_rt'] = h['intensity'][j], h['m/z'][j], h['RT'][j], float(rts1[lo + tops[k]])
                 placed.append(h)
         clusters = placed
+    # The reducing end check only looks at the most intense clusters, so only they are pooled (ranked as wrap_inference ranks the rows)
+    rows = None
+    if top_n is not None:
+        ranks = pd.DataFrame([[c['intensity'][np.argmax(c['intensity'])], len(c['RT'])] for c in clusters], columns = ['intensity', 'num_spectra'])
+        rows = sorted(ranks.sort_values(['intensity', 'num_spectra'], ascending = False, kind = 'stable').index[:top_n])
+        clusters = [clusters[i] for i in rows]
     # Create a condensed dataframe
     condensed_data = []
-    merged = {} if merged is None else merged
     # The spectra still to bin, all at once: one stable argsort and reduceat over their peaks by spectrum and bin gives each spectrum the arrays
     # bin_intensities gives it, bitwise (one call per spectrum was ~15% of condensing a large run); peaks of other types than Python floats go through it
     todo = list({id(s): s for c in clusters if (tuple(map(id, c['peak_d'])), mz_diff, min_mz, max_mz, bin_num) not in merged for s in c['peak_d']
@@ -2287,7 +2304,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             [rep_mz, mean_rt, highest_intensity, peaks, binned_intensities, mz_remainder, num_spectra, rep_charge])
     df_out = pd.DataFrame(condensed_data,
                           columns = ['m/z', 'RT', 'intensity', 'peak_d', 'binned_intensities', 'mz_remainder',
-                                     'num_spectra', 'precursor_charge'])
+                                     'num_spectra', 'precursor_charge'], index = rows)
     # First and last retention time of each cluster's spectra, to tell whether two clusters are one chromatographic peak
     df_out['rt_range'] = [(min(c['RT']), max(c['RT'])) for c in clusters]
     # Each cluster's own spectra and their RTs (training data re-pools subsets of them; references, not copies)
@@ -2300,6 +2317,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
 
 
 _TOPOLOGIES = {}
+# create_struct_map of df_glycan per class and settings (indexed like df_glycan): every pass over a file (reducing end and glycan class checks, the
+# other-class pass, the other classes' maps with accurate survey scans) and every file with the same settings builds the same map
+_STRUCT_MAPS = {}
 CLASS_CODES = {'O': 0, 'N': 1, 'free': 2, 'lipid': 2}
 
 
@@ -2313,10 +2333,11 @@ def in_classes(glycan, classes, conf = None, extra_thresh = 0.3):
     return any(enforce_class(glycan, c) for c in classes) or (conf is not None and conf > extra_thresh)
 
 
-def create_struct_maps(df_glycan, classes, filter_out = None, phylo_level = 'Kingdom', phylo_filter = 'Animalia'):
+def create_struct_maps(df_glycan, classes, filter_out = None, phylo_level = 'Kingdom', phylo_filter = 'Animalia', maps = None):
     # create_struct_map of several classes as one: a composition's candidate structures are those of every class whose database has it (its topologies,
     # else its most common structure), so a spectrum is scored, and goes to the model, as a glycan of each class its composition belongs to
-    maps = [create_struct_map(df_glycan, c, filter_out = filter_out, phylo_level = phylo_level, phylo_filter = phylo_filter) for c in classes]
+    # (maps: create_struct_map of df_glycan per class, if already made)
+    maps = maps or [create_struct_map(df_glycan, c, filter_out = filter_out, phylo_level = phylo_level, phylo_filter = phylo_filter) for c in classes]
     if len(maps) == 1:
         return maps[0]
     comp_map = {k: v for m in maps[::-1] for k, v in m[0].items()}
@@ -4331,9 +4352,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     filter_out = set(filter_out or ()) | ({'Ac'} if sample_prep != 'underivatized' else set())
     if not _return_intermediate:
         print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
+    database_rows = None
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin(classes)])
-        df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
+        df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)]
+        # (the rows of df_glycan it holds, whose structure maps are kept)
+        database_rows = df_use.index
+        df_use = df_use.reset_index(drop = True)
         if df_use.empty:
             raise ValueError(f"No {'+'.join(classes)} glycans of {taxonomy_level} '{taxonomy_filter}' in df_glycan; check taxonomy_level and taxonomy_filter")
     multiplier = -1 if mode == 'negative' else 1
@@ -4395,9 +4420,15 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         loaded_file['intensity'] = [0] * len(loaded_file)
     # A fixed tie-break jitter, so the output does not depend on the global random state
     loaded_file[idx_col] += np.random.RandomState(0).uniform(10 ** (-20), 0.00001, size = len(loaded_file))
+    maps = None
+    if database_rows is not None:
+        maps = [_STRUCT_MAPS[k] if (k := (id(df_glycan), c, frozenset(filter_out), taxonomy_level, taxonomy_filter)) in _STRUCT_MAPS else _STRUCT_MAPS.setdefault(k, create_struct_map(
+            df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in classes]
+        # indexed by their rows in df_use, as made from it
+        maps = [(m[0], m[1].set_axis(database_rows.get_indexer(m[1].index)), m[2]) for m in maps]
     common_structure_map, df_use, topo_struct_map = create_struct_maps(df_use, classes, filter_out = filter_out,
                                                                        phylo_level = taxonomy_level,
-                                                                       phylo_filter = taxonomy_filter)
+                                                                       phylo_filter = taxonomy_filter, maps = maps)
     if (loaded_file.attrs.get('detected_ms1_trap') == 'orbitrap' or targeted) and 'precursor_charge' in loaded_file.columns and loaded_file['precursor_charge'].notna().any():
         # With a header charge, the precursor m/z is the instrument's own monoisotopic pick in the orbitrap survey scan, which for large multiply charged
         # glycans sometimes lands on the 13C isotope. Such a precursor sits one or two isotope spacings / z above a
@@ -4448,9 +4479,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # Clusters follow the MS1 peaks of their precursor only for free reducing ends, whose anomers make two peaks 0.5-2 min apart
     regroup = accurate_ms1 and modification is None and not mass_tag
     key = (loaded_file[idx_col].values.tobytes(), loaded_file['RT'].values.tobytes(), mass_tolerance, rt_diff, bin_num, regroup)
+    # (the reducing end check's runs on the most intense clusters only pool those, unless the whole file was condensed with the same precursors)
+    if key not in condensed and _top_clusters:
+        key = key + (_top_clusters,)
     if key not in condensed:
         condensed[key] = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num, mz_ppm = mz_ppm,
-                                            merged = condensed.setdefault('merged', {}), ms1 = ms1 if regroup else None)
+                                            merged = condensed.setdefault('merged', {}), ms1 = ms1 if regroup else None, top_n = _top_clusters)
     df_out = condensed[key].copy()
     # The most intense clusters, which the reducing end check below looks at
     top_clusters = df_out.sort_values(['intensity', 'num_spectra'], ascending = False, kind = 'stable').iloc[:_top_clusters or 100]
@@ -4477,8 +4511,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # inside it. The 20 ppm allow for the few ppm of orbitrap calibration offset seen in practice (up to -9 ppm)
     cross_class = None
     if accurate_ms1 and any(c not in classes for c in ['N', 'O', 'free']):
-        cross_maps = [create_struct_map(df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)
-                      for c in ['N', 'O', 'free'] if c not in classes]
+        cross_maps = [_STRUCT_MAPS[k] if (k := (id(df_glycan), c, frozenset(filter_out), taxonomy_level, taxonomy_filter)) in _STRUCT_MAPS else _STRUCT_MAPS.setdefault(k, create_struct_map(
+            df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in ['N', 'O', 'free'] if c not in classes]
         cross_class = (pd.concat([m[1] for m in cross_maps]), {k: v for m in cross_maps[::-1] for k, v in m[0].items()},
                        {k: v for m in cross_maps[::-1] for k, v in m[2].items()})
     df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, mass_tolerance, mode,

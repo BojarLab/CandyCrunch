@@ -4342,60 +4342,71 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
    | :-
    | Returns a dictionary of form (fragment) m/z : intensity, sorted by descending intensity
    """
-    sorted_peaks = sorted([(m, i) for m, i in peaks.items() if i >= min_intensity])
+    items = [(m, i) for m, i in peaks.items() if i >= min_intensity]
+    arr = np.array([m for m, _ in items], dtype = float)
+    # Float masses (pooled spectra have numpy float64 ones, whose every comparison and subtraction in the loops below costs several times a float's) are
+    # sorted with numpy and compared as floats; the peaks keep their own masses and intensities. As distinct keys, they sort as the (m/z, intensity) pairs
+    plain = not np.isnan(arr).any() and {type(m) for m, _ in items} <= {float, np.float64}
+    order = np.argsort(arr, kind = 'stable') if plain else None
+    sorted_peaks = [items[k] for k in order.tolist()] if plain else sorted(items)
     # plain lists and bisect, as indexing numpy arrays element by element in these loops was most of the time
-    masses = [m for m, _ in sorted_peaks]
+    arr = arr[order] if plain else np.array([m for m, _ in sorted_peaks], dtype = float)
+    masses = arr.tolist() if plain else [m for m, _ in sorted_peaks]
+    ints = [float(i) if type(i) is np.float64 else i for _, i in sorted_peaks]
     consumed = [False] * len(sorted_peaks)
     deisotoped = {}
     spacings = [1.0034 / z for z in range(1, precursor_charge + 1)]
     # Whether any peak lies one isotope spacing of a tested charge above a peak, for all peaks at once (with the bounds the search below computes): a peak
     # without one starts no pattern, which spares most peaks of a pooled orbitrap or TOF spectrum the search
-    arr = np.array(masses, dtype = float)
     partner = np.zeros(len(arr), dtype = bool) if not np.isnan(arr).any() else np.ones(len(arr), dtype = bool)
     for spacing in spacings if not partner.all() else []:
         start = np.maximum(np.searchsorted(arr, arr + spacing - mass_tolerance), np.arange(1, len(arr) + 1))
         partner |= (start < len(arr)) & (arr[np.minimum(start, len(arr) - 1)] <= arr + spacing + mass_tolerance)
     partner = partner.tolist()
-    for i, (current_mass, current_intensity) in enumerate(sorted_peaks):
+    # A peak takes up every peak within mass_tolerance of it, which for the peaks after it are those before the furthest such bound so far (reach), found
+    # for all float masses at once as bisect finds them
+    upper = np.searchsorted(arr, arr + mass_tolerance, side = 'right').tolist() if plain else None
+    reach = 0
+    for i, current_mass in enumerate(masses):
         # Skip if already processed
-        if consumed[i]:
+        if consumed[i] or i < reach:
             continue
-        lo, hi = bisect.bisect_left(masses, current_mass - mass_tolerance), bisect.bisect_right(masses, current_mass + mass_tolerance)
-        consumed[lo:hi] = [True] * (hi - lo)
-        best_pattern = [(current_mass, current_intensity)]
+        if plain:
+            reach = max(reach, upper[i])
+        else:
+            lo, hi = bisect.bisect_left(masses, current_mass - mass_tolerance), bisect.bisect_right(masses, current_mass + mass_tolerance)
+            consumed[lo:hi] = [True] * (hi - lo)
+        best_pattern = [i]
         # Check all charge states
         for spacing in spacings if partner[i] else []:
             next_mass = current_mass
-            charge_pattern = [(current_mass, current_intensity)]
+            charge_pattern = [i]
             # Fast-forward to relevant mass range
             start_idx = bisect.bisect_left(masses, next_mass + spacing - mass_tolerance, i + 1)
-            for j in range(start_idx, len(sorted_peaks)):
-                candidate_mass, candidate_intensity = sorted_peaks[j]
+            for j in range(start_idx, len(masses)):
+                candidate_mass = masses[j]
                 if candidate_mass > next_mass + spacing + mass_tolerance:
                     break
-                if consumed[j]:
+                if consumed[j] or j < reach:
                     continue
                 if abs(candidate_mass - next_mass - spacing) <= mass_tolerance:
-                    if validate_pattern and not (candidate_intensity <= charge_pattern[-1][1] * 1.20 or
-                                                 candidate_intensity >= charge_pattern[-1][1] * 0.05):
+                    if validate_pattern and not (ints[j] <= ints[charge_pattern[-1]] * 1.20 or ints[j] >= ints[charge_pattern[-1]] * 0.05):
                         continue
-                    charge_pattern.append((candidate_mass, candidate_intensity))
+                    charge_pattern.append(j)
                     next_mass = candidate_mass
             if len(charge_pattern) > len(best_pattern):
                 best_pattern = charge_pattern
         if len(best_pattern) >= min_isotope_count:
-            mono_mass = best_pattern[0][0]
-            apex = max(best_pattern, key = lambda x: x[1])
+            apex = max(best_pattern, key = ints.__getitem__)
             # With relabel, a pattern whose first peak is less than half its most intense one is named by the most intense: in spectra pooled from many
             # MS2, a noise peak 1-3 Da below a fragment starts its 'pattern'
-            if relabel and apex[1] > 2 * best_pattern[0][1]:
-                mono_mass = apex[0]
-            for peak_mass, _ in best_pattern[1:]:
-                lo, hi = bisect.bisect_left(masses, peak_mass - mass_tolerance), bisect.bisect_right(masses, peak_mass + mass_tolerance)
+            mono_mass = sorted_peaks[apex if relabel and ints[apex] > 2 * ints[i] else i][0]
+            for j in best_pattern[1:]:
+                lo, hi = bisect.bisect_left(masses, masses[j] - mass_tolerance), bisect.bisect_right(masses, masses[j] + mass_tolerance)
                 consumed[lo:hi] = [True] * (hi - lo)
-            deisotoped[mono_mass] = sum(i for _, i in best_pattern) if sum_intensities else best_pattern[0][1]
+            deisotoped[mono_mass] = sum(sorted_peaks[j][1] for j in best_pattern) if sum_intensities else sorted_peaks[i][1]
         else:
-            deisotoped[current_mass] = current_intensity
+            deisotoped[sorted_peaks[i][0]] = sorted_peaks[i][1]
     return dict(sorted(deisotoped.items(), key = lambda x: x[1], reverse = True))
 
 
