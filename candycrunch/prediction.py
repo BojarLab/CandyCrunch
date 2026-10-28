@@ -2121,13 +2121,17 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                         h['ms3'] += c['ms3']
             # A part needs 2 spectra and 5% of the highest MS1 apex of the group's parts, else its spectra join the part whose apex is nearest: on
             # GPST000134, whose high-mannose glycans fly as [M+K+H]2+ with in-source fragments at every apex, single spectra on small maxima were rows the
-            # ground truth does not hold
-            keep = [k for k in parts if len(parts[k]['RT']) >= 2 and sm[tops[k]] >= 0.05 * max(sm[tops[j]] for j in parts)] or [max(parts, key = lambda k: sm[tops[k]])]
-            for k in [k for k in parts if k not in keep]:
+            # ground truth does not hold. Only within rt_diff of that apex, as a group holds every cluster of its m/z over the whole run, and on long
+            # gradients whose DDA fragments each precursor again and again, joining at any distance pooled spectra hours apart. Further away, a single
+            # spectrum on a maximum of at least 5% (a peak fragmented once) is a part of its own, and the rest (tails and background) is left out
+            min_apex = 0.05 * max(sm[tops[j]] for j in parts)
+            keep = [k for k in parts if len(parts[k]['RT']) >= 2 and sm[tops[k]] >= min_apex] or [max(parts, key = lambda k: sm[tops[k]])]
+            dist = {k: min(abs(rts1[lo + tops[j]] - rts1[lo + tops[k]]) for j in keep) for k in parts if k not in keep}
+            for k in [k for k in dist if dist[k] <= rt_diff]:
                 into = parts[min(keep, key = lambda j: abs(rts1[lo + tops[j]] - rts1[lo + tops[k]]))]
                 for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3'):
                     into[key] += parts[k][key]
-            parts = {k: parts[k] for k in keep}
+            parts = {k: parts[k] for k in keep + [k for k in dist if dist[k] > rt_diff and len(parts[k]['RT']) == 1 and sm[tops[k]] >= min_apex]}
             for k, h in parts.items():
                 j = int(np.argmax(h['intensity']))
                 h['apex_int'], h['apex_mz'], h['apex_rt'], h['xic_rt'] = h['intensity'][j], h['m/z'][j], h['RT'][j], float(rts1[lo + tops[k]])

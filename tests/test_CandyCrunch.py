@@ -762,19 +762,20 @@ def test_mixed_charge_carrier_candidates():
 
 def test_ms1_peak_regrouping():
     # Unreduced anomers 1 min apart (1:3) fragmented on their flanks only, and a broad peak (sigma 1 min) whose MS2 every 1.2 min differ: with accurate survey
-    # scans each anomer is a cluster at its MS1 apex, and the broad peak one cluster at its apex
-    rts = np.arange(0, 20, 0.01)
-    peaks = [(900.3, 10.0, 0.1, 1e5), (900.3, 11.0, 0.1, 3e5), (1100.4, 15.0, 1.0, 2e5)]
+    # scans each anomer is a cluster at its MS1 apex, and the broad peak one cluster at its apex. Far from the anomers, a small peak of their m/z fragmented
+    # once is a cluster of its own, and a weak one (below 5% of the anomers) fragmented three times is left out instead of joining them
+    rts = np.arange(0, 60, 0.01)
+    peaks = [(900.3, 10.0, 0.1, 1e5), (900.3, 11.0, 0.1, 3e5), (1100.4, 15.0, 1.0, 2e5), (900.3, 30.0, 0.1, 2e4), (900.3, 50.0, 0.1, 5e3)]
     trace = lambda mz, t: sum(h * np.exp(-0.5 * ((t - apex) / w) ** 2) for m, apex, w, h in peaks if m == mz) + 1
     ms1 = (rts, np.repeat([[900.3, 1100.4]], len(rts), axis = 0).ravel().astype(np.float32),
            np.array([[trace(900.3, t), trace(1100.4, t)] for t in rts]).ravel().astype(np.float32), np.arange(len(rts) + 1, dtype = np.int64) * 2)
-    spectra = [(900.3, t) for t in (9.95, 10.1, 10.9, 11.05)] + [(1100.4, t) for t in (12.6, 13.8, 15.0, 16.2, 17.4)]
+    spectra = [(900.3, t) for t in (9.95, 10.1, 10.9, 11.05, 30.0, 49.95, 50.0, 50.05)] + [(1100.4, t) for t in (12.6, 13.8, 15.0, 16.2, 17.4)]
     df = pd.DataFrame({'m/z': [m for m, _ in spectra], 'RT': [t for _, t in spectra], 'intensity': [trace(m, t) for m, t in spectra],
                        'peak_d': [{204.087: 100.0, 366.14: 50.0, 1000.0 + 37 * k: 80.0} for k in range(len(spectra))]})
     out = condense_dataframe(df.copy(), mz_ppm = 20, ms1 = ms1).sort_values('RT')
-    assert np.allclose(out['RT'], [10.0, 11.0, 15.0], atol = 0.02) and out['num_spectra'].tolist() == [2, 2, 5]
-    # Without survey scans the anomers stay one cluster and the broad peak five
-    assert len(condense_dataframe(df.copy(), mz_ppm = 20)) == 6
+    assert np.allclose(out['RT'], [10.0, 11.0, 15.0, 30.0], atol = 0.02) and out['num_spectra'].tolist() == [2, 2, 5, 1]
+    # Without survey scans the anomers stay one cluster, the broad peak five, and the small peaks one each
+    assert len(condense_dataframe(df.copy(), mz_ppm = 20)) == 8
 
 
 def test_condense_isotope_apex():
