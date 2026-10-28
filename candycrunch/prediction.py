@@ -117,6 +117,9 @@ modification_mass_dict = {k: calculate_adduct_mass(v) for k, v in modification_f
 # Natural abundances of each element's isotopes at +0, +1, +2, ... Da, for the share of a glycan's molecules within the integrated isotope peaks
 ISOTOPE_ABUNDANCES = {'C': [0.9893, 0.0107], 'H': [0.999885, 0.000115], 'N': [0.99636, 0.00364], 'O': [0.99757, 0.00038, 0.00205],
                       'S': [0.9499, 0.0075, 0.0425, 0, 0.0001], 'P': [1.0]}
+# extract_xic_areas' elemental formula of each structure (None without one) and isotope share of each (glycan, sample_prep, isotopes): every file of a
+# batch, and every call within a run, weighs the same glycans
+_FORMULAS, _ISOTOPE_SHARES = {}, {}
 
 
 # The ions that carry the charge of the run's precursors in place of protons, from wrap_inference's / wrap_inference_batch's adducts (e.g., Li+ with lithium
@@ -1493,12 +1496,17 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
         # A composition or element formula is weighed whole by glycowork's get_formula (derivatization included), e.g., a glycopeptide as
         # get_formula('H5N4F1', peptide = 'EEQYNSTYR'); structures go through get_molecular_properties and get their derivatization groups below
         whole = {g: get_formula(g, sample_prep = sample_prep) for g in set(glycans) if isinstance(g, str) and (is_composition(g) or re.fullmatch(r'(?:(?:Cl|Br|Na|[CHNOPSKFI])\d*)+', g))}
-        props = get_molecular_properties([g for g in set(glycans) if isinstance(g, str) and g not in whole]) if any(isinstance(g, str) and g not in whole for g in glycans) else pd.DataFrame()
-        formulas = (props['molecular_formula'].to_dict() if 'molecular_formula' in props.columns else {}) | whole
+        if new := [g for g in set(glycans) if isinstance(g, str) and g not in whole and g not in _FORMULAS]:
+            props = get_molecular_properties(new)
+            _FORMULAS.update({g: props['molecular_formula'].get(g) if 'molecular_formula' in props.columns else None for g in new})
+        formulas = {g: _FORMULAS[g] for g in set(glycans) if isinstance(g, str) and g not in whole and _FORMULAS[g] is not None} | whole
         unit = {'permethylated': 'CH2', 'deuteropermethylated': 'CH2', 'peracetylated': 'C2H2O'}.get(sample_prep)
         share = np.full(len(target_mzs), np.nan)
         for t, g in enumerate(glycans):
             if g not in formulas:
+                continue
+            if (g, sample_prep, int(isotopes[t])) in _ISOTOPE_SHARES:
+                share[t] = _ISOTOPE_SHARES[(g, sample_prep, int(isotopes[t]))]
                 continue
             counts = defaultdict(int, {el: int(k or 1) for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', formulas[g])})
             if unit and g not in whole:
@@ -1513,7 +1521,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             for el, k in counts.items():
                 for _ in range(k):
                     dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:isotopes[t] + 1]
-            share[t] = dist.sum()
+            share[t] = _ISOTOPE_SHARES[(g, sample_prep, int(isotopes[t]))] = dist.sum()
         known = ~np.isnan(share)
         if known.any():
             order = np.argsort(target_mzs[known] * charges[known])
@@ -3106,6 +3114,10 @@ def make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = 'unde
     return mass_dic
 
 
+# subgraph_isomorphism of (candidate, top structure) pairs, which recur in every file of a batch
+_SUBGRAPHS = {}
+
+
 def canonicalize_biosynthesis(df_out):
     """regularize predictions by incentivizing biosynthetic feasibility\n
    | Arguments:
@@ -3133,7 +3145,10 @@ def canonicalize_biosynthesis(df_out):
         for p in [x for x in preds if len(x) == 2 if x[1]]:
             p_list = list(p)
             if p_list[0] not in sub_counts:
-                sub_counts[p_list[0]] = sum(subgraph_isomorphism(p_list[0], t) for t in rest_top1 if t != p_list[0])
+                if len(_SUBGRAPHS) > 100000:
+                    _SUBGRAPHS.clear()
+                sub_counts[p_list[0]] = sum(_SUBGRAPHS[k] if (k := (p_list[0], t)) in _SUBGRAPHS else _SUBGRAPHS.setdefault(k, subgraph_isomorphism(*k))
+                                            for t in rest_top1 if t != p_list[0])
             p_list[1] += 0.1 * sub_counts[p_list[0]]
             new_preds.append(tuple(p_list))
         new_preds.sort(key = lambda x: x[1], reverse = True)
@@ -5186,6 +5201,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     sialic_derivatization = tuple(sialic_derivatization) if isinstance(sialic_derivatization, list) else sialic_derivatization
     filter_out = set(filter_out or ()) | ({'Ac'} if sample_prep != 'underivatized' else set())
     print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
+    # The runs of the files take database glycans as None, as they then build the same ones and keep their structure maps across files (wrap_inference)
+    given_df_use = df_use
     if df_use is None:
         df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin(classes)])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
@@ -5216,7 +5233,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     first = load_spectra_filepath(spectra_filepath_list[0], extract_ms1 = spectra_filepath_list[0].lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc')))
     ms1 = first.attrs.pop('ms1', None)
     condensed = {}
-    best, _ = check_reducing_end(spectra_filepath_list[0], glycan_class, {**inference_kwargs, 'model': model, 'df_use': df_use}, loaded = first, condensed = condensed)
+    best, _ = check_reducing_end(spectra_filepath_list[0], glycan_class, {**inference_kwargs, 'model': model, 'df_use': given_df_use}, loaded = first, condensed = condensed)
     if ms1 is not None:
         first.attrs['ms1'] = ms1
     if best is not None:
@@ -5240,7 +5257,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 break
             use_c = copy.deepcopy(df_glycan[df_glycan.glycan_type == c])
             use_c = use_c[use_c[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
-        tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), {**inference_kwargs, 'glycan_class': glycan_class if c == key else c, 'df_use': use_c, **({'_loaded': first.pop()} if i == 0 and first else {}),
+        tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), {**inference_kwargs, 'glycan_class': glycan_class if c == key else c, 'df_use': given_df_use if c == key else None, **({'_loaded': first.pop()} if i == 0 and first else {}),
                                                                        **({'_condensed': condensed.pop()} if i == 0 and condensed else {})}) for i, fp in enumerate(spectra_filepath_list)]
         if n_jobs > 1:
             with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if torch is None else torch.set_num_threads,
@@ -5421,7 +5438,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if triggered:
         use_pair = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin([classes[0], pair])])
         use_pair = use_pair[use_pair[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
-        tasks = [(spectra_filepath_list[file_labels.index(k)], None, {**inference_kwargs, 'glycan_class': [classes[0], pair], 'df_use': use_pair, 'reducing_end_variants': {},
+        tasks = [(spectra_filepath_list[file_labels.index(k)], None, {**inference_kwargs, 'glycan_class': [classes[0], pair], 'df_use': None, 'reducing_end_variants': {},
                                                                       '_pair': (pair, list(zip(inference_dfs[k][0].index.values, inference_dfs[k][0]['RT'].values)))}) for k in triggered]
         if n_jobs > 1:
             with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if torch is None else torch.set_num_threads,
