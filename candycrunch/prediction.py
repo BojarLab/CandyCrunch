@@ -92,8 +92,9 @@ ANALYZER_TRAPS = {'MS:1001542': 'amazon', 'MS:1001546': 'amazon', 'MS:1002300': 
 # Time-of-flight analyzers (Q-TOF, IT-TOF); msconvert writes Waters instruments as the generic Waters model without analyzers, and the Waters instruments
 # acquiring MS/MS with survey scans are Q-TOFs
 TOF_TERMS = {'MS:1000084', 'MS:1000126'}
-# The same for the msModel and msMassAnalyzer names of an mzXML msInstrument (lower-case), checked in this order
-MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'orbitrap': 'orbitrap', 'fourier transform': 'orbitrap',
+# The same for the msModel and msMassAnalyzer names of an mzXML msInstrument (lower-case), checked in this order; msconvert names only the first
+# analyzer of a (Q) Exactive (quadrupole) and writes no filter lines, so its model stands for the orbitrap
+MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'orbitrap': 'orbitrap', 'exactive': 'orbitrap', 'fourier transform': 'orbitrap',
                         'ft-icr': 'orbitrap', 'ion trap': 'linear',
                         'time-of-flight': 'other', 'tof': 'other'}
 # The same for the analyzer types of an mzData file (its terms' names and values in lower-case letters only, e.g., quadrupoletimeofflight), in this order
@@ -2348,6 +2349,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     pools = [(df_glycan_in, comp_struct_map, topo_struct_map, False)] + ([cross_class + (True,)] if cross_class else [])
     multi = [None] * len(red_masses)
     multi_all = [{} for _ in red_masses]
+    alts = [[] for _ in red_masses]
     for pool_df, pool_comp_map, pool_topo_map, fallback in pools:
         pool_comps = pool_df.groupby('comp_str').first()['Composition']
         comps_in = [x for c, x in pool_comps.items() if not fallback or c not in comp_struct_map]
@@ -2435,8 +2437,19 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
         plain = _fill_adducts(comps_out, [a for a in valid_adducts if a[0] not in adducts])
         own = [a for a in valid_adducts if a[0] in adducts]
         if own and not fallback:
-            comps_out = [o if o[0] and not (ms1_ppm and p[0] and o[0][1] > ms1_ppm * mz / 1e6 >= p[0][1]) else p
-                         for o, p, mz in zip(_fill_adducts([(None, 0)] * len(red_masses), own, carriers = True), plain, red_masses)]
+            # With accurate survey scans, the reading of each carrier on its own, as the first carrier takes what several explain, with its pure ions
+            # ([M+2Na]2+) first and with its ions beside protons ([M+H+NH4]2+) first, as the first form takes what both explain
+            singles = [_fill_adducts([(None, 0)] * len(red_masses), [a], carriers = pure) for a in own for pure in (True, False)] if ms1_ppm else []
+            mine = _fill_adducts([(None, 0)] * len(red_masses), own, carriers = True)
+            comps_out = [o if o[0] and not (ms1_ppm and p[0] and o[0][1] > ms1_ppm * mz / 1e6 >= p[0][1]) else p for o, p, mz in zip(mine, plain, red_masses)]
+            # With accurate survey scans, a precursor that several readings (each carrier, protons and the usual adducts) explain within ms1_ppm keeps
+            # them all, and the annotation scores decide: runs that fragment metal adducts beside protonated ions (e.g. [M+2H+K]3+ next to [M+3H]3+)
+            # have both kinds of precursor, and any one reading first took the other kinds' precursors as ions of other compositions
+            if ms1_ppm:
+                for i, (c, mz) in enumerate(zip(comps_out, red_masses)):
+                    for r in [mine[i], plain[i]] + [s[i] for s in singles]:
+                        if c[0] and r[0] and r[0][1] <= ms1_ppm * mz / 1e6 and all((r[0][0], r[1]) != (k[0][0], k[1]) for k in [c] + alts[i]):
+                            alts[i].append(r)
         elif own:
             comps_out = _fill_adducts(plain, own, carriers = True)
     # A spectrum matched as singly charged whose most intense fragments come in pairs half a mass unit apart (domain_filter's sign of a multiply charged
@@ -2454,6 +2467,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     extra = [e + [(y, z) for z, y in m_all.items() if z != x[1] and complementary_pairs(mz, peaks, z, 0.75 * mass_tolerance) > complementary_pairs(
         mz, peaks, x[1], 0.75 * mass_tolerance)] if x[0] and x[1] >= 2 and kc is None and x[0][0][0][1] is comp_struct_map else e
              for e, x, m_all, kc, mz, peaks in zip(extra, comps_out, multi_all, known_charges, red_masses, df_in['peak_d'])]
+    extra = [e + a if x[0] else e for e, a, x in zip(extra, alts, comps_out)]
     candidate_data = []
     for x, e in zip(comps_out, extra):
         matched = ([(c, x[1]) for c in x[0][0]] + [(c, z) for y, z in e for c in y[0]]) if x[0] else None

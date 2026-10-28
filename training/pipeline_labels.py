@@ -5,6 +5,7 @@ On 24 runs with audited ground truths (2026-10-20), these labels were as often r
 instead of 105 wrong compositions and 9% instead of 26% of spectra away from any ground-truth peak; as candidate sets (every structure of the input's
 composition the map lists within the RT window) the right structure was in the label for 97.7% of the spectra.
 """
+import re
 from collections import Counter, defaultdict
 import numpy as np
 import pandas as pd
@@ -102,7 +103,9 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    | :-
    | inputs (dataframe): the run's model inputs, from run_inputs
    | mapping (dataframe): the run's glycans, columns Mass (m/z of the observed ion), glycan (IUPAC) and optionally RT (min; missing or NaN: any RT, but
-   |                      only on the composition's most intense inputs at each charge above crumbs_thresh, as many as the mapping has rows of that composition)
+   |                      only on the composition's most intense inputs at each charge above crumbs_thresh, as many as the mapping has rows of that composition;
+   |                      on PGC two such rows differing only in a2-3 / a2-6 sialic linkages split two of them by elution order, a2-6 first); a row
+   |                      without glycan but with Mass and RT labels nothing, yet keeps the inputs nearer it than any structured row of their mass
    | mz_tolerance (float): maximum distance between an input's m/z and a mapping Mass; default:0.5 (mapping masses are literature values)
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
    |                    5 compositions it lists once; with at least 10 of them, as a function of RT and of the number of charged residues where that fits
@@ -127,7 +130,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    |     candidate compositions, their composition vectors and annotation scores, and whether the mapping lists them there too); attrs:
    |     rt_shift (the median shift applied to the mapping's RTs), rt_alignment ('none', 'median', 'model' or 'dropped'), rt_anchors (compositions
    |     the shift rests on), map_rows (records, one per mapping row: Mass, RT, glycan, any map_file / map_row columns of the mapping, status (labelled, or why
-   |     not: no_structure, no_mass, unreadable, no_input_at_mass, other_composition, outside_rt, not_strongest (a row without RT whose composition's
+   |     not: no_structure, no_mass, unreadable, no_input_at_mass, other_composition, outside_rt, open_row_nearer (its inputs sit nearer a same-mass
+   |     row without structure), not_strongest (a row without RT whose composition's
    |     strongest passing inputs were taken by its isomers or failed crumbs_thresh), spectrum_taken (its spectra kept another composition's label)),
    |     inputs (labeled inputs with it in their candidate set) and labels (of them, with it as the nearest row))
    | (2) unlabelled pooled spectra (for pretraining), one row per spectrum that got no label: index m/z, the spectrum columns of (1), compositions,
@@ -161,12 +165,19 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         map_rts.append(float(rt))
         row_ids.append(row_id)
     masses, map_rts = np.array(masses), np.array(map_rts)
+    # Rows without a structure but with a Mass (composition-level rows, isomers the mapping leaves open) still own the peaks at their RT
+    open_rows = mapping[mapping['glycan'].isna() & mapping['Mass'].notna()]
+    open_masses = open_rows['Mass'].to_numpy(dtype = float)
+    open_rts = pd.to_numeric(open_rows['RT'], errors = 'coerce').to_numpy(dtype = float) if 'RT' in open_rows.columns else np.full(len(open_rows), np.nan)
     # Which inputs fit which rows: within mz_tolerance of the Mass, with accurate survey scans within ppm_tolerance of it or of its first two 13C peaks at the
     # input's charge (13C picks: GPST000578 and 651 at z = 3), a Mass given with fewer decimals widened to half its last one (an integer Mass keeps
     # mz_tolerance). Further off is another ion, also with the row's composition among its candidates: at 0.5 m/z GPST000712's 720.321 took N3H3 [M+2Na]2+
     # 719.849, and in the audited test runs with accurate survey scans labels from their ground truths went to ions 42-660 ppm off its peaks within 1.5 min
     mz_values = inputs.index.to_numpy(dtype = float)
-    if settings.get('accurate_ms1'):
+
+    def fit_matrix(masses):
+        if not settings.get('accurate_ms1'):
+            return np.abs(mz_values[:, None] - masses[None, :]) <= mz_tolerance
         decimals = np.array([next((d for d in range(7) if round(m, d) == m), 6) for m in masses])
         tolerances = np.minimum(mz_tolerance, np.maximum(ppm_tolerance * masses / 1e6, 0.5 * 10.0 ** -decimals))
         spacing = ISOTOPE_SPACING / np.nan_to_num(np.abs(inputs['charge'].to_numpy(dtype = float)), nan = 1.0)[:, None]
@@ -175,26 +186,33 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         # scores and mostly a correct-mass input of the same glycan at the same RT)
         for k in range(-1, 3):
             fits |= np.abs(mz_values[:, None] - masses[None, :] - k * spacing) <= tolerances[None, :]
-    else:
-        fits = np.abs(mz_values[:, None] - masses[None, :]) <= mz_tolerance
+        return fits
+
+    fits, open_fits = fit_matrix(masses), fit_matrix(open_masses)
     input_keys = [tuple(sorted(plain_composition(c).items())) if isinstance(c, dict) else None for c in inputs['composition']]
     # Inputs from the most intense down (spectrum counts without precursor intensities); crumbs_thresh as the pipeline's gate
     by_intensity = np.lexsort((-inputs['num_spectra'].to_numpy(dtype = float), -inputs['intensity'].fillna(0).to_numpy(dtype = float)))
     passing = inputs['annotation_score'].to_numpy() > crumbs_thresh
     # Mapping RTs come from one run of a study, and its other runs drift (up to 1.4 min between replicates of GPST000315): the run's shift is the median
-    # offset of the mapping's compositions with a single RT row to their most intense passing input near that row's Mass, if at least 5 agree within a
+    # offset of the mapping's compositions with a single RT peak (one structure, its charge states within 1 min) to their most intense passing input near
+    # one of those rows' Mass, if at least 5 agree within a
     # median deviation of 1 min (audited test runs: 16 more labels right, one fewer wrong; mappings shifted by 1.3 / 2.5 min kept 95% / 92% of the right labels
     # instead of 29% / 9%; a fitted RT line instead broke runs with few anchors)
-    single = Counter(keys[k] for k in range(len(keys)) if not np.isnan(map_rts[k]))
+    with_rt = defaultdict(list)
+    for k in range(len(keys)):
+        if not np.isnan(map_rts[k]):
+            with_rt[keys[k]].append(k)
+    single = Counter({key: 1 if len({structures[k] for k in ks}) == 1 and np.ptp(map_rts[ks]) <= 1.0 else len(ks) for key, ks in with_rt.items()})
     first = {}
     for i in by_intensity:
         if passing[i] and single.get(input_keys[i]) == 1:
             first.setdefault(input_keys[i], []).append(i)
-    offsets, anchor_rts, anchor_acid = [], [], []
+    offsets, anchor_rts, anchor_acid, anchored = [], [], [], set()
     for k in range(len(keys)):
-        if not np.isnan(map_rts[k]) and single[keys[k]] == 1:
+        if not np.isnan(map_rts[k]) and single[keys[k]] == 1 and keys[k] not in anchored:
             hit = next((i for i in first.get(keys[k], []) if fits[i, k]), None)
             if hit is not None:
+                anchored.add(keys[k])
                 offsets.append(inputs['RT'].iloc[hit] - map_rts[k])
                 anchor_rts.append(map_rts[k])
                 anchor_acid.append(acidic_count(dict(keys[k])))
@@ -241,6 +259,12 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     near = [[k for k in np.flatnonzero(fits[i]) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
             for i, (rt, key) in enumerate(zip(inputs['RT'], input_keys))]
     windowed = {k for n in near for k in n}
+    # An input nearer a same-mass row without structure (moved by the run's median shift) than a structured row is the open row's peak, not the structured
+    # row's: an isomer's composition-level row 0.3-0.8 min from a structured one otherwise gives its peak the structured row's label
+    if alignment != 'dropped' and len(open_masses):
+        open_dist = np.array([np.nanmin(np.abs(open_rts[f] + rt_shift - rt), initial = np.inf) for f, rt in zip(open_fits, inputs['RT'])])
+        near = [[k for k in n if not open_dist[i] < abs(map_rts[k] - rt)] for i, (n, rt) in enumerate(zip(near, inputs['RT']))]
+    open_taken = windowed - {k for n in near for k in n}
     # A run holds about as many peaks of a composition as the mapping lists isomers of it, plus PGC tails, isotope picks and noise, so a row without RT only
     # labels the most intense inputs of its composition at each charge whose fragments pass the pipeline's crumbs_thresh, as many as the mapping has rows of
     # that composition (26 audited test runs with their mappings' RTs removed: 37% of labels off every ground-truth peak and 92% with the right structure in
@@ -262,6 +286,21 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     # Every structure of those rows, nearest RT first
     nearest = [sorted(n, key = lambda k: np.nan_to_num(abs(map_rts[k] - rt))) for n, rt in zip(near, inputs['RT'])]
     candidates = [list(dict.fromkeys(structures[k] for k in n)) for n in nearest]
+    # On PGC a2-6 isomers elute before their a2-3 isomers (343 of 368 given pairs of the study maps), so where a composition's two rows without RT differ only
+    # in sialic linkages, its two kept inputs at a charge more than 0.5 min apart split them: the earlier takes the row with fewer a2-3 linkages
+    if settings.get('lc') == 'PGC':
+        blank = lambda s: re.sub(r'(Neu5[AG]c)\(a2-[36]\)', r'\1', s)
+        pairs = defaultdict(list)
+        for i, n in enumerate(nearest):
+            s = [structures[k] for k in n]
+            if (len(n) == 2 and np.isnan(map_rts[n]).all() and blank(s[0]) == blank(s[1]) and not re.search(r'Neu5[AG]c\(a2-(\?|\d/)', s[0] + s[1])
+                    and s[0].count('(a2-3)') != s[1].count('(a2-3)')):
+                pairs[tuple(sorted(n)), inputs['charge'].iloc[i], acts[i]].append(i)
+        for (rows, _, _), members in pairs.items():
+            if len(members) == 2 and abs(inputs['RT'].iloc[members[0]] - inputs['RT'].iloc[members[1]]) > 0.5:
+                early, late = sorted(members, key = lambda i: inputs['RT'].iloc[i])
+                fewer, more = sorted(rows, key = lambda k: structures[k].count('(a2-3)'))
+                candidates[early], candidates[late] = [structures[fewer]], [structures[more]]
     source = {'none': 'rt', 'median': 'rt_median', 'model': 'rt_model', 'dropped': 'rt_dropped'}[alignment]
     first_row = [n[0] if n else None for n in nearest]
     inputs = inputs.assign(glycan_candidates = candidates, precursor_charge = inputs['charge'], composition = [stringify_dict(c) for c in inputs['composition']],
@@ -299,6 +338,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             status = 'other_composition'
         elif k not in windowed:
             status = 'outside_rt'
+        elif not takes[k] and k in open_taken:
+            status = 'open_row_nearer'
         elif not takes[k]:
             status = 'not_strongest'
         elif not any(i in kept_orders for i in takes[k]):

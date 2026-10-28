@@ -638,10 +638,12 @@ def read_raw_packet(f, address, drop_flagged = False):
 # ScanMethodID, TimeSegmentID, ScanTime in min, MSLevel, ScanType, TIC, base peak m/z and value, CalibrationID, CycleNumber, IonMode, IonPolarity (0 positive,
 # 1 negative), Fragmentor, CollisionEnergy, MzOfInterest, AbundanceLimit, SamplingPeriod, Threshold, ChargeState, then ChromScaleFactor as 4 bytes, not the
 # schema's 8, MassCalOffset, ...), ending in a profile and a centroid SpectrumParamValues block (format ID 1 and 2: offset into MSProfile.bin / MSPeak.bin,
-# byte and point count, x and y range, noise); of them the fields read here
-MASSHUNTER_SCAN = np.dtype({'names': ['scan', 'rt', 'level', 'polarity', 'energy', 'mz', 'charge', 'calibration', 'format', 'offset', 'n'],
-                            'formats': ['<i4', '<f8', '<i4', '<i4', '<f8', '<f8', '<i4', '<i8', '<i4', '<i8', '<i4'],
-                            'offsets': [0, 12, 20, 64, 76, 84, 116, 124, 220, 224, 236], 'itemsize': 284})
+# byte and point count, x and y range, noise); of them the fields read here and CalibrationID (DefaultMassCal.xml's DefaultCalibrationID). Scans of a time
+# segment stored as centroids only list their centroid block first and an empty profile block second (MASSHUNTER_FIRST_BLOCK)
+MASSHUNTER_SCAN = np.dtype({'names': ['scan', 'rt', 'level', 'polarity', 'energy', 'mz', 'charge', 'calibration', 'format', 'offset', 'n', 'calibration_id'],
+                            'formats': ['<i4', '<f8', '<i4', '<i4', '<f8', '<f8', '<i4', '<i8', '<i4', '<i8', '<i4', '<i4'],
+                            'offsets': [0, 12, 20, 64, 76, 84, 116, 124, 220, 224, 236, 52], 'itemsize': 284})
+MASSHUNTER_FIRST_BLOCK = np.dtype({'names': ['format', 'offset', 'n'], 'formats': ['<i4', '<i8', '<i4'], 'offsets': [156, 160, 172], 'itemsize': 284})
 
 
 def read_masshunter_scans(folder):
@@ -653,7 +655,8 @@ def read_masshunter_scans(folder):
    | :-
    | Returns a structured array (MASSHUNTER_SCAN) with one row per scan: scan, rt (min), level, polarity, energy (collision energy), mz (an MS/MS scan's
    | precursor, MassHunter's isolation target), charge (0 if not determined), calibration (the offset of the scan's record in MSMassCal.bin), format (2 where
-   | the scan has a centroided spectrum), offset and n (its place and point count in MSPeak.bin)
+   | the scan has a centroided spectrum), offset and n (its place and point count in MSPeak.bin, from whichever of the record's two blocks is the centroid one)
+   | and calibration_id (its default calibration in DefaultMassCal.xml)
    """
     name = os.path.basename(os.path.normpath(folder))
     with open(os.path.join(folder, 'AcqData', 'MSScan.bin'), 'rb') as f:
@@ -664,7 +667,13 @@ def read_masshunter_scans(folder):
     start = struct.unpack_from('<i', index, 88)[0]
     if not n or len(index) - start != n * MASSHUNTER_SCAN.itemsize:
         raise ValueError(f"{name} has an MSScan.bin layout CandyCrunch does not know; convert it to mzML with msconvert (with peak picking) first.")
-    return np.frombuffer(index, dtype = MASSHUNTER_SCAN, count = n, offset = start)
+    scans = np.frombuffer(index, dtype = MASSHUNTER_SCAN, count = n, offset = start).copy()
+    # The time segments of a method store 'Both' or 'Centroid' (or 'Profile'); a centroid-only scan has its centroid block first
+    first = np.frombuffer(index, dtype = MASSHUNTER_FIRST_BLOCK, count = n, offset = start)
+    centroid_first = (scans['format'] != 2) & (first['format'] == 2)
+    for key in ('format', 'offset', 'n'):
+        scans[key][centroid_first] = first[key][centroid_first]
+    return scans
 
 
 def read_masshunter(folder):
@@ -679,21 +688,34 @@ def read_masshunter(folder):
    """
     name = os.path.basename(os.path.normpath(folder))
     scans = read_masshunter_scans(folder)
-    if not os.path.exists(os.path.join(folder, 'AcqData', 'MSPeak.bin')) or not (scans['format'] == 2).all():
+    # A time segment stored as profiles only has no centroids: its scans are skipped, unless they hold all scans of an MS level (a profile-only run)
+    if not os.path.exists(os.path.join(folder, 'AcqData', 'MSPeak.bin')) or not set(scans['level'].tolist()) <= set(scans['level'][scans['format'] == 2].tolist()):
         raise ValueError(f"{name} holds profile spectra only (no AcqData/MSPeak.bin); convert it to mzML with msconvert (with peak picking) first.")
+    scans = scans[scans['format'] == 2]
     with open(os.path.join(folder, 'AcqData', 'MSPeak.bin'), 'rb') as f:
         peaks = f.read()
     with open(os.path.join(folder, 'AcqData', 'MSMassCal.bin'), 'rb') as f:
         calibration = f.read()
+    # The powers of t of each default calibration's 'Polynomial' step are the bits of its ValueUseFlags (126, powers 1-6, on a 6550)
+    powers = {}
+    if os.path.exists(os.path.join(folder, 'AcqData', 'DefaultMassCal.xml')):
+        with open(os.path.join(folder, 'AcqData', 'DefaultMassCal.xml'), 'rb') as f:
+            for number, body in re.findall(rb'<DefaultCalibration DefaultCalibrationID="(\d+)">(.*?)</DefaultCalibration>', f.read(), re.S):
+                flags = re.search(rb'<CalibrationFormula>Polynomial</CalibrationFormula>.*?<ValueUseFlags>(\d+)</ValueUseFlags>', body, re.S)
+                powers[int(number)] = [k for k in range(32) if flags and int(flags.group(1)) >> k & 1]
     # MSPeak.bin holds each scan's centroids as their float64 flight times, then their float32 abundances; MSMassCal.bin each scan's calibration (a count,
     # then the 'Traditional' step's A and t0 and the 'Polynomial' step's flight time range and coefficients): m/z = (A (t - t0))^2 with the A of the scan's
-    # reference-mass correction. The polynomial step (powers of t chosen by DefaultMassCal.xml's ValueUseFlags) moves m/z by less than 0.1 ppm on 6520 Q-TOF
-    # runs and is not applied
+    # reference-mass correction, minus the polynomial in t, clipped to its range: as MassHunter's base peak m/z of centroid-only 6550 scans (to 0.5 ppm on
+    # 3205 of 3205), and it puts a 6530's reference masses 119.0363 and 966.0007 at 0.00 / +0.01 ppm (-5.09 / -0.83 ppm without; up to 10 ppm at m/z 200-500)
     for s in scans:
         times = np.frombuffer(peaks, '<f8', s['n'], s['offset'])
-        a, t0 = struct.unpack_from('<2d', calibration, s['calibration'] + 4)
+        count = struct.unpack_from('<i', calibration, s['calibration'])[0]
+        a, t0, *step = struct.unpack_from(f'<{count}d', calibration, s['calibration'] + 4)
+        mzs, exponents = (a * (times - t0)) ** 2, powers.get(int(s['calibration_id']), [])
+        if exponents and len(step) == 2 + len(exponents):
+            mzs -= sum(c * np.clip(times, step[0], step[1]) ** k for c, k in zip(step[2:], exponents))
         yield dict(scan = int(s['scan']), ms_level = int(s['level']), rt = float(s['rt']),
-                   peaks = np.column_stack([(a * (times - t0)) ** 2, np.frombuffer(peaks, '<f4', s['n'], s['offset'] + 8 * s['n'])]),
+                   peaks = np.column_stack([mzs, np.frombuffer(peaks, '<f4', s['n'], s['offset'] + 8 * s['n'])]),
                    precursor = dict(mz = float(s['mz']), charge = int(s['charge']) or None) if s['level'] > 1 and s['mz'] > 0 else None,
                    polarity = '-' if s['polarity'] == 1 else '+', collision_energy = float(s['energy']))
 
@@ -781,13 +803,19 @@ def read_wiff(filepath):
     if 'TDCInfo' not in sample or 'TOFCalibrationData' not in sample or 'Idx' not in sample:
         raise ValueError(f"{name} holds no TOF spectra (a triple quadrupole or QTRAP run); CandyCrunch reads the .wiff files of SCIEX TOF instruments.")
     n_exp = len(headers)
-    # Information-dependent acquisition: per cycle the survey scan (experiment 0) and a 32-byte slot per dependent experiment with the m/z and intensity of
-    # the survey peak it fragmented (float64 at bytes 0 and 16; zero where IDA found no candidate). No charge state is stored
+    # Information-dependent acquisition: after a 32-byte header, a 32-byte slot per dependent scan of the index (cycle by cycle, experiment by experiment)
+    # with the m/z and intensity of the survey peak it fragmented (float64 at bytes 0 and 16; zero where IDA found no candidate), up to the last dependent
+    # scan acquired: a run stopped within a cycle ends with part of one (a TripleTOF 5600+ run of 2337 cycles of 16 experiments, then a survey scan and one
+    # dependent scan, has 35,056 slots). No charge state is stored
     dde = sample.get('DDERealTimeData', b'')
-    if n_exp < 2 or sorted(headers) != list(range(n_exp)) or len(dde) < 32 or (len(dde) - 32) % (32 * (n_exp - 1)) or (len(sample['Idx']) - 32) % WIFF_SCAN.itemsize:
+    rows, n_slots = (len(sample['Idx']) - 32) // WIFF_SCAN.itemsize, (len(dde) - 32) // 32
+    # A stream with more slots than the index has dependent scans has another layout
+    if (n_exp < 2 or sorted(headers) != list(range(n_exp)) or len(dde) < 32 or (len(dde) - 32) % 32 or (len(sample['Idx']) - 32) % WIFF_SCAN.itemsize or
+            n_slots > rows - -(-rows // n_exp)):
         raise ValueError(f"{name} has no information-dependent MS/MS scans CandyCrunch can read (TOF MS only, SWATH or an unknown layout); CandyCrunch needs "
                          f"data-dependent MS2 spectra.")
-    slots = np.frombuffer(dde, '<f8', offset = 32).reshape(-1, n_exp - 1, 4)
+    slots = np.zeros((-(-rows // n_exp), n_exp - 1, 4))
+    slots.reshape(-1, 4)[:n_slots] = np.frombuffer(dde, '<f8', n_slots * 4, 32).reshape(-1, 4)
     scans = np.frombuffer(sample['Idx'], WIFF_SCAN, offset = 32)
     # The flight time of a TOF bin in ns (25.1 ps on a TripleTOF 5600), and per experiment the number of bins summed into one stored point (4 for TOF MS,
     # 4 or 8 for product ion scans) and its mass range (float64 at 66)
@@ -895,7 +923,7 @@ def read_baf(folder, peaks = True):
             if kind == 0x3001:
                 ids = {}
                 for key in ('Mode_IonPolarity', 'Mode_ScanBegin', 'MSMS_IsolationMass_Act', 'MSMS_PreCursorChargeState', 'Collision_Energy_Act',
-                            'Quadrupole_IsolationResolution_Act', 'Calibration_Tof2CalC1'):
+                            'Quadrupole_IsolationResolution_Act', 'Calibration_Tof2CalC1', 'TOF_DeviceTempGradient1', 'TOF_DeviceTempGradient2'):
                     i = next((m.start() for m in re.finditer(re.escape(key.encode() + b'\x00'), block) if m.start() >= 20 and
                               struct.unpack_from('<H', block, m.start() - 12)[0] == 20), None)
                     if i is not None:
@@ -934,12 +962,16 @@ def read_baf(folder, peaks = True):
                 # TOF calibration as for timsTOF frames: digitizer delay and time base, then C0-C4; flight time t = C0 + sqrt(1e12 / C1 * (m/z + C4)) +
                 # C2 * m/z, solved in closed form. The spectrum's C1 carries the temperature compensation as the method's C1 times 1 + e: m/z come from
                 # the method's C1, divided by 1 + e, as Bruker's DataAnalysis gives them (with the spectrum's C1 they drift by 2 e, ppm over a run);
-                # a method C1 far from the spectrum's belongs to another calibration and is not used
+                # a method C1 far from the spectrum's belongs to another calibration and is not used. Where the method sets temperature gradients
+                # (TOF_DeviceTempGradient1/2, ppm/C: 45 and 0 on a compact, 48.7 and 22.9 on a maXis, 0 on a timsTOF), e is the instrument's own
+                # compensation from its device temperatures and the spectrum's C1 the calibration it used: its isolation masses equal the survey lines
+                # with it (median 0.2 / 0.01 ppm), against 175 / 99 ppm off with the method's C1 divided by 1 + e
                 if calibration is None or len(calibration) < 72 or struct.unpack_from('<d', calibration, 56)[0]:
                     raise ValueError(f"{name} uses a mass calibration CandyCrunch does not know (not a Bruker Q-TOF); convert it to mzML with msconvert first.")
                 delay, timebase, c0, c1, c2, _, c4 = struct.unpack_from('<7d', calibration, 16)
                 reference = value('Calibration_Tof2CalC1')
-                reference = reference if reference and abs(reference / c1 - 1) < 1e-4 else c1
+                compensated = value('TOF_DeviceTempGradient1') or value('TOF_DeviceTempGradient2')
+                reference = reference if reference and not compensated and abs(reference / c1 - 1) < 1e-4 else c1
                 a, q = np.sqrt(1e12 / reference), positions * timebase + delay - c0 + c2 * c4
                 x = 2 * q / (a + np.sqrt(a * a + 4 * c2 * q))
                 spectrum['peaks'] = np.column_stack([(x * x - c4) * reference / c1, np.frombuffer(block, '<f4', n, 44 + at_intensities)])
