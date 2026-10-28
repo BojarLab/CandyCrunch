@@ -999,6 +999,78 @@ def test_bruker_baf(tmp_path):
         load_spectra_filepath(str(folder))
 
 
+def test_bruker_tsf(tmp_path, monkeypatch):
+    # A timsTOF .d without ion mobility (timsTOF fleX, ESI): analysis.tsf (SQLite: Frames, FrameMsMsInfo, MzCalibration, GlobalMetadata) and per frame in
+    # analysis.tsf_bin its byte size, the size of its zstd block, then the block of float64 line positions on the digitizer's time axis and float32
+    # intensities. Survey frames are MsMsType 0, MS/MS frames are listed with their trigger mass, isolation width, charge and collision energy
+    try:
+        from compression.zstd import compress
+    except ImportError:
+        from zstandard import compress
+    timebase, delay, c0, c1, c2, c4, dc1, t1_ref = 0.125, 31272.375, 278.333, 156145.33, -0.00065, 0.0, 20.0, 25.75
+
+    def position(mz, t1):
+        mz = mz * (1 + dc1 * 1e-6 * (t1 - t1_ref))
+        return (c0 + np.sqrt(1e12 / c1 * (mz + c4)) + c2 * mz - delay) / timebase
+
+    survey = [(675.36, 2e6), (965.844, 9e5), (965.844 + 1.003355 / 2, 6e5), (965.844 + 1.003355, 3e5), (966.47, 4e3)]
+    fragments = [(290.09, 1e4), (675.3, 1e4), (800.3, 3e4), (965.85, 5e4), (966.35, 4e4)]
+    # Frame 1 survey, 2 and 3 MS/MS of 965.84 (charge 2) and 675.36 (charge 1) with trigger masses at their monoisotopic survey lines, 4 an MS/MS frame
+    # without lines
+    rows = [(1, 150.0, 0, survey, 26.1), (2, 150.6, 2, fragments, 26.3), (3, 151.2, 2, fragments, 26.3), (4, 151.8, 2, [], 26.3)]
+    msms = [(2, 1, 965.8441, 3.0, 2, -25.0), (3, 1, 675.3605, 1.0, 1, -20.0), (4, 1, 500.0, 1.0, None, -20.0)]
+
+    def write(folder, metadata, maldi = False):
+        folder.mkdir()
+        data, frames = b'', []
+        for frame, time, kind, peaks, t1 in rows:
+            block = compress(np.array([position(m, t1) for m, _ in peaks], '<f8').tobytes() + np.array([i for _, i in peaks], '<f4').tobytes())
+            frames.append((frame, time, '-', 1, kind, len(data), len(peaks), 1, t1, 24.0))
+            data += struct.pack('<2I', 8 + len(block), len(block)) + block
+        (folder / 'analysis.tsf_bin').write_bytes(data)
+        db = sqlite3.connect(folder / 'analysis.tsf')
+        db.execute('CREATE TABLE GlobalMetadata (Key TEXT, Value TEXT)')
+        db.executemany('INSERT INTO GlobalMetadata VALUES (?, ?)', metadata.items())
+        db.execute('CREATE TABLE Frames (Id INTEGER, Time REAL, Polarity TEXT, ScanMode INTEGER, MsMsType INTEGER, TimsId INTEGER, NumPeaks INTEGER, MzCalibration INTEGER, T1 REAL, T2 REAL)')
+        db.executemany('INSERT INTO Frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', frames)
+        db.execute('CREATE TABLE MzCalibration (Id INTEGER, ModelType INTEGER, DigitizerTimebase REAL, DigitizerDelay REAL, T1 REAL, T2 REAL, dC1 REAL, dC2 REAL, C0, C1, C2, C3, C4)')
+        db.execute('INSERT INTO MzCalibration VALUES (1, 1, ?, ?, ?, 24.0, ?, 0.0, ?, ?, ?, 0.0, ?)', (timebase, delay, t1_ref, dc1, c0, c1, c2, c4))
+        db.execute('CREATE TABLE FrameMsMsInfo (Frame INTEGER, Parent INTEGER, TriggerMass REAL, IsolationWidth REAL, PrecursorCharge INTEGER, CollisionEnergy REAL)')
+        db.executemany('INSERT INTO FrameMsMsInfo VALUES (?, ?, ?, ?, ?, ?)', msms)
+        if maldi:
+            db.execute('CREATE TABLE MaldiFrameInfo (Frame INTEGER, Chip INTEGER, SpotName TEXT)')
+            db.execute("INSERT INTO MaldiFrameInfo VALUES (1, 0, 'A1')")
+        db.commit()
+        db.close()
+        return str(folder)
+
+    metadata = {'TimsCompressionType': '3', 'HasLineSpectra': '1', 'HasProfileSpectra': '0', 'MzAcqRangeLower': '150.000000'}
+    run = write(tmp_path / 'run.d', metadata)
+    df = load_spectra_filepath(run, extract_ms1 = True)
+    # Both precursors move onto their monoisotopic survey lines; the empty MS/MS frame gives no row
+    assert np.allclose(df['m/z'], [965.844, 675.36], atol = 1e-4)
+    # Bruker writes no charge where it determined none, so its charge 1 is kept
+    assert df['precursor_charge'].tolist() == [2, 1]
+    # The line positions give back the m/z through the TOF calibration and the frame's temperature correction; the charge 2 precursor's envelope is no fragment
+    assert sorted(df['peak_d'][0]) == pytest.approx([290.09, 675.3, 800.3], abs = 1e-6) and len(df['peak_d'][1]) == 5
+    assert np.allclose(df['RT'], [2.51, 2.52]) and df['scan'].tolist() == [2, 3] and df['collision_energy'].tolist() == [25.0, 20.0]
+    assert df['isolation_width'].tolist() == [3.0, 1.0] and df['scan_low'].tolist() == [150.0, 150.0]
+    assert df.attrs['detected_trap'] == 'other' and df.attrs['detected_ms1_trap'] == 'tof' and df.attrs['detected_mode'] == 'negative'
+    assert df['polarity'].tolist() == ['-'] * 2 and df['activation'].tolist() == ['HCD'] * 2
+    assert len(df.attrs['ms1'][0]) == 1 and df.attrs['ms1'][1][0] == pytest.approx(675.36, abs = 1e-4) and len(df.attrs['ms1'][1]) == 5
+    # Survey frames keep their TIMS_MS1_PEAKS most intense lines
+    monkeypatch.setattr(candycrunch.utils, 'TIMS_MS1_PEAKS', 4)
+    assert load_spectra_filepath(run, extract_ms1 = True).attrs['ms1'][1].tolist() == pytest.approx([675.36, 965.844, 966.3457, 966.8474], abs = 1e-3)
+    # Headers only (the app's run detection) need no analysis.tsf_bin
+    os.remove(os.path.join(run, 'analysis.tsf_bin'))
+    assert [s['precursor'] for s in candycrunch.utils.read_tsf(run, peaks = False)][1] == {'mz': 965.8441, 'charge': 2}
+    # Profile-only and MALDI runs are refused with a hint
+    with pytest.raises(ValueError, match = 'profile spectra only'):
+        load_spectra_filepath(write(tmp_path / 'profile.d', {**metadata, 'HasLineSpectra': '0', 'HasProfileSpectra': '1'}))
+    with pytest.raises(ValueError, match = 'MALDI'):
+        load_spectra_filepath(write(tmp_path / 'maldi.d', metadata, maldi = True))
+
+
 def test_waters_raw(tmp_path):
     # A Waters MassLynx .raw folder (Fast DDA): _FUNCTNS.INF (a 416-byte record per function: scan type, ionization mode, centroid and lock mass bits; mass
     # range at 160), per function an .IDX (30-byte or older 22-byte records: points, bit 30 for calibrated m/z, TIC, RT, offset), an .STS (parameter

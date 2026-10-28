@@ -12,7 +12,7 @@ import pandas as pd
 from glycowork.glycan_data.loader import stringify_dict
 from glycowork.motif.processing import canonicalize_iupac
 from glycowork.motif.tokenization import glycan_to_composition
-from candycrunch.prediction import ISOTOPE_SPACING, acidic_count, bin_intensities, load_spectra_filepath, plain_composition, wrap_inference
+from candycrunch.prediction import ISOTOPE_SPACING, PROTON_MASS, acidic_count, bin_intensities, load_spectra_filepath, plain_composition, wrap_inference
 
 SPECTRUM_COLUMNS = ['spec_id', 'peak_d', 'RT', 'rt_range', 'intensity', 'num_spectra', 'model_input', 'RT2']
 # Where a label's structure came from: its mapping row's RT as the mapping gives it (fewer than 5 anchors), shifted by the median offset, by the fitted
@@ -189,6 +189,18 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         return fits
 
     fits, open_fits = fit_matrix(masses), fit_matrix(open_masses)
+    # A row with RT also fits its glycan's other charge states (maps often list one): an input whose neutral mass at its charge is the row's at a charge of
+    # 1-4, within the row's tolerance at the input's m/z, where the composition, RT window and crumbs_thresh keep other glycans out (rows without RT keep
+    # their own charge: there it took noise at other charges)
+    sign = -1 if settings['mode'] == 'negative' else 1
+    z_in = np.nan_to_num(np.abs(inputs['charge'].to_numpy(dtype = float)), nan = 1.0)[:, None]
+    other_charge = np.zeros_like(fits)
+    decimals = np.array([next((d for d in range(7) if round(m, d) == m), 6) for m in masses])
+    for z in range(1, 5):
+        at_z = ((masses - sign * PROTON_MASS) * z)[None, :] / z_in + sign * PROTON_MASS
+        tol = (np.minimum(mz_tolerance, np.maximum(ppm_tolerance * mz_values[:, None] / 1e6, 0.5 * 10.0 ** -decimals[None, :] * z / z_in))
+               if settings.get('accurate_ms1') else mz_tolerance)
+        other_charge |= np.abs(mz_values[:, None] - at_z) <= tol
     input_keys = [tuple(sorted(plain_composition(c).items())) if isinstance(c, dict) else None for c in inputs['composition']]
     # Inputs from the most intense down (spectrum counts without precursor intensities); crumbs_thresh as the pipeline's gate
     by_intensity = np.lexsort((-inputs['num_spectra'].to_numpy(dtype = float), -inputs['intensity'].fillna(0).to_numpy(dtype = float)))
@@ -256,7 +268,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             rt_shift, map_rts, row_shift, alignment = 0.0, np.full(len(map_rts), np.nan), np.zeros(len(map_rts)), 'dropped'
     map_rts = map_rts + row_shift
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
-    near = [[k for k in np.flatnonzero(fits[i]) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
+    near = [[k for k in np.flatnonzero(fits[i] | (other_charge[i] & ~np.isnan(map_rts) & passing[i])) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
             for i, (rt, key) in enumerate(zip(inputs['RT'], input_keys))]
     windowed = {k for n in near for k in n}
     # An input nearer a same-mass row without structure (moved by the run's median shift) than a structured row is the open row's peak, not the structured

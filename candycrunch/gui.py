@@ -555,9 +555,10 @@ def _detect_run(path, results):
             dde = read_compound_file(path).get('SampleSubtree/Sample1/DDERealTimeData', b'')
             n_ms2 = int((np.frombuffer(dde[32:len(dde) - (len(dde) - 32) % 32], '<f8')[::4] > 0).sum()) if len(dde) > 32 else 0
             found.update(trap = 'other')
-        elif ext == '.d' and os.path.exists(os.path.join(path, 'analysis.baf')):
-            from candycrunch.utils import read_baf
-            ms2 = [s for s in read_baf(path, peaks = False) if s['ms_level'] == 2 and s['precursor']]
+        elif ext == '.d' and (os.path.exists(os.path.join(path, 'analysis.baf')) or os.path.exists(os.path.join(path, 'analysis.tsf'))):
+            from candycrunch.utils import read_baf, read_tsf
+            # Bruker Q-TOF runs and timsTOF runs without ion mobility: their MS/MS headers
+            ms2 = [s for s in (read_baf if os.path.exists(os.path.join(path, 'analysis.baf')) else read_tsf)(path, peaks = False) if s['ms_level'] == 2 and s['precursor']]
             for s in ms2:
                 if s['precursor']['charge']:
                     charges[s['precursor']['charge']] = charges.get(s['precursor']['charge'], 0) + 1
@@ -1676,7 +1677,7 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, Waters .raw folders, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF DDA-PASEF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        self.file_hint = _label('Thermo .raw, Waters .raw folders, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')

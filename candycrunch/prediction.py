@@ -40,7 +40,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals
-from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, read_baf, read_waters, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
+from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, read_baf, read_tsf, read_waters, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir = os.path.dirname(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
@@ -833,8 +833,8 @@ def process_tdf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
         from zstandard import decompress as zstd_decompress
     tdf = os.path.join(filepath, 'analysis.tdf')
     if not os.path.exists(tdf):
-        raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no analysis.tdf, analysis.baf or Analysis.yep. CandyCrunch reads timsTOF, "
-                         f"Q-TOF and ion trap .d folders directly; other Bruker data (.tsf without ion mobility, MALDI) has to be converted to mzML or mzXML with msconvert first.")
+        raise ValueError(f"{os.path.basename(os.path.normpath(filepath))} has no analysis.tdf, analysis.tsf, analysis.baf or Analysis.yep. CandyCrunch reads timsTOF, "
+                         f"Q-TOF and ion trap .d folders directly; other Bruker data (e.g., MALDI) has to be converted to mzML or mzXML with msconvert first.")
     # Read-only, so nothing is written next to the data (journal files) and a file the acquisition software still holds open can be read
     db = sqlite3.connect(pathlib.Path(tdf).resolve().as_uri() + '?mode=ro', uri = True)
     try:
@@ -1090,7 +1090,8 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
     return df_out
 
 
-def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False, spectra = None, mz_tolerance = 0.05, walk_charges = (1, 2)):
+def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False, spectra = None, mz_tolerance = 0.05, walk_charges = (1, 2),
+                             charge_1 = False):
     """function extracting all MS/MS spectra from an Agilent MassHunter .d folder (Q-TOF; AcqData with MSScan.bin and MSPeak.bin)\n
    | Arguments:
    | :-
@@ -1098,9 +1099,10 @@ def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extr
    | num_peaks (int): max number of peaks to extract from spectrum; default:1000
    | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
    | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False
-   | spectra (iterable): the spectra of another Q-TOF reader (dicts as read_masshunter yields them, read_baf's, read_waters'), to process instead of the folder's; default:None
+   | spectra (iterable): the spectra of another Q-TOF reader (dicts as read_masshunter yields them, read_baf's, read_tsf's, read_waters'), to process instead of the folder's; default:None
    | mz_tolerance (float): how far from its header m/z the survey centroid of a precursor may lie; default:0.05
-   | walk_charges (tuple): the isotope spacings walked for precursors without a charge state, as in refine_precursor_mz; default:(1, 2)\n
+   | walk_charges (tuple): the isotope spacings walked for precursors without a charge state, as in refine_precursor_mz; default:(1, 2)
+   | charge_1 (bool): whether a header charge of 1 is one the instrument determined (kept) rather than its default (undetermined); default:False\n
    | Returns:
    | :-
    | Returns a pandas dataframe of spectra with m/z, peak dictionary, retention time, charge, intensity if True, scan number, activation and the
@@ -1119,8 +1121,8 @@ def process_masshunter_stack(filepath, num_peaks = 1000, intensity = False, extr
             ms1_ints.append(peaks[:, 1].astype(np.float32))
         elif scan['ms_level'] == 2 and scan['precursor'] and len(peaks):
             mz, charge = scan['precursor']['mz'], scan['precursor']['charge']
-            # Charge 1 counts as undetermined, as Agilent's charge 1 in mzML and Bruker's in mzXML
-            charge = charge if charge and charge > 1 else None
+            # Charge 1 counts as undetermined, as Agilent's charge 1 in mzML and Bruker's in mzXML, unless the instrument writes no charge where it determined none
+            charge = charge if charge and (charge > 1 or charge_1) else None
             # As for Q-TOF mzML: the unfragmented precursor envelope is not a fragment, and the 100 most intense centroids are kept; with a charge state it is cut
             # from 0.05 below the isolation target, as the monoisotopic peak often lies a few ppm below it
             peaks = peaks[(peaks[:, 0] < mz - (0.05 if charge else 0)) | (peaks[:, 0] > mz + (6 * ISOTOPE_SPACING / charge + 0.05 if charge else 0))]
@@ -1171,6 +1173,24 @@ def process_baf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
    """
     # Bruker's isolation mass and charge states (1 for undetermined) behave like MassHunter's, so the Q-TOF conventions of that stack hold
     return process_masshunter_stack(filepath, num_peaks = num_peaks, intensity = intensity, extract_ms1 = extract_ms1, spectra = read_baf(filepath))
+
+
+def process_tsf_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
+    """function extracting all MS/MS spectra from a Bruker timsTOF .d folder acquired without ion mobility (timsTOF fleX in ESI mode; with an analysis.tsf)\n
+   | Arguments:
+   | :-
+   | filepath (string): absolute path to the .d folder
+   | num_peaks (int): max number of peaks to extract from spectrum; default:1000
+   | intensity (bool): whether to extract precursor ion intensity from spectra; default:False
+   | extract_ms1 (bool): whether to extract MS1 data for XIC area quantification; default:False\n
+   | Returns:
+   | :-
+   | Returns a pandas dataframe of spectra as process_masshunter_stack, from the line (centroided) spectra the instrument stores, with the frame number as scan
+   """
+    # Without ion mobility a timsTOF acquires data-dependent MS/MS as Bruker's Q-TOFs do (a trigger mass on the monoisotopic survey line and, where
+    # determined, a charge state per MS/MS frame), so the Q-TOF conventions of the MassHunter stack hold; but as in a timsTOF's analysis.tdf, a charge it
+    # did not determine is NULL, so its charge 1 is kept (235 of 239 charge 1 triggers on a singly charged glycan target of a GSL run, 329 of 329 for charge 2)
+    return process_masshunter_stack(filepath, num_peaks = num_peaks, intensity = intensity, extract_ms1 = extract_ms1, spectra = read_tsf(filepath), charge_1 = True)
 
 
 def process_waters_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1 = False):
@@ -3135,11 +3155,12 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
     # A timsTOF .d is a folder, which may come with a trailing separator
     ext = os.path.splitext(os.path.normpath(spectra_filepath))[1].lower()
     if ext == ".d":
-        # timsTOF folders hold an analysis.tdf, the ion traps (esquire, HCT, amaZon) an Analysis.yep, Bruker Q-TOF runs an analysis.baf, Agilent MassHunter
-        # runs (Q-TOF) an AcqData/MSScan.bin
+        # timsTOF folders hold an analysis.tdf (an analysis.tsf without ion mobility), the ion traps (esquire, HCT, amaZon) an Analysis.yep, Bruker Q-TOF runs an
+        # analysis.baf, Agilent MassHunter runs (Q-TOF) an AcqData/MSScan.bin
         stack = (process_yep_stack if os.path.exists(os.path.join(spectra_filepath, 'Analysis.yep')) else process_masshunter_stack
                  if os.path.exists(os.path.join(spectra_filepath, 'AcqData', 'MSScan.bin')) else process_baf_stack
-                 if os.path.exists(os.path.join(spectra_filepath, 'analysis.baf')) else process_tdf_stack)
+                 if os.path.exists(os.path.join(spectra_filepath, 'analysis.baf')) else process_tsf_stack
+                 if os.path.exists(os.path.join(spectra_filepath, 'analysis.tsf')) else process_tdf_stack)
         return stack(spectra_filepath, intensity = True, extract_ms1 = extract_ms1)
     if ext in (".mzml", ".mzxml"):
         try:
@@ -3280,7 +3301,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
 try:
     SPECTRA_LOADER = hashlib.sha1(''.join([inspect.getsource(inspect.getmodule(read_mzml))] + [inspect.getsource(f) for f in (
         refine_precursor_mz, refine_tof_precursors, process_mzML_stack, process_mzXML_stack, process_raw_stack, process_tdf_stack, process_yep_stack,
-        process_masshunter_stack, process_baf_stack, process_waters_stack, process_wiff_stack,
+        process_masshunter_stack, process_baf_stack, process_tsf_stack, process_waters_stack, process_wiff_stack,
         process_mzdata_stack, load_spectra_filepath)]).encode()).hexdigest()[:12]
 except (OSError, TypeError):
     SPECTRA_LOADER = None

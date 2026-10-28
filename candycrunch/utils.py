@@ -1,9 +1,11 @@
-"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Waters .raw, Agilent MassHunter .d, Bruker Q-TOF .d and SCIEX .wiff spectra files, on the standard library and numpy"""
+"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Waters .raw, Agilent MassHunter .d, Bruker Q-TOF and timsTOF (.tsf) .d and SCIEX .wiff spectra files, on the standard library and numpy"""
 import base64
 import heapq
 import itertools
 import os
+import pathlib
 import re
+import sqlite3
 import struct
 import zlib
 import xml.etree.ElementTree as ET
@@ -982,6 +984,85 @@ def read_baf(folder, peaks = True):
         raise ValueError(f"{name} has no readable analysis.baf; convert it to mzML with msconvert first.")
     if peaks and headers and not n_read:
         raise ValueError(f"{name} holds profile spectra only (no line spectra in its analysis.baf); convert it to mzML with msconvert (with peak picking) first.")
+
+
+def read_tsf(folder, peaks = True):
+    """iterates over the spectra of a Bruker timsTOF .d folder acquired without ion mobility (timsTOF fleX in ESI mode, with an analysis.tsf and
+    analysis.tsf_bin), from the line (centroided) spectra the instrument stores\n
+   | Arguments:
+   | :-
+   | folder (string): absolute path to the .d folder
+   | peaks (bool): whether to read the spectra or only their headers (peaks then None); default:True\n
+   | Returns:
+   | :-
+   | Yields a dict per spectrum as read_baf: scan (the frame number), ms_level, rt (min), peaks ((n, 2) array of centroid m/z and intensity), precursor (mz,
+   | the trigger mass, and charge, None for survey scans; the charge None where Bruker determined none), polarity ('+'/'-'), collision_energy,
+   | isolation_width and scan_low (the lower end of the acquisition range)
+   """
+    name = os.path.basename(os.path.normpath(folder))
+    # analysis.tsf is an SQLite database like a timsTOF's analysis.tdf, with one frame per spectrum and no ion mobility scans; read-only, so nothing is
+    # written next to the data
+    db = sqlite3.connect(pathlib.Path(folder, 'analysis.tsf').resolve().as_uri() + '?mode=ro', uri = True)
+    try:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        metadata = dict(db.execute('SELECT Key, Value FROM GlobalMetadata').fetchall())
+        maldi = 'MaldiFrameInfo' in tables and db.execute('SELECT COUNT(*) FROM MaldiFrameInfo').fetchone()[0]
+        frames = db.execute('SELECT Id, Time, Polarity, MsMsType, TimsId, NumPeaks, MzCalibration, T1, T2 FROM Frames ORDER BY Id').fetchall()
+        calibrations = {row[0]: row[1:] for row in db.execute('SELECT Id, ModelType, DigitizerTimebase, DigitizerDelay, T1, T2, dC1, dC2, C0, C1, C2, C3, C4 FROM MzCalibration')}
+        msms = {row[0]: row[1:] for row in db.execute('SELECT Frame, TriggerMass, IsolationWidth, PrecursorCharge, CollisionEnergy FROM FrameMsMsInfo')} if 'FrameMsMsInfo' in tables else {}
+    finally:
+        db.close()
+    if maldi:
+        raise ValueError(f"{name} is a MALDI run; CandyCrunch reads LC-MS/MS runs.")
+    if metadata.get('HasLineSpectra') != '1':
+        raise ValueError(f"{name} holds profile spectra only (no line spectra in its analysis.tsf_bin); convert it to mzML with msconvert (with peak picking) first.")
+    if metadata.get('TimsCompressionType') != '3' or any(cal[0] != 1 or cal[10] for cal in calibrations.values()):
+        raise ValueError(f"{name} stores its spectra in a format CandyCrunch does not know; convert it to mzML with msconvert first.")
+    scan_low = float(metadata['MzAcqRangeLower']) if metadata.get('MzAcqRangeLower') else None
+    if peaks:
+        try:
+            from compression.zstd import decompress as zstd_decompress
+        except ImportError:
+            from zstandard import decompress as zstd_decompress
+        f = open(os.path.join(folder, 'analysis.tsf_bin'), 'rb')
+    try:
+        for frame, time, polarity, kind, offset, n, cal_id, t1, t2 in frames:
+            # Survey frames are MsMsType 0, MS/MS frames are listed in FrameMsMsInfo (trigger mass, isolation width, charge, collision energy with the
+            # polarity's sign); other frames are left out
+            if kind and frame not in msms:
+                continue
+            spectrum = dict(scan = frame, ms_level = 2 if kind else 1, rt = time / 60, peaks = None, precursor = None, polarity = polarity,
+                            collision_energy = None, isolation_width = None, scan_low = scan_low)
+            if kind:
+                mz, width, charge, energy = msms[frame]
+                spectrum.update(precursor = dict(mz = mz, charge = charge or None), collision_energy = abs(energy), isolation_width = width)
+            if peaks:
+                # A frame in analysis.tsf_bin is its byte size, the size of its zstd block, then the block: the lines' float64 positions on the digitizer's
+                # time axis (in sample steps), then their float32 intensities
+                lines = np.zeros((0, 2))
+                if n:
+                    f.seek(offset)
+                    size = struct.unpack('<2I', f.read(8))[0]
+                    raw = zstd_decompress(f.read(size - 8))
+                    if len(raw) != 12 * n:
+                        raise ValueError(f"{name} stores its spectra in a format CandyCrunch does not know; convert it to mzML with msconvert first.")
+                    # TOF calibration as for timsTOF frames (model 1): flight time t = C0 + sqrt(1e12 / C1 * (m/z + C4)) + C2 * m/z, solved in closed form,
+                    # then the linear temperature correction with the frame's T1 and T2
+                    _, timebase, delay, t1_ref, t2_ref, dc1, dc2, c0, c1, c2, _, c4 = calibrations[cal_id]
+                    a, q = np.sqrt(1e12 / c1), np.frombuffer(raw, '<f8', n) * timebase + delay - c0 + c2 * c4
+                    x = 2 * q / (a + np.sqrt(a * a + 4 * c2 * q))
+                    lines = np.column_stack([(x * x - c4) / (1 + dc1 * 1e-6 * (t1 - t1_ref) + dc2 * 1e-6 * (t2 - t2_ref)), np.frombuffer(raw, '<f4', n, 8 * n)])
+                    if not kind and n > TIMS_MS1_PEAKS:
+                        # A survey frame holds 20-40k lines, most of them single ions near the line threshold (2 GB of MS1 data for a 100-min run); as of
+                        # a timsTOF frame, its TIMS_MS1_PEAKS most intense lines are kept and, of those at the cut-off intensity, the first in m/z order
+                        kth = np.partition(lines[:, 1], -TIMS_MS1_PEAKS)[-TIMS_MS1_PEAKS]
+                        above, tied = lines[:, 1] > kth, lines[:, 1] == kth
+                        lines = lines[above | (tied & (np.cumsum(tied) <= TIMS_MS1_PEAKS - above.sum()))]
+                spectrum['peaks'] = lines
+            yield spectrum
+    finally:
+        if peaks:
+            f.close()
 
 
 # MassLynx scan index records (_FUNCnnn.IDX) by their size: the number of points in the low 22 bits of info (bit 30: m/z already calibrated), TIC, RT in
