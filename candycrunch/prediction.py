@@ -40,6 +40,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals
+from candycrunch.confidence import calibrated_confidence
 from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, read_baf, read_tsf, read_waters, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir = os.path.dirname(__file__)
@@ -578,6 +579,12 @@ def process_mzXML_stack(filepath, num_peaks = 1000, ms_level = 2, intensity = Fa
     # 30% of the trigger peak counts (precursors within 0.1 m/z of their GT glycan: 84% at 70%, 93% at 50%, 97% at 30%)
     df_out['m/z'], drop = refine_precursor_mz(ms1, mzs, rts, ms1_scans, refine, mz_tolerance = 0.6 if isolation_mz else 0.3,
                                               min_explained = 0.3 if isolation_mz else 0.7, charges = charges, isolation_mz = isolation_mz)
+    if detected_ms1_trap == 'orbitrap' and not isolation_mz:
+        # Thermo orbitrap monoisotopic picks of glycans above ~2000 Da walk their isotopes as in process_mzML_stack (mzXML of Thermo runs, e.g. RawConverter's,
+        # keep the instrument's pick: PXD036704's A2G2S2 [M+3H]3+ at its apex read 929.82 for 929.48)
+        walked, _ = refine_precursor_mz(ms1, list(df_out['m/z']), rts, ms1_scans, [bool(c) and m * c >= 2000 for m, c in zip(df_out['m/z'], charges)],
+                                        mz_tolerance = 0.02, isotope_tolerance = 0.02, charges = charges, isolation_mz = True, max_lighter = 2)
+        df_out['m/z'] = [w if c and abs(w - m) > ISOTOPE_SPACING / c / 2 else m for w, m, c in zip(walked, df_out['m/z'], charges)]
     df_out = df_out[~drop].reset_index(drop = True)
     df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
@@ -3688,11 +3695,11 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     | ms1_ppm_floor (float): smallest half-width (ppm) of the composition-error window with accurate survey scans (MS1_PPM_FLOORS); default:3.0
     | ion_trap (bool): whether the MS2 spectra are ion-trap CID, the only data supporting_ions' linkage reading of a lone Neu5Ac was measured on, which
     |                  then goes into supported_by; default:False
-    | xic_details (bool): whether to add the column xic: per row the MS1 integrations its abundance sums (extract_xic_areas' details of its own ion and
-    |                     of the rows folded into it; empty without MS1); default:False\n
+    | xic_details (bool): whether to add the columns xic (per row the MS1 integrations its abundance sums: extract_xic_areas' details of its own ion and
+    |                     of the rows folded into it; empty without MS1) and confidence_terms (how its confidence is built, see calibrated_confidence); default:False\n
     | Returns:
     | :-
-    | Returns a tuple of (dataframe of corrected predictions with unnormalized rel_abundance, list of spectra)
+    | Returns a tuple of (dataframe of corrected predictions with unnormalized rel_abundance and the calibrated confidence of each structure, list of spectra)
     """
     df_out = df_out.drop(columns = ['precursor_charge'], errors = 'ignore')
     # Reprioritize predictions based on how well they are explained by biosynthetic precursors in the same file (e.g., core 1 O-glycan making extended core 1 O-glycans more likely)
@@ -4016,6 +4023,11 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                     for e in support['residues'] if ion_trap and e.get('linkage')]
         supported_by.append('; '.join(([f"{sum(bool(e['support']) for e in tested)}/{len(tested)} residues supported" + (': ' + '; '.join(texts) if texts else '')] if tested else []) + readings))
     df_out['supported_by'] = supported_by
+    # One calibrated confidence per structure (the probability that it is the peak's glycan, see confidence.py) takes the place of the scores it is built
+    # from (fragment score, where the structure came from; the model's probabilities stay with the candidates in predictions, and supported_by stays as the
+    # peaks themselves), whose breakdown stays in confidence_terms for the app
+    df_out['confidence'], df_out['confidence_terms'] = calibrated_confidence(df_out)
+    df_out = df_out.drop(columns = ['annotation_score', 'evidence'], errors = 'ignore')
     if 're_offset' in df_out.columns:
         df_out = df_out.drop(columns = ['re_offset', 'unlabelled'] + (['reducing_end'] if df_out['reducing_end'].isna().all() else []))
     if (df_out['rel_abundance'] == 0).all():
@@ -4023,7 +4035,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # By m/z, but the rows of one ion (a composition and charge, whose m/z differ by noise) by RT; before the spectra are split off, which keep the row order
     df_out = df_out.iloc[np.argsort(mz_order(df_out.index, df_out['RT'], df_out['charge'].values, df_out['composition'].tolist()))]
     spectra_out = df_out.pop('peak_d').values.tolist()
-    df_out = df_out[['top1_pred', 'predictions'] + [c for c in df_out.columns if c not in ('top1_pred', 'predictions', 'xic')] + (['xic'] if xic_details else [])]
+    df_out = df_out[['top1_pred', 'confidence', 'predictions'] + [c for c in df_out.columns if c not in ('top1_pred', 'confidence', 'predictions', 'xic', 'confidence_terms')] + (
+        ['xic', 'confidence_terms'] if xic_details else [])]
     df_out.index.name = "m/z"
     return df_out, spectra_out
 
@@ -4277,8 +4290,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                       skipped, so modification and glycan_class have to be right; default:False\n
    | Returns:
    | :-
-   | Returns dataframe of predictions for spectra in file; if spectra=True, a tuple of (dataframe, list of its MS2 spectra) with the column xic (the MS1
-   | integrations each row's abundance sums, see finalise_predictions), and files with MS3 spectra
+   | Returns dataframe of predictions for spectra in file, with the calibrated confidence of each row's structure (confidence: the probability that it is
+   | the peak's glycan, as written; see calibrated_confidence); if spectra=True, a tuple of (dataframe, list of its MS2 spectra) with the columns xic (the
+   | MS1 integrations each row's abundance sums, see finalise_predictions) and confidence_terms (how each confidence is built), and files with MS3 spectra
    | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row); with return_inputs, the dataframe of model inputs,
    | each with the binned_intensities, mz_remainder, RT2 and glycan_type it was encoded with
    """
@@ -4356,7 +4370,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         if _return_intermediate:
             df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1)
             return df_out
+        df_out = df_out.drop(columns = ['annotation_score'])
         df_out.insert(0, 'top1_pred', [])
+        df_out.insert(1, 'confidence', [])
         df_out['ppm_error'] = []
         return (df_out, []) if spectra else df_out
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
@@ -4995,7 +5011,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                             ion_trap = trap in ('linear', 'amazon'))
         return df_out
     if df_out.empty:
+        df_out = df_out.drop(columns = ['annotation_score', 'evidence'], errors = 'ignore')
         df_out.insert(0, 'top1_pred', [])
+        df_out.insert(1, 'confidence', [])
         df_out['ppm_error'] = []
         return (df_out, []) if spectra else df_out
     df_out['top1_pred'] = [x[0][0] if x else np.nan for x in df_out.predictions]
@@ -5120,7 +5138,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | adducts (string or list): ions that carry the charge of the samples' precursors in place of protons, as in wrap_inference; default:None\n
    | Returns:
    | :-
-   | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file>; dict of per-file dataframes, or of (dataframe, spectra) tuples if spectra=True, with the column xic, and ms3 for files with MS3 spectra, as in wrap_inference)
+   | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file> ('ms2', or 'ms1_only' where the file has only MS1 signal of it); dict of per-file dataframes with the confidence of each structure (none for MS1-only rows) and the evidence of each row ('ms2' or 'ms1_only'), or of (dataframe, spectra) tuples if spectra=True, with the columns xic and confidence_terms, and ms3 for files with MS3 spectra, as in wrap_inference)
    """
     mode = "negative" if max_charge < 0 else "positive"
     mass_tolerance = ppm_thresh * MZ_REF / 1e6
@@ -5510,6 +5528,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 gap_df = pd.DataFrame(gaps).set_index('m/z')
                 df_out = pd.concat([df_out, gap_df]) if not df_out.empty else gap_df
                 spectra_out = spectra_out + [None] * len(gaps)
+        # MS2 of the row in this file, or only MS1 signal (a gap filled above)
+        df_out['evidence'] = np.where(df_out['num_spectra'].values.astype(float) > 0, 'ms2', 'ms1_only')
         if 'rel_abundance' in df_out.columns and df_out['rel_abundance'].sum() > 0:
             df_out['rel_abundance'] = df_out['rel_abundance'] / df_out['rel_abundance'].sum() * 100
         if plot_glycans and not df_out.empty:

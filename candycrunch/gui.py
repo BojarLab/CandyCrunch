@@ -910,6 +910,16 @@ def _number_column(title, values, decimals, tip = None):
     return {'title': title, 'kind': 'number', 'raw': raw, 'text': [_fmt(v, decimals) for v in raw], 'tip': tip}
 
 
+def _confidence_html(confidence, terms):
+    """How a row's confidence is built (its confidence_terms), as HTML: a typical reported peak, then how far each term moves the log-odds"""
+    if not isinstance(terms, (list, tuple)) or not terms or confidence is None or pd.isna(confidence):
+        return None
+    rows = ''.join(f'<tr><td style="color:{MUTED}; padding-right:8px; white-space:nowrap">{html.escape(label)}</td><td style="padding-right:8px">{html.escape(value)}</td>'
+                   f'<td align="right" style="color:{LILAC if c > 0.05 else CANDY if c < -0.05 else MUTED}; white-space:nowrap">{c:+.2f}</td></tr>' for label, value, c in terms)
+    return (f'<p>Confidence {confidence:.2f}: the probability that the structure is the glycan of this peak, as written. From a typical reported peak, '
+            f'each term moves its log-odds up (+) or down (-):</p><table cellspacing="0" cellpadding="1">{rows}</table>')
+
+
 def _mass_tag(settings):
     """The reducing-end mass CandyCrumbs takes, built as in assign_annotation_scores_pooled"""
     with IMPORT_LOCK:
@@ -1686,7 +1696,7 @@ class SettingsPanel(QScrollArea):
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.inputs['glycan_class'] = _combo(GLYCAN_CLASSES)
         self.inputs['glycan_class'].setToolTip('Glycan class of the samples. N- and O-glycans measured in one run: candidate compositions and structures come from '
-                                               'both classes, and only structures of other classes need the cross-class confidence')
+                                               'both classes, and only structures of other classes need the cross-class model probability')
         self.mode = _combo([('Negative', 'negative'), ('Positive', 'positive')])
         self.mode.setToolTip('Overridden by the polarity stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
         self.charge = _spin(1, 8, 1)
@@ -1782,13 +1792,14 @@ class SettingsPanel(QScrollArea):
             f'One mass tolerance for precursors and fragments. Precursors: the ppm error filter, and a flat {v * MZ_REF / 1e6:.2f} Da window (its value at m/z '
             f'{MZ_REF}) for grouping spectra and matching compositions. Fragments: the same {v * MZ_REF / 1e6:.2f} Da window for CandyCrumbs annotation'))
         self.inputs['pred_thresh'] = _spin(0, 1, 0.005, 3)
-        self.inputs['pred_thresh'].setToolTip('Minimum prediction confidence')
+        self.inputs['pred_thresh'].setToolTip('Minimum probability the model gives a structure among the isomers of its composition (not the calibrated '
+                                              'confidence reported per peak)')
         self.inputs['crumbs_thresh'] = _spin(0, 100, 1, 1)
         self.inputs['crumbs_thresh'].setToolTip('A peak is only kept if its fragment score exceeds this (2 lower for files with orbitrap or timsTOF survey scans). The fragment score sums, over the '
                                                 '15 most intense deisotoped fragment peaks, how many fragments of a structure of the precursor\'s composition each one matches '
                                                 '(up to two cleavages): fragment evidence that the peak is that glycan, independent of the model')
         self.inputs['extra_thresh'] = _spin(0, 1, 0.05, 2)
-        self.inputs['extra_thresh'].setToolTip('Confidence from which structures of another glycan class are allowed')
+        self.inputs['extra_thresh'].setToolTip('Model probability from which structures of another glycan class are allowed')
         self.inputs['frag_num'] = _spin(1, 1000, 10)
         self.inputs['frag_num'].setToolTip('Number of top fragments reported per spectrum')
         self.inputs['supplement'] = QCheckBox('Impute biosynthetic intermediates')
@@ -1807,9 +1818,9 @@ class SettingsPanel(QScrollArea):
         form.addRow('Peak width', self.inputs['rt_diff'])
         form.addRow('Mass tolerance', self.inputs['ppm_thresh'])
         form.addRow('Extra charge carrier', self.adducts)
-        form.addRow('Min. confidence', self.inputs['pred_thresh'])
+        form.addRow('Min. model probability', self.inputs['pred_thresh'])
         form.addRow('Fragment score above', self.inputs['crumbs_thresh'])
-        form.addRow('Cross-class confidence', self.inputs['extra_thresh'])
+        form.addRow('Cross-class model probability', self.inputs['extra_thresh'])
         form.addRow('Top fragments', self.inputs['frag_num'])
         form.addRow(self.inputs['supplement'])
         form.addRow(self.inputs['experimental'])
@@ -2434,23 +2445,16 @@ class ResultsView(QWidget):
             evidence = list(df.get('evidence', [None] * len(df)))
             column.update(kind = 'bar', bar = [None if v is None else (v / top, e == 'ms1_only') for v, e in zip(column['raw'], evidence)])
             columns.append(column)
-            columns.append(_number_column('Confidence', [next((x[1] for x in p if x[0] == t and len(x) > 1), None) if isinstance(p, (list, tuple)) else None
-                                                         for p, t in zip(df['predictions'], df['top1_pred'])], 2, 'CandyCrunch confidence of the structure shown'))
-            columns.append(_number_column('Fragment score', df.get('annotation_score', [None] * len(df)), 0, 'CandyCrumbs fragment annotation score'))
-            supported = [s if isinstance(s, str) and s else None for s in df.get('supported_by', [None] * len(df))]
-            counts = [re.match(r'(\d+)/(\d+)', s) if s else None for s in supported]
-            readings = [re.search(r'Neu5Ac linkage reads (a2-\d)(, not as shown)?', s) if s else None for s in supported]
-            columns.append({'title': 'Support', 'kind': 'number', 'raw': [int(m[1]) / int(m[2]) if m and int(m[2]) else None for m in counts],
-                            'text': [', '.join(([f'{m[1]}/{m[2]}'] if m else []) + ([('reads ' if r[2] else '') + r[1]] if r else [])) for m, r in zip(counts, readings)],
-                            'tips': supported, 'tip': 'Residues placed by diagnostic MS2 peaks, of those with another possible placement, and the linkage of a lone Neu5Ac '
-                                                      'that [M-H-Neu5Ac]- reads in ion-trap runs ("reads" where it is not the one shown); hover a cell for the peaks'})
+            confidence = list(df.get('confidence', [None] * len(df)))
+            column = _number_column('Confidence', confidence, 2, 'Probability that the structure shown is the glycan of the peak, as written (calibrated on '
+                                                                 'curated test sets; none for a structure assigned by hand); hover a cell for how it is built')
+            column['tips'] = [_confidence_html(c, t) for c, t in zip(confidence, df.get('confidence_terms', [None] * len(df)))]
+            columns.append(column)
             columns.append(_number_column('Spectra', df['num_spectra'], 0, 'MS2 spectra pooled into this peak'))
             if 'ms3' in df.columns:
                 columns.append(_number_column('MS3', [len({round(p) for p, _ in x}) if isinstance(x, list) and x else None for x in df['ms3']], 0,
                                               'MS2 fragments of this peak with MS3 spectra'))
             columns.append(_number_column('ppm', df.get('ppm_error', [None] * len(df)), 0, 'Precursor mass error'))
-            texts = [e if isinstance(e, str) else '' for e in evidence]
-            columns.append({'title': 'Evidence', 'kind': 'text', 'raw': texts, 'text': texts})
             notes = ['; '.join(str(x) for x in (n, f'adduct {a}' if isinstance(a, str) and a else '', c) if isinstance(x, str) and x)
                      for n, a, c in zip(df.get('notes', [''] * len(df)), df.get('adduct', [''] * len(df)), df['curation'])]
         ids = [g if isinstance(g, str) else '' for g in df.get('GlyTouCan_ID', [''] * len(df))]
@@ -2565,12 +2569,9 @@ class ResultsView(QWidget):
         if self.dataset.currentData() == FEATURES:
             facts.append(('MS2 runs', f'{df["n_files_ms2"].iat[row]} of {len(self.payload["tables"])}'))
         else:
-            preds = df['predictions'].iat[row]
             facts += [('Abundance', f'{_fmt(df["rel_abundance"].iat[row], 2)} %' if 'rel_abundance' in df.columns else ''),
-                      ('Confidence', _fmt(next((p[1] for p in preds if p[0] == structure and len(p) > 1), None), 3) if isinstance(preds, (list, tuple)) else ''),
-                      ('Fragment score', _fmt(df['annotation_score'].iat[row], 0) if 'annotation_score' in df.columns else ''),
+                      ('Confidence', _fmt(df['confidence'].iat[row], 2) if 'confidence' in df.columns else ''),
                       ('Spectra', str(df['num_spectra'].iat[row])), ('ppm error', _fmt(df['ppm_error'].iat[row], 1) if 'ppm_error' in df.columns else ''),
-                      ('Evidence', str(df['evidence'].iat[row]) if 'evidence' in df.columns and isinstance(df['evidence'].iat[row], str) else ''),
                       ('Notes', df['notes'].iat[row] if 'notes' in df.columns and isinstance(df['notes'].iat[row], str) else '')]
         glytoucan = df['GlyTouCan_ID'].iat[row] if 'GlyTouCan_ID' in df.columns else ''
         if isinstance(glytoucan, str) and glytoucan:
@@ -2590,7 +2591,9 @@ class ResultsView(QWidget):
                     rows.append(f'<tr>{"".join(pending)}</tr>')
                     pending = []
         rows += [f'<tr>{pending[0]}</tr>'] if pending else []
-        self.facts.setText('<table cellspacing="0" cellpadding="1">' + ''.join(rows) + '</table>')
+        # ... and below them how the confidence of a run's row is built
+        breakdown = _confidence_html(df['confidence'].iat[row], df['confidence_terms'].iat[row]) if 'confidence_terms' in df.columns else None
+        self.facts.setText('<table cellspacing="0" cellpadding="1">' + ''.join(rows) + '</table>' + (breakdown or ''))
         self.exclude.setText('Include again' if df['excluded'].iat[row] else 'Exclude')
 
     def update_drawing(self):
@@ -2731,7 +2734,7 @@ class ResultsView(QWidget):
         charge = table['charge'].iat[r]
         self.report_data = {'path': run, 'mz': float(table['m/z'].iat[r]), 'rt': float(table['RT'].iat[r]),
                             'charge': int(charge) if pd.notna(charge) else -1 if self.payload['settings'].get('max_charge', -3) < 0 else 1,
-                            'table': table.drop(columns = [c for c in ('ms3', 'xic', 'excluded', '_top1') if c in table.columns]).to_csv(index = False)}
+                            'table': table.drop(columns = [c for c in ('ms3', 'xic', 'confidence_terms', 'excluded', '_top1') if c in table.columns]).to_csv(index = False)}
         return report
 
     def update_alternative_icons(self):
@@ -2844,8 +2847,7 @@ class ResultsView(QWidget):
             color, color_label = df['n_files_ms2'].astype(float).values, 'Runs with MS2'
             size = df[[run for run in self.payload['tables'] if run in df.columns]].fillna(0).mean(axis = 1).values
         else:
-            color, color_label = np.array([next((x[1] for x in p if x[0] == t and len(x) > 1), np.nan) if isinstance(p, (list, tuple)) else np.nan
-                                           for p, t in zip(df['predictions'], df['top1_pred'])], dtype = float), 'Confidence'
+            color, color_label = np.array(df.get('confidence', [np.nan] * len(df)), dtype = float), 'Confidence'
             size = (df['rel_abundance'] if 'rel_abundance' in df.columns else df['num_spectra']).astype(float).values
         size = 12 + 380 * np.sqrt(np.nan_to_num(size) / (np.nanmax(size, initial = 0) or 1))
         known = ~np.isnan(color)
@@ -2930,9 +2932,11 @@ class ResultsView(QWidget):
         for df, row in targets:
             # (an edited integration stays noted)
             df.loc[df.index[row], ['top1_pred', 'curation']] = [structure, '; '.join([how] + (['area edited'] if 'area edited' in str(df['curation'].iat[row]).split('; ') else []))]
-            # The pipeline's supporting peaks were found for the old structure; the spectrum panel shows those of the new one
-            if 'supported_by' in df.columns:
-                df.loc[df.index[row], 'supported_by'] = np.nan
+            # The pipeline's supporting peaks and confidence were those of the old structure; one assigned by hand has none (the spectrum panel shows its
+            # supporting peaks)
+            for column in ('supported_by', 'confidence', 'confidence_terms'):
+                if column in df.columns:
+                    df.loc[df.index[row], column] = np.nan
             if 'GlyTouCan_ID' in df.columns:
                 df.loc[df.index[row], 'GlyTouCan_ID'] = self.glytoucan.get(structure, '')
         self.dirty = True
@@ -3012,7 +3016,7 @@ class ResultsView(QWidget):
 
     def export_frame(self, df):
         """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
-        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3', 'xic', '_top1'], errors = 'ignore')
+        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3', 'xic', 'confidence_terms', '_top1'], errors = 'ignore')
         return out.drop(columns = ['curation']) if not out['curation'].astype(bool).any() else out
 
     def write(self, df, path, kind):
