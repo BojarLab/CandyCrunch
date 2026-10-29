@@ -74,17 +74,26 @@ jobs:
         & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\candycrunch.iss
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    # No installer that Microsoft Defender flags reaches a release; the log names the file and the threat
+    # No installer that Microsoft Defender flags reaches a release; the log names the file and the threat. The runner image excludes C:\ and D:\ from
+    # scans (actions/runner-images Configure-WindowsDefender.ps1), so those exclusions go first. MpCmdRun exits 2 on a threat and on a scan that did not
+    # run (hr = 0x800106ba: Defender service not running) alike, so its output decides; a scan that did not run fails a release and only warns otherwise
     - name: Scan the app and installer with Microsoft Defender
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
         $defender = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
         if (-not (Test-Path $defender)) { Write-Host 'Microsoft Defender is not installed on this runner'; exit 0 }
+        try { Start-Service WinDefend -ErrorAction Stop } catch { Write-Host "Could not start the Defender service: $_" }
+        try { Remove-MpPreference -ExclusionPath 'C:\', 'D:\' -ErrorAction Stop } catch { Write-Host "Could not remove the runner's scan exclusions: $_" }
         & $defender -SignatureUpdate | Out-Host
         foreach ($target in @((Resolve-Path dist\CandyCrunch).Path) + @(Get-ChildItem dist\CandyCrunch-*-Windows-Setup.exe | ForEach-Object FullName)) {
-          & $defender -Scan -ScanType 3 -File $target -DisableRemediation | Out-Host
-          if ($LASTEXITCODE -eq 2) { Write-Host "::error::Microsoft Defender flags $target (file and threat listed above)"; exit 1 }
+          $log = & $defender -Scan -ScanType 3 -File $target -DisableRemediation | Out-String
+          Write-Host $log
+          if ($log -match 'found [1-9]\d* threat') { Write-Host "::error::Microsoft Defender flags $target (file and threat listed above)"; exit 1 }
+          if ($log -notmatch 'found no threats') {
+            if ($env:GITHUB_EVENT_NAME -eq 'release') { Write-Host "::error::Microsoft Defender could not scan $target (error listed above); re-run the job"; exit 1 }
+            Write-Host "::warning::Microsoft Defender could not scan $target (error listed above)"
+          }
         }
         exit 0
 
