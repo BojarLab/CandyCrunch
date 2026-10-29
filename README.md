@@ -56,7 +56,7 @@ If you would like to run our main inference function from the command line, you 
 --sialic_derivatization, type=string: linkage-specific sialic acid derivatization of underivatized samples, or of samples permethylated after it; options are 'EE' (ethyl esterification), 'EEA' (ethyl esterification and amidation), 'ME' (methyl esterification), 'DMA' (dimethylamidation), 'SALSA', 'GQ' (glycoqueuing: aniline on every sialic acid, which tells no linkage; with GirardP), and 'GQ-d5' (d5-aniline on a2-6); precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
 --reducing_end_variants, type=string(s): other reducing ends the glycans may carry: 'free' (glycans that escaped reduction or labelling, counted for their glycan) and/or 'ethyl_glycoside' (rows of their own); give none of them to turn this off; default: free, plus ethyl_glycoside for lipid <br />
 --adducts, type=string(s): ions that carry the charge of the precursors in place of protons, e.g. Li+ for lithium salts in the mobile phase ([M+Li]+, [M+2Li]2+, ...); the usual adducts (Na+, K+, NH4+ in positive, acetate, formate, HCO3- in negative mode) are always considered; default:None <br />
---modification, type=string: reducing-end modification of glycans; options are 'reduced', 'reduced_D' (NaBD4), 'unreduced' (free reducing end), '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', or 'custom'; default:'reduced'
+--modification, type=string: reducing-end modification of glycans; options are 'reduced', 'reduced_D' (NaBD4), 'unreduced' (free reducing end), '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl' (benzyl glycoside, e.g., CORA), or 'custom'; default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 --lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
@@ -117,7 +117,7 @@ glycans, type=list: ordered list of glycans used to train CandyCrunch which can 
 bin_num, type=int: number of bins to separate the ms2 spectrum into; default:2048 <br />
 frag_num, type=int: number of top fragments to show in df_out per spectrum; default:100 <br />
 max_charge, type=int: maximum signed charge to consider; the sign sets the mass spectrometry mode (negative or positive); default:-3 <br />
-modification, type=string: reducing-end modification of glycans; options are 'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', or 'custom' (without mass_tag for a free reducing end); default:'reduced'
+modification, type=string: reducing-end modification of glycans; options are 'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl' (benzyl glycoside, e.g., CORA), or 'custom' (without mass_tag for a free reducing end); default:'reduced'
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />

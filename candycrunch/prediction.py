@@ -114,6 +114,11 @@ ISOTOPE_SPACING = 1.003355  # 13C - 12C
 COMPENSATED_SUM = sum([1e16, 1.0, -1e16]) == 1.0
 # Label mass a reducing-end modification adds (H2 for reduction, label minus O for reductive amination)
 modification_mass_dict = {k: calculate_adduct_mass(v) for k, v in modification_formula_dict.items()}
+# The mass_tag CandyCrumbs takes for a modification: on a derivatized glycan the label plus what glycowork derivatizes at that reducing end beyond the one group of a
+# free end that CandyCrumbs counts (a ring opening's C5-OH, a label's own acid and amides; one fewer for a benzyl glycoside, which keeps its ring), so reducing-end
+# fragments weigh what composition_to_mass gives the precursor; an alditol (reduced) CandyCrumbs knows by its 2 H and derivatizes itself
+crumbs_mass_dict = {(k, prep): v if prep == 'underivatized' or k == 'reduced' else composition_to_mass({}, sample_prep = prep, modification = k) - composition_to_mass({}, sample_prep = prep)
+                    for k, v in modification_mass_dict.items() for prep in ('underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated')}
 # Natural abundances of each element's isotopes at +0, +1, +2, ... Da, for the share of a glycan's molecules within the integrated isotope peaks
 ISOTOPE_ABUNDANCES = {'C': [0.9893, 0.0107], 'H': [0.999885, 0.000115], 'N': [0.99636, 0.00364], 'O': [0.99757, 0.00038, 0.00205],
                       'S': [0.9499, 0.0075, 0.0425, 0, 0.0001], 'P': [1.0]}
@@ -1541,7 +1546,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
    | df (dataframe): condensed dataframe from condense_dataframe
    | glycan_class (int or list): 0 = O-linked, 1 = N-linked, 2 = lipid/free, or one such code per row
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'; default:'reduced'
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of ion trap; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0
@@ -1717,7 +1722,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
    | mass (float): observed m/z
    | glycan (string): glycan in IUPAC-condensed nomenclature
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'; default:'reduced'
    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
    | mass_tag (float): label mass to add when calculating possible m/z (the mass of a 'custom' label); default:None
    | double_thresh (float): mass threshold over which to consider doubly-charged ions; default:900
@@ -2620,7 +2625,7 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         structs.append((rows, rounded_mass_rows, ms3_rows, list(pools), strong_counts))
         jobs += [(CandyCrumbs, (glycan, unq_rounded_masses, fragment_tolerance),
                   dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative"),
-                       disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + offset,
+                       disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0) + offset,
                        sample_prep = sample_prep, ms3_precursor = ms3_precursor, sialic_derivatization = sialic_derivatization, mass_threshold_ppm = fragment_ppm,
                        metal_cations = precursor_metals(adducts)))
                  for ms3_precursor, unq_rounded_masses in pools.values()]
@@ -2757,7 +2762,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
    | df_out (dataframe): df_out generated within wrap_inference
    | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'; default:'reduced'
    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | mass_tolerance (float): the general mass tolerance that is used for composition matching; default:0.5
@@ -2950,7 +2955,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                     try:
                         cc_out = CandyCrumbs(m.replace('-ol', '').replace('1Cer', ''), peaks, mass_tolerance, simplify = False, charge = int(charge_col[k]),
                                              disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2, sample_prep = sample_prep,
-                                             mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + (
+                                             mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0) + (
                                                  df_out['re_offset'].values[k] if 're_offset' in df_out.columns else 0))
                     except Exception:
                         cc_out = {}
@@ -2984,7 +2989,7 @@ def impute(df_out, pred_thresh, mode = 'negative', modification = 'reduced', sam
     | df_out (dataframe): prediction dataframe generated within wrap_inference
     | pred_thresh (float): confidence given to an imputed prediction
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default:'negative'
-    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'; default:'reduced'
     | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:0.0
     | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together; default:"O"
@@ -3646,7 +3651,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together
     | df_use (dataframe): sugarbase-like database of glycans with species associations etc.
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'
+    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | filter_out (set): set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen)
     | mass_tolerance (float): the general mass tolerance (in Da) that is used for composition matching
@@ -3720,7 +3725,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     | df_out (dataframe): a dataframe of augmented predictions
     | get_missing (bool): whether to also organize spectra without a matching prediction but a valid composition
     | mode (string): mass spectrometry mode, either 'negative' or 'positive'
-    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'
+    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant
     | ppm_thresh (float): ppm error threshold; the file's own robust ppm error spread can only make it stricter
     | rt_diff (float): maximum retention time difference (in minutes) for combining adduct species of one glycan
@@ -4048,7 +4053,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # (residues without any other placement are not counted), and peaks that only another placement explains
     supported_by = []
     for support in run_jobs([(supporting_ions, (top1, peaks), dict(charge = int(charge), candidates = [p[0] for p in preds if p[0] != top1],
-                                                                    mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0) + offset,
+                                                                    mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0) + offset,
                                                                     sample_prep = sample_prep, sialic_derivatization = sialic_derivatization))
                              if isinstance(top1, str) and isinstance(peaks, dict) else (dict, (), dict(residues = []))
                              for top1, preds, peaks, charge, offset in zip(df_out['top1_pred'], df_out['predictions'], df_out['peak_d'], df_out['charge'],
@@ -4281,7 +4286,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
-   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
@@ -4685,7 +4690,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                       charge = int(multiplier * _row_charge),
                                       disable_global_mods = (not _is_adduct or mode == "negative"),
                                       disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2,
-                                      mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0),
+                                      mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0),
                                       sample_prep = sample_prep, sialic_derivatization = sialic_derivatization,
                                       metal_cations = precursor_metals(_adducts))
             except Exception:
@@ -4794,7 +4799,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             for preds, isomers, peaks, charge, score in zip(df_out['predictions'], df_out['isomers'], df_out['peak_d'], df_out['charge'], df_out['annotation_score'])]
     # Accurate fragment masses (orbitrap, TOF) resolve isotope envelopes, whose 13C peaks would otherwise pass for fragments one isotope spacing heavier
     supports = iter(run_jobs([(supporting_ions, (preds[0][0], deisotope_ms2(peaks, int(abs(charge)), 0.02) if trap in ('orbitrap', 'other') else peaks),
-                               dict(charge = int(charge), candidates = [g[0] for g in others], mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0),
+                               dict(charge = int(charge), candidates = [g[0] for g in others], mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0),
                                     sample_prep = sample_prep, reference_glycans = [], sialic_derivatization = sialic_derivatization))
                               for preds, others, peaks, charge in rows if others], n_jobs))
     reordered = []
@@ -4907,7 +4912,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                 for p, ms3_spectra in pools.values() if g else []:
                     cc_out = CandyCrumbs(g, {m for masses in ms3_spectra for m in masses}, mass_tolerance, simplify = False, charge = int(charge),
                                          disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2,
-                                         mass_tag = modification_mass_dict.get(modification, 0) + (mass_tag or 0), sample_prep = sample_prep,
+                                         mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0), sample_prep = sample_prep,
                                          ms3_precursor = p, sialic_derivatization = sialic_derivatization)
                     counts = {k: sum(not (len(a) > 1 and {c.split('_')[0][-1] for c in a} & {'A', 'X'}) and not (
                         len(a) > 2 and 'M' in {c.split('_')[0][-1] for c in a}) for a in v['Domon-Costello nomenclatures']) if v else 0
@@ -5160,7 +5165,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
    | frag_num (int): how many top fragments to show in df_out per spectrum; default:100
-   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
    | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
    | trap (string): type of mass detector; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
@@ -5835,7 +5840,7 @@ def supplement_prediction(df_in, glycan_class, mode = 'negative', modification =
    | df_in (pandas dataframe): output file produced by wrap_inference
    | glycan_class (string): glycan class as string, options are "O", "N", "lipid", "free"
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
-   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP or 'custom'; default:'reduced'
+   | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl or 'custom'; default:'reduced'
    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None\n
    | Returns:

@@ -69,7 +69,7 @@ MZDATA_ANALYZER_TRAPS = ast.literal_eval(_constants['MZDATA_ANALYZER_TRAPS'])
 NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?glycans?|og|o(?![a-z0-9])|mucins?', 'lipid': r'gsls?|glycosphingolipids?|glycolipids?|gangliosides?',
                                'free': r'milk|hmos?'},
               'modification': {'reduced': r'(?<!non-)reduced|alditols?', 'unreduced': r'un-?reduced|non-?reduced', '2AB': r'2-?ab', '2AA': r'2-?aa', 'procainamide': r'procainamide',
-                               'PA': r'pa-?label\w*|pyridylamin\w*|2-?aminopyridin\w*'},
+                               'PA': r'pa-?label\w*|pyridylamin\w*|2-?aminopyridin\w*', 'benzyl': r'benzyl\w*|bn-?galnac|cora'},
               'sample_prep': {'permethylated': r'permethyl\w*', 'deuteropermethylated': r'deutero-?permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
 BATCH_KEYS = ('intra_cat_thresh', 'top_n_isomers', 'n_jobs')
 FEATURES = '\x00features'
@@ -80,7 +80,7 @@ CLASS_ORDER = ['N', 'O', 'free', 'lipid']
 # 'unreduced' exists only in the app: wrap_inference takes a free reducing end as a custom label without mass (its reducing end check calls that 'unreduced')
 REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('Unreduced (free reducing end)', 'unreduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'),
                  ('PA (2-aminopyridine)', 'PA'), ('Reduced with NaBD4 (alditol-d1)', 'reduced_D'), ('APTS', 'APTS'), ('Aminoxy TMT', 'aminoxyTMT'),
-                 ('Girard P', 'GirardP'), ('Other label (enter its mass)', 'custom')]
+                 ('Girard P', 'GirardP'), ('Benzyl glycoside (e.g., CORA)', 'benzyl'), ('Other label (enter its mass)', 'custom')]
 SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethylated'), ('Deuteropermethylated (CD3)', 'deuteropermethylated'), ('Peracetylated', 'peracetylated')]
 # Linkage-specific sialic acid derivatizations of underivatized samples, as wrap_inference's sialic_derivatization
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
@@ -921,11 +921,16 @@ def _confidence_html(confidence, terms):
 
 
 def _mass_tag(settings):
-    """The reducing-end mass CandyCrumbs takes, built as in assign_annotation_scores_pooled"""
+    """The reducing-end mass CandyCrumbs takes, built as crumbs_mass_dict (prediction.py): on a derivatized glycan with the label's derivatized groups"""
     with IMPORT_LOCK:
-        from glycowork.motif.tokenization import modification_formula_dict, calculate_adduct_mass
-    modification = settings.get('modification')
-    label = calculate_adduct_mass(modification_formula_dict[modification]) if modification in modification_formula_dict else 0
+        from glycowork.motif.tokenization import modification_formula_dict, calculate_adduct_mass, composition_to_mass
+    modification, sample_prep = settings.get('modification'), settings.get('sample_prep', 'underivatized')
+    if modification not in modification_formula_dict:
+        label = 0
+    elif sample_prep == 'underivatized' or modification == 'reduced':
+        label = calculate_adduct_mass(modification_formula_dict[modification])
+    else:
+        label = composition_to_mass({}, sample_prep = sample_prep, modification = modification) - composition_to_mass({}, sample_prep = sample_prep)
     return label + (settings.get('mass_tag') or 0)
 
 
@@ -3191,7 +3196,8 @@ class CrumbsTab(QWidget):
         if not self.structure.text().strip() or not peaks:
             self.spectrum.show_message('Enter a structure and at least one peak')
             return
-        settings = {'modification': self.modification.currentData(), 'mass_tag': self.mass_tag.value() if self.modification.currentData() == 'custom' else None}
+        settings = {'modification': self.modification.currentData(), 'mass_tag': self.mass_tag.value() if self.modification.currentData() == 'custom' else None,
+                    'sample_prep': self.sample_prep.currentData()}
         kwargs = {'max_cleavages': self.cleavages.value()}
         if self.fragmentation.currentData():
             kwargs['fragmentation_method'] = self.fragmentation.currentData()

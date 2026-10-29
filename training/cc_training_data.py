@@ -64,7 +64,7 @@ SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid'
 LOG_COLUMNS = ['project', 'run', 'path', 'excluded', 'maps', 'glycan_class', 'rt_shift', 'rt_alignment', 'rt_anchors', 'masses_rescued', 'settings_fitted', 'status',
                'error', 'settings', 'inputs', 'labelled', 'unique', 'structures', 'map_rows', 'map_rows_with_rt', 'map_row_status', 'unlabelled', 'inputs_cached',
                'seconds']
-REDUCING_ENDS = {'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP'}
+REDUCING_ENDS = {'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl'}
 
 
 def sample_columns(df):
