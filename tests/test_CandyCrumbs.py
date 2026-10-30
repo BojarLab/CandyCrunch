@@ -389,6 +389,25 @@ def test_glycopeptide_charge_reduced_ions():
                     assert hits[m]['Domon-Costello nomenclatures'][0] == [['Peptide', mod], ['M'], ['M']] and hits[m]['Fragment charges'][0] == z
 
 
+def test_glycopeptide_met_sulfoxide_loss():
+    # A Met sulfoxide loses methanesulfenic acid (CH3SOH) on collisional activation, from the intact peptide and from backbone ions that keep it (b_i: the
+    # first i residues, y_i: the last i), not from those without it, nor on electron transfer alone
+    pep, comp = 'SPmAELSHP', {'Hex': 1, 'HexNAc': 1}
+    peptide = sum(AA_masses[a] for a in pep) + WATER_MASS + PROTON_MASS
+    b4 = sum(AA_masses[a] for a in pep[:4]) + PROTON_MASS
+    y4 = sum(AA_masses[a] for a in pep[-4:]) + WATER_MASS + PROTON_MASS
+    peaks = {'peptide - CH3SOH': peptide - 63.998285, 'b4 - CH3SOH': b4 - 63.998285, 'y4 - CH3SOH': y4 - 63.998285}
+    for method in ('HCD', 'ETD'):
+        hits = CandyCrumbs({'peptide': pep, 'glycans': [comp], 'glycosites': [0]}, list(peaks.values()), charge = 2, fragmentation_method = method)
+        found = {name: hits[m]['Domon-Costello nomenclatures'][0] if hits[m] else None for name, m in peaks.items()}
+        assert found['y4 - CH3SOH'] is None
+        if method == 'HCD':
+            assert found['peptide - CH3SOH'] == [['Peptide', 'M_CH3SOH'], ['loss of glycan 1']]
+            assert found['b4 - CH3SOH'] == [['b_4', 'M_CH3SOH'], ['loss of glycan 1']]
+        else:
+            assert found['peptide - CH3SOH'] is None and found['b4 - CH3SOH'] is None
+
+
 def test_rank_glycopeptide_structures_published():
     # The published disialyl core 2 O-glycopeptide (doi:10.1007/s13361-018-1945-7) against every database structure of its composition: its
     # topology ranks first, tied only with its sialic acid linkage isomers, which have the same fragment masses

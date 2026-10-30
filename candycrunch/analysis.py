@@ -82,7 +82,7 @@ mono_attributes = {
             'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5], '15X': [1], '15A': [2, 3, 4, 5],
                       '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Pen': [1, 2, 3, 4, 5]}},
     'Global': {'mass': {'H2O': -18.0105546, 'NH3': -17.026549, 'CH2O': -30.0106, 'CH4O': -32.026215, 'C2H2O': -42.0106, 'CO2': -43.9898,
-                        'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, 'C2H4O2': -60.0211, 'CD3OH': -35.045046,
+                        'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, 'C2H4O2': -60.0211, 'CD3OH': -35.045046, 'CH3SOH': -63.998285,
                         '+Acetate': 59.013851,
                         '+Na': +22.989218, '+K': 38.963158, '+Li': 7.015454, '+H': HYDROGEN_MASS, '-H': -HYDROGEN_MASS}}
 }
@@ -879,8 +879,8 @@ def precursor_metals(adducts):
     return {f'+{m}' for a in adducts for m in re.findall(r'[A-Z][a-z]?', a)} & (METAL_GLOBAL_MODS - DEFAULT_METAL_CATIONS) or True
 # Global modifications a fragment of a glycopeptide composition can carry, by the kind of ion (glycan-only, intact peptide, backbone ion): in spectra of
 # identified glycopeptides (HCD, EThcD, ETD) only these were annotated more often than in the same spectra shifted out of tolerance; metal adducts, CH2O,
-# CO2, C3H8O4 and H2O + NH3 never were, nor NH3 or two waters on backbone ions
-GLYCOPEPTIDE_GLOBAL_MODS = {'No Peptide': {'H2O', '2H2O', 'C2H4O2'}, 'Peptide': {'H2O', '2H2O', 'NH3', '2NH3', 'C2H2O', 'C2H4O2'}, 'backbone': {'H2O'}}
+# CO2, C3H8O4 and H2O + NH3 never were, nor NH3 or two waters on backbone ions; a Met sulfoxide's CH3SOH leaves the intact peptide and backbone ions keeping it
+GLYCOPEPTIDE_GLOBAL_MODS = {'No Peptide': {'H2O', '2H2O', 'C2H4O2'}, 'Peptide': {'H2O', '2H2O', 'NH3', '2NH3', 'C2H2O', 'C2H4O2', 'CH3SOH'}, 'backbone': {'H2O', 'CH3SOH'}}
 BASIC_RESIDUES = {'H', 'K', 'R', 'j', 'k'}
 # radical activation (electrons or UV photons) gives free glycans fragments one hydrogen atom off their even-electron mass (odd-electron ions) or two
 # (hydrogen-shifted ions), written as global modifications (M_+H, M_2-H|H2O) that are no cleavage
@@ -2219,7 +2219,7 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False, max_gl
     precursor), and with hydrogen_shifts (radical activation) every modification, and none, also comes with each of HYDROGEN_SHIFTS"""
     if disable_global_mods:
         return [None] + (list(HYDROGEN_SHIFTS) if hydrogen_shifts else []), []
-    global_mods = [x for x in mono_attributes['Global']['mass'] if x not in ['CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS] and (x not in METHANOL_LOSSES.values() or x == METHANOL_LOSSES.get(sample_prep))]
+    global_mods = [x for x in mono_attributes['Global']['mass'] if x not in ['CO2', 'SO4', 'PO4', 'CH3SOH', *HYDROGEN_ATOMS] and (x not in METHANOL_LOSSES.values() or x == METHANOL_LOSSES.get(sample_prep))]
     charge_mods = {-1: ['+Na', '+K', '+Li'], 1: ['+Acetate']}
     metals = DEFAULT_METAL_CATIONS if metal_cations is True else set(metal_cations or ())
     global_mods = [mod for mod in global_mods if mod not in charge_mods[np.sign(charge)] and (mod in metals or mod not in METAL_GLOBAL_MODS)]
@@ -2620,7 +2620,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         if not is_glycopeptide:
             excluded.add('NH3')
         global_mods_dict = {k: v for k, v in mono_attributes['Global']['mass'].items()
-                            if k not in ('CO2', 'SO4', 'PO4', *HYDROGEN_ATOMS) and k not in excluded and (k not in METHANOL_LOSSES.values() or k == METHANOL_LOSSES.get(sample_prep))}
+                            if k not in ('CO2', 'SO4', 'PO4', 'CH3SOH', *HYDROGEN_ATOMS) and k not in excluded and (k not in METHANOL_LOSSES.values() or k == METHANOL_LOSSES.get(sample_prep))}
         if max_global_mods > 1:
             repeatable = [x for x in global_mods_dict if x in REPEATABLE_GLOBAL_MODS or (x in METAL_GLOBAL_MODS and not is_glycopeptide)]
             for n in range(2, max_global_mods + 1):
@@ -2633,6 +2633,9 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
             global_mods_dict['SO4'] = mono_attributes['Global']['mass']['SO4']
         if any(m == 'P' or m.endswith('P') for comp in all_comps for m in comp):
             global_mods_dict['PO4'] = mono_attributes['Global']['mass']['PO4']
+        # a Met sulfoxide loses methanesulfenic acid on collisional activation, not on electron transfer or capture alone
+        if is_glycopeptide and 'm' in peptide_seq and fragmentation_method not in ('ETD', 'ECD'):
+            global_mods_dict['CH3SOH'] = mono_attributes['Global']['mass']['CH3SOH']
     if is_glycopeptide:
         compositions = all_comps
         if glycosites is None or not len(glycosites):
@@ -2769,6 +2772,12 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                 for label, nc in entries:
                     if is_glycopeptide and gmod not in GLYCOPEPTIDE_GLOBAL_MODS.get(label[0][0], GLYCOPEPTIDE_GLOBAL_MODS['backbone']):
                         continue
+                    if gmod == 'CH3SOH' and label[0][0] != 'Peptide':
+                        # methanesulfenic acid leaves from a Met sulfoxide, so a backbone ion (b_i: the first i residues, y_i: the last i) loses it only if it keeps one
+                        ion, _, size = label[0][0].rpartition('_')
+                        if not size.isdigit() or not any(k < int(size) if ion in ('a', 'b', 'c', 'c-1') else k >= len(peptide_seq) - int(size)
+                                                         for k, aa in enumerate(peptide_seq) if aa == 'm'):
+                            continue
                     if gmod in ('CO2', 'SO4', 'PO4'):
                         # as update_global_mods does for structures, a residue's own loss needs that residue on the fragment: in the glycans an ion keeps
                         # whole ('M' on a peptide) or in part ('B Hex(1)/Neu5Ac(1)', '02A Neu5Ac'), not in those it lost
@@ -4479,7 +4488,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                            simplify = True, charge = charge, mass_tag = mass_tag, sample_prep = sample_prep, intensities = peak_intensities.tolist(),
                            disable_global_mods = disable_global_mods, prior_weight = prior_weight, **kwargs)
     peptide, glycans, glycosites = resolve_spectrum_input(input_string)
-    glycan_string = glycans[0] if glycans and isinstance(glycans[0], str) and not is_composition(glycans[0]) else None
+    # every glycan as given, a composition dict written out (HexNAc(1)Hex(1)), joined in site order
+    glycan_string = ' + '.join(g if isinstance(g, str) else ''.join(f'{k}({v})' for k, v in g.items()) for g in glycans)
     ladder_ax = None
     cartoon_room = 0.26 if draw_glycans and glycans else 0.02
     if ax is None:
@@ -4647,7 +4657,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     ax.set_xlabel('m/z')
     ax.set_ylabel('Relative Intensity (%)')
     stage = f'MS\u00b3 spectrum of m/z {kwargs["ms3_precursor"]:.2f}' if kwargs.get('ms3_precursor') is not None else 'MS\u00b2 spectrum'
-    title = f'Annotated {stage}: {peptide + "*" + str(glycan_string) if peptide else input_string}'
+    title = f'Annotated {stage}: {peptide + "*" + glycan_string if peptide else input_string}'
     title_size = 9 if len(title) > 90 else 'large'
     title_text = ladder_ax.set_title(title, fontsize = title_size) if ladder_ax is not None else ax.set_title(title, fontsize = title_size, y = 1.40 if cartoons_drawn else 1.0)
     # A long structure made the title (centered on its axes, which may be an inset) wider than the figure, which cut it off at both ends, so it breaks
