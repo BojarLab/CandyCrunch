@@ -1493,7 +1493,13 @@ def test_thermo_raw(tmp_path):
     table = candycrunch.utils.read_raw_scan_table(str(path))
     assert table['ms_level'] == [1, 2, 2] and table['filter_string'] == ['', '1000.0000@cid35.00', '1000.5000@hcd30.00']
     assert table['precursor_mz'] == [None, 1000.0, 1000.02] and table['charge'] == [None, None, 2] and table['master_scan'] == [None, 1, 1]
-    assert table['scan_range'] == [(150.0, 2000.0)] * 3
+    assert table['scan_range'] == [(150.0, 2000.0)] * 3 and table['isolation_width'] == [None, 2.0, 2.0]
+    # A zero-filled copy, one cut before its run header and one cut before its scan index
+    raw = path.read_bytes()
+    for i, broken in enumerate([bytes(len(raw)), raw[:run_header], raw[:index]]):
+        (tmp_path / f'broken{i}.raw').write_bytes(broken)
+        with pytest.raises(ValueError, match = 'damaged or incomplete'):
+            candycrunch.utils.read_raw_scan_table(str(tmp_path / f'broken{i}.raw'))
     df = process_raw_stack(str(path), intensity = True, extract_ms1 = True)
     _, ms1_mzs, ms1_ints, _ = df.attrs['ms1']
     assert np.allclose(ms1_mzs, [1000.0]) and np.allclose(ms1_ints, [220])

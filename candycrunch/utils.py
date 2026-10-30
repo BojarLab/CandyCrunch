@@ -464,10 +464,15 @@ def read_raw_scan_table(filepath):
    | ((lowest, highest) m/z of its scan windows; an ion-trap MS2's lower limit is its low-mass cutoff), packet (the file offset of the scan's data
    | packet, for read_raw_packet), and RealEnergy (the trailer's HCD Energy of MSn scans: a float, or text such as 30.00,42.00,72.00 for stepped energies)
    """
+    # A copy cut short or left zero-filled (an interrupted download) gets its own message instead of reading as an old format version or SRM file
+    incomplete = f"{filepath} is a damaged or incomplete copy of a Thermo .raw file (e.g. an interrupted download); download or copy it again."
     with open(filepath, 'rb') as f:
         head = f.read(1356)
+        file_size = f.seek(0, 2)
         version = int.from_bytes(head[36:40], 'little')
-        if head[2:18] != 'Finnigan'.encode('utf-16-le') or version < 57:
+        if head[2:18] != 'Finnigan'.encode('utf-16-le'):
+            raise ValueError(incomplete)
+        if version < 57:
             raise ValueError(f"{filepath} is not a Thermo .raw file of Xcalibur 2.0 or later (format version {version}); convert it to mzML with "
                              f"ThermoRawFileParser or msconvert first.")
         wide = version >= 64
@@ -488,13 +493,16 @@ def read_raw_scan_table(filepath):
             if addr and len(run_header) == 7464 and int.from_bytes(run_header[7376:7380], 'little'):
                 break
         else:
-            raise ValueError(f"{filepath} holds no scan events (e.g. SRM data of a triple quadrupole), which CandyCrunch cannot use.")
+            raise ValueError(incomplete if any(int.from_bytes(addrs[a:a + width], 'little') >= file_size for a in range(0, len(addrs), stride)) else
+                             f"{filepath} holds no scan events (e.g. SRM data of a triple quadrupole), which CandyCrunch cannot use.")
         first, last, _, n_errors = struct.unpack_from('<4I', run_header, 8)
         if wide:
             index_addr, data_addr, _, error_addr, _, trailer_addr, params_addr = struct.unpack_from('<7Q', run_header, 7408)
         else:
             (index_addr, data_addr, _, error_addr), (trailer_addr, params_addr) = struct.unpack_from('<4I', run_header, 28), struct.unpack_from('<2I', run_header, 7368)
         n_scans = last - first + 1
+        if params_addr >= file_size:
+            raise ValueError(incomplete)
         # Scan index: 72 bytes per scan (88 from version 66) with the retention time (minutes) at byte 24 and the packet offset at 0 (u32), from
         # version 64 at 72 (u64)
         f.seek(index_addr)
@@ -579,7 +587,8 @@ def read_raw_scan_table(filepath):
         # The instrument's monoisotopic m/z where it determined one (else 0), otherwise the isolation m/z of the last stage
         table['precursor_mz'].append(mono if mono and mono > 0 else reactions[-1][0] if reactions else None)
         table['charge'].append(int(charge) if charge and charge > 0 else None)
-        table['isolation_width'].append(ms2_width or msn_width)
+        # Without one in the trailer (LTQ, Velos) the stage's reaction gives it, which equals the trailer's where both exist
+        table['isolation_width'].append(ms2_width or msn_width or (reactions[-1][1] if reactions else None))
         table['master_scan'].append(master)
         table['retention_time'].append(float(index['rt'][i]))
         table['RealEnergy'].append(real_energy)
