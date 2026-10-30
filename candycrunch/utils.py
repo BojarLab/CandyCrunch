@@ -464,8 +464,10 @@ def read_raw_scan_table(filepath):
    | ((lowest, highest) m/z of its scan windows; an ion-trap MS2's lower limit is its low-mass cutoff), packet (the file offset of the scan's data
    | packet, for read_raw_packet), and RealEnergy (the trailer's HCD Energy of MSn scans: a float, or text such as 30.00,42.00,72.00 for stepped energies)
    """
-    # A copy cut short or left zero-filled (an interrupted download) gets its own message instead of reading as an old format version or SRM file
-    incomplete = f"{filepath} is a damaged or incomplete copy of a Thermo .raw file (e.g. an interrupted download); download or copy it again."
+    # A copy cut short or left zero-filled (an interrupted download), or a file saved before its acquisition ended, gets its own message instead of reading
+    # as an old format version or SRM file
+    incomplete = (f"{filepath} is a damaged or incomplete Thermo .raw file (e.g. an interrupted download or acquisition); download or copy it again, and if "
+                  f"the source's copy is the same, the file itself is incomplete.")
     with open(filepath, 'rb') as f:
         head = f.read(1356)
         file_size = f.seek(0, 2)

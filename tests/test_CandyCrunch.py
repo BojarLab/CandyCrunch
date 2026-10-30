@@ -4,6 +4,7 @@ import base64
 import pathlib
 import sqlite3
 import struct
+import zipfile
 import zlib
 import hashlib
 import inspect
@@ -1509,6 +1510,16 @@ def test_thermo_raw(tmp_path):
     assert np.allclose(list(df['peak_d'][0]), [600.2, 400.1]) and list(df['peak_d'][0].values()) == [100, 50]
     assert df['analyzer'].tolist() == ['linear'] * 2 and df['polarity'].tolist() == ['-'] * 2 and df['collision_energy'].tolist() == [35.0, 30.0]
     assert df['scan_low'].tolist() == [150.0] * 2 and df['header_shift'].tolist() == [0.0, 0.0]
+    # The same run uploaded as a zip archive reads the same; a zip of several runs names them
+    with zipfile.ZipFile(tmp_path / 'run.raw.zip', 'w') as archive:
+        archive.write(path, 'run.raw')
+    zipped = load_spectra_filepath(str(tmp_path / 'run.raw.zip'), extract_ms1 = True)
+    assert zipped.drop(columns = 'peak_d').equals(df.drop(columns = 'peak_d')) and zipped['peak_d'].tolist() == df['peak_d'].tolist()
+    with zipfile.ZipFile(tmp_path / 'runs.zip', 'w') as archive:
+        archive.write(path, 'a.raw')
+        archive.write(path, 'b.raw')
+    with pytest.raises(ValueError, match = 'holds 2 runs'):
+        load_spectra_filepath(str(tmp_path / 'runs.zip'))
 
 
 def test_qtof_mzml(tmp_path):

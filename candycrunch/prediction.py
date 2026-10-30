@@ -9,9 +9,11 @@ import random
 import re
 import pickle
 import pathlib
+import shutil
 import sqlite3
 import struct
 import tempfile
+import zipfile
 import zlib
 from collections import Counter, defaultdict
 from itertools import combinations_with_replacement, groupby, islice
@@ -3197,7 +3199,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
    | Arguments:
    | :-
    | spectra_filepath (string): a Thermo .raw file, a Waters .raw folder, a SCIEX .wiff file (its .wiff.scan beside it), a Bruker .d folder (timsTOF, Q-TOF or ion trap), an mzML, mzXML or
-   |                            mgf file, or a .cc/.xlsx file from extract_spectra
+   |                            mgf file, a .zip of one such run (a .d or .raw folder zipped with or without the folder itself), or a .cc/.xlsx file from extract_spectra
    | extract_ms1 (bool): whether to also keep the survey scans (attrs['ms1']), for XIC quantification and precursor refinement; default:False\n
    | Returns:
    | :-
@@ -3206,6 +3208,29 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
    """
     # A timsTOF .d is a folder, which may come with a trailing separator
     ext = os.path.splitext(os.path.normpath(spectra_filepath))[1].lower()
+    if ext == ".zip":
+        # A run uploaded as a zip archive: a .d or Waters .raw folder zipped with the folder (run.raw.zip holding run.raw/...) or without it (run.d.zip holding
+        # analysis.tdf, ...), or a run file; it is unpacked into a temporary folder, read and deleted
+        name = os.path.basename(spectra_filepath)
+        with zipfile.ZipFile(spectra_filepath) as archive:
+            names = [n for n in archive.namelist() if not n.endswith('/')]
+            runs = {next(('/'.join(parts[:i + 1]) for i, part in enumerate(parts) if part.lower().endswith(('.d', '.raw', '.wiff', '.mzml', '.mzxml', '.mzdata',
+                                                                                                          '.mzdata.xml', '.mgf'))), None) for parts in (n.split('/') for n in names)} - {None}
+            if not runs and {n.lower() for n in names} & {'analysis.tdf', 'analysis.tsf', 'analysis.yep', 'analysis.baf', 'acqdata/msscan.bin', '_functns.inf'}:
+                stem = os.path.splitext(name)[0]
+                runs = {stem if stem.lower().endswith(('.d', '.raw')) else stem + ('.raw' if '_functns.inf' in {n.lower() for n in names} else '.d')}
+                root = next(iter(runs))
+            else:
+                root = None
+            if len(runs) != 1:
+                raise ValueError(f"{name} holds {len(runs)} runs ({', '.join(sorted(runs)[:3])}{', ...' if len(runs) > 3 else ''}); unzip it and read each run on its own."
+                                 if runs else f"{name} holds no run CandyCrunch reads.")
+            folder = tempfile.mkdtemp(prefix = 'candycrunch_')
+            try:
+                archive.extractall(os.path.join(folder, root) if root else folder)
+                return load_spectra_filepath(os.path.join(folder, *next(iter(runs)).split('/')), extract_ms1 = extract_ms1)
+            finally:
+                shutil.rmtree(folder, ignore_errors = True)
     if ext == ".d":
         # timsTOF folders hold an analysis.tdf (an analysis.tsf without ion mobility), the ion traps (esquire, HCT, amaZon) an Analysis.yep, Bruker Q-TOF runs an
         # analysis.baf, Agilent MassHunter runs (Q-TOF) an AcqData/MSScan.bin
@@ -3345,7 +3370,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         loaded_file = storage.read(spectra_filepath, 'peak_d')
         return loaded_file
     raise FileNotFoundError(f"{os.path.basename(os.path.normpath(spectra_filepath))} is not a file type CandyCrunch reads (Thermo .raw file, Waters .raw folder, SCIEX .wiff, Bruker or Agilent MassHunter .d folder, "
-                            f".mzML, .mzXML, mzData, .mgf, or .cc/.xlsx made by extract_spectra)")
+                            f".mzML, .mzXML, mzData, .mgf, a .zip of one of these, or .cc/.xlsx made by extract_spectra)")
 
 
 # Hash of the code that turns spectra files into spectra (the readers in utils.py and the loader functions above), taken at import, before the app or
@@ -3365,8 +3390,8 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
     """extracts the MS/MS spectra of a .raw/.wiff/.d/.mzML/.mzXML/.mgf file into a lightweight .xlsx or .cc file that wrap_inference reads directly\n
    | Arguments:
    | :-
-   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo file or Waters folder), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF, Q-TOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), or ".mgf"
-   | output_filepath (string): .xlsx or .cc filepath to write; default:None (spectra_filepath with the extension of file_format)
+   | spectra_filepath (string): absolute filepath ending in ".raw" (Thermo file or Waters folder), ".wiff" (SCIEX, with its .wiff.scan), ".d" (Bruker timsTOF, Q-TOF or ion trap, or Agilent MassHunter folder), ".mzML", ".mzXML", ".mzdata"/".mzdata.xml" (mzData), ".mgf", or ".zip" (one zipped run)
+   | output_filepath (string): .xlsx or .cc filepath to write; default:None (spectra_filepath with the extension of file_format; run.d.zip gives run.cc)
    | file_format (string): 'xlsx' (opens in Excel; MS2 and MS3 spectra) or 'cc' (compact binary file that also keeps the survey scans, so predictions
    |                       from it are quantified by XIC areas, as from the original file); an output_filepath ending in .cc writes 'cc'; default:'xlsx'
    | region (tuple): (m/z, signed charge, RT) of a peak, to keep only its surroundings: the survey scans within REGION_RT min of RT and the MS2 (with
@@ -3378,6 +3403,8 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
    | MS3 spectra are kept (column ms3), and MS1 only in a .cc, so predictions from an .xlsx are quantified by precursor intensity instead of XIC areas
    """
     cc = (output_filepath or '.' + file_format).lower().endswith('.cc')
+    stem = re.sub(r'(?i)\.(d|raw|wiff|mzml|mzxml|mzdata\.xml|mzdata|mgf)\.zip$', '', os.path.normpath(spectra_filepath))
+    stem = os.path.splitext(stem)[0] if stem == os.path.normpath(spectra_filepath) else stem
     df = load_spectra_filepath(spectra_filepath, extract_ms1 = cc)
     if df.empty:
         # An empty .xlsx would only fail later as a run without glycan peaks
@@ -3400,7 +3427,7 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
             lo, hi = np.searchsorted(rts, rt - REGION_RT, side = 'left'), np.searchsorted(rts, rt + REGION_RT, side = 'right')
             df.attrs['ms1'] = (rts[lo:hi], mzs[offsets[lo]:offsets[hi]], ints[offsets[lo]:offsets[hi]], offsets[lo:hi + 1] - offsets[lo])
     if cc:
-        output_filepath = output_filepath or os.path.splitext(os.path.normpath(spectra_filepath))[0] + '.cc'
+        output_filepath = output_filepath or stem + '.cc'
         # A .cc is a zip of numpy arrays (np.load reads it), each stored as its byte planes (all first bytes, then all second bytes, ...), which deflate packs
         # far better than interleaved numbers. Everything is kept exactly as loaded (MS2/MS3 peaks as float32 where that is exact), as rounding MS2 m/z to
         # 0.1 mDa or intensities to 0.02% already changed rows and F1 by up to 0.01; only survey scan intensities are rounded to 12 significant bits (0.02%),
@@ -3450,7 +3477,7 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
     # turns back into the attrs wrap_inference checks
     for k in ('mode', 'trap', 'ms1_trap'):
         df[k] = df.attrs.get(f'detected_{k}')
-    output_filepath = output_filepath or os.path.splitext(os.path.normpath(spectra_filepath))[0] + '.xlsx'
+    output_filepath = output_filepath or stem + '.xlsx'
     df.to_excel(output_filepath, index = False)
     return output_filepath
 
@@ -4382,7 +4409,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         if df_use.empty:
             raise ValueError(f"No {'+'.join(classes)} glycans of {taxonomy_level} '{taxonomy_filter}' in df_glycan; check taxonomy_level and taxonomy_filter")
     multiplier = -1 if mode == 'negative' else 1
-    loaded_file = _loaded.copy() if _loaded is not None else load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc')))
+    loaded_file = _loaded.copy() if _loaded is not None else load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc', '.zip')))
     ms1 = loaded_file.attrs.pop('ms1', None)
     # The spectra as loaded, for processing the file again with another reducing end without reading it again
     loaded_spectra = None if _return_intermediate else loaded_file.copy()
@@ -5235,7 +5262,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         inference_kwargs['model'] = model
     # The reducing end check of wrap_inference, on the first file: all files are then processed with the reducing end it takes over. The file is read once,
     # with its MS1 data, which the check does not need; when files are processed one after the other, the first one's prediction then takes it as read
-    first = load_spectra_filepath(spectra_filepath_list[0], extract_ms1 = spectra_filepath_list[0].lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc')))
+    first = load_spectra_filepath(spectra_filepath_list[0], extract_ms1 = spectra_filepath_list[0].lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc', '.zip')))
     ms1 = first.attrs.pop('ms1', None)
     condensed = {}
     best, _ = check_reducing_end(spectra_filepath_list[0], glycan_class, {**inference_kwargs, 'model': model, 'df_use': given_df_use}, loaded = first, condensed = condensed)
