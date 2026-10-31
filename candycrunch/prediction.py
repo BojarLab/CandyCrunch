@@ -1419,9 +1419,11 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     scan_ends = np.searchsorted(ms1_rts, rt_centers + search_window + rt_window, side = 'right')
     areas, apex_rts, apex_ints = np.zeros(len(target_mzs)), np.full(len(target_mzs), np.nan), np.zeros(len(target_mzs))
     is_peak, apex_scans = np.zeros(len(target_mzs), dtype = bool), np.full(len(target_mzs), -1)
-    # Each survey scan as its m/z values and cumulative intensities, so the intensity within an m/z window is one difference
-    cumulated = lambda first, last: [(ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]], np.concatenate([[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)]))
-                                     for si in range(first, last)]
+    # Each survey scan as its m/z values and cumulative intensities, so the intensity within an m/z window is one difference; built once per scan, as the
+    # windows of the targets overlap (gap filling rebuilt each scan for hundreds of targets)
+    per_scan = {}
+    cumulated = lambda first, last: [per_scan[si] if si in per_scan else per_scan.setdefault(si, (ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]], np.concatenate(
+                                     [[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)]))) for si in range(first, last)]
     records = [{'mz': float(target_mzs[t]), 'charge': int(charges[t]), 'rt': float(rt_centers[t]), 'times': np.zeros(0, dtype = np.float32), 'trace': np.zeros(0, dtype = np.float32),
                 'left': -1, 'apex': -1, 'right': -1, 'baseline': 0.0, 'area': 0.0, 'windows': [], 'scan': None, 'others': []} for t in range(len(target_mzs))] if details is not None else None
     for t in range(len(target_mzs)):
@@ -3801,9 +3803,9 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # Unreduced (unlabeled) rows (wrap_inference's reducing_end_variants, folded into their glycan below) are cut like every other row, but the file's error
     # and RT statistics come from the rows it reports
     if 're_offset' in df_out.columns:
-        # ... and so are glycosylamines of PA glycans, a labeling side product as well
+        # ... and so are glycosylamines of PA glycans, a labeling side product as well, and glycosylaminitols of reduced N-glycans
         df_out['unlabelled'] = ((np.abs(df_out['re_offset'].values + modification_mass_dict.get(modification, 0) + (mass_tag or 0)) < 0.01) | (
-            (df_out['reducing_end'].values == 'glycosylamine') if 'reducing_end' in df_out.columns else False)) & (df_out['re_offset'].values != 0)
+            np.isin(df_out['reducing_end'].values, ('glycosylamine', 'glycosylaminitol')) if 'reducing_end' in df_out.columns else False)) & (df_out['re_offset'].values != 0)
     regular = ~df_out['unlabelled'].values if 're_offset' in df_out.columns else np.ones(len(df_out), dtype = bool)
     known = regular & df_out['ppm_error'].notna().values
     known_ppm = df_out['ppm_error'].values[known]
@@ -3947,8 +3949,14 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 df_out.iat[j, xc] = df_out.iat[j, xc] + df_out.iat[i, xc]
                 folded.add(i)
         df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in folded]]
+    # Glycosylaminitol rows, side products folded into their glycan's row below, stay out of the charge-state and ion-form merges, where one took a
+    # co-eluting charge state of its alditol along and, without another row of that glycan to fold into, lost it
+    side = (df_out['reducing_end'].values == 'glycosylaminitol') if 'reducing_end' in df_out.columns else np.zeros(len(df_out), dtype = bool)
+    df_side, df_out = df_out[side], df_out[~side]
     df_out = combine_charge_states(df_out)
     df_out = combine_adduct_species(df_out, rt_diff = rt_diff, mode = mode)
+    if len(df_side):
+        df_out = pd.concat([df_out, df_side]).sort_index(kind = 'stable')
     if mode == 'negative' and 'adduct' in df_out.columns:
         # An anion adduct without a co-eluting (de)protonated ion of its composition is not reported: adduct readings only fill precursors that no
         # (de)protonated composition explains, formate and bicarbonate are exact isobars with Hex and dHex (or Neu5Ac and Neu5Gc) swapped, and [M+2Acetate]2-
@@ -4037,19 +4045,24 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         df_out.index = pd.Index(new_index, name = df_out.index.name)
         df_out['adduct'] = observed
     if 're_offset' in df_out.columns:
-        # An unreduced (unlabeled) glycan is a glycan of the run that escaped reduction (labeling), a glycosylamine one whose PA label was not reduced: its
-        # abundance and spectra count for that glycan's most abundant row, and it is never a row of its own. Every other reducing end (e.g., ethyl glycosides) is
-        # a species of its own, reported at its observed m/z
+        # An unreduced (unlabeled) glycan is a glycan of the run that escaped reduction (labeling), a glycosylamine one whose PA label was not reduced, a
+        # glycosylaminitol a reduced N-glycan whose glycosylamine was reduced before it hydrolyzed: its abundance and spectra count for that glycan's row
+        # nearest in RT (below), and it is never a row of its own. Every other reducing end (e.g., ethyl glycosides) is a species of its own, reported at its
+        # observed m/z
         unlabelled = df_out['unlabelled'].values
-        top1, abundance = df_out['top1_pred'].values, df_out['rel_abundance'].values
-        target = {}
-        for i in np.flatnonzero(df_out['re_offset'].values == 0):
-            if isinstance(top1[i], str) and (top1[i] not in target or abundance[i] > abundance[target[top1[i]]]):
-                target[top1[i]] = i
-        for i in np.flatnonzero(unlabelled & np.isin(top1, list(target))):
-            for col in ('rel_abundance', 'num_spectra'):
-                df_out.iloc[target[top1[i]], df_out.columns.get_loc(col)] += df_out[col].iloc[i]
-            df_out.iat[target[top1[i]], df_out.columns.get_loc('xic')] = df_out['xic'].iloc[target[top1[i]]] + df_out['xic'].iloc[i]
+        # That row is the row of the side product's structure nearest in RT or, where the run reports its composition only as other isomers (the side
+        # product's isomer comes from its own fragments among the run's structures of the composition), the composition's row nearest in RT: a
+        # glycosylaminitol elutes 1-2 min after its alditol, and the most abundant row of the structure was often an isomer several minutes away
+        top1 = df_out['top1_pred'].values
+        comps = [stringify_dict(get_comp(g)) if isinstance(g, str) else None for g in top1]
+        rts, own = df_out['RT'].values, np.flatnonzero(df_out['re_offset'].values == 0)
+        for i in np.flatnonzero(unlabelled & np.array([isinstance(g, str) for g in top1], dtype = bool)):
+            same = [j for j in own if top1[j] == top1[i]] or [j for j in own if comps[j] == comps[i]]
+            t = min(same, key = lambda j: abs(rts[j] - rts[i]), default = None)
+            if t is not None:
+                for col in ('rel_abundance', 'num_spectra'):
+                    df_out.iloc[t, df_out.columns.get_loc(col)] += df_out[col].iloc[i]
+                df_out.iat[t, df_out.columns.get_loc('xic')] = df_out['xic'].iloc[t] + df_out['xic'].iloc[i]
         df_out.index = pd.Index(df_out.index.values + df_out['re_offset'].values / np.abs(df_out['charge'].values), name = df_out.index.name)
         df_out = df_out[~unlabelled]
     df_out = flag_coeluting_substructures(df_out, glycan_class, sample_prep = sample_prep, unreduced = modification is None and not mass_tag,
@@ -4349,8 +4362,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                               abundance and spectra then count for their glycan's row, or {'ethyl glycoside': 'C2H4'}, reported as rows of their own at
    |                               their observed m/z and named in a column reducing_end. Only structures the run reports with its own reducing end are searched
    |                               for; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid', as released
-   |                               glycosphingolipid glycans form them, and for 'PA' glycosylamines, the PA glycan 2 H lighter, whose abundance and spectra
-   |                               count for their glycan's row like those of unlabeled glycans)
+   |                               glycosphingolipid glycans form them, for 'PA' glycosylamines, the PA glycan 2 H lighter, and for reduced N-glycans
+   |                               glycosylaminitols (1-amino-1-deoxy-alditols, from PNGase F's glycosylamines reduced before they hydrolyzed), the alditol
+   |                               0.984 Da lighter, whose abundance and spectra count for their glycan's row like those of unlabeled glycans)
    | adducts (string or list): ions of glycowork's adduct table that carry the charge of the run's precursors in place of protons, e.g., 'Li+' for lithium salts in
    |                           the mobile phase ([M+Li]+, [M+2Li]2+, [M+Li+H]2+, ...): their compositions come before the protonated ones, and fragments of such
    |                           precursors carry them; the mode's usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered after protons;
@@ -4546,8 +4560,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # check's runs on the most intense clusters)
     # PA labeling leaves part of the glycans as their glycosylamine (the Schiff base not reduced, 2 H lighter; GPST000750 lists 162 such rows of 1536 and its
     # Deriv_A1-1_8 holds 6N-TRF(6) as glycosylamine at 39.17 min, twice the apex of the PA glycan at 42.72), a side product like an unlabeled glycan
-    variants = ({'free': 0} | ({'ethyl glycoside': 'C2H4'} if 'lipid' in classes else {}) | ({'glycosylamine': 'C5H4N2-O'} if modification == 'PA' else {})
-                if reducing_end_variants is None else reducing_end_variants)
+    # PNGase F releases N-glycans as glycosylamines, which reduction before their hydrolysis turns into 1-amino-1-deoxy-alditols (glycosylaminitols, NH2 for
+    # the alditol's C1 OH), a side product as well
+    variants = ({'free': 0} | ({'ethyl glycoside': 'C2H4'} if 'lipid' in classes else {}) | ({'glycosylamine': 'C5H4N2-O'} if modification == 'PA' else {}) | (
+        {'glycosylaminitol': 'NH3-O'} if modification == 'reduced' and 'N' in classes else {}) if reducing_end_variants is None else reducing_end_variants)
     label = modification_mass_dict.get(modification, 0) + (mass_tag or 0)
     re_names = {(calculate_adduct_mass(g) if isinstance(g, str) else g) - label: name for name, g in variants.items()} if (
         sample_prep == 'underivatized' and not _top_clusters) else {}
@@ -4580,7 +4596,11 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     df_out = assign_annotation_scores_pooled(df_out, multiplier, mass_tag, mass_tolerance, modification = modification,
                                              sample_prep = sample_prep, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
                                              fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm, deisotoped = condensed.setdefault('deisotoped', {}))
-    own_best = df_out.groupby('spec_id')['annotation_score'].max() if 'glycosylamine' in re_names.values() else None
+    # A glycosylamine or glycosylaminitol reading is checked against every candidate of its spectrum at the run's own reducing end (below): their best
+    # annotation score and, without accurate survey scans, their masses
+    own_best = df_out.groupby('spec_id')['annotation_score'].max() if {'glycosylamine', 'glycosylaminitol'} & set(re_names.values()) else None
+    own_masses = df_out.groupby('spec_id')['composition'].agg(lambda cs: [composition_to_mass(c, sample_prep = sample_prep, modification = modification,
+        sialic_derivatization = sialic_derivatization) for c in cs if isinstance(c, dict)]) if own_best is not None and not accurate_ms1 else None
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
     # Spectra without an annotation above crumbs_thresh are dropped unless rescued, so their inputs get one plain pass instead of 5 augmented ones
     # The model knows permethylated spectra by their own modification code (as build_training_pickles encodes them), whatever the reducing end. A free
@@ -5031,9 +5051,27 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             doomed = np.array([t is not None and (not t or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh) for t, mz in zip(theo, df_var['m/z'])], dtype = bool)
             # A glycosylamine lies 2.016 Da below its PA glycan, so an ion trap's precursor window also fits the glycosylamine of a composition about 1 Da heavier
             # (two dHex for a Neu5Ac) at a real PA glycan: in GPST000237 the 8 spectra of Hex7HexNAc6Neu5Ac3 1108.41 [M+3H]3+ went to a fucosylated
-            # glycosylamine. One has to outscore every candidate of its spectrum at the run's own reducing end, whether the model named one or not
-            ga_ok = (df_var['reducing_end'].values != 'glycosylamine') | (df_var['annotation_score'].values > df_var['spec_id'].map(own_best).fillna(-np.inf).values + 2) if (
-                own_best is not None) else True
+            # glycosylamine. One has to outscore every candidate of its spectrum at the run's own reducing end, whether the model named one or not. So does a
+            # glycosylaminitol, 0.984 Da below its alditol
+            ga = np.isin(df_var['reducing_end'].values, ('glycosylamine', 'glycosylaminitol'))
+            ga_ok = ~ga | (df_var['annotation_score'].values > df_var['spec_id'].map(own_best).fillna(-np.inf).values + 2) if own_best is not None else True
+            if own_best is not None and len(df_var):
+                # Its precursor has to lie nearer to it than to its glycan at the run's reducing end, which an ion trap's precursor window also fits (0.49 m/z
+                # at z = 2 for a glycosylaminitol), as chance fragments otherwise decided. Without accurate survey scans, no candidate of the spectrum at the
+                # run's reducing end may weigh the same within 0.1 Da either: the glycosylaminitol of a glycan with two dHex for a Neu5Ac lies 0.037 Da above
+                # the alditol of the sialylated glycan, the run's main product, which fewer residue kinds left with fewer chance fragments
+
+                def fit(mz, g, z, tag):
+                    return min([abs(m - mz) for m in mass_check(mz, g, mode = mode, modification = modification, sample_prep = sample_prep, mass_tag = tag,
+                                                                 mass_tolerance = mass_tolerance, permitted_charges = [abs(int(z))],
+                                                                 sialic_derivatization = sialic_derivatization) or []], default = np.inf)
+
+                ga_ok = ga_ok & np.array([not a or fit(mz, g, z, (mass_tag or 0) + o) < fit(mz, g, z, mass_tag) for a, mz, g, z, o in zip(
+                    ga, df_var['m/z'], df_var['candidate_structure'], df_var['charge'], df_var['re_offset'])], dtype = bool)
+                if own_masses is not None:
+                    var_masses = [composition_to_mass(c, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization) + o
+                                  for c, o in zip(df_var['composition'], df_var['re_offset'])]
+                    ga_ok = ga_ok & ~(ga & np.array([any(abs(m - v) < 0.1 for m in own_masses.get(s, [])) for s, v in zip(df_var['spec_id'], var_masses)], dtype = bool))
             df_var = df_var[((df_var['annotation_score'] > crumbs_thresh) | sparse) & ~doomed & ga_ok & (df_var['annotation_score'] > np.array(
                 [own.get(key, -np.inf) for key in zip(np.round(df_var['m/z'].values, 5), np.round(df_var['RT'].values, 2))]) + 2)]
         if len(df_var):
@@ -5538,8 +5576,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         df_out, spectra_out = inference_dfs[file_label]
         file_mode = file_modes[file_label]
         # Cross-file MS1 gap filling: propagate isomer groups to files without MS2 for them when MS1 shows their peak
-        # (only groups seen in a file of this ion mode: the m/z of the other mode's ions means nothing in this file's MS1)
-        missing = master[master['present_in'].apply(lambda s: file_label not in s and any(file_modes[f] == file_mode for f in s))]
+        # (only groups seen in a file of this ion mode: the m/z of the other mode's ions means nothing in this file's MS1). From 10 files on, only groups
+        # that at least two files report: the gap rows of single-file groups pile up with batch size and replicate runs disagree on them (detection
+        # Jaccard of technical replicates 0.72 at 12 runs, 0.65 at 91, against 0.72-0.74 at every size with two)
+        missing = master[master['present_in'].apply(lambda s: file_label not in s and any(file_modes[f] == file_mode for f in s) and len(s) >= (2 if len(file_labels) >= 10 else 1))]
         if ms1_paths[file_label] and not missing.empty:
             with np.load(ms1_paths[file_label]) as ms1_file:
                 ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])
@@ -5738,124 +5778,37 @@ def assign_modal_category_prediction(assigned_cats):
 
 
 def assign_categories(all_ms2_spectra, intra_cat_thresh = 3):
-    all_mass_dfs = []
-    condition_labels = all_ms2_spectra.condition_label.unique()
-    # RT_group numbers the rows of each file at each mass; the rows are split by mass and file once, and a file without rows at a mass gets an empty frame
+    # Isomer groups at each mass, independent of the file order: the RT that the most files have a row within intra_cat_thresh of (then the most
+    # abundance, then the earliest) becomes a group, which takes each file's row closest to it (re-centred once on their median) and that file's other
+    # rows in the window with the same first prediction (one peak, which deduplicate_predictions merges later); its rows leave, and the next group forms.
+    # Assigning one file after the other to the nearest group mean made the groups depend on the file order (91 runs in reverse order: per-run profiles
+    # 1.1% apart, 330 detections flipped), and a file with two rows of one peak opened a second group that later files split between
+    # RT_group numbers the rows of each file at each mass
     all_ms2_spectra = all_ms2_spectra.assign(RT_group = all_ms2_spectra.groupby(['mass_label', 'condition_label'], sort = False).cumcount())
+    grouped = []
     for _, mass_df in all_ms2_spectra.groupby('mass_label', sort = False):
-        condition_dfs, empty = dict(list(mass_df.groupby('condition_label', sort = False))), mass_df.iloc[:0]
-        mass_group_dfs = [condition_dfs.get(c, empty) for c in condition_labels]
-        cats_mass_dfs = mass_dfs_to_categories(mass_group_dfs, intra_cat_thresh)
-        all_mass_dfs.append(cats_mass_dfs)
-    return pd.concat([p for q in all_mass_dfs for p in q])
-
-
-def mass_dfs_to_categories(mass_range_dfs, inter_sample_thresh):
-    RT_groups = create_RT_groups(mass_range_dfs)
-    categories = {0: []}
-    for x in RT_groups[0]:
-        add_new_category(categories, x)
-    categories = expand_RT_categories(RT_groups, categories, inter_sample_thresh)
-    sample_cats = RT_cats_to_sample_cats(categories, RT_groups)
-    cat_dfs = sample_categories_to_df(sample_cats, mass_range_dfs)
-    return cat_dfs
-
-
-def create_RT_groups(mass_range_dfs):
-    # Every row is its own RT group (RT_group numbers the rows of each file)
-    return [[[rt] for rt in sample_df['RT']] for sample_df in mass_range_dfs]
-
-
-def add_new_category(categories, cluster):
-    new_id = max(categories)
-    categories[new_id + 1] = [cluster]
-    return categories
-
-
-def expand_RT_categories(all_sample_RT_groups, categories, inter_sample_thresh):
-    for sample in all_sample_RT_groups[1:]:
-        all_candidate_categories = calculate_candidate_clusters(sample, categories, inter_sample_thresh)
-        orphan_idxs = []
-        for idx, (orphan_cluster, empty_candidates) in enumerate(zip(sample, all_candidate_categories)):
-            if len(empty_candidates) == 0:
-                add_new_category(categories, orphan_cluster)
-                orphan_idxs.append(idx)
-        sample = [x for u, x in enumerate(sample) if u not in orphan_idxs]
-        all_candidate_categories = [x for u, x in enumerate(all_candidate_categories) if u not in orphan_idxs]
-        assigned = settle_category_conflict(sample, all_candidate_categories, categories)
-        while single := [u for u, x in enumerate(all_candidate_categories) if len(x) == 1 and u not in assigned]:
-            cat = next(iter(all_candidate_categories[single[0]]))
-            categories[cat].append(sample[single[0]])
-            assigned.add(single[0])
-            all_candidate_categories = [x - {cat} for x in all_candidate_categories]
-        for u, x in enumerate(all_candidate_categories):
-            if not x and u not in assigned:
-                add_new_category(categories, sample[u])
-                assigned.add(u)
-        sample = [x for u, x in enumerate(sample) if u not in assigned]
-        all_candidate_categories = [x for u, x in enumerate(all_candidate_categories) if u not in assigned]
-        if [x for x in all_candidate_categories if x]:
-            optim_cats = find_closest_categories_largest(sample, all_candidate_categories, categories)
-            for cluster, optim_cat in zip(sample, optim_cats):
-                if optim_cat:
-                    categories[optim_cat].append(cluster)
-                else:
-                    add_new_category(categories, cluster)
-    return categories
-
-
-def calculate_candidate_clusters(sample, categories, inter_sample_thresh):
-    means = {category: np.mean([p for q in cat_pop for p in q]) for category, cat_pop in categories.items() if cat_pop}
-    return [{category for category, mean in means.items() if abs(np.mean(cluster) - mean) < inter_sample_thresh} for cluster in sample]
-
-
-def settle_category_conflict(sample, cand_categories, categories):
-    settled = set()
-    for cat in set().union(*cand_categories):
-        conflicting = [i for i, x in enumerate(cand_categories) if x == {cat}]
-        if len(conflicting) > 1:
-            closest_cluster_idx = conflicting[np.argmin(
-                [abs(np.mean([p for q in categories[cat] for p in q]) - np.mean(sample[i])) for i in conflicting])]
-            categories[cat].append(sample[closest_cluster_idx])
-            for other_idx in [i for i in conflicting if i != closest_cluster_idx]:
-                categories = add_new_category(categories, sample[other_idx])
-            settled.update(conflicting)
-            for x in cand_categories:
-                x.discard(cat)
-    return settled
-
-
-def find_closest_categories_largest(sample, sample_candidates, categories):
-    cat_means = [{cat: np.mean([p for q in categories[cat] for p in q]) for cat in sorted(x)} for x in sample_candidates]
-    cluster_means = [x[0] for x in sample]
-    cat_mean_diffs = []
-    for cluster_mean, cat_mean in zip(cluster_means, cat_means):
-        cat_mean_diffs.append({k: abs(v - cluster_mean) for k, v in cat_mean.items()})
-    cats_out = [set() for _ in cluster_means]
-    selected_RTs = []
-    sorted_categories = dict(sorted(categories.items(), key = lambda x: len(x[1]), reverse = True))
-    for cat in sorted_categories:
-        closest_RTs = sorted(
-            [(diffs[cat], sample_RT) for diffs, sample_RT in zip(cat_mean_diffs, cluster_means) if cat in diffs if
-             sample_RT not in selected_RTs])
-        if not closest_RTs:
-            continue
-        selected_RT = closest_RTs[0][1]
-        selected_RTs.append(selected_RT)
-        cats_out[cluster_means.index(selected_RT)] = cat
-    return cats_out
-
-
-def RT_cats_to_sample_cats(RT_categories, RT_groups):
-    position = {id(c): (i, j) for i, x in enumerate(RT_groups) for j, c in enumerate(x)}
-    return {k: [position[id(cluster)] for cluster in v] for k, v in RT_categories.items()}
-
-
-def sample_categories_to_df(sample_group_categories, mass_range_df):
-    # by category, and within one in the order its rows joined it
-    order = [(cat, i, j) for cat, group in sample_group_categories.items() for i, j in group]
-    offsets = np.cumsum([0] + [len(x) for x in mass_range_df])
-    return [pd.concat(mass_range_df).iloc[[offsets[i] + j for _, i, j in order]].assign(category_label = [cat for cat, _, _ in order])] if order else []
+        rts, abundance = mass_df['RT'].values.astype(float), mass_df['rel_abundance'].fillna(0).values.astype(float)
+        files = pd.factorize(mass_df['condition_label'])[0]
+        top = np.array([p[0][0] if isinstance(p, list) and p else None for p in mass_df['predictions']], dtype = object)
+        remaining, groups = np.arange(len(mass_df)), []
+        while len(remaining):
+            r, f, t = rts[remaining], files[remaining], top[remaining]
+            near = np.abs(r[:, None] - r[None, :]) <= intra_cat_thresh
+            support = (near.astype(int) @ (f[:, None] == np.unique(f)[None, :]) > 0).sum(axis = 1)
+            center = r[np.lexsort((r, -(near @ abundance[remaining]), -support))[0]]
+            for _ in range(2):
+                dist = np.where(np.abs(r - center) <= intra_cat_thresh, np.abs(r - center), np.inf)
+                order = np.lexsort((r, dist, f))
+                first = order[np.r_[True, f[order][1:] != f[order][:-1]]]
+                members = first[np.isfinite(dist[first])]
+                center = np.median(r[members])
+            own = dict(zip(f[members], t[members]))
+            members = np.union1d(members, np.array([i for i in np.flatnonzero(np.isfinite(dist)) if t[i] is not None and own.get(f[i]) == t[i]], dtype = int))
+            groups.append(remaining[members])
+            remaining = np.delete(remaining, members)
+        order = [(g, i) for g, idx in enumerate(groups, 1) for i in sorted(idx, key = lambda i: (files[i], rts[i]))]
+        grouped.append(mass_df.iloc[[i for _, i in order]].assign(category_label = [g for g, _ in order]))
+    return pd.concat(grouped)
 
 
 def supplement_prediction(df_in, glycan_class, mode = 'negative', modification = 'reduced',

@@ -22,7 +22,7 @@ def build_parser():
     parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated'], required=False)
     parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples (or of samples permethylated after it): EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA, GQ (glycoqueuing: aniline on every sialic acid, which tells no linkage), GQ-d5 (d5-aniline on a2-6, d0 on a2-3)', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5'], required=False)
     parser.add_argument('--adducts', help='Ions that carry the charge of the precursors in place of protons, e.g. Li+ for lithium salts in the mobile phase; the usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered', type=str, nargs='+', required=False)
-    parser.add_argument('--reducing_end_variants', help='Other reducing ends the glycans may carry: free (glycans that escaped reduction or labelling, counted for their glycan), ethyl_glycoside (rows of their own); default: free, plus ethyl_glycoside for lipid; give none of them to turn this off', type=str, nargs='*', choices=['free', 'ethyl_glycoside'], required=False)
+    parser.add_argument('--reducing_end_variants', help='Other reducing ends the glycans may carry: free (glycans that escaped reduction or labelling, counted for their glycan), ethyl_glycoside (rows of their own), glycosylamine (PA glycans whose label was not reduced, counted for their glycan), glycosylaminitol (reduced N-glycans that were glycosylamines when reduced, counted for their glycan); default: free, plus ethyl_glycoside for lipid, glycosylamine for PA and glycosylaminitol for reduced N-glycans; give none of them to turn this off', type=str, nargs='*', choices=['free', 'ethyl_glycoside', 'glycosylamine', 'glycosylaminitol'], required=False)
     parser.add_argument('--lc', help='LC type', type=str, choices=['PGC', 'C18', 'other'], required=False)
     parser.add_argument('--trap', help='Detector type', type=str, choices=['linear', 'orbitrap', 'amazon', 'other'], required=False)
     parser.add_argument('--rt_min', help='Minimum relevant retention time', type=float, required=False)
@@ -79,7 +79,7 @@ def main(argv=None):
     if args.filter_out is not None:
         args_dict['filter_out'] = set(args.filter_out)
     if args.reducing_end_variants is not None:
-        args_dict['reducing_end_variants'] = {k: v for k, v in {'free': 0, 'ethyl glycoside': 'C2H4'}.items() if k.replace(' ', '_') in args.reducing_end_variants}
+        args_dict['reducing_end_variants'] = {k: v for k, v in {'free': 0, 'ethyl glycoside': 'C2H4', 'glycosylamine': 'C5H4N2-O', 'glycosylaminitol': 'NH3-O'}.items() if k.replace(' ', '_') in args.reducing_end_variants}
     # Imported only now: it loads the model, which --help and argument errors do not need, and every process of --n_jobs imports this module again
     from candycrunch.prediction import wrap_inference, wrap_inference_batch
     if len(filepaths) == 1:
