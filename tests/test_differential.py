@@ -63,6 +63,15 @@ def test_compare_two_groups():
     assert paired['paired'] and paired['members']['tumor'][:2] == ['tumor_2', 'tumor_1'] and 'paired' in paired['test']
     motifs = compare_groups(df, {run: run.split('_')[0] for run in runs}, motifs = True)
     assert motifs['motifs'] and 'Features' not in motifs['table'].columns and len(motifs['table']) > 5
+    # a covariate (two non-secretor-like runs per group, one glycan sixteen-fold lower in them): the groups are compared within it
+    status = {run: 'non' if run[-1] in '12' else 'sec' for run in runs}
+    df_c = df.copy()
+    df_c.loc[df_c['top1_pred'] == GLYCANS[3], [run for run in runs if status[run] == 'non']] /= 16
+    adjusted = compare_groups(df_c, {run: run.split('_')[0] for run in runs}, covariates = status)
+    assert adjusted['covariates'] == {'covariate': status} and 'with covariates' in adjusted['test'] and adjusted['table'].set_index('Glycan').loc[GLYCANS[0], 'significant']
+    # typed into a table, numbers arrive as text and are a slope; several covariates come by name
+    ages = {run: str(40 + 3 * k) for k, run in enumerate(runs)}
+    assert 'with covariates' in compare_groups(df, {run: run.split('_')[0] for run in runs}, covariates = {'age': ages, 'status': status})['test']
 
 
 def test_compare_groups_absent_in_a_group():
@@ -97,6 +106,13 @@ def test_compare_three_groups_and_errors():
         compare_groups(df, {run: run[0] for run in runs}, pairs = {run: run[1] for run in runs})
     with pytest.raises(ValueError, match = 'every pair'):
         compare_groups(df, {'a0': 'a', 'a1': 'a', 'b0': 'b', 'b1': 'b'}, pairs = {'a0': '1', 'a1': '2', 'b0': '1'})
+    # with a covariate, three or more groups are compared by ANCOVA; every compared run needs a value, and pairs refuse covariates
+    assert 'ANCOVA' in compare_groups(df, {run: run[0] for run in runs}, covariates = {run: 'x' if run[1] == '0' else 'y' for run in runs})['test']
+    with pytest.raises(ValueError, match = 'Give every compared run a value'):
+        compare_groups(df, {run: run[0] for run in runs}, covariates = {'a0': 'x'})
+    with pytest.raises(ValueError, match = 'Pairs and covariates'):
+        compare_groups(df, {'a0': 'a', 'a1': 'a', 'b0': 'b', 'b1': 'b'}, pairs = {'a0': '1', 'a1': '2', 'b0': '1', 'b1': '2'},
+                       covariates = {'a0': 'x', 'a1': 'y', 'b0': 'x', 'b1': 'y'})
 
 
 def test_gui_compare_groups():
@@ -144,4 +160,13 @@ def test_gui_compare_groups():
     # new results of the same runs keep their groups
     tab.set_session({'experiments': [{k: v for k, v in session['experiments'][0].items() if k != 'comparison'}]})
     assert tab.groups()[0] == {run: run.split('_')[1] for run in runs} and tab.result is None
+    # a covariate given for some runs only holds the comparison back; given for all, the plan says it is adjusted, and new results keep it
+    tab.runs.item(0, 3).setText('non')
+    assert not tab.go.isEnabled() and 'covariate value' in tab.plan.text()
+    for r in range(1, 6):
+        tab.runs.item(r, 3).setText('non' if r == 3 else 'sec')
+    assert tab.go.isEnabled() and 'Adjusted for the covariate' in tab.plan.text()
+    covariates = tab.groups()[2]
+    tab.set_session({'experiments': [{k: v for k, v in tab.session['experiments'][0].items() if k != 'comparison'}]})
+    assert tab.groups()[2] == covariates
     tab.shutdown()

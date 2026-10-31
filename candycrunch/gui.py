@@ -3250,10 +3250,11 @@ class CompareTab(QWidget):
         layout.addWidget(self.experiments)
         layout.addWidget(_label('Groups'))
         layout.addWidget(_label('Give each run its group (such as control or treated); runs without a group are left out, and the first group is the '
-                                'reference. For a paired comparison of two groups (the same subjects in both), give both runs of a subject the same pair.',
-                                'hint'))
-        self.runs = QTableWidget(0, 3)
-        self.runs.setHorizontalHeaderLabels(['Run', 'Group', 'Pair'])
+                                'reference. For a paired comparison of two groups (the same subjects in both), give both runs of a subject the same pair. '
+                                'To compare the groups within a variable that also changes the glycome (such as secretor status, sex, age, or batch), give '
+                                'every run its value as covariate.', 'hint'))
+        self.runs = QTableWidget(0, 4)
+        self.runs.setHorizontalHeaderLabels(['Run', 'Group', 'Pair', 'Covariate'])
         self.runs.verticalHeader().setVisible(False)
         self.runs.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.runs.horizontalHeader().setHighlightSections(False)
@@ -3262,10 +3263,13 @@ class CompareTab(QWidget):
         self.runs.setWordWrap(False)
         layout.addWidget(self.runs, 1)
         buttons = QHBoxLayout()
-        self.set_group, self.guess = QPushButton('Set group…'), QPushButton('Guess from run names')
+        self.set_group, self.set_covariate, self.guess = QPushButton('Set group…'), QPushButton('Set covariate…'), QPushButton('Guess from run names')
         self.set_group.setToolTip('Gives the selected runs one group')
+        self.set_covariate.setToolTip('Gives the selected runs one covariate value (such as non-secretor); numbers (such as ages) are a slope, anything else a '
+                                      'factor')
         self.guess.setToolTip('Groups runs whose names differ only in a leading number or a trailing replicate number (ctrl_1, ctrl_2, tumor_1, ...)')
         buttons.addWidget(self.set_group)
+        buttons.addWidget(self.set_covariate)
         buttons.addWidget(self.guess)
         layout.addLayout(buttons)
         layout.addWidget(_label('Comparison'))
@@ -3357,7 +3361,8 @@ class CompareTab(QWidget):
         outer.addWidget(splitter)
         self.experiments.currentIndexChanged.connect(self.show_experiment)
         self.runs.itemChanged.connect(self.store_groups)
-        self.set_group.clicked.connect(self.set_selected_group)
+        self.set_group.clicked.connect(lambda: self.set_selected(1))
+        self.set_covariate.clicked.connect(lambda: self.set_selected(3))
         self.guess.clicked.connect(self.guess_groups)
         self.go.clicked.connect(self.run)
         self.done.connect(self.finished)
@@ -3377,13 +3382,13 @@ class CompareTab(QWidget):
     def set_session(self, session):
         """The experiments of new or opened results that can be compared: those with a feature table of at least four runs. New results of runs that
         had groups (the same experiment run again, with other settings) keep them"""
-        earlier = {(e['name'], run): (c['groups'].get(run, ''), c['pairs'].get(run, '')) for e in (self.session or {}).get('experiments', [])
-                   if (c := e.get('comparison')) for run in c['groups']}
+        earlier = {(e['name'], run): (c['groups'].get(run, ''), c['pairs'].get(run, ''), c.get('covariates', {}).get(run, ''))
+                   for e in (self.session or {}).get('experiments', []) if (c := e.get('comparison')) for run in c['groups']}
         for experiment in (session or {}).get('experiments', []):
             kept = {run: earlier[(experiment['name'], run)] for run in experiment['tables'] if (experiment['name'], run) in earlier}
             if 'comparison' not in experiment and kept:
-                experiment['comparison'] = {'groups': {run: g for run, (g, _) in kept.items()}, 'pairs': {run: p for run, (_, p) in kept.items() if p},
-                                            'options': {}, 'result': None}
+                experiment['comparison'] = {'groups': {run: g for run, (g, _, _) in kept.items()}, 'pairs': {run: p for run, (_, p, _) in kept.items() if p},
+                                            'covariates': {run: v for run, (_, _, v) in kept.items() if v}, 'options': {}, 'result': None}
         self.session, self.experiment = session, None
         experiments = [e for e in (session or {}).get('experiments', []) if e.get('features') is not None and len(self.run_names(e)) >= 4]
         self.experiments.blockSignals(True)
@@ -3402,7 +3407,7 @@ class CompareTab(QWidget):
 
     def show_experiment(self):
         self.experiment = experiment = self.current()
-        for widget in (self.runs, self.set_group, self.guess, self.level, self.transform, self.min_samples, self.impute):
+        for widget in (self.runs, self.set_group, self.set_covariate, self.guess, self.level, self.transform, self.min_samples, self.impute):
             widget.setEnabled(experiment is not None)
         self.runs.blockSignals(True)
         self.runs.setRowCount(0)
@@ -3423,6 +3428,7 @@ class CompareTab(QWidget):
             self.runs.setItem(row, 0, name)
             self.runs.setItem(row, 1, QTableWidgetItem(comparison['groups'].get(run, '')))
             self.runs.setItem(row, 2, QTableWidgetItem(comparison['pairs'].get(run, '')))
+            self.runs.setItem(row, 3, QTableWidgetItem(comparison.get('covariates', {}).get(run, '')))  # sessions saved before covariates have none
         self.runs.blockSignals(False)
         self.runs.resizeColumnsToContents()
         self.runs.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -3435,28 +3441,31 @@ class CompareTab(QWidget):
         self.show_result(comparison['result'])
 
     def groups(self):
-        """{run: group} and {run: pair} as the run list holds them (blank cells left out)"""
-        cells = [[(self.runs.item(r, c).text().strip() if self.runs.item(r, c) else '') for c in range(3)] for r in range(self.runs.rowCount())]
-        return {run: g for run, g, _ in cells if g}, {run: p for run, g, p in cells if g and p}
+        """{run: group}, {run: pair} and {run: covariate} as the run list holds them (blank cells left out)"""
+        cells = [[(self.runs.item(r, c).text().strip() if self.runs.item(r, c) else '') for c in range(4)] for r in range(self.runs.rowCount())]
+        return {run: g for run, g, _, _ in cells if g}, {run: p for run, g, p, _ in cells if g and p}, {run: v for run, g, _, v in cells if g and v}
 
     def store_groups(self):
         if self.experiment is not None:
-            self.experiment['comparison']['groups'], self.experiment['comparison']['pairs'] = self.groups()
+            comparison = self.experiment['comparison']
+            comparison['groups'], comparison['pairs'], comparison['covariates'] = self.groups()
             self.changed.emit()
             self.update_plan()
 
-    def set_selected_group(self):
+    def set_selected(self, column):
+        """Gives the selected runs one group (column 1) or one covariate value (column 3)"""
         rows = sorted({index.row() for index in self.runs.selectionModel().selectedRows()})
+        what = 'group' if column == 1 else 'covariate'
         if not rows:
-            self.status.emit('Select the runs of a group first')
+            self.status.emit(f'Select the runs to give a {what} first')
             return
-        names = list(dict.fromkeys(self.groups()[0].values()))
-        text, ok = QInputDialog.getItem(self, 'Set group', f'Group of the {len(rows)} selected run{"s" if len(rows) > 1 else ""} (empty: leave them out):', names,
-                                        0, True)
+        names = list(dict.fromkeys(self.groups()[0 if column == 1 else 2].values()))
+        text, ok = QInputDialog.getItem(self, f'Set {what}', f'{what.capitalize()} of the {len(rows)} selected run{"s" if len(rows) > 1 else ""}'
+                                        f'{" (empty: leave them out)" if column == 1 else ""}:', names, 0, True)
         if ok:
             self.runs.blockSignals(True)
             for r in rows:
-                self.runs.item(r, 1).setText(text.strip())
+                self.runs.item(r, column).setText(text.strip())
             self.runs.blockSignals(False)
             self.store_groups()
 
@@ -3483,22 +3492,29 @@ class CompareTab(QWidget):
 
     def update_plan(self):
         """Says which test the groups make for, or what they are missing"""
-        groups, pairs = self.groups() if self.experiment is not None else ({}, {})
+        groups, pairs, covariates = self.groups() if self.experiment is not None else ({}, {}, {})
         members = {}
         for run, g in groups.items():
             members.setdefault(g, []).append(run)
         sizes, test = ', '.join(f'{html.escape(g)} ({len(m)})' for g, m in members.items()), 'paired' if pairs else "Welch's"
-        ready = len(members) >= 2 and min(len(m) for m in members.values()) >= 2 and not (pairs and len(members) > 2)
+        # a covariate needs a value for every run compared, and a paired test none
+        unset = len(groups) - len(covariates) if covariates else 0
+        adjusted = f' Adjusted for the covariate ({len(set(covariates.values()))} values).' if covariates else ''
+        ready = len(members) >= 2 and min(len(m) for m in members.values()) >= 2 and not (pairs and len(members) > 2) and not unset and not (pairs and covariates)
         if self.experiment is None:
             text = ''
         elif len(members) < 2 or min(len(m) for m in members.values()) < 2:
             text = 'Give at least two groups of at least two runs each.' + (f' Now: {sizes}.' if sizes else '')
+        elif unset:
+            text = f'Give every run with a group its covariate value, or clear the covariate: {unset} run{"s have" if unset > 1 else " has"} none.'
+        elif pairs and covariates:
+            text = 'Pairs and covariates do not go together (a paired test already compares each subject with itself): clear one of them.'
         elif len(members) == 2:
-            text = (f'{sizes}: {test} t-test of each glycan (variance-moderated), with Benjamini-Hochberg correction; fold changes are '
-                    f'{html.escape(list(members)[1])} over {html.escape(list(members)[0])}.')
+            text = (f'{sizes}: {"linear-model" if covariates else test} t-test of each glycan (variance-moderated), with Benjamini-Hochberg correction; '
+                    f'fold changes are {html.escape(list(members)[1])} over {html.escape(list(members)[0])}.{adjusted}')
         else:
-            text = f"{sizes}: one-way ANOVA of each glycan (variance-moderated), with Benjamini-Hochberg correction and Tukey's post-hoc tests." + (
-                ' Pairs only work for two groups: clear them.' if pairs else '')
+            text = (f"{sizes}: {'ANCOVA' if covariates else 'one-way ANOVA'} of each glycan (variance-moderated), with Benjamini-Hochberg correction and "
+                    f"Tukey's post-hoc tests." + (' Pairs only work for two groups: clear them.' if pairs else adjusted))
         self.plan.setText(text)
         self.go.setEnabled(self.busy is None and ready)
 
@@ -3506,7 +3522,7 @@ class CompareTab(QWidget):
         experiment = self.experiment
         if experiment is None or self.busy is not None:
             return
-        groups, pairs = self.groups()
+        groups, pairs, covariates = self.groups()
         experiment['comparison']['options'] = options = self.options()
         runs = [run for run in self.run_names(experiment) if run in groups]
         columns = [c for c in ('top1_pred', 'composition', 'excluded') if c in experiment['features'].columns] + runs
@@ -3518,7 +3534,8 @@ class CompareTab(QWidget):
         self.go.setEnabled(False)
         self.go.setText('Comparing…')
         self.status.emit('Comparing groups with glycowork…')
-        future = self.pool.submit(compare_groups, experiment['features'][columns].copy(), {run: groups[run] for run in runs}, pairs, **options)
+        future = self.pool.submit(compare_groups, experiment['features'][columns].copy(), {run: groups[run] for run in runs}, pairs, **options,
+                                  covariates = {run: covariates[run] for run in runs if run in covariates} or None)
         future.add_done_callback(lambda future: future.cancelled() or self.done.emit(experiment, None if future.exception() else future.result(), future.exception()))
 
     def finished(self, experiment, result, error):
@@ -3792,8 +3809,9 @@ class CompareTab(QWidget):
                     if posthoc is not None:
                         posthoc.to_excel(writer, sheet_name = 'Post-hoc tests', index = False)
                     result['values'].rename_axis('Motif' if result['motifs'] else 'Glycan').to_excel(writer, sheet_name = 'Abundances (%)')
-                    pd.DataFrame([(run, g) for g, runs in result['members'].items() for run in runs], columns = ['Run', 'Group']).to_excel(
-                        writer, sheet_name = 'Groups', index = False)
+                    covariates = result.get('covariates', {})  # comparisons saved before covariates have none
+                    pd.DataFrame([(run, g, *(v.get(run) for v in covariates.values())) for g, runs in result['members'].items() for run in runs],
+                                 columns = ['Run', 'Group', *covariates]).to_excel(writer, sheet_name = 'Groups', index = False)
             self.status.emit(f'Exported {os.path.basename(path)}')
         except Exception as error:
             QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
