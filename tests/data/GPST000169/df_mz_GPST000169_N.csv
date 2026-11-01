@@ -26,7 +26,7 @@ Mass,charge,glycan,9_NGlycan_StandardTransfection_Lysis treated_Replicate1,9_NGl
 921.84,-2,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,42.91,0,,1,42.14,1,44.35,added
 934.35,-2,,0,,0,,0,,1,38.66,added
 937.33,-2,Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,52.96,1,52.48,1,52.6,1,53.59,given
-937.33,-2,Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,63.47,1,62.79,1,63.09,0,,given
+937.33,-2,Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,63.47,1,62.79,1,63.09,1,63.94,given
 941.32,-2,Man(a1-2)Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-3)[Man(a1-2)Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,45.51,1,44.83,1,44.79,1,46.89,given
 945.33,-2,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,49.93,1,49.28,1,49.44,1,50.43,given
 945.33,-2,Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,59.9,1,59.34,1,59.41,0,,added
@@ -87,3 +87,4 @@ Mass,charge,glycan,9_NGlycan_StandardTransfection_Lysis treated_Replicate1,9_NGl
 829.2831,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,48.05,1,47.35,0,,1,49.04,added
 991.3359,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,52.96,1,52.20,1,52.33,1,53.97,added
 1153.3887,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,55.89,1,55.17,1,55.35,1,57.25,added
+1549.5532,-2,,1,66.89,0,,1,66.79,0,,added
