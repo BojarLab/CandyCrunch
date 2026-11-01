@@ -1614,9 +1614,9 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
     random.setstate(state[0])
     np.random.set_state(state[1])
     idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
-    df.set_index(idx_col, inplace = True)
+    df = df.set_index(idx_col)
     drop_cols = ['mode', 'modification', 'trap', 'lc'] + ([] if keep_inputs else ['binned_intensities', 'mz_remainder', 'RT2', 'glycan_type'])
-    df.drop(drop_cols, axis = 1, inplace = True)
+    df = df.drop(drop_cols, axis = 1)
     return batches, df
 
 
@@ -1863,9 +1863,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     idx_col = 'm/z' if 'm/z' in df.columns else 'reducing_mass'
     df['rounded_mz'] = np.round(df[idx_col] * 2) / 2
     df['rounded_RT'] = np.round(df['RT'], 1)
-    df.sort_values(by = ['rounded_mz', 'rounded_RT'], inplace = True)
+    df = df.sort_values(by = ['rounded_mz', 'rounded_RT'])
     rounded_mz = df['rounded_mz'].to_numpy()
-    df.drop(['rounded_mz', 'rounded_RT'], axis = 1, inplace = True)
+    df = df.drop(['rounded_mz', 'rounded_RT'], axis = 1)
     # Initialize the first cluster
     mz_arr = df[idx_col].to_numpy()
     rt_arr = df['RT'].to_numpy()
@@ -2708,8 +2708,7 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
    | Returns a deduplicated dataframe
    """
     # Sort by index and 'RT' (the index sort has to be stable to keep the RT order within one m/z)
-    df.sort_values(by = 'RT', inplace = True)
-    df.sort_index(kind = 'stable', inplace = True)
+    df = df.sort_values(by = 'RT').sort_index(kind = 'stable')
     idx_vals = df.index.values
     rt_vals = df['RT'].values
     preds_col = df['predictions'].values
@@ -3165,7 +3164,7 @@ def canonicalize_biosynthesis(df_out):
    """
     df_out = df_out.assign(
         true_mass = df_out.index * abs(df_out['charge']) - (df_out['charge'] + np.sign(df_out['charge'].sum())))
-    df_out.sort_values(by = 'true_mass', inplace = True)
+    df_out = df_out.sort_values(by = 'true_mass')
     strong_evidence_preds = [pred[0][0] for pred, evidence in zip(df_out['predictions'], df_out['evidence']) if
                              len(pred) > 0 and evidence == 'strong']
     rest_top1 = set(strong_evidence_preds)
@@ -3195,8 +3194,7 @@ def canonicalize_biosynthesis(df_out):
             new_preds = new_preds[:5]
         prediction_column.append(new_preds)
     df_out['predictions'] = prediction_column[::-1]
-    df_out.drop(['true_mass'], axis = 1, inplace = True)
-    return df_out.sort_index()
+    return df_out.drop(['true_mass'], axis = 1).sort_index()
 
 
 class DictStorage:
@@ -3547,9 +3545,7 @@ def combine_charge_states(df_out):
             if 'xic' in df_filtered.columns:
                 df_filtered.at[rep, 'xic'] = sum(group['xic'], [])
             df_filtered = df_filtered.drop(group.index.drop(rep))
-    df_out = pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index()
-    df_out.drop(['top_pred'], axis = 1, inplace = True)
-    return df_out
+    return pd.concat([df_out[~df_out['top_pred'].isin(filtered_top_pred)], df_filtered]).sort_index().drop(['top_pred'], axis = 1)
 
 
 def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
@@ -3605,9 +3601,7 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
                     rows_to_drop.append(idx_i)
                     used.add(idx_i)
                     break
-    df_out = df_out.drop(rows_to_drop)
-    df_out.drop(['top_pred'], axis = 1, inplace = True)
-    return df_out
+    return df_out.drop(rows_to_drop).drop(['top_pred'], axis = 1)
 
 
 def Ac_follows_Gc(df_out):
@@ -3642,8 +3636,7 @@ def Ac_follows_Gc(df_out):
             if idx not in canonical_ac_indices and len(row["predictions"]) > 1:
                 df_out.at[idx, "predictions"] = row["predictions"][1:]
     # Remove the helper column
-    df_out.drop(columns = ["Original_Prediction"], inplace = True, errors = "ignore")
-    return df_out
+    return df_out.drop(columns = ["Original_Prediction"], errors = "ignore")
 
 
 def filter_delayed_rts(df_out, mass_tolerance):
@@ -4498,7 +4491,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         return (df_out, []) if spectra else df_out
     intensity = 'intensity' in loaded_file.columns and not (loaded_file['intensity'] == 0).all() and not loaded_file['intensity'].isnull().all()
     # Prepare file for processing
-    loaded_file.dropna(subset = ['peak_d'], inplace = True)
+    loaded_file = loaded_file.dropna(subset = ['peak_d'])
     idx_col = 'm/z' if 'm/z' in loaded_file.columns else 'reducing_mass'
     # A targeted run (PRM, tMS2) isolates a list of precursor m/z over and over, without survey scans and so without precursor intensities; there each
     # MS2's own signal (PRM quantifies by fragments) traces its target's elution, so it finds the peaks and abundances that precursor intensities give
@@ -5246,6 +5239,14 @@ def acidic_count(composition):
     return sum(v for k, v in composition.items() if k in ACIDIC_RESIDUES) if isinstance(composition, dict) else 0
 
 
+def concat_files(frames):
+    # The row tables of several files as one: a column without any value in one file (precursor_charge of a file without instrument charges) would set
+    # the dtype of the concatenation in future pandas; it takes the dtype that the files with values give it, which is what pandas does so far
+    dtypes = {c: pd.concat([v[c] for v in frames if c in v.columns and v[c].notna().any()]).dtype for c in {c for v in frames for c in v.columns}
+              if any(c in v.columns and v[c].notna().any() for v in frames)}
+    return pd.concat([v.astype({c: np.float64 if dtypes[c].kind in 'iu' else object if dtypes[c].kind == 'b' else dtypes[c] for c in v.columns if c in dtypes and v[c].isna().all()}) for v in frames])
+
+
 def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers = 5, model = candycrunch,
                          glycans = glycans, bin_num = bin_num, max_charge = -3,
                          frag_num = 100, modification = 'reduced', mass_tag = None, lc = 'PGC',
@@ -5402,11 +5403,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if not non_empty:
         ms1_dir.cleanup()
         return pd.DataFrame(), {k: (empty_table.copy(), []) if spectra else empty_table.copy() for k in file_labels}
-    # A column without any value in one file (precursor_charge of a file without instrument charges) would set the dtype of the concatenation in future
-    # pandas; it takes the dtype that the files with values give it, which is what pandas does so far
-    dtypes = {c: pd.concat([v[c] for v in non_empty.values() if c in v.columns and v[c].notna().any()]).dtype for c in {c for v in non_empty.values() for c in v.columns}
-              if any(c in v.columns and v[c].notna().any() for v in non_empty.values())}
-    all_ms2 = pd.concat([v.astype({c: np.float64 if dtypes[c].kind in 'iu' else object if dtypes[c].kind == 'b' else dtypes[c] for c in v.columns if c in dtypes and v[c].isna().all()}) for v in non_empty.values()])
+    all_ms2 = concat_files(list(non_empty.values()))
 
     def mass_labels(mzs):
         # Cluster precursor m/z across files: split at gaps above the mass tolerance, then split clusters wider than it at their largest gap
@@ -5541,7 +5538,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # class has is processed again as N+O glycans on its clusters without a row, and its rows of such a structure from >= 2 spectra are harmonized across these
     # files like the own rows (aligned RTs, isomer groups, modal structure, top_n_isomers), augmented and finalised per file, and join their file unless they
     # are another charge state of one of its rows; gap filling and the feature table then treat them like any other row. Running the pass on every file once
-    # one file has the other class lost on the files without it (GlycoGauntlet N and O batches -0.005 each)
+    # one file has the other class lost on the files without it
     pair = {'N': 'O', 'O': 'N'}.get(classes[0]) if len(classes) == 1 else None
     only = lambda p: isinstance(p, list) and len(p) > 0 and enforce_class(p[0][0], pair) and not enforce_class(p[0][0], classes[0])
     triggered = [k for k in file_labels if pair is not None and sum(isinstance(g, str) and enforce_class(g, pair) and not enforce_class(g, classes[0])
@@ -5561,7 +5558,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         pair_rows = [r[0][[only(p) and n >= 2 for p, n in zip(r[0]['predictions'], r[0]['num_spectra'])]].assign(condition_label = k) for k, r in zip(triggered, pair_runs)]
         pair_rows = [r for r in pair_rows if len(r)]
     if pair_rows:
-        pair_rows = pd.concat(pair_rows)
+        pair_rows = concat_files(pair_rows)
         pair_rows['mass_label'] = pair_rows.index.map(mass_labels(pair_rows.index.values))
         pair_cats = assign_categories(pair_rows.assign(RT = pair_rows['RT'] + drift(pair_rows['RT'], pair_rows['condition_label'], pair_rows['composition']), RT_own = pair_rows['RT']),
                                       intra_cat_thresh = intra_cat_thresh)

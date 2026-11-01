@@ -764,7 +764,7 @@ def test_glucose_oligomer_notes():
     df = pd.DataFrame({'top1_pred': rows, 'RT': [16.9, 13.2, 19.0, 13.8], 'charge': [-1] * 4, 'rel_abundance': [10.0, 5.0, 4.0, 3.0]},
                       index = pd.Index([667.23, 667.19, 829.28, 505.18], name = 'm/z'))
     notes = flag_coeluting_substructures(df.copy(), ['N', 'O'])['notes'].tolist()
-    assert notes[0] == ('Glucose oligomer (Glc4, a hexose ladder): likely from glycogen, starch or dextrins in the sample or reagents, not a glycan of its '
+    assert notes[0] == ('Glucose oligomer (Glc4, a hexose ladder): likely from glycogen, starch, or dextrins in the sample or reagents, not a glycan of its '
                         'glycoconjugates') and notes[2].startswith('Glucose oligomer (Glc5') and 'by structure' not in notes[0] + notes[2]
     assert notes[1] == '' and 'by structure, in an N-glycan or an O-glycan run' in notes[3]
     notes = flag_coeluting_substructures(df.copy(), 'free')['notes'].tolist()
