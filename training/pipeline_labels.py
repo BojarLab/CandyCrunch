@@ -330,7 +330,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                            mz_error = [np.nan if k is None else mz - masses[k] for k, mz in zip(first_row, inputs.index)],
                            mode = settings['mode'], trap = settings['trap'], lc_type = settings['lc'], ms1_trap = settings.get('ms1_trap'),
                            activation = inputs['activation'] if 'activation' in inputs.columns else settings.get('activation'),
-                           modification = 'permethylated' if settings['sample_prep'] == 'permethylated' else (
+                           modification = 'permethylated' if settings['sample_prep'] in ('permethylated', 'deuteropermethylated') else (
                                'reduced' if settings['modification'] is None and not settings['mass_tag'] else settings['modification']),
                            order = np.arange(len(inputs)))
     labelled = inputs[[len(c) > 0 for c in candidates]]

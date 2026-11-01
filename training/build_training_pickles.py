@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit
 
-from glycowork.motif.graph import glycan_to_nxGraph
+from glycowork.motif.graph import compare_glycans, glycan_to_nxGraph
 from glycowork.motif.tokenization import glycan_to_composition
 
 cc_training_dir = Path("cc_training")
@@ -84,6 +84,8 @@ train = train[~train["GlycoPost_ID"].isin(exclude_projects)]
 structures = set(train["glycan"]).union(*train["glycan_candidates"])
 readable = {g for g in structures if _readable(g)}
 print(f"Labelled inputs: {len(train)}, structures: {len(structures)}, unreadable: {len(structures) - len(readable)}")
+# A label outside its candidate set (narrowed after labelling) goes in front of it in place of the candidates it only refines
+train = train.assign(glycan_candidates=[c if g in c else [g] + [x for x in c if not compare_glycans(g, x)] for g, c in zip(train["glycan"], train["glycan_candidates"])])
 # Unreadable structures leave the candidate sets: an input whose set is then empty goes, one whose nearest-RT label went takes the next of its set
 train = train.assign(glycan_candidates=[[g for g in c if g in readable] for c in train["glycan_candidates"]])
 train = train[train["glycan_candidates"].map(len) > 0]

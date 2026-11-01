@@ -22,8 +22,9 @@ species' kingdom for non-mammals; without a reducing end in the checklist, reduc
 the checklist's settings label nothing although the map has structures, underivatized/permethylated x reduced/free are tried. label_run shifts map RTs onto the
 run and labels RT-less map rows only on their composition's strongest inputs. Runs of test sets and held-out files (tests/data, the training exclusion list of
 the GlycoGauntlet audit), and their copies (<run>_2, ... or the same inputs), are written but never merged; the other runs of their projects are training
-data like any. Of runs with the same inputs (one acquisition downloaded under several names, also under several project IDs) only the first is merged
-(runs.csv: duplicate_of, as project/run; the inputs' hash is kept beside each run as <run>.key). <out>/manifest.json records what the merged tables were made
+data like any. Of runs with the same spectra (one acquisition downloaded under several names, also under several project IDs, whatever maps or settings each
+copy was converted with) only the first is merged (runs.csv: duplicate_of, as project/run; a hash of the .cc's MS2 precursors and RTs is kept beside each
+run as <run>.cckey). <out>/manifest.json records what the merged tables were made
 from (code, glycowork, checklist, maps, exclusions, .cc loaders) and what they hold.
 Outputs: <out>/runs/<project>/<run>.pkl (labelled and unlabelled inputs with settings, the inputs of every settings tried, and map_rows: what became of
 each map row, with its map file and row), <out>/runs.csv (one line per run; map_row_status counts the map rows' fates), <out>/train.pkl (labeled inputs:
@@ -325,6 +326,10 @@ def excluded_stems(exclusion_csv):
     # the timsTOF serum and GPST000750 sets, misprediction reports) count as well
     stems = {p.stem for folder in ('data', 'untracked') for p in (BASE_DIR / 'tests' / folder).rglob('*')
              if p.suffix.lower() in ('.raw', '.wiff', '.mzml', '.mzxml', '.xlsx', '.d', '.cc', '.mgf')}
+    # A test set assembled from the spectra of other runs names them in its ground truth (raw_file), and those runs are test runs as well
+    for gt in (BASE_DIR / 'tests').glob('*/*/df_mz_*.csv'):
+        if 'raw_file' in pd.read_csv(gt, nrows = 0, encoding = 'utf-8-sig').columns:
+            stems |= {str(f).rsplit('.', 1)[0] for f in pd.read_csv(gt, usecols = ['raw_file'], encoding = 'utf-8-sig')['raw_file'].dropna()}
     if exclusion_csv and pathlib.Path(exclusion_csv).exists():
         ex = pd.read_csv(exclusion_csv)
         stems |= {str(f).rsplit('.', 1)[0] for f in ex['filename']} | {str(f).rsplit('.', 1)[0] for f in ex.get('matched_to', pd.Series(dtype = str)).dropna()}
@@ -395,19 +400,27 @@ def merge(out, exclude, pretrain_peaks = False, exclude_runs = None, sources = N
     out = pathlib.Path(out)
     train, infos, n_pretrain = [], [], 0
     projects = {p: sorted(r for r in p.glob('*.pkl') if not (exclude_runs and re.search(exclude_runs, r.stem))) for p in sorted(out.joinpath('runs').iterdir()) if p.is_dir()}
-    # Copies of one acquisition have the same inputs (156 of the first 1107 runs, the .cc differing only in the embedded name;
-    # examples of shared runs under two project IDs: GPST000422/506, PMC7329767/_xyl, GPST000009/162, GPST000222/268), so runs are told apart by a hash of their
-    # inputs over all projects, kept beside each run (<run>.key) as long as the run is not converted again
+    # Copies of one acquisition have the same spectra (156 of the first 1107 runs, the .cc differing only in the embedded name; examples of shared runs under
+    # two project IDs: GPST000422/506, PMC7329767/_xyl, GPST000009/162, GPST000222/268), so runs are told apart by a hash of the MS2 precursor m/z and RT in
+    # their .cc, which neither the maps, the class nor the settings a copy was converted with change (a hash of the inputs let such copies through), else of
+    # their inputs where the .cc is gone; over all projects, kept beside each run (<run>.cckey) as long as the run is not converted again
     keys = {}
     for runs in projects.values():
         for r in runs:
-            side = r.with_suffix('.key')
+            side = r.with_suffix('.cckey')
             if side.exists() and side.stat().st_mtime_ns >= r.stat().st_mtime_ns:
                 keys[r] = side.read_text()
                 continue
             d = pd.read_pickle(r)
-            inputs = pd.concat([d['labelled'].reset_index()[['m/z', 'RT', 'num_spectra']], d['unlabelled'].reset_index()[['m/z', 'RT', 'num_spectra']]])
-            keys[r] = hashlib.sha1(np.round(inputs.sort_values(['RT', 'm/z']).to_numpy(float), 3).tobytes()).hexdigest() if len(inputs) else r.stem
+            if pathlib.Path(d['info']['path']).exists():
+                with np.load(d['info']['path']) as f:
+                    meta = json.loads(f['meta'].tobytes())
+                    columns = [f"col{meta['columns'].index(c)}" for c in ('m/z', 'RT')]
+                    spectra = np.round(np.column_stack([np.ascontiguousarray(f[c].T).view(meta['dtypes'][c]).ravel() for c in columns]), 2)
+                keys[r] = 'cc' + hashlib.sha1(spectra[np.lexsort((spectra[:, 0], spectra[:, 1]))].tobytes()).hexdigest() if len(spectra) else r.stem
+            else:
+                inputs = pd.concat([d['labelled'].reset_index()[['m/z', 'RT', 'num_spectra']], d['unlabelled'].reset_index()[['m/z', 'RT', 'num_spectra']]])
+                keys[r] = hashlib.sha1(np.round(inputs.sort_values(['RT', 'm/z']).to_numpy(float), 3).tobytes()).hexdigest() if len(inputs) else r.stem
             side.write_text(keys[r])
     # A copy of an excluded run is excluded too, in any project, and of the others only the first is merged
     excluded_keys = {keys[r] for runs in projects.values() for r in runs if is_excluded(r.stem, exclude)}

@@ -88,20 +88,26 @@ else:
 _trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 
 NEGATIVE_ADDUCTS = ['Acetate', 'Formate', 'HCO3-']
-# Trap setting for the PSI-MS instrument model (Bruker amaZon) and mass analyzer terms of an mzML instrument configuration, checked in this order
+# Trap setting for the PSI-MS instrument model and mass analyzer terms of an mzML instrument configuration, checked in this order: 'amazon' is every 3D
+# (Paul) ion trap, whose spectra differ from those of linear traps (Bruker amaZon, HCT and esquire series, which msconvert also writes for amaZon runs
+# with a linear trap analyzer, Agilent's Bruker-built 6300 series, and the 'quadrupole ion trap' analyzer)
 ANALYZER_TRAPS = {'MS:1001542': 'amazon', 'MS:1001546': 'amazon', 'MS:1002300': 'amazon', 'MS:1002301': 'amazon', 'MS:1003466': 'amazon',
-                  'MS:1001545': 'amazon', 'MS:1000484': 'orbitrap', 'MS:1000079': 'orbitrap', 'MS:1000078': 'linear', 'MS:1000083': 'linear',
-                  'MS:1000082': 'linear', 'MS:1000264': 'linear', 'MS:1000084': 'other', 'MS:1000126': 'other'}
+                  'MS:1001545': 'amazon', 'MS:1000697': 'amazon', 'MS:1000160': 'amazon', 'MS:1000161': 'amazon', 'MS:1000698': 'amazon',
+                  'MS:1000699': 'amazon', 'MS:1000700': 'amazon', 'MS:1001533': 'amazon', 'MS:1000156': 'amazon', 'MS:1000157': 'amazon',
+                  'MS:1003461': 'amazon', 'MS:1000473': 'amazon', 'MS:1000474': 'amazon', 'MS:1000475': 'amazon', 'MS:1000476': 'amazon',
+                  'MS:1000484': 'orbitrap', 'MS:1000079': 'orbitrap', 'MS:1000078': 'linear', 'MS:1000083': 'linear',
+                  'MS:1000082': 'amazon', 'MS:1000264': 'linear', 'MS:1000084': 'other', 'MS:1000126': 'other'}
 # Time-of-flight analyzers (Q-TOF, IT-TOF); msconvert writes Waters instruments as the generic Waters model without analyzers, and the Waters instruments
 # acquiring MS/MS with survey scans are Q-TOFs
 TOF_TERMS = {'MS:1000084', 'MS:1000126'}
 # The same for the msModel and msMassAnalyzer names of an mzXML msInstrument (lower-case), checked in this order; msconvert names only the first
 # analyzer of a (Q) Exactive (quadrupole) and writes no filter lines, so its model stands for the orbitrap
-MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'orbitrap': 'orbitrap', 'exactive': 'orbitrap', 'fourier transform': 'orbitrap',
-                        'ft-icr': 'orbitrap', 'ion trap': 'linear',
+MZXML_ANALYZER_TRAPS = {'amazon': 'amazon', 'hct': 'amazon', 'esquire': 'amazon', 'xct': 'amazon', 'msd trap': 'amazon', 'quadrupole ion trap': 'amazon',
+                        'orbitrap': 'orbitrap', 'exactive': 'orbitrap', 'fourier transform': 'orbitrap', 'ft-icr': 'orbitrap', 'ion trap': 'linear',
                         'time-of-flight': 'other', 'tof': 'other'}
 # The same for the analyzer types of an mzData file (its terms' names and values in lower-case letters only, e.g., quadrupoletimeofflight), in this order
-MZDATA_ANALYZER_TRAPS = {'orbitrap': 'orbitrap', 'fouriertransform': 'orbitrap', 'cyclotron': 'orbitrap', 'timeofflight': 'other', 'tof': 'other', 'trap': 'linear'}
+MZDATA_ANALYZER_TRAPS = {'orbitrap': 'orbitrap', 'fouriertransform': 'orbitrap', 'cyclotron': 'orbitrap', 'timeofflight': 'other', 'tof': 'other',
+                         'quadrupoleiontrap': 'amazon', 'paul': 'amazon', 'trap': 'linear'}
 POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 # What the spectra readers (.raw, mzML, mzXML, timsTOF and ion trap .d) record of each MS2 spectrum besides what the pipeline uses (for training data and
 # audits, kept in .cc files), each as far as its files hold it (else None): its analyzer (as the trap setting names it, 'tof' for time-of-flight),
@@ -1082,7 +1088,7 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
             ms1_scans.append(len(ms1_rts) - 1)
             # SPECTRUM_DETAILS: analyzer and polarity (collision energy, isolation width and scan range are not read from the acquisition parameters);
             # header_shift holds the header m/z until refinement
-            details.append(('amazon' if b'amaZon' in definitions else 'linear', ('-' if struct.unpack('<i', values[param_ids[b'iIonNeg']])[0] else '+')
+            details.append(('amazon', ('-' if struct.unpack('<i', values[param_ids[b'iIonNeg']])[0] else '+')
                             if param_ids[b'iIonNeg'] in values else None, None, None, None, mzs[-1]))
             # As for Bruker mzXML, the precursor intensity is the survey scan's centroids around the precursor
             intensities.append(float(ms1_ints[-1][(ms1_mzs[-1] >= mzs[-1] - 1.5) & (ms1_mzs[-1] < mzs[-1] + 1.5)].sum()) if ms1_mzs else np.nan)
@@ -1100,8 +1106,8 @@ def process_yep_stack(filepath, num_peaks = 1000, intensity = False, extract_ms1
     df_out = df_out[~drop].reset_index(drop = True)
     df_out['header_shift'] = df_out['header_shift'] - df_out['m/z']
     df_out.attrs['detected_mode'] = detected_mode
-    # The definitions name the instrument; HCT and esquire count as linear ion traps, as for their mzXML
-    df_out.attrs['detected_trap'] = df_out.attrs['detected_ms1_trap'] = 'amazon' if b'amaZon' in definitions else 'linear'
+    # Every instrument writing an Analysis.yep (esquire, HCT, amaZon, Agilent's LC/MSD Trap) is a 3D ion trap, as for their mzML and mzXML
+    df_out.attrs['detected_trap'] = df_out.attrs['detected_ms1_trap'] = 'amazon'
     if extract_ms1:
         df_out.attrs['ms1'] = ms1
     return df_out

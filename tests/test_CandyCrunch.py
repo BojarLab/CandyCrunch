@@ -834,9 +834,9 @@ def test_bruker_mzxml(tmp_path):
     # Every precursor moves onto its monoisotopic centroid (the nearest centroid to 675.81 is the shoulder), keeps its header charge, and none is
     # dropped as isotope-triggered, as a Bruker isolation window always holds the whole envelope
     assert np.allclose(df['m/z'], [965.844, 675.36, 675.36], atol = 0.02) and df['precursor_charge'].tolist()[0] == 2
-    assert df.attrs['detected_trap'] == 'linear' and df.attrs['detected_mode'] == 'negative'
+    assert df.attrs['detected_trap'] == 'amazon' and df.attrs['detected_mode'] == 'negative'
     # The scans' details: analyzer and polarity, nothing the file does not state, the header m/z as the shift refinement applied
-    assert df['analyzer'].tolist() == ['linear'] * 3 and df['polarity'].tolist() == ['-'] * 3 and df['collision_energy'].isna().all()
+    assert df['analyzer'].tolist() == ['amazon'] * 3 and df['polarity'].tolist() == ['-'] * 3 and df['collision_energy'].isna().all()
     assert np.allclose(df['m/z'] + df['header_shift'], [966.204528808594, 675.813842773438, 675.418823242188])
 
 
@@ -950,7 +950,7 @@ def test_bruker_yep(tmp_path, model):
     # RT ticks are 64 us, and the MS2 peaks are the line spectrum's
     assert np.allclose(df['RT'], np.array([2813000, 2813500]) * 64e-6 / 60)
     assert len(df['peak_d'][0]) == 3 and max(df['peak_d'][0], key = df['peak_d'][0].get) == pytest.approx(800.3)
-    assert df.attrs['detected_trap'] == ('linear' if hct or xct else 'amazon') and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
+    assert df.attrs['detected_trap'] == 'amazon' and df.attrs['detected_mode'] == 'negative' and len(df.attrs['ms1'][0]) == 1
     assert df['analyzer'].tolist() == [df.attrs['detected_trap']] * 2 and df['polarity'].tolist() == ['-'] * 2 and df['isolation_width'].isna().all()
 
 
