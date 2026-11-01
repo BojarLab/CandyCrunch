@@ -10,7 +10,7 @@ Mass,charge,glycan,19_OGlycan_Non_transfected_Lysis treated_Replicate1,19_OGlyca
 739.27,-2,,0,,1,11.39,0,,0,,added
 749.28,-1,Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc,1,50.03,1,49.96,1,50,1,49.99,given
 821.3,-1,Fuc(a1-2)Gal(b1-3)[Neu5Ac(a2-6)]GalNAc,1,70.89,1,70.89,1,70.94,1,71.24,added
-829.24,-1,Gal(b1-4)GlcNAc6S(b1-6)[Gal(b1-3)]GalNAc,1,61.52,1,61.43,1,61.44,1,61.63,added
+829.2831,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,61.52,1,61.43,1,61.44,1,61.63,added
 878.33,-1,Neu5Ac(a2-3)Gal(b1-3)[GlcNAc(b1-6)]GalNAc,1,48.88,1,49.06,1,49.11,1,49.34,added
 966.34,-1,Neu5Ac(a2-3)Gal(b1-3)[Neu5Ac(a2-6)]GalNAc,1,39.58,1,39.68,1,39.78,1,40.15,given
 1040.38,-1,Neu5Ac(a2-3)Gal(b1-3)[Gal(b1-4)GlcNAc(b1-6)]GalNAc,1,57.83,1,57.77,1,57.88,1,58.05,given
@@ -21,3 +21,5 @@ Mass,charge,glycan,19_OGlycan_Non_transfected_Lysis treated_Replicate1,19_OGlyca
 1331.47,-1,Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-6)[Neu5Ac(a2-3)Gal(b1-3)]GalNAc,1,68.29,1,68.52,1,68.58,1,69.02,given
 1331.47,-1,Neu5Ac(a2-3)Gal(b1-3/4)GlcNAc(b1-6)[Neu5Ac(a2-3)Gal(b1-3)]GalNAc,0,,1,73.26,1,73.54,1,72.4,added
 860.2965,-2,,1,59.1,1,59.16,0,,0,,added
+667.2302,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,54.64,1,54.44,1,54.35,0,,added
+1153.3887,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,0,,1,69.57,1,69.62,0,,added

@@ -87,6 +87,21 @@ def test_compare_groups_absent_in_a_group():
     assert table.loc[GLYCANS[7], 'Found in'] == 'ctrl 0/3, tumor 3/3' and table.loc[GLYCANS[7], 'Mean in tumor'] > 0
 
 
+def test_compare_groups_run_without_signal():
+    runs = ['a1', 'a2', 'a3', 'b1', 'b2', 'b3']
+    df = feature_table(runs, {})
+    without = compare_groups(df, {run: run[0] for run in runs if run != 'a3'})
+    df['a3'] = np.nan
+    result = compare_groups(df, {run: run[0] for run in runs})
+    # its shares would be 0/0: the run is left out as if it had no group
+    assert result['left_out'] == ['a3'] and result['members']['a'] == ['a1', 'a2'] and 'a3' in result['log']
+    assert result['table'].equals(without['table'])
+    paired = compare_groups(df, {run: run[0] for run in runs}, pairs = {run: run[1] for run in runs})
+    assert paired['left_out'] == ['a3', 'b3'] and paired['members'] == {'a': ['a1', 'a2'], 'b': ['b1', 'b2']}
+    with pytest.raises(ValueError, match = 'a has one'):
+        compare_groups(df, {'a2': 'a', 'a3': 'a', 'b1': 'b', 'b2': 'b'})
+
+
 def test_compare_three_groups_and_errors():
     runs = [f'{g}{k}' for g in 'abc' for k in range(3)]
     df = feature_table(runs, {'c0': 5, 'c1': 5, 'c2': 5})

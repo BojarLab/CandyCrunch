@@ -2527,6 +2527,26 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
                             alts[i].append(r)
         elif own:
             comps_out = _fill_adducts(plain, own, carriers = True)
+    # Glucose oligomers in glycan preparations sit, as reduced Hex_n, 0.05 Da from sulfated O-glycans (Hex4 667.23 / Hex1HexNAc2S1 667.18, Hex5
+    # 829.29 / Hex2HexNAc2S1 829.24), which ion-trap survey scans do not separate, and the sulfated composition took them. Their 1-4 linkages give a
+    # series of 2,4A ions (221, 383, 545, 707 for the reduced oligomers): a singly charged spectrum whose base peak is the 2,4A ion of the residue next
+    # to the reducing end (the precursor minus that residue and C4H6O3) and that has the next one (a Hex lighter) among its 10 most intense fragments
+    # is the oligomer of n >= 4 Hex and keeps only that composition, scored as the 1-4 linked glucose chain (1-4 linked galactose would give the same
+    # ions, glucose is the oligomer found in glycan preparations; Hex3 has a single 2,4A ion, which 4-linked lactose-based trisaccharides share)
+    ladder = [False] * len(red_masses)
+    if mode == 'negative' and sample_prep == 'underivatized':
+        hex_end = composition_to_mass({'Hex': 1}, mass_value = 'monoisotopic', modification = modification) + tag
+        hex_res = composition_to_mass({'Hex': 2}, mass_value = 'monoisotopic') - composition_to_mass({'Hex': 1}, mass_value = 'monoisotopic')
+        for i, (mz, peaks, kc) in enumerate(zip(red_masses, df_in['peak_d'], known_charges)):
+            n = round((mz + PROTON_MASS - hex_end) / hex_res) + 1
+            top = sorted(peaks.items(), key = lambda x: x[1], reverse = True)[:10] if isinstance(peaks, dict) else []
+            if n < 4 or kc not in (None, 1) or not top or abs(hex_end + (n - 1) * hex_res - PROTON_MASS - mz) > (ms1_ppm * mz / 1e6 if ms1_ppm else mass_tolerance):
+                continue
+            a24 = mz - hex_end - calculate_adduct_mass('C4H6O3')
+            if abs(top[0][0] - a24) < mass_tolerance and any(abs(m - a24 + hex_res) < mass_tolerance for m, _ in top[1:]):
+                key, chain = stringify_dict({'Hex': n}), '(a1-4)'.join(['Glc'] * n)
+                comps_out[i] = (([({'Hex': n}, {key: chain}, {key: [chain]})], 0.0), 1)
+                ladder[i] = True
     # A spectrum matched as singly charged whose most intense fragments come in pairs half a mass unit apart (domain_filter's sign of a multiply charged
     # precursor) also gets the multiply charged compositions of glycan_class at its m/z, and the annotation scores decide: ion traps read the 13C peak
     # of large [M-2H]2- next to a lighter [M-H]- composition (Hex5HexNAc4Neu5Ac1 965.8 as Hex1HexNAc1Neu5Ac2, Hex6HexNAc5Neu5Ac4 1585.1 as
@@ -2542,7 +2562,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     extra = [e + [(y, z) for z, y in m_all.items() if z != x[1] and complementary_pairs(mz, peaks, z, 0.75 * mass_tolerance) > complementary_pairs(
         mz, peaks, x[1], 0.75 * mass_tolerance)] if x[0] and x[1] >= 2 and kc is None and x[0][0][0][1] is comp_struct_map else e
              for e, x, m_all, kc, mz, peaks in zip(extra, comps_out, multi_all, known_charges, red_masses, df_in['peak_d'])]
-    extra = [e + a if x[0] else e for e, a, x in zip(extra, alts, comps_out)]
+    extra = [e + a if x[0] and not lad else [] for e, a, x, lad in zip(extra, alts, comps_out, ladder)]
     candidate_data = []
     for x, e in zip(comps_out, extra):
         matched = ([(c, x[1]) for c in x[0][0]] + [(c, z) for y, z in e for c in y[0]]) if x[0] else None
@@ -2557,6 +2577,7 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
                                    [z for _, _, z in pairs]))
     df_in['candidate_structure'], df_in['composition'], df_in['charge'] = zip(*candidate_data)
     df_in['cross_class'] = [bool(x[0]) and x[0][0][0][1] is not comp_struct_map for x in comps_out]
+    df_in['hexose_ladder'] = ladder
     df_in = df_in.explode(['composition', 'candidate_structure', 'charge']).reset_index(names = 'spec_id')
     df_in['charge'] = df_in['charge'].astype(float)
     # Build a fixed-length composition vector aligned to comp_vector_order for model input
@@ -4135,7 +4156,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
 def flag_coeluting_substructures(df_out, glycan_class, sample_prep = 'underivatized', unreduced = False, ms1 = None, mz_tolerance = 0.5,
                                  rt_tolerance = 0.1, min_ratio = 3.0):
     """Notes on rows to check before trusting them: possible in-source fragments and O-glycan peeling products, structures reported at more than one
-    peak, and structures outside the run's glycan class\n
+    peak, structures outside the run's glycan class, and glucose oligomers\n
     | Arguments:
     | :-
     | df_out (dataframe): finalised predictions (index m/z; top1_pred, RT, charge, rel_abundance)
@@ -4228,11 +4249,15 @@ def flag_coeluting_substructures(df_out, glycan_class, sample_prep = 'underivati
                 if others:
                     notes[i].append(f"Same structure as the peak at {others} min; one of the two is likely another isomer" if len(rows) == 2 else
                                     f"Same structure as the peaks at {others} min; all but one of these {len(rows)} are likely other isomers")
-    # Structures of another class (an N-glycan in an O-glycan run) are real glycans in most cases, but outside what the run was set up for
+    # Structures of another class (an N-glycan in an O-glycan run) are real glycans in most cases, but outside what the run was set up for. Linear glucose
+    # oligomers (the hexose ladders of glycan preparations) come from glycogen, starch or dextrins in the sample or its reagents, in a run of any class
     names = {'N': 'an N-glycan', 'O': 'an O-glycan', 'free': 'a free glycan', 'lipid': 'a glycolipid glycan', 'lipid/free': 'a free or glycolipid glycan'}
     run = ' or '.join(names[c] for c in classes)
     for i, t in enumerate(tops):
-        if isinstance(t, str) and not in_classes(t, classes):
+        if isinstance(t, str) and re.fullmatch(r'Glc(\([ab?]1-[\d?]\)Glc){2,}', t):
+            notes[i].append(f"Glucose oligomer (Glc{t.count('Glc')}, a hexose ladder): likely from glycogen, starch, or dextrins in the sample or reagents, not a "
+                            "glycan of its glycoconjugates")
+        elif isinstance(t, str) and not in_classes(t, classes):
             name = names.get(get_class(t), 'a glycan of another class')
             notes[i].append(f"{name[0].upper() + name[1:]} by structure, in {run} run")
     df_out['notes'] = ['; '.join(n) for n in notes]
@@ -4692,6 +4717,17 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
          g[1] > pred_thresh and (in_classes(g[0], classes, g[1], extra_thresh = extra_thresh) or 0 < best_in <= g[1] or xc)][:5]
         for preds, best_in, xc in zip(df_out.isomers, best_in_class, df_out['cross_class'])
     ]
+    # A hexose ladder spectrum (assign_candidate_structures) is the 1-4 linked glucose chain its 2,4A ions show: with the model's probability for it if
+    # that exceeds pred_thresh, else as a database structure at pred_thresh (the model prefers milk galacto-oligosaccharides of Hex4 and rarely has the
+    # longer chains, and the rescue below gave its top prediction of the precursor's mass, the sulfated O-glycan)
+    ladder_rows = set()
+    for i in np.flatnonzero(df_out['hexose_ladder'].values.astype(bool)):
+        g = df_out['candidate_structure'].iloc[i]
+        p = next((c for s, c in _raw_predictions[i] if s == g), 0)
+        df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(max(p, pred_thresh), 4))]
+        df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(max(p, pred_thresh), 4))]
+        if p <= pred_thresh:
+            ladder_rows.add(df_out.index[i])
     # Cross-validate: for spectra where exact composition equality eliminated all model
     # predictions, run CandyCrumbs on the model's top mass-compatible prediction.
     # Accepted only when fragment annotation independently passes crumbs_thresh.
@@ -4771,7 +4807,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                     df_out.iat[_idx, df_out.columns.get_loc('isomers')] = [(_gn, round(_gc, 4))]
                     df_out.iat[_idx, df_out.columns.get_loc('composition')] = get_comp(_gn) if sialic_derivatization is None else _pred_comp
                     df_out.iat[_idx, df_out.columns.get_loc('annotation_score')] = float(_score)
-    database_rows = set()
+    database_rows = set(ladder_rows)
     has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
     if accurate_ms1:
         # Accurate survey scans pin a precursor's composition, so a spectrum without any model prediction whose in-class composition matches within the

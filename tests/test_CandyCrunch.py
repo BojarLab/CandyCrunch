@@ -741,6 +741,36 @@ def test_charge_carrier_candidates():
     assert 'Hex5HexNAc3P1' in {stringify_dict(c) for s, c in zip(out['spec_id'], out['composition']) if s == 2}
 
 
+def test_hexose_ladder_candidates():
+    # Reduced glucose oligomers sit 0.05 Da from sulfated core 2 O-glycans (Hex4 667.23 / Hex1HexNAc2S1 667.18, Hex5 829.28 / Hex2HexNAc2S1 829.24): a spectrum
+    # whose base peak is the 2,4A ion next to the reducing end (383 for Hex4, 545 for Hex5) with the next one (221, 383) among its top fragments is the 1-4 linked
+    # chain, as the only candidate, also where the run's classes have the Hex composition (O); the sulfated core 2 (base peak M - Gal, 282 GlcNAc-6S) keeps its
+    # composition, and so does a Hex4 spectrum without the ladder
+    maps = create_struct_maps(df_glycan, ['N', 'O'], filter_out = {'HexA'}, phylo_level = 'Kingdom', phylo_filter = 'Animalia')
+    spectra = [(667.28, {383.12: 100.0, 425.1: 20.0, 221.07: 18.0, 487.1: 15.0}), (829.35, {545.2: 100.0, 383.1: 30.0, 487.1: 12.0, 587.2: 10.0}),
+               (667.26, {505.2: 100.0, 282.0: 10.0, 506.2: 12.0, 487.1: 5.0}), (667.27, {505.2: 100.0, 383.1: 40.0, 221.1: 30.0})]
+    out = assign_candidate_structures(pd.DataFrame({'m/z': [m for m, _ in spectra], 'peak_d': [p for _, p in spectra]}), maps[1], maps[0], maps[2], 0.5, 'negative', 0)
+    found = {s: {(stringify_dict(c), g, x) for k, c, g, x in zip(out['spec_id'], out['composition'], out['candidate_structure'], out['cross_class']) if k == s}
+             for s in range(len(spectra))}
+    assert found[0] == {('Hex4', 'Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc', True)} and found[1] == {('Hex5', 'Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc', True)}
+    assert out.loc[out['spec_id'] < 2, 'hexose_ladder'].all() and not out.loc[out['spec_id'] >= 2, 'hexose_ladder'].any()
+    assert 'Hex1HexNAc2S1' in {c for c, _, _ in found[2]} and 'Hex1HexNAc2S1' in {c for c, _, _ in found[3]}
+
+
+def test_glucose_oligomer_notes():
+    # A glucose oligomer gets its own note, whatever the run's class, instead of the other-class note; a sulfated core 2 O-glycan in an N+O run and
+    # a galacto-oligosaccharide in a free-glycan run get none, and a galacto-oligosaccharide in an N run keeps the other-class note
+    rows = ['Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc', 'Gal(b1-3)[GlcNAc6S(b1-6)]GalNAc', 'Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc', 'Gal(a1-4)Gal(b1-4)Glc']
+    df = pd.DataFrame({'top1_pred': rows, 'RT': [16.9, 13.2, 19.0, 13.8], 'charge': [-1] * 4, 'rel_abundance': [10.0, 5.0, 4.0, 3.0]},
+                      index = pd.Index([667.23, 667.19, 829.28, 505.18], name = 'm/z'))
+    notes = flag_coeluting_substructures(df.copy(), ['N', 'O'])['notes'].tolist()
+    assert notes[0] == ('Glucose oligomer (Glc4, a hexose ladder): likely from glycogen, starch or dextrins in the sample or reagents, not a glycan of its '
+                        'glycoconjugates') and notes[2].startswith('Glucose oligomer (Glc5') and 'by structure' not in notes[0] + notes[2]
+    assert notes[1] == '' and 'by structure, in an N-glycan or an O-glycan run' in notes[3]
+    notes = flag_coeluting_substructures(df.copy(), 'free')['notes'].tolist()
+    assert notes[0].startswith('Glucose oligomer (Glc4') and notes[3] == ''
+
+
 def test_mixed_charge_carrier_candidates():
     # A procainamide run that fragments [M+2H+K]3+ and [M+H+NH4]2+ beside [M+3H]3+ (adducts K+ and NH4+) with accurate survey scans: a precursor keeps every
     # reading within ms1_ppm for the annotation scores, so protonated Hex5HexNAc4dHex1Neu5Ac2 is no longer only Hex4HexNAc4Neu5Ac3 [M+2H+NH4]3+, and
