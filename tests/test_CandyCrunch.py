@@ -755,6 +755,11 @@ def test_hexose_ladder_candidates():
     assert found[0] == {('Hex4', 'Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc', True)} and found[1] == {('Hex5', 'Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc(a1-4)Glc', True)}
     assert out.loc[out['spec_id'] < 2, 'hexose_ladder'].all() and not out.loc[out['spec_id'] >= 2, 'hexose_ladder'].any()
     assert 'Hex1HexNAc2S1' in {c for c, _, _ in found[2]} and 'Hex1HexNAc2S1' in {c for c, _, _ in found[3]}
+    # Hex10 flies as [M-2H]2-, its base peak and series at half their m/z: the chain with accurate survey scans, not on an ion trap's m/z
+    rung = pd.DataFrame({'m/z': [819.2707], 'peak_d': [{677.22: 100.0, 596.19: 40.0, 1031.3: 20.0}]})
+    out = assign_candidate_structures(rung.copy(), maps[1], maps[0], maps[2], 0.5, 'negative', 0, ms1_ppm = 20)
+    assert out['hexose_ladder'].all() and {stringify_dict(c) for c in out['composition']} == {'Hex10'} and set(out['charge']) == {2}
+    assert not assign_candidate_structures(rung.copy(), maps[1], maps[0], maps[2], 0.5, 'negative', 0)['hexose_ladder'].any()
 
 
 def test_glucose_oligomer_notes():
@@ -794,9 +799,9 @@ def test_mixed_charge_carrier_candidates():
 def test_ms1_peak_regrouping():
     # Unreduced anomers 1 min apart (1:3) fragmented on their flanks only, and a broad peak (sigma 1 min) whose MS2 every 1.2 min differ: with accurate survey
     # scans each anomer is a cluster at its MS1 apex, and the broad peak one cluster at its apex. Far from the anomers, a small peak of their m/z fragmented
-    # once is a cluster of its own, and a weak one (below 5% of the anomers) fragmented three times is left out instead of joining them
+    # once is a cluster of its own, and a weak one (below 1% of the anomers) fragmented three times is left out instead of joining them
     rts = np.arange(0, 60, 0.01)
-    peaks = [(900.3, 10.0, 0.1, 1e5), (900.3, 11.0, 0.1, 3e5), (1100.4, 15.0, 1.0, 2e5), (900.3, 30.0, 0.1, 2e4), (900.3, 50.0, 0.1, 5e3)]
+    peaks = [(900.3, 10.0, 0.1, 1e5), (900.3, 11.0, 0.1, 3e5), (1100.4, 15.0, 1.0, 2e5), (900.3, 30.0, 0.1, 2e4), (900.3, 50.0, 0.1, 2e3)]
     trace = lambda mz, t: sum(h * np.exp(-0.5 * ((t - apex) / w) ** 2) for m, apex, w, h in peaks if m == mz) + 1
     ms1 = (rts, np.repeat([[900.3, 1100.4]], len(rts), axis = 0).ravel().astype(np.float32),
            np.array([[trace(900.3, t), trace(1100.4, t)] for t in rts]).ravel().astype(np.float32), np.arange(len(rts) + 1, dtype = np.int64) * 2)

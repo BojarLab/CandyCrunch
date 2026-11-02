@@ -60,14 +60,14 @@ If you would like to run our main inference function from the command line, you 
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 --lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
---trap, type=string: type of mass detector used; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear' <br />
+--trap, type=string: type of mass analyzer that records the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; the instrument stored in the file overrides it; default:'linear' <br />
 --rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
 --rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (runs longer than 40 min then skip their last 10%) <br />
 --rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 --spectra, type=bool: whether to also output the actual spectra used for prediction, as a peak_d column; default:False <br />
 --get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
 --filter_out, type=string(s): space-separated monosaccharide or modification types; compositions containing any of them are not considered (e.g., Pen if you know there is none); the list replaces the default, and giving none of them filters nothing; Ac is always left out of permethylated and peracetylated samples; default: HexA <br />
---ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
+--ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error (all on precursors), and for matching fragments of ion-trap MS2 (orbitrap MS2 are matched at 15 ppm, other MS2 at 0.05 Da); default:300 <br />
 --pred_thresh, type=float: prediction confidence threshold used for filtering; default:0.01 <br />
 --crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap or timsTOF survey scans); default:3 <br />
 --extra_thresh, type=float: prediction confidence threshold at which to allow cross-class predictions; default:0.2 <br />
@@ -121,7 +121,7 @@ modification, type=string: reducing-end modification of glycans; options are 're
 | 
 |--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag ; default:None <br />
 lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
-trap, type=string: type of mass detector used; options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear' <br />
+trap, type=string: type of mass analyzer that records the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; the instrument stored in the file overrides it; default:'linear' <br />
 rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
 rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (runs longer than 40 min then skip their last 10%) <br />
 rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
@@ -130,7 +130,7 @@ temperature, type=float: the temperature factor used to calibrate logits; defaul
 spectra, type=bool: whether to also output the actual spectra used for prediction; the result is then a tuple (dataframe, list of peak dictionaries); default:False <br />
 get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
 filter_out, type=set: set of monosaccharide or modification types that is used to filter out compositions (e.g., if you know there is no Pen); Ac is always left out of permethylated and peracetylated samples; default:{'HexA'} <br />
-ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error; default:300 <br />
+ppm_thresh, type=float: mass tolerance in ppm, used for grouping spectra, matching compositions, and filtering by ppm error (all on precursors), and for matching fragments of ion-trap MS2 (orbitrap MS2 are matched at 15 ppm, other MS2 at 0.05 Da); default:300 <br />
 crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exceed to be kept (2 lower for files with orbitrap or timsTOF survey scans); default:3 <br />
 sample_prep, type=string: options are 'underivatized', 'permethylated', and 'peracetylated'; default:'underivatized' <br />
 extra_thresh, type=float: prediction confidence threshold at which to allow cross-class predictions (e.g., predicting N-glycans in O-glycan samples); default:0.2 <br />

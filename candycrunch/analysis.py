@@ -4335,7 +4335,7 @@ def draw_peptide_ladder(peptide, hit_dict, glycosites = (), ax = None, fontsize 
 
 
 def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities = True, min_intensity = 0.0, min_isotope_count = 2,
-                  validate_pattern = True, relabel = False):
+                  validate_pattern = False, relabel = False):
     """collapses isotope patterns of an MS2 spectrum onto their monoisotopic peak\n
    | Arguments:
    | :-
@@ -4345,7 +4345,7 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
    | sum_intensities (bool): whether a pattern's monoisotopic peak carries the summed intensity of the pattern; default:True
    | min_intensity (float): peaks below this intensity are ignored; default:0.0
    | min_isotope_count (int): minimum number of peaks of a pattern; default:2
-   | validate_pattern (bool): whether to check each isotope's intensity against the previous one; default:True
+   | validate_pattern (bool): whether a pattern only continues with peaks of 5-120% of the intensity of its previous peak; default:False
    | relabel (bool): whether a pattern whose first peak has less than half the intensity of its most intense peak is named by the latter; default:False\n
    | Returns:
    | :-
@@ -4399,7 +4399,7 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
                 if consumed[j] or j < reach:
                     continue
                 if abs(candidate_mass - next_mass - spacing) <= mass_tolerance:
-                    if validate_pattern and not (ints[j] <= ints[charge_pattern[-1]] * 1.20 or ints[j] >= ints[charge_pattern[-1]] * 0.05):
+                    if validate_pattern and not (ints[charge_pattern[-1]] * 0.05 <= ints[j] <= ints[charge_pattern[-1]] * 1.20):
                         continue
                     charge_pattern.append(j)
                     next_mass = candidate_mass

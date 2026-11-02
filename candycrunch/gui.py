@@ -1721,7 +1721,8 @@ class SettingsPanel(QScrollArea):
             box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
-        self.inputs['trap'].setToolTip('Overridden by the instrument stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
+        self.inputs['trap'].setToolTip('The analyzer that records the fragment spectra (MS2), e.g., Linear ion trap for orbitrap MS1 with ion-trap MS2. The survey scan (MS1) analyzer is no setting, it is '
+                                       'read from the file. Overridden by the instrument stored in the file (.raw, mzML, mzXML, other vendor formats, .xlsx made by extract_spectra)')
         # Imported models are copies in the app's data folder, so they stay available wherever their file was; each experiment keeps its model
         self.model_dir = os.path.join(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation), 'models')
         self.model = _combo([('CandyCrunch (built-in)', None)] + [(os.path.splitext(os.path.basename(p))[0], p) for p in
@@ -1743,7 +1744,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('Derivatization', self.inputs['sample_prep'])
         form.addRow('Sialic acid linkage', self.sialic)
         form.addRow('Chromatography', self.inputs['lc'])
-        form.addRow('Mass analyzer', self.inputs['trap'])
+        form.addRow('MS2 mass analyzer', self.inputs['trap'])
         layout.addLayout(form)
         self.sample_form = form
         # What the first run of the experiment shown set (_detect_run)
@@ -1792,10 +1793,11 @@ class SettingsPanel(QScrollArea):
         self.inputs['rt_diff'] = _spin(0.05, 10, 0.25, 2, ' min')
         self.inputs['rt_diff'].setToolTip('Maximum retention time difference to a peak apex that is still grouped with that peak')
         self.inputs['ppm_thresh'] = _spin(1, 5000, 10, 0, ' ppm')
-        # One tolerance for precursors and fragments: as a flat window of its value at m/z 1600, as the pipeline turns it into Da (MZ_REF)
+        # One tolerance for precursors and ion-trap fragments: as a flat window of its value at m/z 1600, as the pipeline turns it into Da (MZ_REF)
         self.inputs['ppm_thresh'].valueChanged.connect(lambda v: self.inputs['ppm_thresh'].setToolTip(
-            f'One mass tolerance for precursors and fragments. Precursors: the ppm error filter, and a flat {v * MZ_REF / 1e6:.2f} Da window (its value at m/z '
-            f'{MZ_REF}) for grouping spectra and matching compositions. Fragments: the same {v * MZ_REF / 1e6:.2f} Da window for CandyCrumbs annotation'))
+            f'Precursors (MS1): the limit of the ppm error filter, and a flat {v * MZ_REF / 1e6:.2f} Da window (its value at m/z {MZ_REF}) for grouping spectra and matching compositions; '
+            f'with orbitrap or TOF survey scans, the run\'s own narrower ppm window applies within it. Fragments (MS2): the same {v * MZ_REF / 1e6:.2f} Da window for ion-trap MS2; '
+            f'orbitrap MS2 are annotated at 15 ppm and other MS2 (e.g., TOF) at 0.05 Da, whatever this is set to'))
         self.inputs['pred_thresh'] = _spin(0, 1, 0.005, 3)
         self.inputs['pred_thresh'].setToolTip('Minimum probability the model gives a structure among the isomers of its composition (not the calibrated '
                                               'confidence reported per peak)')
@@ -1977,7 +1979,7 @@ class SettingsPanel(QScrollArea):
             target.detecting = (path, self.values() if target is self.shown else dict(target.settings), time.time())
             mp.get_context('spawn').Process(target = _detect_run, args = (path, self.detections), daemon = True, name = 'CandyCrunch file check').start()
             # Until it answers, the note says that the run is being read (it gave no sign before, and a run started meanwhile used the old settings)
-            target.note = f'Reading {os.path.basename(path)} for its ion mode, mass analyzer, and charge states…'
+            target.note = f'Reading {os.path.basename(path)} for its ion mode, MS2 mass analyzer, and charge states…'
             if target is self.shown:
                 self.detected.setText(target.note)
                 self.detected.show()
@@ -2011,7 +2013,7 @@ class SettingsPanel(QScrollArea):
             else:
                 experiment.settings = {**current, **changed}
             told = [f'{"negative" if v < 0 else "positive"} ions up to charge {abs(v)}' if k == 'max_charge' else
-                    self.inputs[k].itemText(self.inputs[k].findData('unreduced' if k == 'modification' and v == 'custom' else v)) for k, v in changed.items() if k != 'mass_tag']
+                    self.inputs[k].itemText(self.inputs[k].findData('unreduced' if k == 'modification' and v == 'custom' else v)) + (' MS2' if k == 'trap' else '') for k, v in changed.items() if k != 'mass_tag']
             experiment.note = f'Set from {os.path.basename(path)}: {", ".join(told)}' if told else ''
             if experiment is self.shown:
                 self.detected.setText(experiment.note)

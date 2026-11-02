@@ -777,7 +777,7 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
         d = df.reset_index() if 'm/z' not in df.columns else df
         hit = near(d['m/z'].values, d['RT'].values, (d['charge'].values.astype(float) if 'charge' in d.columns else np.full(len(d), float(sign))), gmz, grt, gz, sign = sign)
         for p in d.loc[hit, 'predictions'] if 'predictions' in d.columns else []:
-            if isinstance(p, list) and p and (comp is None or any(gt_comp(g) == comp for g, _ in p)):
+            if isinstance(p, list) and p and (comp is None or any(gt_comp(x[0]) == comp for x in p)):
                 return True
         return False
     for i, g in gt.iterrows():
@@ -804,7 +804,7 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
                 # a hedged ground truth is reachable through any more specific version of it
                 if not any(compare_glycans(glycan, x, subsumes = True) for x in top):
                     stage = 'not_in_top25'
-                elif not any(compare_glycans(glycan, x, subsumes = True) for x, _ in r['predictions']) if isinstance(r.get('predictions'), list) else True:
+                elif not any(compare_glycans(glycan, x[0], subsumes = True) for x in r['predictions']) if isinstance(r.get('predictions'), list) else True:
                     stage = 'below_thresh'
                 else:
                     stage = 'ranked_lower'
