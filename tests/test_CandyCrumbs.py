@@ -8,7 +8,7 @@ import networkx as nx
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
     build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
-    CHAIN_IONS, domon_costello_to_mpl, \
+    CHAIN_IONS, domon_costello_to_label, \
     peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
     subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge, chance_fragment
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
@@ -512,7 +512,7 @@ def test_candycrumbs_label_chain_ions(modification):
             assert not any(name[2:] in CHAIN_IONS for v in out.values() if v for d in v['Domon-Costello nomenclatures'] for name in d)
     if modification == '2AB':
         assert abs(get_fragment_mass('GlcNAc(b1-4)GlcNAc', 'I_03X0-C2H5NO-H2O', -1, mass_tag) - 173.0720) < 1e-3
-        assert domon_costello_to_mpl(['I_03X0-C2H5NO-H2O']) == '$^{0,3}X_0 - C_{2}H_{5}NO - H_{2}O$'
+        assert domon_costello_to_label(['I_03X0-C2H5NO-H2O']) == '^{0,3}X_{0} - C_{2}H_{5}NO - H_{2}O'
 
 
 # Settings that take generate_atomic_frags through its paths: cross-rings, global modifications (metal cation pairs, hydrogen shifts, CO2/SO4 of acidic

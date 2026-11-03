@@ -189,15 +189,16 @@ class ResultCollector:
                                   f"{avg_wrong:.1f}", f"{avg_fp:.1f}"]
             table_data.append(row)
         headers = list(self.param_names.values()) + ['F1', 'Prec', 'Rec', 'NotPicked', 'Wrong', 'FP']
-        param_scores = defaultdict(lambda: {'means': [], 'weights': []})
-        for param_results in self.dict_results.values():
+        # One average over all raw files, whatever the tables and baselines call their formats; format is the last parameter
+        param_scores = defaultdict(lambda: defaultdict(list))
+        for dict_name, param_results in self.dict_results.items():
             for params, scores in param_results.items():
-                param_scores[params]['means'].append(np.mean(scores))
-                param_scores[params]['weights'].append(len(scores))
+                group = 'batch' if dict_name.endswith('_batch') else 'raw files' if params[-1] in ('raw', 'mzML') else params[-1]
+                param_scores[params[:-1] + (group,)][dict_name].extend(scores)
         print("\n=== Weighted Summary ===")
         for params, data in sorted(param_scores.items()):
-            means = np.array(data['means'])
-            weights = np.array(data['weights'])
+            means = np.array([np.mean(scores) for scores in data.values()])
+            weights = np.array([len(scores) for scores in data.values()])
             weighted_mean = np.average(means, weights = weights)
             n = len(means)
             se = np.std(means, ddof = 1) / np.sqrt(n) if n > 1 else float('nan')

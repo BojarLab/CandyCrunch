@@ -141,7 +141,5 @@ def save_volcano(result, path):
    | result (dict): output of compare_groups for two groups
    | path (string): .svg, .pdf or .png file to write
    """
-    import matplotlib
-    matplotlib.use('Agg')
     from glycowork.motif.analysis import get_volcano
     get_volcano(result['table'], y_thresh = result['alpha'], filepath = path, title = f'{result["groups"][1]} vs {result["groups"][0]}')

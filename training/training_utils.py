@@ -5,7 +5,7 @@ import random
 import time
 import torch
 
-import matplotlib.pyplot as plt
+from candycrunch.utils import PALETTE, vc
 from glycowork.ml.model_training import EarlyStopping, disable_running_stats, enable_running_stats, training_setup, Poly1CrossEntropyLoss
 from glycowork.ml.models import init_weights
 from candycrunch.model import SimpleDataset
@@ -187,23 +187,19 @@ def train_model(model, model_name, dataloaders, criterion, optimizer,
   print('Best val loss: {:4f}, best Accuracy score: {:.4f}'.format(best_loss, best_acc))
 
   ## plot loss & score over the course of training 
-  fig, ax = plt.subplots(nrows = 2, ncols = 1) 
-  plt.subplot(2, 1, 1)
-  plt.plot(range(epoch+1), val_losses, label='Validation')  
-  plt.plot(range(epoch+1), train_losses, label='Training')
-  plt.title('Model Training')
-  plt.ylabel('Validation Loss')
-  #plt.legend(['Validation Loss'],loc = 'best')
-  plt.legend() 
+  fig, (ax_loss, ax_acc) = vc.subplots(2, 1, figsize = (6.4, 4.8), palette = PALETTE)
+  ax_loss.plot(range(epoch+1), val_losses, label='Validation', color='a1')
+  ax_loss.plot(range(epoch+1), train_losses, label='Training', color='b1')
+  ax_loss.set_title('Model Training')
+  ax_loss.set_ylabel('Validation Loss')
+  ax_loss.legend('upper right')
 
-  plt.subplot(2, 1, 2)
-  plt.plot(range(epoch+1), val_acc, label='Validation')
-  plt.plot(range(epoch+1), train_acc, label='Training')
-  plt.xlabel('Number of Epochs')
-  plt.ylabel('Validation Accuracy')
- #plt.legend(['Validation Accuracy'], loc = 'best')
-  plt.legend()
-  plt.savefig(f'{model_name}_metric_plots.png')
+  ax_acc.plot(range(epoch+1), val_acc, label='Validation', color='a1')
+  ax_acc.plot(range(epoch+1), train_acc, label='Training', color='b1')
+  ax_acc.set_xlabel('Number of Epochs')
+  ax_acc.set_ylabel('Validation Accuracy')
+  ax_acc.legend('upper right')
+  fig.save(f'{model_name}_metric_plots.png')
   model.load_state_dict(best_model_wts)
   checkpoint_model = model.module if isinstance(model, torch.nn.DataParallel) else model
   checkpoint = dict(checkpoint_metadata or {})

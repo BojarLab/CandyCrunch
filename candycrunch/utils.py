@@ -1,4 +1,5 @@
-"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Waters .raw, Agilent MassHunter .d, Bruker Q-TOF and timsTOF (.tsf) .d and SCIEX .wiff spectra files, on the standard library and numpy"""
+"""Readers for mzML, mzXML, mzData, mgf, Thermo .raw, Waters .raw, Agilent MassHunter .d, Bruker Q-TOF and timsTOF (.tsf) .d and SCIEX .wiff spectra files, on the standard library and numpy; and
+the palette of CandyCrunch's figures, drawn with viscose in the app's colors, lilac and candy red"""
 import base64
 import heapq
 import itertools
@@ -10,6 +11,12 @@ import struct
 import zlib
 import xml.etree.ElementTree as ET
 import numpy as np
+import viscose as vc
+PALETTE = 'candy'
+# No soft shadow, as the app paints a spectrum again with every step of a zoom, and that painting leaves shadows out
+vc.register_palette(vc.Palette(PALETTE, ['#5c3a7d', '#8c5bb5', '#b99bd4', '#e6d9f1'], ['#8e1a2e', '#c8243f', '#e27a8c', '#f6d3da'], '#2a2133', '#857a90', '#efe9f4',
+                               'Lilac and candy red, with thin marks and small type for spectra and for charts in a window.', line_width = 1.0, bar_width = 0.6,
+                               spine_width = 0.8, tick_length = 3.0, tick_size = 7.5, tick_color = '#2a2133', label_size = 8.5, title_size = 12.0, title_bold = False))
 # Thermo .raw trailer extra fields: numpy types of the generic data types (0 is a gap, 2-4 are booleans; 12 and 13, strings of the declared length
 # in ASCII or UTF-16, are only read for HCD Energy)
 RAW_FIELD_TYPES = {0: 'V0', 1: 'i1', 2: 'u1', 3: 'u1', 4: 'u1', 5: 'u1', 6: '<i2', 7: '<u2', 8: '<i4', 9: '<u4', 10: '<f4', 11: '<f8'}
@@ -28,6 +35,18 @@ TIMS_MS2_PEAKS = 100
 ION_TRAP_TERMS = {'MS:1000264', 'MS:1000082', 'MS:1000083', 'MS:1000078', 'MS:1000291', 'MS:1000697', 'MS:1000160', 'MS:1000161', 'MS:1000698',
                   'MS:1000699', 'MS:1000700', 'MS:1001533', 'MS:1000156', 'MS:1000157', 'MS:1003461', 'MS:1001545', 'MS:1001542', 'MS:1001546',
                   'MS:1002300', 'MS:1002301', 'MS:1003466', 'MS:1000473', 'MS:1000474', 'MS:1000475', 'MS:1000476'}
+
+
+def figure(width, height, palette = None):
+    """A figure in inches, in the palette given, else in one chosen with viscose.set_palette, else in CandyCrunch's"""
+    return vc.Figure(width, height, vc.get_palette(palette, PALETTE))
+
+
+def finish(fig, filepath = ''):
+    """Saves the figure if a path is given, then shows it inline in a notebook, or from a terminal in the system's viewer if it was not saved"""
+    if filepath:
+        fig.save(filepath)
+    fig.show(viewer = not filepath)
 
 
 def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):

@@ -213,8 +213,8 @@ def test_gui_supporting_ions(app):
 
 def test_gui_support_hover(app):
     import time
-    from matplotlib.backend_bases import MouseEvent
     from candycrunch import gui
+    from candycrunch.gui import ChartEvent
     panel, hovered = gui.SpectrumPanel(), []
     panel.support_hovered.connect(hovered.append)
     g = 'Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc'
@@ -227,10 +227,14 @@ def test_gui_support_hover(app):
     # off it clears the highlight
     assert panel.hover_targets, panel.message.text() or panel.summary.text()
     artist = panel.hover_targets[0][0]
-    x, y = artist.axes.transData.transform(artist.get_offsets()[list(artist.get_offsets()[:, 0]).index(510.19)])
-    panel.hover(MouseEvent('motion_notify_event', panel.canvas, x, y))
-    panel.hover(MouseEvent('motion_notify_event', panel.canvas, 1, 1))
+    k = list(artist.x).index(510.19)
+    x, y = artist.ax.page(artist.x[k], artist.y[k])
+    panel.hover(ChartEvent(x, y))
+    panel.hover(ChartEvent(1, 1))
     assert hovered == [(g, (0, 1, 2), 2), None]
+    panel.hover(ChartEvent(x, y))
+    gui.QApplication.sendEvent(panel.canvas, gui.QEvent(gui.QEvent.Leave))
+    assert hovered[2:] == [(g, (0, 1, 2), 2), None]
     # The drawing with that highlight renders
     images = gui.GlycanImages()
     while images.get(g, compact = False, highlight = ((0, 1, 2), 2)) is None and time.time() < end:
@@ -240,8 +244,8 @@ def test_gui_support_hover(app):
 
 def test_gui_label_tooltip_and_reset(app, monkeypatch):
     import time
-    from matplotlib.backend_bases import MouseEvent
     from candycrunch import gui
+    from candycrunch.gui import ChartEvent
     # Restore defaults is only enabled while a setting differs from its default, and keeps the glycan class
     settings = gui.SettingsPanel()
     assert not settings.reset.isEnabled()
@@ -259,15 +263,113 @@ def test_gui_label_tooltip_and_reset(app, monkeypatch):
     monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: shown.append(text))
     assert panel.label_targets, panel.message.text() or panel.summary.text()
     text = next(t for t, _ in panel.label_targets if t.xy[0] == 384.15)
-    box = text.get_window_extent()
-    panel.hover(MouseEvent('motion_notify_event', panel.canvas, (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2))
+    px, py = text.ax.page(*text.xy)
+    panel.hover(ChartEvent(px + (text.box[0] + text.box[2]) / 2, py + (text.box[1] + text.box[3]) / 2))
     assert 'Observed m/z <b>384.1500</b>' in shown[-1] and 'theoretical m/z <b>384.1511</b>' in shown[-1]
+
+
+def test_gui_cartoon_clicks(app, monkeypatch):
+    import time
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QCursor
+    from PySide6.QtTest import QTest
+    from candycrunch import gui
+    from candycrunch.gui import ChartEvent, LabelTarget
+    # A short panel with fragments at every mass: not every cartoon fits, and the room above the axes is lower than a large cartoon
+    g = 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    mzs, ints = [200.0 + 3.0 * k for k in range(500)], [10.0 + 90.0 * (k % 7) / 6 for k in range(500)]
+    panel, tips = gui.SpectrumPanel(), []
+    panel.resize(800, 300)
+    panel.show()
+    monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: tips.append(text))
+
+    def drawn():
+        end = time.time() + 120
+        while (panel.drawn is None or panel.drawn[0]['key'] != panel.request['key']) and time.time() < end:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        assert panel.drawn is not None and panel.drawn[0]['key'] == panel.request['key'], panel.message.text()
+        return {b['fragment']: b['xy'] for b in panel.canvas.figure.axes[0].cartoon_boxes}
+
+    def spot(target):
+        px, py = target.ax.page(*target.xy)
+        py = target.ax.rect[1] + target.xy[1] * target.ax.rect[3] if target.fraction else py
+        return px + (target.box[0] + target.box[2]) / 2, py + (target.box[1] + target.box[3]) / 2
+
+    def click(target):
+        x, y = panel.canvas.to_widget(*spot(target))
+        QTest.mouseClick(panel.canvas, Qt.LeftButton, Qt.NoModifier, QPoint(round(x), round(y)))
+
+    panel.annotate(g, mzs, ints, -1, None, 'underivatized')
+    base = drawn()
+    ax = panel.canvas.figure.axes[0]
+    labels, fragments = list(ax.peak_labels), dict(ax.cartoon_fragments)
+    left_out = {f: next(label for label in labels if label['xy'][0] == mz) for mz, (f, on) in fragments.items() if not on and any(label['xy'][0] == mz for label in labels)}
+    assert base and len(left_out) >= 5
+    # A name whose cartoon is left out draws it, whatever the room, nothing else comes up, and only its neighbors make way for it
+    for frag, label in list(left_out.items())[:5]:
+        panel.annotate(g, mzs, ints, -1, None, 'underivatized')
+        drawn()
+        click(LabelTarget(panel.canvas.figure.axes[0], label))
+        shown = drawn()
+        assert frag in shown and set(shown) - set(base) == {frag}
+        assert sum(f in shown and shown[f] == pytest.approx(xy) for f, xy in base.items()) >= len(base) / 2
+    # A cartoon says what it stands for with a hand cursor, a click on it hides it, nothing comes up in its place, and the others stay put
+    panel.annotate(g, mzs, ints, -1, None, 'underivatized')
+    drawn()
+    box = panel.canvas.figure.axes[0].cartoon_boxes[0]
+    target = LabelTarget(panel.canvas.figure.axes[0], box)
+    panel.hover(ChartEvent(*spot(target)))
+    assert 'Observed m/z' in tips[-1] and tips[-1].endswith('Click to hide this cartoon') and panel.canvas.cursor().shape() == Qt.PointingHandCursor
+    click(target)
+    shown = drawn()
+    assert set(shown) == set(base) - {box['fragment']} and all(shown[f] == pytest.approx(base[f]) for f in shown)
+    # Its name brings it back, and the click after that, on the cartoon, hides it again
+    label = next(label for label in labels if fragments.get(label['xy'][0], (None,))[0] == box['fragment'])
+    click(LabelTarget(panel.canvas.figure.axes[0], label))
+    shown = drawn()
+    assert set(shown) == set(base)
+    click(LabelTarget(panel.canvas.figure.axes[0], next(b for b in panel.canvas.figure.axes[0].cartoon_boxes if b['fragment'] == box['fragment'])))
+    assert box['fragment'] not in drawn()
+    # Reset brings the first picture back
+    panel.reset_cartoons()
+    assert drawn() == base and not panel.toggles
+    # A view zoomed into stays through a click, with Home still going back to the whole spectrum, and the zoom's history
+    lo, hi = panel.canvas.figure.axes[0].get_xlim()
+    center = LabelTarget(panel.canvas.figure.axes[0], box)
+    x, y = spot(center)
+    panel.zoom(ChartEvent(x, panel.canvas.figure.axes[0].rect[1] + 10, 1, 2.0))
+    zoomed, toolbar = panel.canvas.figure.axes[0].get_xlim(), panel.toolbar
+    assert zoomed[1] - zoomed[0] < hi - lo
+    visible = next(b for b in panel.canvas.figure.axes[0].cartoon_boxes if zoomed[0] < b['xy'][0] < zoomed[1])
+    click(LabelTarget(panel.canvas.figure.axes[0], visible))
+    assert visible['fragment'] not in drawn() and panel.toolbar is not toolbar
+    assert panel.canvas.figure.axes[0].get_xlim() == zoomed
+    panel.toolbar.home()
+    assert panel.canvas.figure.axes[0].get_xlim() == (lo, hi)
+    # In pan mode a click pans: the tooltip does not offer one, and the cursor stays the toolbar's
+    panel.reset_cartoons()
+    drawn()
+    panel.toolbar.pan.setChecked(True)
+    target = LabelTarget(panel.canvas.figure.axes[0], panel.canvas.figure.axes[0].cartoon_boxes[0])
+    panel.hover(ChartEvent(*spot(target)))
+    assert 'Click' not in tips[-1] and panel.canvas.cursor().shape() == Qt.SizeAllCursor
+    panel.toolbar.pan.setChecked(False)
+    # A spectrum changed under a resting mouse gives it the cursor of what is there now
+    monkeypatch.setattr(panel, 'isActiveWindow', lambda: True)
+    panel.hover(ChartEvent(1, 1))
+    assert panel.canvas.cursor().shape() == Qt.ArrowCursor
+    x, y = panel.canvas.to_widget(*spot(target))
+    QCursor.setPos(panel.canvas.mapToGlobal(QPoint(round(x), round(y))))
+    panel.hover_again()
+    assert panel.canvas.cursor().shape() == Qt.PointingHandCursor
 
 
 def test_gui_ms3_hover_and_menu(app, monkeypatch):
     import time
-    from matplotlib.backend_bases import MouseEvent
     from candycrunch import gui
+    from candycrunch.gui import ChartEvent
     df = pd.DataFrame({'top1_pred': ['Fuc(a1-2)Gal(b1-3)GalNAc', 'Gal(b1-3)GalNAc'], 'predictions': [[('Fuc(a1-2)Gal(b1-3)GalNAc', 0.8)], [('Gal(b1-3)GalNAc', 0.9)]],
                        'composition': [{'Hex': 1, 'HexNAc': 1, 'dHex': 1}, {'Hex': 1, 'HexNAc': 1}], 'num_spectra': [5, 3], 'charge': [-1, -1], 'RT': [26.8, 14.0],
                        'rel_abundance': [60.0, 40.0], 'evidence': ['strong', 'strong'], 'notes': ['', ''], 'ppm_error': [20.0, 5.0], 'GlyTouCan_ID': ['', ''],
@@ -285,11 +387,23 @@ def test_gui_ms3_hover_and_menu(app, monkeypatch):
     monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: shown.append(text))
     assert panel.hover_targets, panel.message.text() or panel.summary.text()
     artist = panel.canvas.figure.ms3_artists[0]
-    x, y = artist.axes.transData.transform(artist.get_offsets()[0])
-    panel.hover(MouseEvent('motion_notify_event', panel.canvas, x, y))
+    x, y = artist.ax.page(artist.x[0], artist.y[0])
+    panel.hover(ChartEvent(x, y))
     assert 'isolated for MS3: 2 spectra' in shown[-1] and panel.canvas.cursor().shape() == gui.Qt.PointingHandCursor
-    panel.hover(MouseEvent('motion_notify_event', panel.canvas, x + 300, y + 300))
+    panel.hover(ChartEvent(x + 300, y + 300))
     assert panel.canvas.cursor().shape() == gui.Qt.ArrowCursor
+    opened, toggled = [], []
+    panel.ms3_clicked.connect(opened.append)
+    monkeypatch.setattr(panel, 'toggle_cartoon', toggled.append)
+    panel.press(ChartEvent(x, y))
+    assert opened == [0] and not toggled
+    label = next((t for t, _ in panel.label_targets if t.xy[0] == artist.x[0]), None)
+    if label is not None:
+        px, py = label.ax.page(*label.xy)
+        panel.press(ChartEvent(px + (label.box[0] + label.box[2]) / 2, py + label.box[1] - 1))
+        assert opened == [0] and len(toggled) == 1
+    monkeypatch.undo()
+    monkeypatch.setattr(gui.QToolTip, 'showText', lambda pos, text, *args: shown.append(text))
     # Open in CandyCrumbs from the MS3 tab sends the MS3 spectrum shown with its precursor, from the MS2 tab the MS2 spectrum
     sent, tab = [], gui.CrumbsTab(gui.GlycanImages())
     view.open_in_crumbs.connect(sent.append)
@@ -368,7 +482,7 @@ def test_gui_save_image(app, tmp_path, monkeypatch):
     assert gui.QImage(str(tmp_path / 'spectrum.png')).width() > 3000
     # Its labels give the observed m/z of annotated peaks, and an unannotated peak gets its m/z in grey
     _, ax = plot_annotated_spectrum(g, mzs, ints, charge = -1, mass_tag = 2.0156, mz_labels = True)
-    texts = [t.get_text() for t in ax.texts]
+    texts = [label['text'] for label in ax.peak_labels]
     assert any(t.startswith('510.19 ') for t in texts) and '990.00' in texts
 
 

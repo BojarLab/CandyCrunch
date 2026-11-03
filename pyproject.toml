@@ -23,7 +23,7 @@ classifiers = [
 keywords = ["glycomics", "glycans", "mass spectrometry", "LC-MS/MS", "deep learning", "glycoproteomics"]
 requires-python = ">=3.11"
 dependencies = [
-    "glycowork>=1.11.1",
+    "glycowork>=1.12.0",
     "networkx",
     "scipy",
     "torch>=2.3,<3; (platform_system != 'Darwin' or platform_machine != 'x86_64') and platform_system != 'Emscripten'",
@@ -33,7 +33,7 @@ dependencies = [
     "pandas>=2.2.2",
     "zstandard; python_version < '3.14'",
     "openpyxl",
-    "matplotlib>=3.10",
+    "viscose>=0.1.1",
 ]
 
 [project.urls]
@@ -43,7 +43,7 @@ Paper = "https://doi.org/10.1038/s41592-024-02314-6"
 Data = "https://doi.org/10.5281/zenodo.7940046"
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.7", "matplotlib<3.11"]
+gui = ["PySide6>=6.7"]
 train = ["glycowork[ml]>=1.11.1", "torchmetrics"]
 
 [project.scripts]

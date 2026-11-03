@@ -2,7 +2,6 @@
 import ast
 import contextlib
 import faulthandler
-import functools
 import glob
 import html
 import importlib.util
@@ -27,29 +26,25 @@ import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ProcessPoolExecutor
+from functools import lru_cache
+from typing import NamedTuple
 import numpy as np
 import pandas as pd
+from glycorender import pdfwrite
 try:
-    from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRectF, QSize, QUrl, QStringListModel, \
+    from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRect, QRectF, QSize, QUrl, QStringListModel, \
         QStandardPaths, QEvent
-    from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QBrush, QShortcut, QFontDatabase, \
-        QCursor
+    from PySide6.QtGui import QTextOption, QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap, \
+        QBrush, QRadialGradient, QShortcut, QFontDatabase, QCursor, QTransform
     from PySide6.QtWidgets import (QApplication, QMainWindow, QDialog, QDialogButtonBox, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
                                    QToolButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QTextBrowser, QListWidget,
                                    QListWidgetItem, QTreeWidget, QTreeWidgetItem, QTableView, QAbstractItemView, QSplitter, QStackedWidget, QTabWidget, QScrollArea,
                                    QFrame, QFileDialog, QMessageBox, QInputDialog, QDockWidget, QProgressBar, QStyledItemDelegate, QStyleOptionViewItem,
-                                   QStyle, QMenu, QCompleter, QSizePolicy, QToolTip, QTableWidget, QTableWidgetItem, QHeaderView)
+                                   QStyle, QMenu, QCompleter, QSizePolicy, QToolBar, QToolTip, QTableWidget, QTableWidgetItem, QHeaderView)
 except ImportError as error:
     raise ImportError('The CandyCrunch app needs PySide6, which comes with: pip install "candycrunch[gui]"') from error
-from matplotlib.figure import Figure
-from matplotlib.offsetbox import AnnotationBbox, OffsetImage
-from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.backend_tools import Cursors
-from matplotlib.mathtext import MathTextParser
-from matplotlib.widgets import SpanSelector
 from candycrunch import references
+from candycrunch.utils import PALETTE, vc
 
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch
 _tree = ast.parse(open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8').read())
@@ -127,30 +122,9 @@ TAIL_WEIGHT = 0.06
 # Per process: where progress goes and where each step starts within a file, read by the wrappers _install_progress puts around prediction.py
 _PROGRESS = {}
 INK, MUTED, LILAC, LILAC_LIGHT, WASH, CANDY = '#2a2133', '#857a90', '#8c5bb5', '#e6d9f1', '#f6f2f9', '#c8243f'
-# matplotlib's mathtext parser is not thread-safe, so the annotation threads and the window never lay out text at the same time
-MPL_LOCK = threading.Lock()
-# matplotlib caches parsed mathtext per parser, 50 entries in all, and every renderer has a parser of its own, so each spectrum parsed its fragment labels
-# again (~5 ms each), and so did the window's canvas when it drew it (~30 ms of every spectrum shown). One cache for all parsers of an output type returns
-# the same parse for the same arguments, as only the output type of the parser goes into it
-_MATHTEXT_PARSERS, _MATHTEXT_PARSE = {}, getattr(MathTextParser._parse_cached, '__wrapped__', None)
-
-
-@functools.lru_cache(2048)
-def _shared_mathtext(output_type, *args):
-    return _MATHTEXT_PARSE(_MATHTEXT_PARSERS[output_type], *args)
-
-
-def _parse_mathtext(self, *args):
-    _MATHTEXT_PARSERS.setdefault(self._output_type, self)
-    return _shared_mathtext(self._output_type, *args)
-
-
-if _MATHTEXT_PARSE is not None:
-    MathTextParser._parse_cached = _parse_mathtext
 # glycowork's modules import each other in a cycle, so two threads importing them at once (the drawing, annotation, and taxonomy threads all
 # start with an import) can hit Python's import deadlock detection, which killed the drawing thread or failed the first annotation
 IMPORT_LOCK = threading.Lock()
-CONFIDENCE_MAP = LinearSegmentedColormap.from_list('candy', ['#d9c8ea', LILAC, CANDY])
 STYLE = f"""
 QWidget#settings {{ background: {WASH}; }}
 QLabel[role="heading"] {{ font-weight: 600; color: {INK}; padding-top: 8px; }}
@@ -729,6 +703,45 @@ class GlycanImages(QObject):
                 return
 
 
+def _neu5ac_readings(support, ion_trap):
+    """The linkage of a lone Neu5Ac, read from how intense [M-H-Neu5Ac]- is (ion-trap CID only): no colors of its own, a peak that reads a2-3 gets the
+    lilac marker if the structure says a2-3 and the red one if it says a2-6; a reading of a2-6 is a missing peak, so it is only listed. Gives the readings and their text, by residue"""
+    read = {id(e): e['linkage'] for e in support['residues'] if e.get('linkage') and ion_trap}
+    linkage = {k: f'{v[0]:.2f} ' * (v[2] == 'a2-3') + f'[M-H-Neu5Ac]<sup>-</sup> at {v[1]:.0%} of the base peak: {v[2]}' for k, v in read.items()}
+    return read, linkage
+
+
+def _support_markers(ax, structure, support, ion_trap):
+    """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red); gives the (target, what hovering it shows) of each set"""
+    from candycrunch.analysis import domon_costello_to_html, glycan_to_nxGraph
+    read, linkage = _neu5ac_readings(support, ion_trap)
+    # Each marker carries what hovering it shows: the supported residues' fragment and cleaved bond in the drawing (lilac) and a tooltip naming
+    # the fragment; added once per cached figure
+    points, markers = {'support': {}, 'against': {}}, []
+    for e in support['residues']:
+        for s in e['support']:
+            points['support'].setdefault(s[0], [s[1], (structure, s[5], s[6]), f'{s[0]:.2f}: {domon_costello_to_html(list(s[2]))} = {s[3]}<br>rules out'])[2] += f'<br>{", ".join(s[4])}'
+        for a in e['against']:
+            points['against'].setdefault(a[0], [a[1], None, f'{a[0]:.2f}: {domon_costello_to_html(list(a[2]))} = {a[3]}<br>fits'])[2] += f'<br>{a[4]}'
+    for e in support['residues']:
+        if id(e) in read and read[id(e)][2] == 'a2-3':
+            residues = range(len(glycan_to_nxGraph(structure)) // 2 + 1)
+            points['support' if read[id(e)][3] else 'against'].setdefault(read[id(e)][0], [read[id(e)][1], (structure, tuple(i for i in residues if i != e['residue']), e['residue']), f'{linkage[id(e)]}<br>15% or more reads a2-3 (ion-trap CID)'])
+    for color, side in ((LILAC, 'support'), (CANDY, 'against')):
+        if points[side]:
+            xs, ys = list(points[side]), [v[0] * 100 + 3 for v in points[side].values()]
+            ax.scatter(xs, ys, marker = 'v', s = 45, color = color, edge = ('white', 0.6), z = 7)
+            markers.append((Target(ax, xs, ys), [(*v[1:], None) for v in points[side].values()]))
+    return markers
+
+
+def _spectrum_axes(figure, cartoons):
+    """Axes for plot_annotated_spectrum, with margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it"""
+    width, height = figure.width / 72, figure.height / 72
+    room = 1 - 0.95 / height
+    return figure.add_axes([0.65 / width, 0.55 / height, 1 - 0.85 / width, room / 1.4 if cartoons else room])
+
+
 class Annotator(QObject):
     """Runs CandyCrumbs, supporting_ions and plot_annotated_spectrum in a background thread; only the newest request is worked on, so scrolling through a
     table never queues up stale spectra, and while idle it draws the spectra likely shown next (prefetch), which the panel then shows at once"""
@@ -771,17 +784,15 @@ class Annotator(QObject):
                 if request is None:
                     continue
                 stale = lambda: self.request[0] != request_id
-                width, height = request['figsize']
                 try:
                     with IMPORT_LOCK:
                         from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, classify_fragment, \
                             fragment_cartoon, fragIUPAC_to_image, is_composition, derivatize_carboxyls, deisotope_ms2
-                        # fragIUPAC_to_image imports these itself, now outside MPL_LOCK too
+                        # fragIUPAC_to_image imports these itself
                         with contextlib.suppress(ImportError):
                             import glycowork.motif.draw, glycorender.render, PIL.Image
-                    # CandyCrumbs needs no matplotlib and can take long, so it runs before MPL_LOCK is taken: inside it, a slow MS3 annotation stalled the
-                    # other panel's spectrum and every redraw in the window. Its results (and those of supporting_ions) are kept for the last spectra, which
-                    # are drawn again at another panel size, or after a prefetch was cut short
+                    # CandyCrumbs can take long, so its results (and those of supporting_ions) are kept for the last spectra, which are drawn again at another
+                    # panel size, or after a prefetch was cut short
                     key = repr([request[k] for k in ('structure', 'mzs', 'intensities', 'charge', 'mass_tag', 'sample_prep', 'tolerance', 'ppm')] + sorted(request['kwargs'].items()))
                     if len(self.results) > 200:
                         self.results.clear()
@@ -821,7 +832,7 @@ class Annotator(QObject):
                     diagnostic = sorted({s[0] for e in support['residues'] for s in e['support']} | {s[0] for c in support['candidates'] for s in c['support']} |
                                         {e['linkage'][0] for e in support['residues'] if request['ion_trap'] and e.get('linkage') and e['linkage'][2] == 'a2-3'}) if support else None
                     # The fragment cartoons plot_annotated_spectrum will place (glycan and oxonium ions of labeled or diagnostic peaks, ~30-50 ms each) are
-                    # rendered into its cache here, outside MPL_LOCK (GlycoDraw and glycorender need no matplotlib) and one by one, so a newer request cuts it short
+                    # rendered into its cache here, one by one, so a newer request cuts it short
                     glycans = resolve_spectrum_input(request['structure'])[1] if request['cartoons'] else []
                     if glycans:
                         sialic = request['kwargs'].get('sialic_derivatization')
@@ -839,28 +850,26 @@ class Annotator(QObject):
                                     break
                         if stale():
                             continue
-                    figure = Figure(figsize = request['figsize'], dpi = 100)
-                    FigureCanvasAgg(figure)
-                    # Margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it
-                    bottom = 0.55 / height
-                    figure.subplots_adjust(left = 0.65 / width, right = 1 - 0.2 / width, bottom = bottom, top = bottom + (1 - 0.4 / height - bottom) / 1.4 if request['cartoons'] else 1 - 0.4 / height)
-                    with MPL_LOCK:
-                        hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
-                                                               charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                               ax = figure.add_subplot(), draw_glycans = request['cartoons'], hit_dict = hit_dict,
-                                                               diagnostic = diagnostic, cartoons = request['toggles'], cartoon_dpi = 100 * request['ratio'],
-                                                               **request['kwargs'])
-                        # Save image… draws the spectrum again with the same diagnostic peaks
-                        figure.diagnostic = diagnostic
-                        if request['ms3']:
-                            # A triangle under every peak that was isolated for MS3 and an invisible stick over that peak, both clickable
-                            mzs, ints = np.array(request['mzs']), np.array(request['intensities'])
-                            near = [int(np.argmin(np.abs(mzs - p))) for p in request['ms3']]
-                            hit = [abs(mzs[k] - p) <= request['tolerance'] for k, p in zip(near, request['ms3'])]
-                            xs = [mzs[k] if h else p for k, h, p in zip(near, hit, request['ms3'])]
-                            figure.ms3_artists = (ax.scatter(xs, [0] * len(xs), marker = '^', s = 70, c = CANDY, edgecolors = 'white', linewidths = 0.8, zorder = 6,
-                                                             clip_on = False, picker = True),
-                                                  ax.vlines(xs, 0, [ints[k] / (ints.max() or 1) * 100 if h else 0 for k, h in zip(near, hit)], colors = 'none', picker = 5))
+                    figure = vc.Figure(*request['figsize'], PALETTE)
+                    hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
+                                                           charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
+                                                           ax = _spectrum_axes(figure, request['cartoons']), draw_glycans = request['cartoons'], hit_dict = hit_dict,
+                                                           diagnostic = diagnostic, cartoons = request['toggles'], cartoon_dpi = DPI * request['ratio'], label_fontsize = 7,
+                                                           **request['kwargs'])
+                    # Save image… draws the spectrum again with the same diagnostic peaks
+                    figure.diagnostic = diagnostic
+                    if request['ms3']:
+                        # A triangle under every peak that was isolated for MS3, clickable like the stick of that peak
+                        mzs, ints = np.array(request['mzs']), np.array(request['intensities'])
+                        near = [int(np.argmin(np.abs(mzs - p))) for p in request['ms3']]
+                        hit = [abs(mzs[k] - p) <= request['tolerance'] for k, p in zip(near, request['ms3'])]
+                        xs = [mzs[k] if h else p for k, h, p in zip(near, hit, request['ms3'])]
+                        ax.scatter(xs, [0] * len(xs), marker = '^', s = 70, color = CANDY, edge = ('white', 0.8), z = 6)
+                        figure.ms3_artists = (Target(ax, xs, [0] * len(xs), radius = 6.0),
+                                              Target(ax, xs, [ints[k] / (ints.max() or 1) * 100 if h else 0 for k, h in zip(near, hit)], stick = True))
+                    if support and (support['residues'] or support['candidates']):
+                        # Each marker carries what hovering it shows
+                        figure.support_markers = _support_markers(ax, request['structure'], support, request['ion_trap'])
                     if prefetch:
                         self.prefetched.emit(request['key'], figure, hit_dict, support)
                     else:
@@ -1112,29 +1121,356 @@ class BarDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
-class Canvas(FigureCanvasQTAgg):
-    """Skips a redraw while an annotation thread holds MPL_LOCK and catches up right after, so the window never blocks on it"""
+# The app's charts: viscose figures in Qt widgets, with the mouse handling that viscose, which only draws, leaves to whoever shows them
+# Widget pixels per inch of a figure, as figures follow their widget's size in inches
+DPI = 100
+RING_RADIUS, RING_WIDTH = 6.0, 1.4
 
-    def draw(self):
-        if MPL_LOCK.acquire(blocking = False):
-            try:
-                super().draw()
-            finally:
-                MPL_LOCK.release()
+
+def _path(ops):
+    path = QPainterPath()
+    for op in ops:
+        if op[0] == 'm':
+            path.moveTo(op[1], op[2])
+        elif op[0] == 'l':
+            path.lineTo(op[1], op[2])
+        elif op[0] == 'c':
+            path.cubicTo(*op[1:])
         else:
-            QTimer.singleShot(60, self.draw_idle)
+            path.closeSubpath()
+    return path
+
+
+@lru_cache(4096)
+def _glyphs(ttf, text):
+    """A string's outlines at 1000 units per em, cached, as the same few characters come back with every redraw"""
+    return _path(vc.text.outline(pdfwrite.Canvas(None, (1.0, 1.0)), ttf, text, 0.0, 0.0, 1000.0).ops)
+
+
+@lru_cache(256)
+def _bitmap(rgb, alpha, w, h):
+    px = np.dstack([np.frombuffer(rgb, np.uint8).reshape(h, w, 3), np.full((h, w), 255, np.uint8) if alpha is None else np.frombuffer(alpha, np.uint8).reshape(h, w)])
+    return QImage(px.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
+
+
+def _color(rgb, alpha = 1.0):
+    return QColor.fromRgbF(rgb[0], rgb[1], rgb[2], alpha)
+
+
+def _brush(op):
+    gradient = op.get('fill_grad')
+    if not gradient:
+        return QBrush(_color(op['fill_rgb'], op['fill_alpha']))
+    fill = QLinearGradient(*gradient[1]) if gradient[0] == 'linear' else QRadialGradient(gradient[1][0], gradient[1][1], gradient[1][2])
+    for offset, stop in gradient[2]:
+        fill.setColorAt(offset, _color(stop[:3], stop[3] * op['fill_alpha']))
+    return QBrush(fill)
+
+
+def paint_page(figure, dpi, layout = True):
+    """The page as a QImage, painted by Qt from the figure's display list: about ten times as fast as the numpy rasterizer that saved images go through, whatever the
+    resolution, which makes zooming and panning smooth. For palettes without a soft shadow or spaced capitals, which the display list or this leaves out"""
+    ops = figure.display_list(layout)
+    scale = dpi / 72
+    image = QImage(round(figure.width * scale), round(figure.height * scale), QImage.Format_RGBA8888_Premultiplied)
+    image.fill(Qt.white)
+    # Page points, from the lower left, to the image's pixels
+    page = QTransform(scale, 0.0, 0.0, -scale, 0.0, image.height())
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing)
+    clip = None
+    for op in ops:
+        if op['clip'] is not clip:
+            clip = op['clip']
+            painter.setClipping(False)
+            for k, (box, ctm) in enumerate(clip or ()):
+                painter.setTransform(QTransform(*ctm) * page)
+                painter.setClipRect(QRectF(*box), Qt.ReplaceClip if k == 0 else Qt.IntersectClip)
+        painter.setTransform(QTransform(*op['ctm']) * page)
+        if op['kind'] == 'text':
+            size = op['size'] / 1000
+            painter.save()
+            painter.translate(op['x'], op['y'])
+            painter.scale(size, size)
+            painter.fillPath(_glyphs(op['ttf'], op['text']), _color(op['fill_rgb'], op['fill_alpha']))
+            painter.restore()
+        elif op['kind'] == 'image':
+            # The unit square, first row at its top
+            painter.setTransform(QTransform(1 / op['w'], 0.0, 0.0, -1 / op['h'], 0.0, 1.0) * QTransform(*op['ctm']) * page)
+            painter.setOpacity(op['fill_alpha'])
+            painter.drawImage(0, 0, _bitmap(op['rgb'], op['alpha'], op['w'], op['h']))
+            painter.setOpacity(1.0)
+        else:
+            path = _path(op['path'])
+            path.setFillRule(Qt.OddEvenFill if op['even_odd'] else Qt.WindingFill)
+            if op['fill']:
+                painter.fillPath(path, _brush(op))
+            if op['stroke']:
+                pen = QPen(_color(op['stroke_rgb'], op['stroke_alpha']), op['line_width'])
+                pen.setCapStyle((Qt.FlatCap, Qt.RoundCap, Qt.SquareCap)[op['cap']])
+                pen.setJoinStyle((Qt.MiterJoin, Qt.RoundJoin, Qt.BevelJoin)[op['join']])
+                if op['dash']:
+                    # Qt counts a dash in line widths
+                    pen.setDashPattern([v / op['line_width'] for v in op['dash'][0]])
+                    pen.setDashOffset(op['dash'][1] / op['line_width'])
+                painter.strokePath(path, pen)
+    painter.end()
+    return image
+
+
+class ChartEvent(NamedTuple):
+    """The mouse in page points, from the page's lower left"""
+    x: float
+    y: float
+    button: int = 1
+    step: float = 0.0
+
+
+class Target:
+    """Points in data coordinates that answer the mouse, or with stick the sticks from zero up to them; contains gives the nearest first"""
+
+    def __init__(self, ax, x, y, radius = 5.0, stick = False):
+        self.ax, self.x, self.y, self.radius, self.stick = ax, np.asarray(x, dtype = float), np.asarray(y, dtype = float), radius, stick
+
+    def contains(self, event):
+        x0, y0, w, h = self.ax.rect
+        r = self.radius
+        px, py = self.ax.page(self.x, self.y)
+        inside = (px >= x0 - r) & (px <= x0 + w + r) & (py >= y0 - r) & (py <= y0 + h + r)
+        if self.stick:
+            near = (np.abs(px - event.x) <= r) & (event.y >= self.ax.page(0.0, 0.0)[1] - r) & (event.y <= py + r)
+        else:
+            near = np.hypot(px - event.x, py - event.y) <= r
+        found = np.flatnonzero(inside & near)
+        return bool(len(found)), {'ind': found[np.argsort(np.hypot(px[found] - event.x, py[found] - event.y), kind = 'stable')].tolist()}
+
+
+class LabelTarget:
+    """A peak's label or a fragment's cartoon as plot_annotated_spectrum placed it (ax.peak_labels, ax.cartoon_boxes), which answers the mouse while it is shown; pad takes in
+    the margin that place_peak_label keeps free around each label, as a label is only a few pixels wide"""
+
+    def __init__(self, ax, label, pad = 1.5):
+        self.ax, self.xy, self.box, self.fraction, self.pad = ax, label['xy'], label['box'], label.get('y_fraction', False), pad
+
+    def contains(self, event):
+        (x_lo, x_hi), (y_lo, y_hi) = sorted(self.ax.xlim), sorted(self.ax.ylim)
+        if not x_lo <= self.xy[0] <= x_hi or not (self.fraction or y_lo <= self.xy[1] <= y_hi):
+            return False, {}
+        px, py = self.ax.page(*self.xy)
+        py = self.ax.rect[1] + self.xy[1] * self.ax.rect[3] if self.fraction else py
+        return bool(px + self.box[0] - self.pad <= event.x <= px + self.box[2] + self.pad and py + self.box[1] - self.pad <= event.y <= py + self.box[3] + self.pad), {}
+
+
+class Canvas(QWidget):
+    """Shows a viscose figure at the widget's size. Its page is kept as an image, so the mouse, a selection ring (rings: (axes, x, y)), and a dragged range cost no
+    new drawing, and draw_idle draws it again at the next paint"""
+    moved = Signal(object)
+    pressed = Signal(object)
+    scrolled = Signal(object)
+    resized = Signal()
+    left = Signal()
+
+    def __init__(self, figure):
+        super().__init__()
+        self.figure, self.toolbar, self.span, self.rings, self.image, self.band, self.start, self.pan_from = figure, None, None, [], None, None, None, None
+        self.setMouseTracking(True)
+        figure.layout()
+
+    def sizeHint(self):
+        return QSize(round(self.figure.width * DPI / 72), round(self.figure.height * DPI / 72))
+
+    def minimumSizeHint(self):
+        return QSize(10, 10)
+
+    def draw_idle(self):
+        self.figure.layout()
+        self.image = None
+        self.update()
+
+    def event_at(self, event, step = 0.0):
+        position = event.position()
+        return ChartEvent(position.x() * 72 / DPI, self.figure.height - position.y() * 72 / DPI, 1 if event.buttons() & Qt.LeftButton or event.button() == Qt.LeftButton else 3, step)
+
+    def to_widget(self, x, y):
+        return x * DPI / 72, (self.figure.height - y) * DPI / 72
+
+    def paintEvent(self, event):
+        ratio = self.devicePixelRatioF()
+        if self.image is None or self.image.devicePixelRatio() != ratio:
+            # Laid out by draw_idle or, for a figure just shown, by __init__
+            self.image = paint_page(self.figure, DPI * ratio, False)
+            self.image.setDevicePixelRatio(ratio)
+        painter = QPainter(self)
+        painter.drawImage(0, 0, self.image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(self.figure.pal.css('ink')), RING_WIDTH * DPI / 72))
+        for ax, x, y in self.rings:
+            cx, cy = self.to_widget(*ax.page(x, y))
+            r = RING_RADIUS * DPI / 72
+            painter.drawEllipse(round(cx - r), round(cy - r), round(2 * r), round(2 * r))
+        if self.band is not None:
+            color = QColor(self.figure.pal.css('a1'))
+            color.setAlpha(50)
+            painter.fillRect(self.band, color)
+        painter.end()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        width, height = max(self.width(), 10) / DPI, max(self.height(), 10) / DPI
+        if (self.figure.width, self.figure.height) != (width * 72.0, height * 72.0):
+            self.figure.set_size(width, height)
+            self.draw_idle()
+            self.resized.emit()
+
+    def mousePressEvent(self, event):
+        at = self.event_at(event)
+        mode = self.toolbar.mode if self.toolbar is not None else ''
+        if at.button == 1 and (mode or self.span is not None) and self.figure.axes:
+            ax = self.figure.axes[0]
+            x0, y0, w, h = ax.rect
+            if not (x0 <= at.x <= x0 + w and y0 <= at.y <= y0 + h):
+                return
+            self.start = event.position().toPoint()
+            if mode == 'pan':
+                self.toolbar.begin()
+                self.pan_from = at, ax.xlim, ax.ylim
+            return
+        if not mode:
+            self.pressed.emit(at)
+
+    def mouseDoubleClickEvent(self, event):
+        # Qt's default sends a second press, which undid whatever the first one toggled
+        event.accept()
+
+    def leaveEvent(self, event):
+        self.left.emit()
+
+    def mouseMoveEvent(self, event):
+        if self.start is None:
+            self.moved.emit(self.event_at(event))
+            return
+        position, mode = event.position().toPoint(), self.toolbar.mode if self.toolbar is not None else ''
+        if mode == 'pan':
+            at, xlim, ylim = self.pan_from
+            now = self.event_at(event)
+            ax = self.figure.axes[0]
+            x0, y0, w, h = ax.rect
+            dx, dy = (now.x - at.x) / w * (xlim[1] - xlim[0]), (now.y - at.y) / h * (ylim[1] - ylim[0])
+            ax.set_xlim(xlim[0] - dx, xlim[1] - dx)
+            ax.set_ylim(ylim[0] - dy, ylim[1] - dy)
+            self.draw_idle()
+            return
+        x0, y0, w, h = self.figure.axes[0].rect
+        left, top = self.to_widget(x0, y0 + h)
+        bottom = self.to_widget(x0, y0)[1]
+        right = self.to_widget(x0 + w, y0)[0]
+        lo, hi = sorted((min(max(self.start.x(), left), right), min(max(position.x(), left), right)))
+        if mode == 'zoom':
+            up, down = sorted((min(max(self.start.y(), top), bottom), min(max(position.y(), top), bottom)))
+        else:
+            up, down = top, bottom
+        self.band = QRect(round(lo), round(up), round(hi - lo), round(down - up))
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        band, start, self.band, self.start = self.band, self.start, None, None
+        mode = self.toolbar.mode if self.toolbar is not None else ''
+        if start is None:
+            return
+        if mode == 'pan':
+            self.toolbar.push_current()
+        elif band is not None and band.width() >= 3:
+            ax = self.figure.axes[0]
+            x_lo, y_lo = ax.data(band.x() * 72 / DPI, self.figure.height - (band.y() + band.height()) * 72 / DPI)
+            x_hi, y_hi = ax.data((band.x() + band.width()) * 72 / DPI, self.figure.height - band.y() * 72 / DPI)
+            if mode == 'zoom' and band.height() >= 3:
+                self.toolbar.begin()
+                ax.set_xlim(x_lo, x_hi)
+                ax.set_ylim(y_lo, y_hi)
+                self.toolbar.push_current()
+                self.draw_idle()
+            elif not mode:
+                self.span(x_lo, x_hi)
+        self.update()
+
+    def wheelEvent(self, event):
+        self.scrolled.emit(self.event_at(event, event.angleDelta().y() / 120))
+
+
+class Toolbar(QToolBar):
+    """Home, back, and forward through the views of a canvas's first axes, and dragging to pan it or to zoom into a rectangle"""
+
+    def __init__(self, canvas, parent = None):
+        super().__init__(parent)
+        self.canvas, self.mode, self.views, self.position = canvas, '', [], -1
+        canvas.toolbar = self
+        self.setIconSize(QSize(16, 16))
+        style = self.style()
+        self.addAction('Home', self.home).setToolTip('Show the whole spectrum')
+        for icon, text, tip, action in ((QStyle.SP_ArrowBack, 'Back', 'The view before this one', lambda: self.move_by(-1)),
+                                        (QStyle.SP_ArrowForward, 'Forward', 'The view after this one', lambda: self.move_by(1))):
+            self.addAction(style.standardIcon(icon), text, action).setToolTip(tip)
+        self.pan = QAction('Pan', self, checkable = True, toolTip = 'Drag to move the spectrum')
+        self.zoom = QAction('Zoom', self, checkable = True, toolTip = 'Drag a rectangle to zoom into it')
+        self.pan.toggled.connect(lambda on: self.set_mode('pan', on))
+        self.zoom.toggled.connect(lambda on: self.set_mode('zoom', on))
+        self.addAction(self.pan)
+        self.addAction(self.zoom)
+
+    def set_mode(self, mode, on):
+        if on:
+            self.mode = mode
+            (self.zoom if mode == 'pan' else self.pan).setChecked(False)
+            self.canvas.setCursor(Qt.SizeAllCursor if mode == 'pan' else Qt.CrossCursor)
+        elif self.mode == mode:
+            self.mode = ''
+            self.canvas.setCursor(Qt.ArrowCursor)
+
+    def begin(self):
+        """The view before the first zoom is the one Home returns to"""
+        if not self.views:
+            self.push_current()
+
+    def push_current(self):
+        ax = self.canvas.figure.axes[0]
+        self.views[self.position + 1:] = [(ax.get_xlim(), ax.get_ylim())]
+        self.position = len(self.views) - 1
+
+    def apply(self, position):
+        self.position = position
+        ax = self.canvas.figure.axes[0]
+        ax.set_xlim(*self.views[position][0])
+        ax.set_ylim(*self.views[position][1])
+        self.canvas.draw_idle()
+
+    def home(self):
+        if self.views:
+            self.apply(0)
+
+    def move_by(self, step):
+        if 0 <= self.position + step < len(self.views):
+            self.apply(self.position + step)
 
 
 class ChartView(QWidget):
-    """A matplotlib figure that follows the widget's size"""
+    """A canvas with a new figure for each thing it shows, of the widget's size"""
 
     def __init__(self, height = 3.0):
         super().__init__()
-        self.figure = Figure(figsize = (6, height), dpi = 100)
-        self.canvas = Canvas(self.figure)
+        self.canvas = Canvas(vc.Figure(6, height, PALETTE))
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.canvas)
+
+    @property
+    def figure(self):
+        return self.canvas.figure
+
+    def new_figure(self):
+        figure = vc.Figure(self.figure.width / 72, self.figure.height / 72, PALETTE)
+        self.canvas.figure, self.canvas.span, self.canvas.rings = figure, None, []
+        self.canvas.draw_idle()
+        return figure
 
 
 class SpectrumPanel(QWidget):
@@ -1149,7 +1485,7 @@ class SpectrumPanel(QWidget):
         self.spec, self.ahead, self.cache = None, [], {}
         self.annotator.done.connect(self.show_figure)
         self.annotator.prefetched.connect(self.store)
-        self.fragment_html, self.hover_targets, self.label_targets, self.hovered, self.toggles = '', [], [], None, {}
+        self.fragment_html, self.hover_targets, self.label_targets, self.stick_targets, self.hovered, self.toggles = '', [], [], [], None, {}
         self.controls = QHBoxLayout()
         self.controls.setContentsMargins(6, 4, 6, 0)
         self.summary = _label('', 'hint')
@@ -1164,6 +1500,7 @@ class SpectrumPanel(QWidget):
         self.unit.setToolTip('Unit of the tolerance: a flat window in Da, or ppm of each theoretical fragment m/z (accurate MS2, e.g., orbitrap). Switching converts the value at m/z 1000')
         self.cartoons = QCheckBox('Fragment cartoons')
         self.cartoons.setChecked(True)
+        self.cartoons.setToolTip('Draws the SNFG cartoons of fragments above their peaks. Click a fragment\'s name to draw or hide its cartoon, or a cartoon to hide it; right-click the spectrum to reset them')
         self.fragment_types = _combo(FRAGMENT_TYPES)
         self.fragment_types.setToolTip('Fragment types to annotate with. Automatic: glycosidic fragments (B, C, Y, Z, also internal ones) for permethylated glycans, whose '
                                        'cross-ring readings matched no more peaks than in m/z-shifted spectra (CID and HCD of protonated ions); otherwise also X '
@@ -1250,7 +1587,7 @@ class SpectrumPanel(QWidget):
                    'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value() if ppm is None else ppm * 1e-3, 'ppm': ppm,
                    'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}), 'ion_trap': bool(ion_trap),
                    'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100), 'ratio': self.devicePixelRatioF()}
-        request['key'] = repr(sorted((k, sorted(v.items()) if isinstance(v, dict) else v) for k, v in request.items()))
+        request['key'] = repr(sorted((k, list(v.items()) if k == 'toggles' else sorted(v.items()) if isinstance(v, dict) else v) for k, v in request.items()))
         return request
 
     def resubmit(self):
@@ -1265,7 +1602,9 @@ class SpectrumPanel(QWidget):
             self.show_figure(self.latest, entry['figure'], entry['hit_dict'], entry['support'], '')
         else:
             self.latest = self.annotator.submit(dict(self.request), ahead)
-            self.summary.setText(f'Annotating with CandyCrumbs: {self.request["structure"]}')
+            # A toggled cartoon recomputes nothing and is there at once, so the summary does not flash for it
+            if self.drawn is None or any(self.drawn[0][k] != v for k, v in self.request.items() if k not in ('toggles', 'key')):
+                self.summary.setText(f'Annotating with CandyCrumbs: {self.request["structure"]}')
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1279,11 +1618,9 @@ class SpectrumPanel(QWidget):
         return super().event(event)
 
     def show_message(self, text):
-        self.request, self.spec, self.hover_targets, self.label_targets, self.drawn = None, None, [], [], None
+        self.request, self.spec, self.hover_targets, self.label_targets, self.stick_targets, self.drawn = None, None, [], [], [], None
         self.save.setEnabled(False)
-        if self.hovered is not None:
-            self.hovered = None
-            self.support_hovered.emit(None)
+        self.clear_highlight()
         self.latest = self.annotator.counter + 1
         self.message.setText(text)
         self.stack.setCurrentWidget(self.message)
@@ -1294,7 +1631,7 @@ class SpectrumPanel(QWidget):
         """Keeps the last 12 spectra drawn (current, earlier, or ahead), with their canvas and toolbar once shown, so returning to one or moving on to a
         prefetched one shows it at once"""
         if key not in self.cache:
-            self.cache[key] = {'figure': figure, 'hit_dict': hit_dict, 'support': support, 'canvas': None, 'toolbar': None, 'markers': None}
+            self.cache[key] = {'figure': figure, 'hit_dict': hit_dict, 'support': support, 'canvas': None, 'toolbar': None}
         self.cache[key] = self.cache.pop(key)
         while len(self.cache) > 12:
             old = self.cache.pop(next(iter(self.cache)))
@@ -1316,6 +1653,7 @@ class SpectrumPanel(QWidget):
             return
         self.store(self.request['key'], figure, hit_dict, support)
         entry = self.cache[self.request['key']]
+        kept = self.toolbar if self.drawn is not None and self.toolbar is not entry['toolbar'] and all(self.drawn[0][k] == self.request[k] for k in ('mzs', 'intensities')) else None
         # The spectrum shown before stays hidden with its canvas while it is cached
         for widget, layout in ((self.canvas, self.holder_layout), (self.toolbar, self.summary_row)):
             if widget is not None:
@@ -1326,27 +1664,25 @@ class SpectrumPanel(QWidget):
             self.toolbar.deleteLater()
         if entry['canvas'] is None:
             entry['canvas'] = Canvas(figure)
-            # Pan and zoom hold the canvas' widgetlock, so clicks while using them never count as picks
-            entry['canvas'].mpl_connect('pick_event', lambda event: event.artist in getattr(figure, 'ms3_artists', ()) and len(event.ind) and self.ms3_clicked.emit(int(event.ind[0])))
-            entry['canvas'].mpl_connect('motion_notify_event', self.hover)
-            entry['canvas'].mpl_connect('button_press_event', self.toggle_cartoon)
-            entry['canvas'].mpl_connect('scroll_event', self.zoom)
+            # While panning or zooming, the canvas sends no presses, so clicks never count as picks
+            entry['canvas'].pressed.connect(self.press)
+            entry['canvas'].moved.connect(self.hover)
+            entry['canvas'].left.connect(self.clear_highlight)
+            entry['canvas'].scrolled.connect(self.zoom)
             entry['canvas'].setContextMenuPolicy(Qt.CustomContextMenu)
             entry['canvas'].customContextMenuRequested.connect(self.canvas_menu)
-            entry['toolbar'] = NavigationToolbar2QT(entry['canvas'], self, coordinates = False)
-            entry['toolbar'].setIconSize(QSize(16, 16))
-            # Its save button would save the small on-screen figure (Save image… draws it at print size instead), and its subplot and axes editors
-            # change a layout that every annotation lays out again; squeezed by the controls next to it, it hid pan and zoom behind an overflow arrow
-            for action in entry['toolbar'].actions():
-                if action.text() in ('Subplots', 'Customize', 'Save'):
-                    entry['toolbar'].removeAction(action)
-            if entry['toolbar'].actions()[-1].isSeparator():
-                entry['toolbar'].removeAction(entry['toolbar'].actions()[-1])
+            entry['toolbar'] = Toolbar(entry['canvas'], self)
+            # Squeezed by the controls next to it, it would hide pan and zoom behind an overflow arrow
             entry['toolbar'].setMinimumWidth(entry['toolbar'].sizeHint().width())
-        self.canvas, self.toolbar, self.hover_targets = entry['canvas'], entry['toolbar'], []
-        if self.hovered is not None:
-            self.hovered = None
-            self.support_hovered.emit(None)
+        self.canvas, self.toolbar, self.hover_targets, self.stick_targets = entry['canvas'], entry['toolbar'], [], []
+        # The same peaks drawn again (a cartoon toggled, another tolerance or candidate, a resized panel) stay at the view they were left at
+        if kept is not None:
+            self.toolbar.pan.setChecked(kept.pan.isChecked())
+            self.toolbar.zoom.setChecked(kept.zoom.isChecked())
+            if kept.views:
+                self.toolbar.views = list(kept.views)
+                self.toolbar.apply(kept.position)
+        self.clear_highlight()
         self.drawn = (dict(self.request), hit_dict, getattr(figure, 'diagnostic', None))
         self.save.setEnabled(True)
         self.summary_row.insertWidget(0, self.toolbar)
@@ -1367,12 +1703,13 @@ class SpectrumPanel(QWidget):
         if getattr(figure, 'ms3_artists', None):
             # Hovering a peak isolated for MS3 (its marker or the peak itself) names its fragment and says what clicking does
             tips = []
-            for x, p, n in zip(np.asarray(figure.ms3_artists[0].get_offsets())[:, 0], self.request['ms3'], self.request['ms3_spectra']):
+            for k, (x, p, n) in enumerate(zip(figure.ms3_artists[0].x, self.request['ms3'], self.request['ms3_spectra'])):
                 names = hits[x]['Domon-Costello nomenclatures'][0] if x in hits else []
                 flat = [y for sub in names for y in sub] if names and isinstance(names[0], list) else list(names)
                 tips.append((None, f'<b>m/z {p:.2f}</b>' + (f' ({domon_costello_to_html(flat)})' if flat else '') + f' was isolated for MS3: {n} spectr{"um" if n == 1 else "a"}'
-                             f'<br>Click to show {"it" if n == 1 else "them"}, pooled and annotated as fragments of this fragment, in the MS3 tab'))
-            self.hover_targets += [(artist, tips) for artist in figure.ms3_artists]
+                             f'<br>Click to show {"it" if n == 1 else "them"}, pooled and annotated as fragments of this fragment, in the MS3 tab', k))
+            self.hover_targets.append((figure.ms3_artists[0], tips))
+            self.stick_targets.append((figure.ms3_artists[1], tips))
         rows, tips = [], {}
         for mz in sorted(hits):
             hit = hits[mz]
@@ -1387,11 +1724,16 @@ class SpectrumPanel(QWidget):
                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
                               f'<th align="right">Error (ppm)</th><th align="right">z</th></tr>{"".join(rows)}</table>')
         self.fragments.setHtml(self.fragment_html)
-        # Hovering a fragment label shows the observed and theoretical m/z of its peak
+        # Hovering a fragment label shows the observed and theoretical m/z of its peak, and hovering a cartoon that of the peaks it stands for
         fragments = getattr(figure.axes[0], 'cartoon_fragments', {})
-        self.label_targets = [(text, [(None, tips[text.xy[0]] + (f'<br>Click to {"hide" if fragments[text.xy[0]][1] else "draw"} its cartoon' if text.xy[0] in fragments else ''))])
-                              for text in figure.axes[0].texts if text.get_text() and text.xy[0] in tips]
+        self.label_targets = [(LabelTarget(figure.axes[0], label), [(None, tips[label['xy'][0]] + (f'<br>Click to {"hide" if fragments[label["xy"][0]][1] else "draw"} its cartoon' if label['xy'][0] in fragments else ''),
+                                                                     fragments[label['xy'][0]][0] if label['xy'][0] in fragments else None)])
+                              for label in figure.axes[0].peak_labels if label['xy'][0] in tips]
+        self.label_targets += [(LabelTarget(figure.axes[0], box), [(None, '<br>'.join([tips[mz] for mz in box['peaks'] if mz in tips] + ['Click to hide this cartoon']), box['fragment'])])
+                               for box in figure.axes[0].cartoon_boxes]
         self.show_support(support)
+        # Once laid out; the press that asked for this spectrum took the tooltip away, and a new canvas has no cursor yet
+        QTimer.singleShot(0, self.hover_again)
 
     def save_image(self, clipboard = False):
         """Draws the spectrum shown again at print size, with the m/z of every labeled peak, as PNG (300 dpi), SVG, or PDF; clipboard: as a 300 dpi image
@@ -1407,25 +1749,20 @@ class SpectrumPanel(QWidget):
             if not os.path.splitext(path)[1]:
                 path += re.search(r'\*(\.\w+)', chosen).group(1)
         request, hit_dict, diagnostic = self.drawn
-        width, height = 12.0, 6.0 if request['cartoons'] else 4.6
-        figure = Figure(figsize = (width, height), dpi = 100)
-        FigureCanvasAgg(figure)
-        bottom = 0.55 / height
-        figure.subplots_adjust(left = 0.65 / width, right = 1 - 0.2 / width, bottom = bottom, top = bottom + (1 - 0.4 / height - bottom) / 1.4 if request['cartoons'] else 1 - 0.4 / height)
+        figure = vc.Figure(12.0, 6.0 if request['cartoons'] else 4.6, PALETTE)
         with IMPORT_LOCK:
             from candycrunch.analysis import plot_annotated_spectrum
-        buffer = io.BytesIO()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            with MPL_LOCK:
-                plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
-                                        mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = figure.add_subplot(), draw_glycans = request['cartoons'],
-                                        hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, cartoons = request['toggles'],
-                                        cartoon_dpi = 300, **request['kwargs'])
-                figure.savefig(path or buffer, dpi = 300, bbox_inches = 'tight', format = None if path else 'png')
+            plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
+                                    mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = _spectrum_axes(figure, request['cartoons']), draw_glycans = request['cartoons'],
+                                    hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, cartoons = request['toggles'],
+                                    cartoon_dpi = 300, **request['kwargs'])
             if clipboard:
-                QApplication.clipboard().setImage(QImage.fromData(buffer.getvalue()))
+                QApplication.clipboard().setImage(QImage.fromData(figure.to_png(300)))
                 QToolTip.showText(QCursor.pos(), 'Spectrum copied as an image', self.canvas)
+            else:
+                figure.save(path)
         except Exception as error:
             QMessageBox.critical(self, 'Save image', f'Could not write {path}:\n{error}' if path else f'Could not copy the spectrum:\n{error}')
         finally:
@@ -1440,43 +1777,26 @@ class SpectrumPanel(QWidget):
         menu.addAction('Copy image', lambda: self.save_image(clipboard = True))
         menu.addAction('Save image…', lambda: self.save_image())
         menu.addAction('Show the whole spectrum', self.toolbar.home)
+        if self.toggles:
+            menu.addAction('Reset fragment cartoons', self.reset_cartoons)
         menu.exec(self.canvas.mapToGlobal(position))
+
+    def reset_cartoons(self):
+        self.toggles = {}
+        self.resubmit()
 
     def show_support(self, support):
         """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red) and lists them above the fragment table"""
         if not support or not (support['residues'] or support['candidates']):
             return
-        from candycrunch.analysis import domon_costello_to_html, glycan_to_nxGraph
+        from candycrunch.analysis import domon_costello_to_html
         tested = [e for e in support['residues'] if e['support'] or e['open']]
         partly = sum(bool(e['support'] and e['open']) for e in tested)
-        # The linkage of a lone Neu5Ac, read from how intense [M-H-Neu5Ac]- is (ion-trap CID only): no colors of its own, a peak that reads a2-3 gets the
-        # lilac marker if the structure says a2-3 and the red one if it says a2-6; a reading of a2-6 is a missing peak, so it is only listed
-        read = {id(e): e['linkage'] for e in support['residues'] if e.get('linkage') and self.request['ion_trap']}
-        linkage = {k: f'{v[0]:.2f} ' * (v[2] == 'a2-3') + f'[M-H-Neu5Ac]<sup>-</sup> at {v[1]:.0%} of the base peak: {v[2]}' for k, v in read.items()}
+        read, linkage = _neu5ac_readings(support, self.request['ion_trap'])
         self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) and not e["open"] for e in tested)} of {len(tested)} residues placed by diagnostic fragments' + (f', {partly} narrowed down' if partly else '') +
                              ''.join(f'; Neu5Ac linkage reads {v[2]}' + ('' if v[3] else ', not as shown') for v in read.values()))
         self.summary.setToolTip(self.summary.text())
-        entry = self.cache[self.request['key']]
-        if entry['markers'] is None:
-            # Each marker carries what hovering it shows: the supported residues' fragment and cleaved bond in the drawing (lilac) and a tooltip naming
-            # the fragment; added once per cached figure
-            ax, points, entry['markers'] = self.canvas.figure.axes[0], {'support': {}, 'against': {}}, []
-            for e in support['residues']:
-                for s in e['support']:
-                    points['support'].setdefault(s[0], [s[1], (self.request['structure'], s[5], s[6]), f'{s[0]:.2f}: {domon_costello_to_html(list(s[2]))} = {s[3]}<br>rules out'])[2] += f'<br>{", ".join(s[4])}'
-                for a in e['against']:
-                    points['against'].setdefault(a[0], [a[1], None, f'{a[0]:.2f}: {domon_costello_to_html(list(a[2]))} = {a[3]}<br>fits'])[2] += f'<br>{a[4]}'
-            for e in support['residues']:
-                if id(e) in read and read[id(e)][2] == 'a2-3':
-                    residues = range(len(glycan_to_nxGraph(self.request['structure'])) // 2 + 1)
-                    points['support' if read[id(e)][3] else 'against'].setdefault(read[id(e)][0], [read[id(e)][1], (self.request['structure'], tuple(i for i in residues if i != e['residue']), e['residue']), f'{linkage[id(e)]}<br>15% or more reads a2-3 (ion-trap CID)'])
-            for color, side in ((LILAC, 'support'), (CANDY, 'against')):
-                if points[side]:
-                    artist = ax.scatter(list(points[side]), [v[0] * 100 + 3 for v in points[side].values()], marker = 'v', s = 45, c = color, edgecolors = 'white',
-                                        linewidths = 0.6, zorder = 7, clip_on = False)
-                    entry['markers'].append((artist, [v[1:] for v in points[side].values()]))
-            self.canvas.draw_idle()
-        self.hover_targets += entry['markers']
+        self.hover_targets += getattr(self.canvas.figure, 'support_markers', [])
         rows = [f'<tr><td>{e["name"]}</td><td>{"<br>".join([f"{s[0]:.2f} {domon_costello_to_html(list(s[2]))} = {s[3]}" for s in e["support"][:3]] + [linkage.get(id(e))] * (id(e) in read and read[id(e)][3])) or "none"}</td>'
                 f'<td>{", ".join(e["open"][:3]) + (", ..." if len(e["open"]) > 3 else "")}</td>'
                 f'<td style="color:{CANDY}">{"<br>".join([f"{a[0]:.2f} fits {a[4]}" for a in e["against"][:2]] + [linkage.get(id(e))] * (id(e) in read and not read[id(e)][3]))}</td></tr>'
@@ -1493,54 +1813,63 @@ class SpectrumPanel(QWidget):
     def zoom(self, event):
         """The mouse wheel zooms into m/z around the pointer and out again; the toolbar's Home and Back return as from its own zoom"""
         ax = self.canvas.figure.axes[0]
-        if event.inaxes is not ax or event.xdata is None:
+        if not (ax.rect[0] <= event.x <= ax.rect[0] + ax.rect[2] and ax.rect[1] <= event.y <= ax.rect[1] + ax.rect[3]):
             return
-        if not getattr(self.canvas.figure, 'zoomed', False):
-            # The view before the first zoom is the one Home returns to
-            self.toolbar.push_current()
-            self.canvas.figure.zoomed = True
+        self.toolbar.begin()
         lo, hi = ax.get_xlim()
-        factor = 0.8 ** event.step
-        ax.set_xlim(event.xdata - (event.xdata - lo) * factor, event.xdata + (hi - event.xdata) * factor)
-        self.toolbar.push_current()
+        factor, x = 0.8 ** event.step, float(ax.data(event.x, event.y)[0])
+        ax.set_xlim(x - (x - lo) * factor, x + (hi - x) * factor)
         self.canvas.draw_idle()
+        self.toolbar.push_current()
+        self.hover(event)
 
-    def toggle_cartoon(self, event):
-        """A click on a fragment label hides that fragment's cartoon if it is drawn, else draws it (every peak of one fragment shares its cartoon)"""
-        # Pan and zoom clicks are not label clicks; hit-testing a label lays out its mathtext, which waits for no annotation thread
-        if self.toolbar.mode or event.button != 1 or self.request is None or not MPL_LOCK.acquire(blocking = False):
-            return
-        try:
-            fragments = getattr(self.canvas.figure.axes[0], 'cartoon_fragments', {})
-            text = next((t for t in self.canvas.figure.axes[0].texts if t.get_text() and t.xy[0] in fragments and t.contains(event)[0]), None)
-        finally:
-            MPL_LOCK.release()
-        if text is not None:
-            frag_iupac, drawn = fragments[text.xy[0]]
-            self.toggles[frag_iupac] = not drawn
-            self.resubmit()
+    def at_mouse(self, event):
+        """What the mouse is on, as (highlight in the SNFG drawing, tooltip, what a click acts on: the index of an MS3 peak or the fragment of a cartoon), which hovering and
+        clicking share, so that a click does what the tooltip and the cursor said"""
+        # Newest first, so support markers win over the MS3 triangles; labels and cartoons (no 'ind') next, and the sticks that reach up into their labels last
+        for artist, meta in list(reversed(self.hover_targets)) + self.label_targets + self.stick_targets:
+            hit, info = artist.contains(event)
+            if hit:
+                return meta[info.get('ind', [0])[0]]
+        return None, '', None
+
+    def press(self, event):
+        action = self.at_mouse(event)[2] if event.button == 1 else None
+        if isinstance(action, int):
+            self.ms3_clicked.emit(action)
+        elif action is not None:
+            self.toggle_cartoon(action)
+
+    def toggle_cartoon(self, frag_iupac):
+        """Hides a fragment's cartoon if it is drawn, else draws it (every peak of one fragment shares its cartoon). The rest of the picture is settled by that: the cartoons drawn
+        stay where they are, and those left out for want of room stay out, so that a click changes only what it was on"""
+        ax = self.canvas.figure.axes[0]
+        shown = {box['fragment']: box['xy'] for box in ax.cartoon_boxes}
+        self.toggles = {f: False for f in [f for f, _ in ax.cartoon_fragments.values()] + list(self.toggles) if f not in shown} | shown
+        self.toggles.pop(frag_iupac)
+        self.toggles[frag_iupac] = frag_iupac not in shown
+        self.resubmit()
+
+    def clear_highlight(self):
+        if self.hovered is not None:
+            self.hovered = None
+            self.support_hovered.emit(None)
+
+    def hover_again(self):
+        """Cursor, tooltip, and highlight of a spectrum that changed under a resting mouse"""
+        position = self.canvas.mapFromGlobal(QCursor.pos())
+        if self.canvas.isVisible() and self.isActiveWindow() and self.canvas.rect().contains(position):
+            self.hover(ChartEvent(position.x() * 72 / DPI, self.canvas.figure.height - position.y() * 72 / DPI))
 
     def hover(self, event):
-        """Shows the fragment of the supporting (or contradicting) peak under the mouse as a tooltip, and its supported part in the SNFG drawing; over a
-        peak isolated for MS3, what clicking it does, with a hand cursor"""
-        highlight, tip, clickable = None, '', False
-        # Hit-testing a label lays out its text, which must wait while an annotation thread draws (matplotlib's mathtext parser is not thread-safe); markers
-        # need no lock, so they answer while spectra ahead are drawn
-        locked = MPL_LOCK.acquire(blocking = False)
-        try:
-            # Newest first, so support markers win over the invisible MS3 sticks under them, and fragment labels (text, no 'ind') last
-            for artist, meta in list(reversed(self.hover_targets)) + (self.label_targets if locked else []):
-                hit, info = artist.contains(event)
-                if hit:
-                    highlight, tip = meta[info.get('ind', [0])[0]]
-                    clickable = artist in getattr(self.canvas.figure, 'ms3_artists', ()) or getattr(artist, 'xy', (None,))[0] in getattr(self.canvas.figure.axes[0], 'cartoon_fragments', {})
-                    break
-        finally:
-            if locked:
-                MPL_LOCK.release()
-        # While panning or zooming, the toolbar sets its own cursor
-        if not self.toolbar.mode:
-            self.canvas.set_cursor(Cursors.HAND if clickable else Cursors.POINTER)
+        """Shows the fragment of the supporting (or contradicting) peak under the mouse as a tooltip, and its supported part in the SNFG drawing; over a peak isolated for MS3, a
+        fragment label, or a cartoon, what clicking it does, with a hand cursor"""
+        highlight, tip, action = self.at_mouse(event)
+        # While panning or zooming, the toolbar sets its own cursor, and clicks do neither of what the tooltips say
+        if self.toolbar.mode:
+            tip = tip.split('<br>Click')[0]
+        else:
+            self.canvas.setCursor(Qt.PointingHandCursor if action is not None else Qt.ArrowCursor)
         if tip:
             QToolTip.showText(QCursor.pos(), tip, self.canvas)
         elif self.hovered is not None or QToolTip.isVisible():
@@ -1639,44 +1968,40 @@ class QuantPanel(QWidget):
         k = self.ion.currentIndex()
         if not 0 <= k < len(self.records):
             return
-        d, figure = self.records[k], self.chart.figure
+        d = self.records[k]
         self.automatic.setVisible('auto' in d)
-        figure.clear()
-        ax, scan_ax = figure.add_axes([0.08, 0.16, 0.54, 0.74]), figure.add_axes([0.71, 0.16, 0.27, 0.74])
+        figure = self.chart.new_figure()
+        # In points on the left, as ticks with a power of ten and the axis name take the same room in a narrow window
+        left = 58 / figure.width
+        ax, scan_ax = figure.add_axes([left, 0.16, 0.62 - left, 0.74]), figure.add_axes([0.71, 0.16, 0.27, 0.74])
         times, trace, left, right = d['times'], d['trace'], d['left'], d['right']
         if left >= 0:
-            ax.fill_between(times[left:right + 1], d['baseline'], np.maximum(trace[left:right + 1], d['baseline']), color = LILAC, alpha = 0.35, linewidth = 0,
-                            label = 'Integrated')
-            ax.hlines(d['baseline'], times[left], times[right], colors = MUTED, linestyles = '--', linewidth = 0.8, label = 'Baseline')
+            ax.fill_between(times[left:right + 1], np.maximum(trace[left:right + 1], d['baseline']), d['baseline'], color = LILAC, alpha = 0.35, label = 'Integrated')
+            ax.hlines(d['baseline'], times[left], times[right], color = MUTED, dash = (3.0, 1.3), lw = 0.8, label = 'Baseline')
         if 'auto' in d and d['auto'][0] >= 0:
-            ax.axvspan(times[d['auto'][0]], times[d['auto'][1]], fill = False, edgecolor = MUTED, linestyle = ':', linewidth = 0.8, label = 'CandyCrunch\'s range')
-        ax.plot(times, trace, color = INK, linewidth = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"]}')
+            ax.axvline(times[d['auto'][0]], color = MUTED, dash = (0.8, 1.3), label = 'CandyCrunch\'s range')
+            ax.axvline(times[d['auto'][1]], color = MUTED, dash = (0.8, 1.3))
+        ax.plot(times, trace, color = INK, lw = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"]}')
         for o in d['others']:
-            ax.plot(times, o['trace'], color = LILAC if o['added'] else '#b8b0c0', linestyle = '-' if o['added'] else '--', linewidth = 0.8,
+            ax.plot(times, o['trace'], color = LILAC if o['added'] else '#b8b0c0', dash = None if o['added'] else (3.0, 1.3), lw = 0.8,
                     label = f'z = {o["charge"]} (m/z {o["mz"]:.2f}): ' + ('added' if o['added'] else 'not added') + (f', r {o["r"]:.2f}' if o['r'] is not None else ', flat'))
-        ax.axvline(d['rt'], color = CANDY, linestyle = ':', linewidth = 0.8, label = 'Peak RT')
+        ax.axvline(d['rt'], color = CANDY, dash = (0.8, 1.3), label = 'Peak RT')
         ax.set_xlim(times[0], times[-1]) if len(times) > 1 else None
-        ax.set_xlabel('Retention time (min)', fontsize = 8)
-        ax.set_ylabel('Intensity', fontsize = 8)
-        ax.set_title(f'Extracted ion chromatogram, M to M+{len(d["windows"]) - 1}' if d['windows'] else 'Extracted ion chromatogram', fontsize = 8)
-        ax.legend(fontsize = 7, frameon = False, loc = 'upper right')
+        ax.set_xlabel('Retention time (min)')
+        ax.set_ylabel('Intensity')
+        ax.set_title(f'Extracted ion chromatogram, M to M+{len(d["windows"]) - 1}' if d['windows'] else 'Extracted ion chromatogram', size = 8)
+        ax.legend('upper right')
         if d['scan'] is not None:
             mzs, ints = d['scan']
             for lo, hi in d['windows']:
-                scan_ax.axvspan(lo, hi, color = LILAC, alpha = 0.25, linewidth = 0)
-            scan_ax.vlines(mzs, 0, ints, colors = INK, linewidth = 0.8)
+                scan_ax.axvspan(lo, hi, color = LILAC)
+            scan_ax.vlines(mzs, 0, ints, color = INK, lw = 0.8)
             spacing = 1.00335 / d['charge']
             scan_ax.set_xlim(d['windows'][0][0] - 1.5 * spacing, d['windows'][-1][1] + 1.5 * spacing)
             scan_ax.set_ylim(0, max(ints.max(initial = 0), 1) * 1.1)
-            scan_ax.set_title(f'Survey scan at {times[d["apex"]]:.2f} min', fontsize = 8)
-        scan_ax.set_xlabel('m/z (shaded: windows summed)', fontsize = 8)
-        for a in (ax, scan_ax):
-            a.tick_params(labelsize = 7)
-            a.ticklabel_format(axis = 'y', style = 'sci', scilimits = (0, 0))
-            a.yaxis.get_offset_text().set_fontsize(7)
-            a.spines[['top', 'right']].set_visible(False)
-        # Kept as an attribute: a selector without a reference is garbage collected and stops responding
-        self.selector = SpanSelector(ax, lambda lo, hi: self.select(k, lo, hi), 'horizontal', useblit = True, props = dict(facecolor = LILAC, alpha = 0.2))
+            scan_ax.set_title(f'Survey scan at {times[d["apex"]]:.2f} min', size = 8)
+        scan_ax.set_xlabel('m/z (shaded: windows summed)')
+        self.chart.canvas.span = lambda lo, hi: self.select(k, lo, hi)
         self.chart.canvas.draw_idle()
 
     def select(self, k, lo, hi):
@@ -2296,7 +2621,7 @@ class ResultsView(QWidget):
         actions.addWidget(self.custom, 0, 1)
         actions.addWidget(self.exclude, 1, 0)
         actions.addWidget(self.crumbs, 1, 1)
-        # With the other actions on this peak: in the spectrum controls it left the matplotlib toolbar too little room, which hid pan and zoom
+        # With the other actions on this peak: in the spectrum controls it left the chart's toolbar too little room, which hid pan and zoom
         self.report_button = QPushButton('Report misprediction…')
         self.report_button.setToolTip('Sends this peak (its MS2 and MS3 spectra, CandyCrunch\'s predictions and scores, and the settings) to the CandyCrunch '
                                       'developers, with what is wrong about it, so that CandyCrunch can learn from it')
@@ -2392,9 +2717,8 @@ class ResultsView(QWidget):
         self.tabs.currentChanged.connect(lambda: self.row is not None and self.tabs.currentWidget() is self.quant and self.show_quant())
         self.quant.run.currentIndexChanged.connect(self.show_quant)
         self.quant.edited.connect(self.integrate)
-        self.map_background, self.highlight = None, None
-        self.map.canvas.mpl_connect('draw_event', self.map_drawn)
-        self.map.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and self.select_row(int(event.ind[0])))
+        self.map_points = None
+        self.map.canvas.pressed.connect(self.map_pressed)
         images.ready.connect(self.image_ready)
 
     @property
@@ -2909,9 +3233,7 @@ class ResultsView(QWidget):
             self.update_alternative_icons()
 
     def draw_map(self):
-        df, figure = self.frame, self.map.figure
-        figure.clear()
-        self.map_background = None
+        df, figure = self.frame, self.map.new_figure()
         ax = figure.add_axes([0.08, 0.14, 0.78, 0.8])
         if self.dataset.currentData() == FEATURES:
             color, color_label = df['n_files_ms2'].astype(float).values, 'Runs with MS2'
@@ -2921,64 +3243,39 @@ class ResultsView(QWidget):
             size = (df['rel_abundance'] if 'rel_abundance' in df.columns else df['num_spectra']).astype(float).values
         size = 12 + 380 * np.sqrt(np.nan_to_num(size) / (np.nanmax(size, initial = 0) or 1))
         known = ~np.isnan(color)
-        ax.scatter(df['RT'].values[~known], df['m/z'].values[~known], s = size[~known], c = '#cccccc', edgecolors = 'white', linewidths = 0.5)
-        points = ax.scatter(df['RT'].values, df['m/z'].values, s = size, c = np.where(known, color, np.nan), cmap = CONFIDENCE_MAP,
-                            edgecolors = 'white', linewidths = 0.5, alpha = 0.9, picker = 4)
+        ax.scatter(df['RT'].values[~known], df['m/z'].values[~known], s = size[~known], color = '#cccccc', edge = ('white', 0.5))
         if known.any():
-            colorbar = figure.colorbar(points, cax = figure.add_axes([0.89, 0.14, 0.02, 0.8]))
-            colorbar.set_label(color_label, fontsize = 8)
-            colorbar.ax.tick_params(labelsize = 7)
-            if self.dataset.currentData() == FEATURES:
-                from matplotlib.ticker import MaxNLocator
-                # A number of runs: whole numbers only (it was labeled 1.2, 1.4, ..., or 0.925 to 1.075 when every feature had MS2 in one run)
-                colorbar.ax.yaxis.set_major_locator(MaxNLocator(integer = True, min_n_ticks = 1))
-        # The selection marker is animated: a full draw leaves it out (and keeps that background), so selecting another peak only blits the marker
-        self.highlight = ax.scatter([], [], s = 0, facecolors = 'none', edgecolors = INK, linewidths = 1.4, animated = True)
-        ax.set_xlabel('Retention time (min)', fontsize = 8)
-        ax.set_ylabel('m/z', fontsize = 8)
-        ax.tick_params(labelsize = 7)
-        ax.spines[['top', 'right']].set_visible(False)
+            ax.scatter(df['RT'].values[known], df['m/z'].values[known], s = size[known], c = color[known], edge = ('white', 0.5), alpha = 0.9)
+            # A number of runs: whole numbers only (it was labeled 1.2, 1.4, ..., or 0.925 to 1.075 when every feature had MS2 in one run)
+            ax.colorbar(color_label, integer = self.dataset.currentData() == FEATURES)
+        self.map_points = Target(ax, df['RT'].values, df['m/z'].values, radius = 4.0)
+        ax.set_xlabel('Retention time (min)')
+        ax.set_ylabel('m/z')
         self.map.canvas.draw_idle()
 
-    def map_drawn(self, event = None):
-        """After every full draw of the glycan map (or with event None, when only the selection moved): the selection marker blitted onto the map"""
-        if self.highlight is None:
-            return
-        if event is not None:
-            self.map_background = self.map.canvas.copy_from_bbox(self.map.figure.bbox)
-        elif self.map_background is None:
-            return
-        else:
-            self.map.canvas.restore_region(self.map_background)
-        self.map.figure.draw_artist(self.highlight)
-        if event is None:
-            self.map.canvas.blit(self.map.figure.bbox)
+    def map_pressed(self, event):
+        hit, info = self.map_points.contains(event) if self.map_points is not None else (False, None)
+        if hit:
+            self.select_row(info['ind'][0])
 
     def draw_selection(self):
         df, row = self.frame, self.row
-        self.highlight.set_offsets([[df['RT'].iat[row], df['m/z'].iat[row]]])
-        self.highlight.set_sizes([140])
-        # Hidden charts are not drawn (a full draw of the map took 0.2-0.5 s on every row change); showing their tab draws them
-        if self.map.isVisible():
-            self.map_drawn()
+        # A ring the canvas paints over the map's kept image, so selecting another peak draws nothing again (a full draw of the map took 0.2-0.5 s on every row change)
+        self.map.canvas.rings = [(self.map_points.ax, df['RT'].iat[row], df['m/z'].iat[row])]
+        self.map.canvas.update()
         if self.dataset.currentData() != FEATURES or not self.across.isVisible():
             return
-        figure = self.across.figure
-        figure.clear()
+        figure = self.across.new_figure()
         ax = figure.add_axes([0.25, 0.15, 0.7, 0.8])
         runs = [run for run in self.payload['tables'] if run in df.columns]
         values = [0 if pd.isna(df[run].iat[row]) else df[run].iat[row] for run in runs]
         evidence = [df[f'evidence_{run}'].iat[row] if f'evidence_{run}' in df.columns else None for run in runs]
-        bars = ax.barh(range(len(runs)), values, height = 0.6, color = [LILAC if e != 'ms1_only' else 'white' for e in evidence], edgecolor = LILAC, linewidth = 0.8)
-        for bar, e, value in zip(bars, evidence, values):
-            bar.set_hatch('////' if e == 'ms1_only' else None)
-            ax.annotate(f'{value:.2f}' if isinstance(e, str) else 'not found', (value, bar.get_y() + bar.get_height() / 2), xytext = (4, 0),
-                        textcoords = 'offset points', va = 'center', fontsize = 7, color = INK if isinstance(e, str) else MUTED)
-        ax.set_yticks(range(len(runs)), runs, fontsize = 7)
+        ax.barh(range(len(runs)), values, height = 0.6, color = ['a1' if e != 'ms1_only' else 'a3' for e in evidence])
+        for k, (e, value) in enumerate(zip(evidence, values)):
+            ax.annotate(f'{value:.2f}' if isinstance(e, str) else 'not found', (value, k), offset = (4, 0), size = 7, color = INK if isinstance(e, str) else MUTED, halo = 0.0)
+        ax.set_yticks(range(len(runs)), runs)
         ax.invert_yaxis()
-        ax.set_xlabel('Relative abundance (%); hatched: MS1 signal only', fontsize = 8)
-        ax.tick_params(axis = 'x', labelsize = 7)
-        ax.spines[['top', 'right']].set_visible(False)
+        ax.set_xlabel('Relative abundance (%); pale: MS1 signal only')
         self.across.canvas.draw_idle()
 
     def refresh(self):
@@ -3439,14 +3736,13 @@ class CompareTab(QWidget):
         self.done.connect(self.finished)
         self.search.textChanged.connect(self.proxy.set_needle)
         self.table.selectionModel().selectionChanged.connect(self.selection_changed)
-        self.volcano.canvas.mpl_connect('pick_event', lambda event: len(event.ind) and event.artist in self.volcano_rows and
-                                        self.select_row(int(self.volcano_rows[event.artist][event.ind[0]])))
+        self.volcano.canvas.pressed.connect(self.volcano_pressed)
         self.redraw = QTimer(self)
         self.redraw.setSingleShot(True)
         self.redraw.setInterval(250)
-        self.redraw.timeout.connect(lambda: self.result is not None and (self.draw_volcano(self.volcano.figure), self.draw_selection()))
+        self.redraw.timeout.connect(lambda: self.result is not None and (self.draw_volcano(self.volcano.new_figure()), self.draw_selection()))
         images.ready.connect(lambda key: key[1] is True and key[0] in self.cartoon_wanted and self.redraw.start())
-        self.volcano.canvas.mpl_connect('resize_event', lambda event: self.result is not None and self.redraw.start())
+        self.volcano.canvas.resized.connect(lambda: self.result is not None and self.redraw.start())
         self.tabs.currentChanged.connect(lambda: self.row is not None and self.draw_selection())
         self.set_session(None)
 
@@ -3658,8 +3954,7 @@ class CompareTab(QWidget):
             self.summary.setText(html.escape(message or 'Give the runs their groups, then compare them.'))
             self.model.set_table(pd.DataFrame({'excluded': [], 'curation': []}), [])
             for chart in (self.volcano, self.by_group):
-                chart.figure.clear()
-                chart.canvas.draw_idle()
+                chart.new_figure()
             return
         df = result['table'].assign(excluded = False, curation = '')
         two = len(result['groups']) == 2
@@ -3706,7 +4001,7 @@ class CompareTab(QWidget):
         menu.addAction('Plot as image…', self.save_plot)
         if two:
             menu.addAction('Volcano plot (glycowork)…', self.save_volcano)
-        self.draw_volcano(self.volcano.figure)
+        self.draw_volcano(self.volcano.new_figure())
         self.select_row(keep_row if keep_row is not None and keep_row < len(df) else (self.proxy.mapToSource(self.proxy.index(0, 0)).row() if len(df) else None))
 
     def select_row(self, row):
@@ -3740,48 +4035,51 @@ class CompareTab(QWidget):
         colors = np.where(df['significant'].values.astype(bool), np.where(x > 0, CANDY, LILAC) if two else LILAC, '#cccccc')
         return x, y, colors, two
 
+    def volcano_pressed(self, event):
+        for target, rows in self.volcano_rows.items():
+            hit, info = target.contains(event)
+            if hit:
+                self.select_row(int(rows[info['ind'][0]]))
+                return
+
     def draw_volcano(self, figure, small = True):
-        figure.clear()
         ax = figure.add_axes([0.09, 0.14, 0.86, 0.8] if small else [0.12, 0.12, 0.83, 0.82])
         x, y, colors, two = self.volcano_axes()
         # those tested on detection as triangles pointing to the group they were found in
         self.volcano_rows = {}
         for rows, marker in ((~self.absent, 'o'), (self.absent & (x > 0), '>'), (self.absent & (x <= 0), '<')):
             if rows.any():
-                points = ax.scatter(x[rows], y[rows], s = 34 if marker != 'o' else 28, c = colors[rows], marker = marker if two else 'D' if marker != 'o' else 'o',
-                                    edgecolors = 'white', linewidths = 0.5, picker = 4)
-                self.volcano_rows[points] = np.flatnonzero(rows)
+                ax.scatter(x[rows], y[rows], s = 34 if marker != 'o' else 28, hue = colors[rows], colors = {c: c for c in set(colors[rows])}, marker = marker if two else 'D' if marker != 'o' else 'o',
+                           edge = ('white', 0.5), legend = None)
+                self.volcano_rows[Target(ax, x[rows], y[rows], radius = 4.0)] = np.flatnonzero(rows)
         if self.absent.any():
-            ax.text(0.99, 0.98, f'{"Triangles at the edges" if two else "Diamonds"}: missing from every run of a group, tested on detection', transform = ax.transAxes,
-                    ha = 'right', va = 'top', fontsize = 7, color = MUTED)
-        ax.axhline(-np.log10(self.result['alpha']), color = MUTED, linestyle = '--', linewidth = 0.8)
+            ax.text(0.99, 0.98, f'{"Triangles at the edges" if two else "Diamonds"}: missing from every run of a group, tested on detection', axes_fraction = True,
+                    ha = 'right', va = 'top', size = 7, color = MUTED)
+        ax.axhline(-np.log10(self.result['alpha']), color = MUTED, dash = (3.0, 1.3))
         if two:
-            ax.axvline(0, color = '#dddddd', linewidth = 0.8)
+            ax.axvline(0, color = '#dddddd', dash = None)
             a, b = self.result['groups']
-            ax.set_xlabel(f'Log2 fold change, {b} over {a}', fontsize = 8)
+            ax.set_xlabel(f'Log2 fold change, {b} over {a}')
         else:
-            ax.set_xlabel('Effect size (omega squared)', fontsize = 8)
-        ax.set_ylabel('-log10 corrected p-value', fontsize = 8)
-        ax.tick_params(labelsize = 7)
-        ax.spines[['top', 'right']].set_visible(False)
-        self.add_cartoons(ax, x, y)
+            ax.set_xlabel('Effect size (omega squared)')
+        ax.set_ylabel('-log10 corrected p-value')
+        self.add_cartoons(ax, x, y, DPI * self.devicePixelRatioF() if small else 300)
         if small:
-            # The selection marker is drawn over the plot, as on the glycan map
-            self.marker = ax.scatter([], [], s = 0, facecolors = 'none', edgecolors = INK, linewidths = 1.4)
-        figure.canvas.draw_idle()
+            # The selection marker is a ring the canvas paints over the plot, as on the glycan map
+            self.volcano_ax = ax
+            self.volcano.canvas.draw_idle()
 
-    def add_cartoons(self, ax, x, y):
+    def add_cartoons(self, ax, x, y, dpi):
         """SNFG drawings of the most significant glycans or motifs (up to 15; GlycoDraw draws named motifs, not those defined by a glyco-regex), each next to its point where it covers no other point or drawing and stays within the
         plot, outward first (one without such a place is left out); one still being rendered is added when it is ready (cartoon_wanted)"""
-        df, figure = self.result['table'], ax.figure
-        ax.autoscale_view()
+        df = self.result['table']
         bottom, top = ax.get_ylim()
         # room above the most significant points
         ax.set_ylim(bottom, top + 0.25 * (top - bottom))
-        frame, placed, self.cartoon_wanted = ax.get_window_extent(), [], set()
-        per_pt = figure.dpi / 72
-        gap = 6 * per_pt
-        points = ax.transData.transform(np.column_stack([x, y]))
+        ax.figure.layout()
+        placed, self.cartoon_wanted = [], set()
+        gap = 6
+        points = np.column_stack(ax.page(x, y))
         for i in [i for i in np.argsort(-y, kind = 'stable') if df['significant'].iat[i]][:15]:
             image = self.images.get(df['Glycan'].iat[i])
             if image is None:
@@ -3790,58 +4088,55 @@ class CompareTab(QWidget):
             if image.isNull():
                 continue
             # 0.18 pt per pixel of the compact drawings (0.8 px per SVG unit), so their sizes compare as the glycans do: an N-glycan is about 60 x 22 pt
-            scale = min(0.18, 90 / image.width()) * per_pt
+            scale = min(0.18, 90 / image.width())
             w, h = image.width() * scale, image.height() * scale
-            px, py = ax.transData.transform((x[i], y[i]))
+            px, py = (float(v) for v in ax.page(x[i], y[i]))
             side = -1 if x[i] < 0 and len(self.result['groups']) == 2 else 1
             for dx, dy in ((w / 2 + gap, h / 2 + gap), (w / 2 + gap, 0), (0, h / 2 + 2 * gap), (w / 2 + gap, -h / 2 - gap), (-w / 2 - gap, h / 2 + gap),
                            (w / 2 + gap, 1.5 * h + 2 * gap), (0, -h / 2 - 2 * gap), (-w / 2 - gap, 0), (w + 3 * gap, h + 3 * gap), (0, 1.5 * h + 4 * gap),
                            (w + 3 * gap, 0), (-w - 3 * gap, h + 3 * gap)):
                 cx, cy = px + side * dx, py + dy
                 box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-                if box[0] >= frame.x0 and box[2] <= frame.x1 and box[1] >= frame.y0 and box[3] <= frame.y1 and not any(
+                if box[0] >= ax.rect[0] and box[2] <= ax.rect[0] + ax.rect[2] and box[1] >= ax.rect[1] and box[3] <= ax.rect[1] + ax.rect[3] and not any(
                         box[0] < b[2] + gap and b[0] < box[2] + gap and box[1] < b[3] + gap and b[1] < box[3] + gap for b in placed) and not (
                         (points[:, 0] > box[0] - gap / 2) & (points[:, 0] < box[2] + gap / 2) & (points[:, 1] > box[1] - gap / 2) & (points[:, 1] < box[3] + gap / 2)).any():
                     break
             else:
                 continue
             placed.append(box)
-            # Shrunk to its pixels at this figure's dpi by Qt's area-averaging scaler (matplotlib's filter left thin strokes grainy); zoom 1 / per_pt keeps
-            # those pixels 1:1 on screen and in a 300 dpi export, and their size in points in SVG and PDF
-            small = image.scaled(QSize(max(1, round(w)), max(1, round(h))), Qt.IgnoreAspectRatio, Qt.SmoothTransformation).convertToFormat(QImage.Format_RGBA8888)
+            # Shrunk to its pixels at this figure's dpi by Qt's area-averaging scaler, which keeps those pixels 1:1 on screen and in a 300 dpi export, and their
+            # size in points in SVG and PDF
+            small = image.scaled(QSize(max(1, round(w * dpi / 72)), max(1, round(h * dpi / 72))), Qt.IgnoreAspectRatio, Qt.SmoothTransformation).convertToFormat(QImage.Format_RGBA8888)
             pixels = np.frombuffer(small.constBits(), np.uint8).reshape(small.height(), small.bytesPerLine())[:, :4 * small.width()].reshape(small.height(), small.width(), 4)
             # a connector only where the drawing is not right next to its point (there it was a stray dash)
             far = np.hypot(max(box[0] - px, px - box[2], 0), max(box[1] - py, py - box[3], 0)) > 3 * gap
-            ax.add_artist(AnnotationBbox(OffsetImage(pixels.copy(), zoom = 1 / per_pt), (x[i], y[i]), xybox = ((cx - px) / per_pt, (cy - py) / per_pt),
-                                         boxcoords = 'offset points', frameon = False, annotation_clip = False, zorder = 1,
-                                         arrowprops = dict(arrowstyle = '-', color = '#c8c0d0', linewidth = 0.6, shrinkA = 0, shrinkB = 4) if far else None))
+            ax.image(pixels, x[i], y[i], w, h, offset = (cx - px, cy - py), z = 1)
+            if far:
+                # Up to the drawing's edge, whose inside the line would show through
+                edge = 1 - min(w / 2 / abs(cx - px) if cx != px else np.inf, h / 2 / abs(cy - py) if cy != py else np.inf)
+                ax.plot([x[i], x[i]], [y[i], y[i]], color = '#c8c0d0', lw = 0.6, offset = [(0.0, 0.0), ((cx - px) * edge, (cy - py) * edge)], z = 1)
 
     def draw_selection(self):
         if self.row is None or self.result is None:
             return
         x, y, _, _ = self.volcano_axes()
-        self.marker.set_offsets([[x[self.row], y[self.row]]])
-        self.marker.set_sizes([140])
-        if self.volcano.isVisible():
-            self.volcano.canvas.draw_idle()
+        self.volcano.canvas.rings = [(self.volcano_ax, x[self.row], y[self.row])]
+        self.volcano.canvas.update()
         label = self.result['table']['Glycan'].iat[self.row]
         if self.by_group.isVisible():
-            figure = self.by_group.figure
-            figure.clear()
+            figure = self.by_group.new_figure()
             ax = figure.add_axes([0.1, 0.14, 0.86, 0.78])
             values = self.result['values'].loc[label] if label in self.result['values'].index else None
             for k, g in enumerate(self.result['groups']):
                 runs = self.result['members'][g]
                 v = np.array([0.0 if values is None or pd.isna(values.get(run)) else float(values.get(run)) for run in runs])
                 offsets = np.linspace(-0.12, 0.12, len(v)) if len(v) > 1 else np.zeros(1)
-                ax.scatter(k + offsets, v, s = 30, color = LILAC, edgecolors = 'white', linewidths = 0.5, zorder = 3)
-                ax.hlines(v.mean(), k - 0.25, k + 0.25, color = INK, linewidth = 1.2)
-            ax.set_xticks(range(len(self.result['groups'])), self.result['groups'], fontsize = 8)
+                ax.scatter(k + offsets, v, s = 30, color = LILAC, edge = ('white', 0.5), z = 3)
+                ax.hlines(v.mean(), k - 0.25, k + 0.25, color = INK, lw = 1.2)
+            ax.set_xticks(range(len(self.result['groups'])), self.result['groups'])
             ax.set_xlim(-0.6, len(self.result['groups']) - 0.4)
-            ax.set_ylabel(f'{"Motif" if self.result["motifs"] else "Relative"} abundance (%), as measured', fontsize = 8)
-            ax.set_title(label if len(label) < 90 else label[:87] + '…', fontsize = 8)
-            ax.tick_params(axis = 'y', labelsize = 7)
-            ax.spines[['top', 'right']].set_visible(False)
+            ax.set_ylabel(f'{"Motif" if self.result["motifs"] else "Relative"} abundance (%), as measured')
+            ax.set_title(label if len(label) < 90 else label[:87] + '…', size = 8)
             self.by_group.canvas.draw_idle()
         if len(self.result['groups']) > 2:
             table = self.result['posthoc'].get(label)
@@ -3893,10 +4188,9 @@ class CompareTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, 'Save plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.png'),
                                               'PNG image (*.png);;SVG image (*.svg);;PDF (*.pdf)')
         if path:
-            figure = Figure(figsize = self.volcano.figure.get_size_inches(), dpi = 300)
-            FigureCanvasAgg(figure)
+            figure = vc.Figure(self.volcano.figure.width / 72, self.volcano.figure.height / 72, PALETTE)
             self.draw_volcano(figure, small = False)
-            figure.savefig(path, dpi = 300)
+            figure.save(path)
 
     def save_volcano(self):
         path, _ = QFileDialog.getSaveFileName(self, 'Save volcano plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.svg'),

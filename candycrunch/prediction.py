@@ -2884,10 +2884,10 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
     header_col = df_out['precursor_charge'].tolist() if trust_header_charge and 'precursor_charge' in df_out.columns else [None] * len(df_out)
     double_mass_tolerance = 2 * mass_tolerance
     has_sulfate = {}
+    water = {'permethylated': calculate_adduct_mass('CH4O'), 'deuteropermethylated': calculate_adduct_mass('CD3OH'), 'peracetylated': calculate_adduct_mass('C2H4O2')}.get(sample_prep, mass_dict['H2O'])
     # Sialic acid ions as a share of the base peak per spectrum (None where the scan range starts above all of them), for accurate MS2
     accurate_sia = None
     if fragment_tolerance is not None and sialic_derivatization is None:
-        water = {'permethylated': calculate_adduct_mass('CH4O'), 'deuteropermethylated': calculate_adduct_mass('CD3OH'), 'peracetylated': calculate_adduct_mass('C2H4O2')}.get(sample_prep, mass_dict['H2O'])
         ions = {sia: [sm + a + PROTON_MASS * multiplier - w for sm in sia_masses[sia] for a in (0, res_mass['Hex'] + res_mass['HexNAc']) for w in (0, water)]
                 for sia in ('Neu5Ac', 'Neu5Gc')}
         accurate_sia = []
@@ -2903,6 +2903,21 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 hits = int_arr[np.any(np.abs(mz_arr[:, None] - np.array(seen)[None, :]) < tol, axis = 1)] if seen else []
                 levels[sia] = (hits.max() / int_arr.max() if len(hits) else 0.0) if seen else None
             accurate_sia.append(levels)
+    # Neu5Ac and Neu5Gc B1 ions (also less H2O) as a share of the base peak per spectrum, for any MS2, matched within the fragment tolerance of accurate MS2,
+    # else half the mass tolerance; None where the scan starts above them (an ion at the scan's first m/z, the edge of an ion trap's low-mass cutoff, counts)
+    b1_levels = []
+    for pk in peak_col:
+        levels = {}
+        if isinstance(pk, dict) and pk:
+            mz_arr, int_arr = np.fromiter(pk.keys(), float, len(pk)), np.fromiter(pk.values(), float, len(pk))
+            for sia in ('Neu5Ac', 'Neu5Gc'):
+                targets = np.array([sm + PROTON_MASS * multiplier - w for sm in sia_masses[sia] for w in (0, water)])
+                tol = (targets * fragment_ppm / 1e6 if fragment_ppm else np.full(len(targets), fragment_tolerance)) if fragment_tolerance is not None else np.full(
+                    len(targets), mass_tolerance / 2)
+                seen = targets + tol > mz_arr.min()
+                hits = int_arr[np.any(np.abs(mz_arr[:, None] - targets[seen][None, :]) < tol[seen][None, :], axis = 1)]
+                levels[sia] = (hits.max() / int_arr.max() if len(hits) else 0.0) if seen.any() else None
+        b1_levels.append(levels)
     for k in range(len(df_out)):
         keep = []
         c = abs(charge_col[k])
@@ -2961,6 +2976,16 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 for sia, level in accurate_sia[k].items():
                     if level is not None and ((sia in m and level < 0.05) or (sia not in m and level >= 0.5)):
                         truth.append(False)
+            if 'Neu5Gc' in m:
+                # A Neu5Gc (Neu5Ac + O) must not leave only a trace of its B1 next to a strong Neu5Ac B1, which the checks above (any peak within 1 Da,
+                # or a loss matched by an isotope peak) let through: compositions read as Neu5Gc for a +16 Da species (A2G2S2 + O as
+                # Hex5HexNAc4Neu5Ac1Neu5Gc1) or for an isobar (Neu5Gc + dHex for Neu5Ac + Hex) had their Neu5Gc B1 at 0-10% of a Neu5Ac B1 of 10-100% of
+                # the base peak, as much as Neu5Ac-only glycans leave at its m/z in ion traps; real Neu5Gc glycans (mouse, rat, bovine, cells grown in
+                # Matrigel or serum) at 25% or more, also with one Neu5Gc among four sialic acids. A weak Neu5Ac B1 says nothing (monosialylated
+                # N-glycans in ion traps show 1-5% of either), nor do the antenna B ions (a triantennary Neu5Gc glycan in an ion trap: Neu5Ac's at 22%,
+                # Neu5Gc's absent)
+                ac, gc = b1_levels[k].get('Neu5Ac'), b1_levels[k].get('Neu5Gc')
+                truth.append(ac is None or gc is None or ac < 0.1 or gc >= 0.2 * ac)
             if 'Neu5Gc' not in m:
                 truth.append(not any(abs(sm + PROTON_MASS * multiplier - j) < mass_tolerance
                                      for j in top_frags[:5] if isinstance(j, float) for sm in sia_masses['Neu5Gc']))
