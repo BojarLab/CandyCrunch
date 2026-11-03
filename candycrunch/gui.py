@@ -789,8 +789,7 @@ class Annotator(QObject):
                         from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, classify_fragment, \
                             fragment_cartoon, fragIUPAC_to_image, is_composition, derivatize_carboxyls, deisotope_ms2
                         # fragIUPAC_to_image imports these itself
-                        with contextlib.suppress(ImportError):
-                            import glycowork.motif.draw, glycorender.render, PIL.Image
+                        import glycowork.motif.draw, glycorender.raster, glycorender.render
                     # CandyCrumbs can take long, so its results (and those of supporting_ions) are kept for the last spectra, which are drawn again at another
                     # panel size, or after a prefetch was cut short
                     key = repr([request[k] for k in ('structure', 'mzs', 'intensities', 'charge', 'mass_tag', 'sample_prep', 'tolerance', 'ppm')] + sorted(request['kwargs'].items()))
@@ -1143,8 +1142,10 @@ def _path(ops):
 
 @lru_cache(4096)
 def _glyphs(ttf, text):
-    """A string's outlines at 1000 units per em, cached, as the same few characters come back with every redraw"""
-    return _path(vc.text.outline(pdfwrite.Canvas(None, (1.0, 1.0)), ttf, text, 0.0, 0.0, 1000.0).ops)
+    """A string's outlines at 1000 units per em, cached, as the same few characters come back with every redraw; filled by the nonzero rule, as strokes of a glyph may overlap"""
+    path = _path(vc.text.outline(pdfwrite.Canvas(None, (1.0, 1.0)), ttf, text, 0.0, 0.0, 1000.0).ops)
+    path.setFillRule(Qt.WindingFill)
+    return path
 
 
 @lru_cache(256)

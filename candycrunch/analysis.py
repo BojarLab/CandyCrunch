@@ -4292,25 +4292,21 @@ _CARTOONS = {}
 
 
 def fragIUPAC_to_image(frag_iupac, padding = 4, scale = 1.0):
-    """Renders a glycan fragment as a cropped SNFG cartoon at scale pixels per point (padding in points), or None if the drawing stack is
-    unavailable; cached, as spectra are drawn again for every candidate, panel size, and saved image"""
+    """Renders a glycan fragment as a cropped SNFG cartoon at scale pixels per point (padding in points), as an RGBA array of shape (rows, columns, 4), or None if it
+    cannot be drawn; cached, as spectra are drawn again for every candidate, panel size, and saved image"""
     if (frag_iupac, padding, scale) in _CARTOONS:
         return _CARTOONS[(frag_iupac, padding, scale)]
+    from glycowork.motif.draw import GlycoDraw
+    from glycorender.raster import render
+    from glycorender.render import convert_svg_to_pdf
     try:
-        from io import BytesIO
-        from glycowork.motif.draw import GlycoDraw
-        from glycorender.render import convert_svg_to_png
-        from PIL import Image
-    except ImportError:
-        return None
-    try:
-        image = Image.open(BytesIO(convert_svg_to_png(GlycoDraw(frag_iupac, suppress = True, compact = True,
-                                                                dim = 30).as_svg(), None, return_bytes = True, scale = scale)))
+        canvas = convert_svg_to_pdf(GlycoDraw(frag_iupac, suppress = True, compact = True, dim = 30).as_svg(), None, return_canvas = True)
+        image = render(canvas.ops, canvas.width, canvas.height, scale, scale)
     except Exception:
         return None
-    box, pad = image.convert('RGBA').getbbox(), round(padding * scale)
-    if box:
-        image = image.crop((max(0, box[0] - pad), max(0, box[1] - pad), min(image.width, box[2] + pad), min(image.height, box[3] + pad)))
+    rows, columns, pad = np.flatnonzero(image[..., 3].any(axis = 1)), np.flatnonzero(image[..., 3].any(axis = 0)), round(padding * scale)
+    if len(rows):
+        image = image[max(0, rows[0] - pad):rows[-1] + 1 + pad, max(0, columns[0] - pad):columns[-1] + 1 + pad].copy()
     if len(_CARTOONS) > 2000:
         _CARTOONS.clear()
     _CARTOONS[(frag_iupac, padding, scale)] = image
@@ -4663,14 +4659,14 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
             if image is None:
                 continue
             forced = bool(cartoons.get(frag_iupac))
-            width, height = image.width * glycan_zoom / scale, image.height * glycan_zoom / scale
+            width, height = image.shape[1] * glycan_zoom / scale, image.shape[0] * glycan_zoom / scale
             # One asked for that is too tall for the band fits it, rendered smaller, as shrinking it on drawing would turn it grainy
             fit = np.floor(20 * (band[1] - band[0]) / height) / 20
             if forced and 0 < fit < 1:
                 image = fragIUPAC_to_image(frag_iupac, scale = scale * fit)
                 if image is None:
                     continue
-                width, height = image.width * glycan_zoom / scale, image.height * glycan_zoom / scale
+                width, height = image.shape[1] * glycan_zoom / scale, image.shape[0] * glycan_zoom / scale
             # Leaders end at the top of a peak's label (or of the peak), most intense peak first
             tops = []
             for rel_int, mz, _ in sorted(members, reverse = True):
@@ -4702,7 +4698,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                 continue
             _, x, y = spot
             diagonals = cross(x, y)
-            ax.image(np.array(image), to_mz(x), (y + height / 2 - frame_y) / frame_height, width, height, y_fraction = True)
+            ax.image(image, to_mz(x), (y + height / 2 - frame_y) / frame_height, width, height, y_fraction = True)
             ax.cartoon_boxes.append({'xy': (to_mz(x), (y + height / 2 - frame_y) / frame_height), 'box': (-width / 2, -height / 2, width / 2, height / 2), 'y_fraction': True,
                                      'fragment': frag_iupac, 'peaks': [m[1] for m in sorted(members, reverse = True)]})
             for top in tops:
