@@ -3758,11 +3758,12 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     if experimental:
         df_out = impute(df_out, pred_thresh, mode = mode, modification = modification, mass_tag = mass_tag,
                         glycan_class = glycan_class, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization, filter_out = filter_out)
-        try:
-            df_out = filter_delayed_rts(df_out, mass_tolerance)
-            df_out = Ac_follows_Gc(df_out)
-        except ValueError:
-            pass
+    try:
+        df_out = filter_delayed_rts(df_out, mass_tolerance)
+        df_out = Ac_follows_Gc(df_out)
+    except ValueError:
+        pass
+    if experimental:
         ionization = -PROTON_MASS if mode == 'negative' else PROTON_MASS
         # Reducing-end modification as glycowork adds it, including the group a derivatized alditol gains on its extra free OH
         mass_offset = composition_to_mass({}, sample_prep = sample_prep, modification = modification) - composition_to_mass(
@@ -3779,13 +3780,12 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
             # of another ion
             df_out['predictions'] = [[] if e == 'weak' else preds for e, preds in zip(df_out['evidence'], df_out['predictions'])]
     # Filter out wrong predictions via diagnostic ions etc.
-    if supplement or experimental:
-        df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, modification = modification,
-                               mass_tolerance = mass_tolerance, df_use = df_use, sample_prep = sample_prep,
-                               mass_tag = mass_tag, max_charge = max_charge, sialic_derivatization = sialic_derivatization,
-                               trust_header_charge = trust_header_charge)
-        df_out['predictions'] = [[(k[0].replace('-ol', '').replace('1Cer', ''), k[1]) if len(k) > 1 else (
-            k[0].replace('-ol', '').replace('1Cer', ''),) for k in j] if j else j for j in df_out['predictions']]
+    df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, modification = modification,
+                           mass_tolerance = mass_tolerance, df_use = df_use, sample_prep = sample_prep,
+                           mass_tag = mass_tag, max_charge = max_charge, sialic_derivatization = sialic_derivatization,
+                           trust_header_charge = trust_header_charge)
+    df_out['predictions'] = [[(k[0].replace('-ol', '').replace('1Cer', ''), k[1]) if len(k) > 1 else (
+        k[0].replace('-ol', '').replace('1Cer', ''),) for k in j] if j else j for j in df_out['predictions']]
     return pd.concat([df_out, df_variant]) if len(df_variant) else df_out
 
 
@@ -4931,14 +4931,11 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         reordered.append([(best[0], round(best[1], 4))] + [g for g in preds if g[0] != best[0]][:4] if best else preds)
     df_out['predictions'] = reordered
     # Filter out wrong predictions via diagnostic ions etc.
-    if experimental:
-        df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep,
-                               mass_tag = mass_tag, max_charge = max_charge,
-                               modification = modification, mass_tolerance = mass_tolerance,
-                               df_use = df_use, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1,
-                               fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm).reset_index()
-    else:
-        df_out = df_out.reset_index()
+    df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep,
+                           mass_tag = mass_tag, max_charge = max_charge,
+                           modification = modification, mass_tolerance = mass_tolerance,
+                           df_use = df_use, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1,
+                           fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm).reset_index()
     # A spectrum's row is the one with the best fragment evidence, unless its top structure is at least ppm_thresh off the precursor where
     # finalise_predictions cuts by ppm alone (multiply charged rows, or accurate survey scans), so it could never be reported, while another composition of
     # the spectrum has a prediction: at z = 2, Neu5Ac and two dHex (or Neu5Gc and Hex + dHex) lie 0.51 m/z apart, so with an ion-trap precursor both are
@@ -5158,10 +5155,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             df_var = df_var.assign(predictions = [preds[k] for k in df_var['spec_id']], charge = df_var['charge'] * multiplier, RT = df_var['RT'].round(2),
                                    rel_abundance = df_var['intensity'], evidence = 'side product', top_fragments = [
                     [round(float(m), 4) for m, _ in sorted(p.items(), key = lambda x: x[1], reverse = True)[:frag_num]] for p in df_var['peak_d']]).set_index('m/z')
-            if experimental:
-                df_var = domain_filter(df_var, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep, mass_tag = mass_tag,
-                                       max_charge = max_charge, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use,
-                                       sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1)
+            df_var = domain_filter(df_var, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep, mass_tag = mass_tag,
+                                   max_charge = max_charge, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use,
+                                   sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1)
             df_var = df_var[df_var['predictions'].str.len() > 0][[c for c in df_out.columns if c in df_var.columns and c != 'rt_range'] + ['re_offset', 'reducing_end', 'rt_range']]
         if len(df_var):
             df_var = deduplicate_predictions(df_var, mz_diff = mass_tolerance, rt_diff = rt_diff).drop(columns = ['rt_range'])
@@ -5246,11 +5242,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         return (df_out, []) if spectra else df_out
     df_out['top1_pred'] = [x[0][0] if x else np.nan for x in df_out.predictions]
     # Same augmentation and clean-up as every file in wrap_inference_batch
-    if supplement or experimental:
-        df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use, mode,
-                                     modification, mass_tag, filter_out, mass_tolerance, mass_dic,
-                                     sample_prep = sample_prep, max_charge = max_charge, glycans = glycans,
-                                     sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1, accurate_ms2 = trap == 'orbitrap')
+    df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use, mode,
+                                 modification, mass_tag, filter_out, mass_tolerance, mass_dic,
+                                 sample_prep = sample_prep, max_charge = max_charge, glycans = glycans,
+                                 sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1, accurate_ms2 = trap == 'orbitrap')
     df_out, spectra_out = finalise_predictions(df_out, get_missing, mode, modification, mass_tag,
                                                ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1,
@@ -5600,13 +5595,12 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         df_out, spectra_out = empty_table.copy(), []
         if file_label in harmonized_labels:
             df_out = prevailing_category_predictions[prevailing_category_predictions['condition_label'] == file_label].sort_index()
-            if supplement or experimental:
-                df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use,
-                                             file_mode, modification, mass_tag, filter_out,
-                                             mass_tolerance, mass_dic, sample_prep = sample_prep,
-                                             max_charge = abs(max_charge) * (-1 if file_mode == 'negative' else 1),
-                                             sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1s[file_label],
-                                             accurate_ms2 = accurate_ms2s[file_label])
+            df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use,
+                                         file_mode, modification, mass_tag, filter_out,
+                                         mass_tolerance, mass_dic, sample_prep = sample_prep,
+                                         max_charge = abs(max_charge) * (-1 if file_mode == 'negative' else 1),
+                                         sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1s[file_label],
+                                         accurate_ms2 = accurate_ms2s[file_label])
             if len(df_out) > 0:
                 ms1 = None
                 if ms1_paths[file_label]:
@@ -5659,11 +5653,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             for file_label, df_pair in pair_cats.groupby('condition_label', sort = False):
                 file_mode = file_modes[file_label]
                 df_pair = df_pair.sort_index()
-                if supplement or experimental:
-                    df_pair = augment_predictions(df_pair, pred_thresh, supplement, experimental, [classes[0], pair], use_pair, file_mode, modification, mass_tag,
-                                                  filter_out, mass_tolerance, None, sample_prep = sample_prep, max_charge = abs(max_charge) * (-1 if file_mode == 'negative' else 1),
-                                                  glycans = glycans, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1s[file_label],
-                                                  accurate_ms2 = accurate_ms2s[file_label])
+                df_pair = augment_predictions(df_pair, pred_thresh, supplement, experimental, [classes[0], pair], use_pair, file_mode, modification, mass_tag,
+                                              filter_out, mass_tolerance, None, sample_prep = sample_prep, max_charge = abs(max_charge) * (-1 if file_mode == 'negative' else 1),
+                                              glycans = glycans, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1s[file_label],
+                                              accurate_ms2 = accurate_ms2s[file_label])
                 if not len(df_pair):
                     continue
                 ms1 = None

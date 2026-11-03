@@ -404,6 +404,27 @@ def test_filter_out_is_airtight():
     assert not any('Neu5Ac' in p[0] for preds in df['predictions'] for p in (preds or []))
 
 
+def test_search_options_keep_the_checks(tmp_path):
+    # Without imputation and database search a run only loses what those two add: domain_filter still runs, so a [M+HCO3]- three times stronger than its [M-H]- is
+    # folded into that row and listed at its m/z
+    example = str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx')
+    off = {'supplement': False, 'experimental': False}
+    with_search, without = wrap_inference(example, 'O'), wrap_inference(example, 'O', **off)
+    assert 'adduct' in without.columns
+    assert {stringify_dict(c) for c in without['composition']} <= {stringify_dict(c) for c in with_search['composition']}
+    single = without[without['charge'] == -1]
+    mz, rt = single['num_spectra'].idxmax(), single.loc[single['num_spectra'].idxmax(), 'RT']
+    spectra = pd.read_excel(example)
+    plain = spectra[(np.abs(spectra['m/z'] - mz) < 0.3) & (np.abs(spectra['RT'] - rt) < 1)]
+    shift = mass_dict['HCO3-'] + PROTON_MASS
+    adduct = plain.assign(**{'m/z': plain['m/z'] + shift, 'intensity': plain['intensity'] * 3, 'scan': plain['scan'] + 1000000})
+    path = tmp_path / 'adduct.xlsx'
+    pd.concat([spectra, adduct], ignore_index = True).sort_values('RT').to_excel(path, index = False)
+    out = wrap_inference(str(path), 'O', **off)
+    assert (np.abs(out.index.values - mz) < 0.1).any() and not (np.abs(out.index.values - mz - shift) < 0.1).any()
+    assert out.loc[np.abs(out.index.values - mz) < 0.1, 'num_spectra'].max() > without.loc[mz, 'num_spectra']
+
+
 def test_onnx_model_matches_torch():
     # The built app runs the weights of model.py's CandyCrunch_CNN on ONNX Runtime: same logits as PyTorch, also for a norm scale below zero (which cannot
     # be folded into the convolution after it), and the same predictions for the example run
