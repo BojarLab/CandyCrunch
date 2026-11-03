@@ -40,6 +40,7 @@ def map_to_basic(glycoletter, obfuscate_ptm = True):
     basic = glycowork_map_to_basic(glycoletter, obfuscate_ptm = obfuscate_ptm)
     return glycoletter if basic.startswith('Hex') and re.match(r'(Galf|Ins)(?![a-z])', glycoletter) else basic
 
+
 mono_attributes = {
     'Hex': {'mass': {'03X': 72.0211, '02X': 42.0106, '15X': 27.9949, '13A': 60.0211, '24A': 60.0211, '15A': 134.057859,
                      '04A': 60.0211, '35A': 74.0368, '25A': 104.0473, '02A': 120.0423, '03A': 90.0317, '24X': 102.0317,

@@ -1186,7 +1186,11 @@ class SpectrumPanel(QWidget):
         layout.setSpacing(2)
         layout.addLayout(self.controls)
         self.summary.setContentsMargins(10, 0, 6, 0)
-        layout.addWidget(self.summary)
+        # Next to the summary rather than the controls: there it made the window's minimum width 141 px wider once a spectrum was shown
+        self.summary_row = QHBoxLayout()
+        self.summary_row.setContentsMargins(6, 0, 6, 0)
+        self.summary_row.addWidget(self.summary, 1)
+        layout.addLayout(self.summary_row)
         layout.addWidget(self.stack, 1)
         self.fragments = QTextBrowser()
         self.fragments.setOpenLinks(False)
@@ -1303,7 +1307,7 @@ class SpectrumPanel(QWidget):
         self.store(self.request['key'], figure, hit_dict, support)
         entry = self.cache[self.request['key']]
         # The spectrum shown before stays hidden with its canvas while it is cached
-        for widget, layout in ((self.canvas, self.holder_layout), (self.toolbar, self.controls)):
+        for widget, layout in ((self.canvas, self.holder_layout), (self.toolbar, self.summary_row)):
             if widget is not None:
                 widget.hide()
                 layout.removeWidget(widget)
@@ -1335,7 +1339,7 @@ class SpectrumPanel(QWidget):
             self.support_hovered.emit(None)
         self.drawn = (dict(self.request), hit_dict, getattr(figure, 'diagnostic', None))
         self.save.setEnabled(True)
-        self.controls.insertWidget(0, self.toolbar)
+        self.summary_row.insertWidget(0, self.toolbar)
         self.holder_layout.addWidget(self.canvas)
         self.toolbar.show()
         self.canvas.show()
@@ -1347,6 +1351,8 @@ class SpectrumPanel(QWidget):
             f'; \u25b2 marks the {len(self.request["ms3"])} peak(s) with MS3 spectra, click one to annotate them' if self.request['ms3'] else ''))
         if self.request['kwargs'].get('ms3_precursor') is not None and not hits:
             self.summary.setText(f'm/z {self.request["kwargs"]["ms3_precursor"]:.2f} is no fragment of {self.request["structure"]}, so none of its MS3 peaks can be annotated')
+        # The row may be too narrow for all of it next to the toolbar
+        self.summary.setToolTip(self.summary.text())
         from candycrunch.analysis import domon_costello_to_html, PROTON_MASS
         if getattr(figure, 'ms3_artists', None):
             # Hovering a peak isolated for MS3 (its marker or the peak itself) names its fragment and says what clicking does
@@ -1439,6 +1445,7 @@ class SpectrumPanel(QWidget):
         linkage = {k: f'{v[0]:.2f} ' * (v[2] == 'a2-3') + f'[M-H-Neu5Ac]<sup>-</sup> at {v[1]:.0%} of the base peak: {v[2]}' for k, v in read.items()}
         self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) and not e["open"] for e in tested)} of {len(tested)} residues placed by diagnostic fragments' + (f', {partly} narrowed down' if partly else '') +
                              ''.join(f'; Neu5Ac linkage reads {v[2]}' + ('' if v[3] else ', not as shown') for v in read.values()))
+        self.summary.setToolTip(self.summary.text())
         entry = self.cache[self.request['key']]
         if entry['markers'] is None:
             # Each marker carries what hovering it shows: the supported residues' fragment and cleaved bond in the drawing (lilac) and a tooltip naming
@@ -1670,6 +1677,18 @@ class QuantPanel(QWidget):
             self.edited.emit(k, (left, right))
 
 
+class _WheelGuard(QObject):
+    """Installed on the application: the wheel over a combo or spin box scrolls what they sit in and never changes their value, which changed settings unnoticed while
+    scrolling past them; their open lists (widgets of their own), arrows, clicks, and typing work as before"""
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and isinstance(watched, (QComboBox, QSpinBox, QDoubleSpinBox)):
+            # Ignored and filtered: Qt then offers the event to the parent widgets, up to the scroll area
+            event.ignore()
+            return True
+        return False
+
+
 class SettingsPanel(QScrollArea):
     """Input files and every wrap_inference / wrap_inference_batch setting"""
     files_changed = Signal()
@@ -1706,7 +1725,9 @@ class SettingsPanel(QScrollArea):
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
-        self.file_hint = _label('Thermo .raw, Waters .raw folders, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere in this window.', 'hint')
+        # Short enough to keep Advanced settings in view in a 702 px high window at the panel's usual width; the formats in full are its tooltip
+        self.file_hint = _label('Thermo, Waters, SCIEX, Bruker, or Agilent raw data, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere here.', 'hint')
+        self.file_hint.setToolTip('Thermo .raw, Waters .raw folders, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -1730,8 +1751,8 @@ class SettingsPanel(QScrollArea):
         self.adducts.setToolTip('Protons and the usual adducts of the ion mode (Na+, K+, NH4+ in positive, acetate, formate, HCO3- in negative mode) are always '
                                 'considered. An extra charge carrier takes the place of protons where the mobile phase supplies it, e.g., Li+ with lithium '
                                 'acetate: precursors are read as [M+Li]+, [M+2Li]2+, ... first, and their fragments carry Li+')
-        # As wide as their longest choice, these three made the panel wider than its view, which cut off its right edge (the hint, combo arrows, Restore defaults)
-        for box in (self.inputs['glycan_class'], self.sialic, self.adducts):
+        # As wide as their longest choice, these made the panel wider than its view, which cut off its right edge (the hint, combo arrows, Restore defaults)
+        for box in (self.inputs['glycan_class'], self.inputs['modification'], self.inputs['sample_prep'], self.sialic, self.adducts):
             box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
@@ -2200,9 +2221,7 @@ class ResultsView(QWidget):
         self.search.setPlaceholderText('Filter by structure, composition, m/z, GlyTouCan ID, or notes')
         self.search.setClearButtonEnabled(True)
         self.counter = _label('', 'hint')
-        self.export = QToolButton()
-        self.export.setText('Export')
-        self.export.setPopupMode(QToolButton.InstantPopup)
+        self.export = QPushButton('Export')
         self.export_menu = QMenu(self)
         self.export.setMenu(self.export_menu)
         top.addWidget(self.experiment)
@@ -3134,6 +3153,10 @@ class CrumbsTab(QWidget):
         self.ms3_precursor.setSpecialValueText('None (MS2 spectrum)')
         self.ms3_precursor.setToolTip('For an MS3 spectrum: m/z of the MS2 fragment that was isolated, so its peaks are only annotated as fragments of that '
                                       'fragment (glycan structures only)')
+        # As wide as their longest choice, these made the form wider than its limit, which cut off its right edge
+        for box in (self.modification, self.sample_prep, self.sialic):
+            box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form.addRow('Precursor charge', self.charge)
         form.addRow('Reducing end', self.modification)
         form.addRow('Tag mass', self.mass_tag)
@@ -3325,9 +3348,7 @@ class CompareTab(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText('Filter by glycan, motif, or composition')
         self.search.setClearButtonEnabled(True)
-        self.export = QToolButton()
-        self.export.setText('Export')
-        self.export.setPopupMode(QToolButton.InstantPopup)
+        self.export = QPushButton('Export')
         self.export.setMenu(QMenu(self))
         top.addWidget(self.search, 1)
         top.addWidget(self.export)
@@ -4754,6 +4775,7 @@ def main():
         palette.setColor(role, QColor(color))
     app.setPalette(palette)
     app.setStyleSheet(STYLE)
+    app.installEventFilter(_WheelGuard(app))
     app.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'candycrunch_icon.png')))
     if sys.argv[1:2] == ['--self-test']:
         # For the app build: --self-test CLASS FILE [FILE ...] predicts the files (several in parallel) without a window and exits with 0 only if

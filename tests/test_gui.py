@@ -32,6 +32,37 @@ def test_gui_settings_match_wrap_inference(app):
     assert panel.values()['sialic_derivatization'] is None
 
 
+def test_gui_long_choices_keep_forms_narrow(app):
+    from candycrunch import gui
+    # A combo as wide as its longest choice widens its form beyond its view, which cuts off the form's right edge (combo arrows, buttons, Restore defaults)
+    for form in (gui.SettingsPanel(), gui.CrumbsTab(gui.GlycanImages())):
+        for box in form.findChildren(QtWidgets.QComboBox):
+            if max((len(box.itemText(i)) for i in range(box.count())), default = 0) > 24:
+                assert box.sizeAdjustPolicy() == QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon, box.itemText(0)
+
+
+def test_gui_wheel_scrolls_past_settings(app):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtTest import QTest
+    from candycrunch import gui
+    assert '_WheelGuard' in inspect.getsource(gui.main)
+    guard = gui._WheelGuard()
+    app.installEventFilter(guard)
+    panel = gui.SettingsPanel()
+    panel.resize(340, 240)
+    panel.show()
+    app.processEvents()
+    bar = panel.verticalScrollBar()
+    for box, value in ((panel.inputs['glycan_class'], panel.inputs['glycan_class'].currentIndex), (panel.charge, panel.charge.value)):
+        panel.ensureWidgetVisible(box)
+        app.processEvents()
+        before, position = value(), bar.value()
+        QTest.wheelEvent(panel.windowHandle(), QPointF(box.mapTo(panel, box.rect().center())), QPoint(0, -120))
+        assert value() == before and bar.value() > position
+    panel.hide()
+    app.removeEventFilter(guard)
+
+
 def test_gui_results_curation(app):
     from candycrunch import gui
     df = pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc', 'Fuc(a1-2)Gal(b1-3)GalNAc'],
