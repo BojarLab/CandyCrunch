@@ -17,7 +17,7 @@ def build_parser():
     parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g. N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
-    parser.add_argument('--modification', help='Reducing-end modification: reduced (alditol), reduced_D (NaBD4), unreduced (free reducing end), a label, benzyl (benzyl glycoside), or custom: a label of --mass_tag Da', type=str, choices=['reduced', 'reduced_D', 'unreduced', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl', 'custom'], required=False)
+    parser.add_argument('--modification', help='Reducing-end modification: reduced (alditol), reduced_D (NaBD4), unreduced (free reducing end), a label, benzyl (benzyl glycoside), glycolate or lactate (O-glycans released oxidatively, on the glycolic acid of their Ser or the lactic acid of their Thr), or custom: a label of --mass_tag Da; several for glycans of several reducing ends side by side (e.g. glycolate lactate), the first being the run\'s own', type=str, nargs='+', choices=['reduced', 'reduced_D', 'unreduced', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl', 'glycolate', 'lactate', 'custom'], required=False)
     parser.add_argument('--mass_tag', help='Mass in Da of a --modification custom label', type=float, required=False)
     parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated'], required=False)
     parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples (or of samples permethylated after it): EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA, GQ (glycoqueuing: aniline on every sialic acid, which tells no linkage), GQ-d5 (d5-aniline on a2-6, d0 on a2-3)', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5'], required=False)
@@ -65,13 +65,15 @@ def main(argv=None):
         parser.error(f"not found: {', '.join(missing)}")
     if len(filepaths) > 1 and args.intra_cat_thresh is None:
         parser.error('--intra_cat_thresh is required when processing several files')
-    if (args.mass_tag is not None) != (args.modification == 'custom'):
+    # One reducing end is that end, several side by side a list (the first being the run's own, which --mass_tag belongs to)
+    ends = args.modification or []
+    if (args.mass_tag is not None) != (ends[:1] == ['custom']):
         parser.error('--mass_tag and --modification custom go together (glycans with a free reducing end: --modification unreduced)')
     if args.max_charge == 0:
         parser.error('--max_charge has to be at least 1 (the ion mode is set by --mode)')
     # wrap_inference takes a free reducing end as a custom label without mass, as the app does
-    if args.modification == 'unreduced':
-        args.modification = 'custom'
+    ends = ['custom' if m == 'unreduced' else m for m in ends]
+    args.modification = (ends[0] if len(ends) == 1 else ends) if ends else None
     args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}
     # wrap_inference takes the ion mode from the sign of max_charge
     if args.mode or args.max_charge:

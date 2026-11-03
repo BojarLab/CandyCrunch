@@ -10,7 +10,7 @@ from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph
     build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
     CHAIN_IONS, domon_costello_to_mpl, \
     peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
-    subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge
+    subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge, chance_fragment
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
@@ -64,9 +64,11 @@ TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6
 'ref':'https://doi.org/10.1007/s13361-018-1945-7'
 }
 ]
-# Correctly annotated peaks (top-1, top-5) of each TEST_DICTS spectrum as of 2026-10-19: fewer fails the accuracy tests, so that a lost annotation shows
-# instead of passing under a common threshold; when a change annotates more (or deliberately fewer), these are updated with it
-REFERENCE_CORRECT = [(8, 11), (16, 17), (10, 13), (7, 13), (4, 4), (9, 11), (25, 27)]
+# Correctly annotated peaks (top-1, top-5) of each TEST_DICTS spectrum as of 2026-11-02: fewer fails the accuracy tests, so that a lost annotation shows
+# instead of passing under a common threshold; when a change annotates more (or deliberately fewer), these are updated with it. Since chance_filter
+# (2026-11-02) four top-1 reference annotations are fragment kinds that match decoys as often as spectra at this tolerance, which simplify no longer
+# picks (with chance_filter = False: 16, 10, 7, 9 for TEST_DICTS[1, 2, 3, 5]); the top-5 lists keep them
+REFERENCE_CORRECT = [(8, 11), (15, 17), (9, 13), (6, 13), (4, 4), (8, 11), (25, 27)]
 CHAIN_RANKS = {'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa', 'Lambda', 'Mu'}
 
 def strip_chain_rank(name):
@@ -463,6 +465,21 @@ def test_supporting_ions():
     # Nothing here tells where the core 1 Gal sits, so its alternatives stay open
     assert not residues['Gal(b1-3) on reducing-end GalNAc']['support'] and residues['Gal(b1-3) on reducing-end GalNAc']['open']
     assert [(c['structure'], [s[0] for s in c['support']], c['against']) for c in out['candidates']] == [(isomer, [510.19], [])]
+
+
+def test_candycrumbs_chance_filter():
+    # At a wide tolerance simplify does not pick a cross-ring with a neutral loss (a chance match); the full option list (simplify = False) and
+    # chance_filter = False keep it, and at an accurate tolerance the filter is off
+    assert chance_fragment(['02A_3_Alpha', 'M_H2O']) and chance_fragment(['Z_2_Alpha', 'Z_1_Beta', 'Y_1_Gamma']) and chance_fragment(['Y_2_Alpha', 'Y_3_Beta', 'M_H2O'])
+    assert not any(chance_fragment(n) for n in (['Y_2_Alpha', 'Y_3_Beta'], ['24A_3_Alpha'], ['M_C2H4O2'], ['B_1_Alpha', 'M_H2O']))
+    d = TEST_DICTS[1]
+    on = CandyCrumbs(d['glycan_string'], [425.07], 0.4, charge = d['charge'], mass_tag = d['label_mass'])[425.07]
+    assert on is None or not any(chance_fragment(n) for n in on['Domon-Costello nomenclatures'])
+    for kwargs in (dict(simplify = False), dict(chance_filter = False)):
+        off = CandyCrumbs(d['glycan_string'], [425.07], 0.4, charge = d['charge'], mass_tag = d['label_mass'], **kwargs)[425.07]
+        assert any(normalize_annotations(n) == normalize_annotations(['02A_3_Alpha', 'M_H2O']) for n in off['Domon-Costello nomenclatures'])
+    assert CandyCrumbs(d['glycan_string'], [425.0712], 0.02, charge = d['charge'], mass_tag = d['label_mass']) == \
+        CandyCrumbs(d['glycan_string'], [425.0712], 0.02, charge = d['charge'], mass_tag = d['label_mass'], chance_filter = False)
 
 
 def test_candycrumbs_alditol_cross_ring_alone():

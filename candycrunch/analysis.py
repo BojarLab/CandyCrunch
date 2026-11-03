@@ -860,6 +860,9 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
 
 GLYCAN_ONLY_GLOBAL_MODS = {'CH2O', 'C2H2O', 'C2H4O2', 'C3H8O4', 'CO2', 'SO4', 'PO4'}
 PEPTIDE_ONLY_GLOBAL_MODS = {'NH3'}
+# labels whose primary amide loses ammonia, so a glycan fragment that keeps the labelled reducing end loses NH3 like a peptide does: 2-AB Y ions of
+# positive-mode ion-trap CID show [Y - NH3]+ as strong as Y itself (Gal-GalNAc-2AB: Y1 342.17 and 325.14 at the top of the spectrum)
+AMIDE_LABELS = ('2AB',)
 ADDUCT_GLOBAL_MODS = {'+Na', '+K', '+Li', '+Acetate'}
 # the methanol only permethylated glycans lose, with its deuterated caps when deuteropermethylated
 METHANOL_LOSSES = {'permethylated': 'CH4O', 'deuteropermethylated': 'CD3OH'}
@@ -972,13 +975,14 @@ def chain_ions(root_label, charge, mass_tag, sample_prep = 'underivatized'):
             for name, (k, hexnac) in CHAIN_IONS.items() if base == 'HexNAc' or not hexnac}
 
 
-def update_global_mods(subg, global_mods, special_residues):
+def update_global_mods(subg, global_mods, special_residues, amide_label = False):
     """Returns the valid list of global modifications for a given subgraph\n
     | Arguments:
     | :-
     | subg (networkx_object): a subgraph
     | global_mods (list): global modifications of the whole glycan, from get_initial_global_mods
-    | special_residues (list): residues of the glycan with losses of their own (CO2 of acids, SO4 of S, PO4 of P), from get_initial_global_mods\n
+    | special_residues (list): residues of the glycan with losses of their own (CO2 of acids, SO4 of S, PO4 of P), from get_initial_global_mods
+    | amide_label (bool): whether the reducing end carries a label of AMIDE_LABELS, whose NH3 loss fragments holding the reducing end may show; default:False\n
     | Returns:
     | :-
     | Returns a list of modification names
@@ -988,7 +992,7 @@ def update_global_mods(subg, global_mods, special_residues):
     excluded = set()
     if not node_labels:
         excluded |= GLYCAN_ONLY_GLOBAL_MODS
-    if all(len(v) > 1 for v in all_labels):
+    if all(len(v) > 1 for v in all_labels) and not (amide_label and any('reducing_end' in d for d in subg.nodes.values())):
         excluded |= PEPTIDE_ONLY_GLOBAL_MODS
     subg_global_mods = [x for x in global_mods if not (excluded & set(parse_global_mod(x)))]
     # residue by residue (the joined labels of Glc(a1-4)Ara contain GlcA), with every uronic acid (IdoA, GalA) as HexA and only phosphate
@@ -1134,6 +1138,10 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     """
     if mass_tag is None:
         mass_tag = 2 * HYDROGEN_MASS
+    amide_label = any(abs(mass_tag - calculate_adduct_mass(modification_formula_dict[x])) < 0.01 for x in AMIDE_LABELS)
+    # ... a loss of the label, not a neutral loss of the glycan, so it stays when the other global modifications are disabled (protonated precursors)
+    if amide_label and 'NH3' not in global_mods:
+        global_mods = list(global_mods) + ['NH3']
     charge_masses = extend_masses(fragment_masses, charge)
     sorted_charge_masses = sorted(charge_masses)
     unfiltered = not len(charge_masses)
@@ -1299,13 +1307,15 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             labels = sorted(set(node_dict.values()))
             holds = np.bitwise_or.reduce(np.where(member, np.array([1 << labels.index(node_dict[v]) for v in node_list],
                                                                    dtype = object if len(labels) > 62 else np.int64), 0), axis = 1)
+            # (bit 0: the set holds an amide-labelled reducing end, whose fragments may lose NH3)
+            holds = holds * 2 + (member[:, [pos[v] for v in red_ends]].any(axis = 1) if amide_label and red_ends else 0)
             uniq, first, gid = np.unique(holds, return_index = True, return_inverse = True)
             gid, global_table = gid.ravel(), []
             for present, f in zip(uniq.tolist(), first.tolist()):
-                key = (frozenset(label for k, label in enumerate(labels) if present >> k & 1), global_settings)
+                key = (frozenset(label for k, label in enumerate(labels) if present >> (k + 1) & 1), present & 1, global_settings)
                 opt = _TERMINAL_OPTIONS.get(key)
                 if opt is None:
-                    gm = update_global_mods(nx_mono.subgraph(subgraphs[set_idx[f]]), global_mods, special_residues)
+                    gm = update_global_mods(nx_mono.subgraph(subgraphs[set_idx[f]]), global_mods, special_residues, amide_label = amide_label)
                     g_masses = [global_mod_mass(x, mode_mass = mode_mass) for x in gm[1:]]
                     opt = _TERMINAL_OPTIONS[key] = (gm, g_masses, np.array([0.0] + g_masses), np.array([mod_count([[], []], x) for x in gm], dtype = int),
                                                     np.array([bool(ADDUCT_GLOBAL_MODS & set(parse_global_mod(x))) for x in gm]), min([0.0] + g_masses), max([0.0] + g_masses))
@@ -1451,7 +1461,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             subg._node, subg._adj, subg._pred = node_data, succ, {v: {u: succ[u][v] for u in node_data if v in succ[u]} for v in node_data}
             terminal_labels = [node_dict_basic[x] for x in terminals]
             bonus_root_mass, bonus_root_node = temporary_root_calc_func(subg, nx_mono)
-            subg_global_mods = update_global_mods(subg, global_mods, special_residues)
+            subg_global_mods = update_global_mods(subg, global_mods, special_residues, amide_label = amide_label)
             present_breakages = get_broken_bonds(subg, nx_edge_dict)
             # glycopeptide subgraphs have two sinks (C-terminal residue, glycan reducing end); pick in parent graph order
             # like true_root_node, as the subgraph view iterates string node labels in hash-randomized set order
@@ -2866,9 +2876,18 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
 
 
 @rescue_glycans
+def chance_fragment(name):
+    # Fragment kinds that m/z-shifted decoy spectra match as often as real ones at a wide (ion-trap) tolerance: a cross-ring together with any other
+    # cleavage or neutral loss, three or more glycosidic cleavages, a neutral loss on two glycosidic cleavages
+    glyco = sum(t[:2] in ('B_', 'C_', 'Y_', 'Z_') for t in name)
+    cross = sum(len(t) > 3 and t[:2].isdigit() and t[2] in 'AX' for t in name)
+    mods = sum(t.startswith('M_') for t in name)
+    return bool(cross and (glyco or mods or cross > 1)) or glyco > 2 or bool(mods and glyco > 1)
+
+
 def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 max_cleavages = 3, simplify = True, charge = -1, mass_tag = None,
-                iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = None,
+                iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = None, chance_filter = None,
                 disable_A_cross_rings = None, sample_prep = 'underivatized', prior_weight = 1.0, glycan_class = None,
                 fragmentation_method = None, allow_internal_peptide_fragments = False, mass_threshold_ppm = None,
                 max_global_mods = None, ms3_precursor = None, sialic_derivatization = None, metal_cations = True):
@@ -2888,6 +2907,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     |                             PO3- of sulfates and phosphates in negative mode, the reporter ions of a 2AA/2AB/procainamide label in positive mode); default:False
     | disable_X_cross_rings (bool): whether to strip out any X-type cross-rings, the open-chain ions of a labeled reducing end (CHAIN_IONS) included;
     |                               default:None (kept)
+    | chance_filter (bool): whether to leave out the fragment kinds that match m/z-shifted decoy spectra as often as real ones at a wide tolerance (a
+    |                       cross-ring with any other cleavage or neutral loss, three or more glycosidic cleavages, a neutral loss on two of them);
+    |                       default:None (on for the fragment simplify picks, for free-glycan structures at a flat window of 0.1 Da or more, outside
+    |                       MS3; the full option lists of simplify = False, which the pipeline scores, keep every kind)
     | disable_A_cross_rings (bool or string): whether to strip out any A-type cross-rings, or 'non_reducing' for all but the A_R ions (cross-rings of the
     |                                         reducing-terminal residue) of fragments with a metal cation; default:None ('non_reducing' in positive mode for
     |                                         unreduced glycans (mass_tag 0), stripped for other positive-mode glycans)
@@ -2946,6 +2969,11 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         # Glycopeptide oxonium series routinely lose two waters; free glycans rarely need a second modification
         max_global_mods = 2 if glycopeptide_input else 1
     hydrogen_shifts = isinstance(fragmentation_method, str) and fragmentation_method in RADICAL_METHODS and not glycopeptide_input
+    if chance_filter is None:
+        # on by default only for the one fragment picked per peak (simplify) where chance matches swamp the real ones: free-glycan structures at a
+        # flat window of 0.1 Da or more (on ion-trap spectra at 0.5 Da these kinds annotated as much signal of m/z-shifted decoys as of the spectra;
+        # at accurate tolerances they are real); the full option lists keep them, as the pipeline's scores lost by the filter and experts use them
+        chance_filter = simplify and not glycopeptide_input and mass_threshold_ppm is None and (mass_threshold is None or mass_threshold >= 0.1) and ms3_precursor is None
     if mass_threshold_ppm is None and mass_threshold is None and glycopeptide_input:
         # Intact glycopeptides are only measurable on FT instruments, where a fixed Da window is far too
         # loose; an explicitly given mass_threshold is always respected instead
@@ -3189,6 +3217,11 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                         keep.append(i)
                 fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
             dc_names = [list(names[id(sg)]) for sg in fragment_properties[-1]]
+            if chance_filter:
+                keep = [i for i, x in enumerate(dc_names) if not chance_fragment(x)]
+                if len(keep) < len(dc_names):
+                    fragment_properties = [[v[i] for i in keep] for v in fragment_properties]
+                    dc_names = [dc_names[i] for i in keep]
             lability = [set_lability[id(sg.nodes)] for sg in fragment_properties[-1]]
             # an ion named without a graph: one without a residue, which its fragmentation prior puts ahead of any single cleavage, or an open-chain ion
             hits = [(t, m) for t, m in small.items() if abs(observed_mass - m) <= mass_threshold and (

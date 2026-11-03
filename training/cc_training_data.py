@@ -65,7 +65,7 @@ SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid'
 LOG_COLUMNS = ['project', 'run', 'path', 'excluded', 'maps', 'glycan_class', 'rt_shift', 'rt_alignment', 'rt_anchors', 'masses_rescued', 'settings_fitted', 'status',
                'error', 'settings', 'inputs', 'labelled', 'unique', 'structures', 'map_rows', 'map_rows_with_rt', 'map_row_status', 'unlabelled', 'inputs_cached',
                'seconds']
-REDUCING_ENDS = {'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl'}
+REDUCING_ENDS = {'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl', 'glycolate', 'lactate'}
 
 
 def sample_columns(df):
@@ -223,6 +223,10 @@ def convert_run(task):
             # 'custom <mass>': a tagged reducing end, as the CORA benzyl glycosides ('custom 76.0313' on permethylated glycans)
             tag = str(ends.iloc[0])[len('custom'):].strip()
             settings.update(modification = 'custom', mass_tag = float(tag) if tag else None)
+        # Rows of several reducing ends side by side (O-glycans released oxidatively on the glycolic acid of their Ser and the lactic acid of their Thr, some
+        # with a free end): each end is a pass of its own with its rows, as wrap_inference(modification = [...]) runs them
+        mixed = sorted(ends.unique(), key = str) if len(ends) and ends.notna().all() and ends.nunique() > 1 and all(
+            e in REDUCING_ENDS or e == 'free' or str(e).startswith('custom') for e in ends.unique()) else []
         traps = task['mapping']['trap'] if task['mapping'] is not None and 'trap' in task['mapping'].columns else pd.Series(dtype = object)
         if len(traps) and traps.notna().all() and traps.nunique() == 1 and traps.iloc[0] in ('linear', 'orbitrap', 'amazon'):
             settings['trap'] = traps.iloc[0]
@@ -259,9 +263,10 @@ def convert_run(task):
                 settings['filter_out'] = default_out - listed
         tries = [settings] if 'modification' in settings else [dict(settings, modification = 'reduced'), dict(settings, modification = 'custom', mass_tag = None)]
 
-        def attempt(s):
+        def attempt(s, rows = None):
             nonlocal reused
-            mapping, rescued = rescue_masses(task['mapping'], s) if task['mapping'] is not None else (pd.DataFrame(columns = ['Mass', 'RT', 'glycan']), 0)
+            rows = task['mapping'] if rows is None else rows
+            mapping, rescued = rescue_masses(rows, s) if rows is not None else (pd.DataFrame(columns = ['Mass', 'RT', 'glycan']), 0)
             key = hashlib.sha1((task['inputs_stamp'] + json.dumps(s, sort_keys = True, default = lambda v: sorted(v) if isinstance(v, (set, frozenset)) else str(v))).encode()).hexdigest()
             if key not in used:
                 reused += key in cached
@@ -269,8 +274,18 @@ def convert_run(task):
             return (*label_inputs(used[key], mapping, crumbs_thresh = s.get('crumbs_thresh', 3)), s, mapping, rescued)
 
         # The first of the most labelling settings
-        best, fitted = max([attempt(s) for s in tries], key = lambda r: len(r[0])), False
-        if best[0].empty and len(best[1]) and task['mapping'] is not None and task['mapping']['glycan'].notna().any():
+        best, fitted = (None, False) if mixed else (max([attempt(s) for s in tries], key = lambda r: len(r[0])), False)
+        if mixed:
+            parts = []
+            for e in mixed:
+                tag = str(e)[len('custom'):].strip() if str(e).startswith('custom') else ''
+                s = dict(settings, modification = e if e in REDUCING_ENDS else 'custom', mass_tag = float(tag) if tag else None)
+                labelled, unlabelled, s, mapping, rescued = attempt(s, task['mapping'][ends == e])
+                parts.append((labelled.assign(reducing_end_part = e), unlabelled.assign(reducing_end_part = e), s, mapping, rescued))
+            labelled, unlabelled = [pd.concat([p[i] for p in parts if len(p[i])] or [parts[0][i]]) for i in (0, 1)]
+            labelled.attrs = dict(parts[0][0].attrs, map_rows = [r for p in parts for r in p[0].attrs['map_rows']])
+            best = (labelled, unlabelled, parts[0][2], pd.concat([p[3] for p in parts]), sum(p[4] for p in parts))
+        elif best[0].empty and len(best[1]) and task['mapping'] is not None and task['mapping']['glycan'].notna().any():
             # The checklist's settings label nothing although the map has structures: the derivatization and reducing end that the map's masses fit
             done = [(s['sample_prep'], s['modification']) for s in tries]
             # A sialic acid derivatization only exists on underivatized glycans
@@ -300,6 +315,11 @@ def convert_run(task):
         # glycan_type (labelled) and glycan_types (unlabelled) are label_run's: the class code the model got, the run's class
         labelled = labelled.assign(**meta)
         unlabelled = unlabelled.assign(**meta)
+        if mixed:
+            # every input of a mixed run carries its own reducing end
+            tags = {e: float(e[len('custom'):]) if str(e).startswith('custom') and str(e)[len('custom'):].strip() else None for e in mixed}
+            labelled, unlabelled = [x.assign(reducing_end = x['reducing_end_part'], mass_tag = x['reducing_end_part'].map(tags)).drop(columns = 'reducing_end_part')
+                                    for x in (labelled, unlabelled)]
         mapped = mapping[mapping['glycan'].notna()]
         info.update(status = 'no_precursor_mz' if on_grid else 'ok', settings = json.dumps({k: v for k, v in settings.items()}, default = str), inputs = len(labelled) + len(unlabelled),
                     labelled = len(labelled), unique = int((labelled['glycan_match_status'] == 'unique').sum()), structures = labelled['glycan'].nunique(),

@@ -69,7 +69,8 @@ MZDATA_ANALYZER_TRAPS = ast.literal_eval(_constants['MZDATA_ANALYZER_TRAPS'])
 NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?glycans?|og|o(?![a-z0-9])|mucins?', 'lipid': r'gsls?|glycosphingolipids?|glycolipids?|gangliosides?',
                                'free': r'milk|hmos?'},
               'modification': {'reduced': r'(?<!non-)reduced|alditols?', 'unreduced': r'un-?reduced|non-?reduced', '2AB': r'2-?ab', '2AA': r'2-?aa', 'procainamide': r'procainamide',
-                               'PA': r'pa-?label\w*|pyridylamin\w*|2-?aminopyridin\w*', 'benzyl': r'benzyl\w*|bn-?galnac|cora'},
+                               'PA': r'pa-?label\w*|pyridylamin\w*|2-?aminopyridin\w*', 'benzyl': r'benzyl\w*|bn-?galnac|cora',
+                               'glycolate+lactate': r'bleach\w*|hypochlorit\w*|ca-?clo|oxidative\w*'},
               'sample_prep': {'permethylated': r'permethyl\w*', 'deuteropermethylated': r'deutero-?permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
 BATCH_KEYS = ('intra_cat_thresh', 'top_n_isomers', 'n_jobs')
 FEATURES = '\x00features'
@@ -77,10 +78,12 @@ GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharide
                   ('N- and O-glycans (same run)', 'N+O')]
 # Classes measured together are one combo choice, their names joined by '+' in this order; wrap_inference takes them as a list
 CLASS_ORDER = ['N', 'O', 'free', 'lipid']
-# 'unreduced' exists only in the app: wrap_inference takes a free reducing end as a custom label without mass (its reducing end check calls that 'unreduced')
+# 'unreduced' exists only in the app: wrap_inference takes a free reducing end as a custom label without mass (its reducing end check calls that 'unreduced');
+# reducing ends side by side are one choice, joined by '+' (wrap_inference takes them as a list, the first being the run's own)
 REDUCING_ENDS = [('Reduced (alditol)', 'reduced'), ('Unreduced (free reducing end)', 'unreduced'), ('2-AB', '2AB'), ('2-AA', '2AA'), ('Procainamide', 'procainamide'),
                  ('PA (2-aminopyridine)', 'PA'), ('Reduced with NaBD4 (alditol-d1)', 'reduced_D'), ('APTS', 'APTS'), ('Aminoxy TMT', 'aminoxyTMT'),
-                 ('Girard P', 'GirardP'), ('Benzyl glycoside (e.g., CORA)', 'benzyl'), ('Other label (enter its mass)', 'custom')]
+                 ('Girard P', 'GirardP'), ('Benzyl glycoside (e.g., CORA)', 'benzyl'), ('Oxidative release (glycolic acid on Ser, lactic acid on Thr)', 'glycolate+lactate'),
+                 ('Other label (enter its mass)', 'custom')]
 SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethylated'), ('Deuteropermethylated (CD3)', 'deuteropermethylated'), ('Peracetylated', 'peracetylated')]
 # Linkage-specific sialic acid derivatizations of underivatized samples, as wrap_inference's sialic_derivatization
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
@@ -920,11 +923,22 @@ def _confidence_html(confidence, terms):
             f'each term moves its log-odds up (+) or down (-):</p><table cellspacing="0" cellpadding="1">{rows}</table>')
 
 
+def _row_settings(settings, table, r):
+    """The run's settings with the reducing end of row r where the run has several side by side (its column reducing_end, as wrap_inference names them)"""
+    ends, end = settings.get('modification'), table['reducing_end'].iat[r] if 'reducing_end' in table.columns else None
+    ends = ends.split('+') if isinstance(ends, str) else ends
+    if isinstance(ends, (list, tuple)) and len(ends) > 1 and isinstance(end, str) and (end in ends or end == 'free'):
+        return {**settings, 'modification': 'custom' if end == 'free' else end, 'mass_tag': None}
+    return settings
+
+
 def _mass_tag(settings):
     """The reducing-end mass CandyCrumbs takes, built as crumbs_mass_dict (prediction.py): on a derivatized glycan with the label's derivatized groups"""
     with IMPORT_LOCK:
         from glycowork.motif.tokenization import modification_formula_dict, calculate_adduct_mass, composition_to_mass
     modification, sample_prep = settings.get('modification'), settings.get('sample_prep', 'underivatized')
+    # (of reducing ends side by side, the run's own)
+    modification = modification.split('+')[0] if isinstance(modification, str) else modification[0] if isinstance(modification, (list, tuple)) else modification
     if modification not in modification_formula_dict:
         label = 0
     elif sample_prep == 'underivatized' or modification == 'reduced':
@@ -2108,9 +2122,11 @@ class SettingsPanel(QScrollArea):
         values['sialic_derivatization'] = self.sialic.currentData()
         values['adducts'] = self.adducts.currentData()
         values['model_file'] = self.model.currentData()
-        # Classes measured together go to wrap_inference as a list
+        # Classes measured together, and reducing ends side by side, go to wrap_inference as a list
         if '+' in values['glycan_class']:
             values['glycan_class'] = values['glycan_class'].split('+')
+        if '+' in values['modification']:
+            values['modification'] = values['modification'].split('+')
         return values
 
     def set_values(self, values):
@@ -2122,6 +2138,8 @@ class SettingsPanel(QScrollArea):
             if self.inputs['glycan_class'].findData(choice) < 0:
                 names = {value: label for label, value in GLYCAN_CLASSES}
                 self.inputs['glycan_class'].addItem(' and '.join(names[c] for c in choice.split('+')), choice)
+        if isinstance(values.get('modification'), (list, tuple)):
+            values = {**values, 'modification': '+'.join(values['modification'])}
         for key, widget in self.inputs.items():
             value = values.get(key, DEFAULTS.get(key))
             if value is None:
@@ -2757,7 +2775,7 @@ class ResultsView(QWidget):
         """Structure (structure, else the row's top1_pred, else its composition), MS3 groups, and SpectrumPanel.annotate arguments (None without a spectrum
         or anything to annotate it with) of row r of the per-run table shown in the spectrum"""
         table, spectra = self.payload['tables'][self.source[0]]
-        peaks, settings = spectra[r], self.payload['settings']
+        peaks, settings = spectra[r], _row_settings(self.payload['settings'], table, r)
         structure = structure or table['top1_pred'].iat[r]
         if not isinstance(structure, str):
             structure = _composition(table['composition'].iat[r]) or None
@@ -2826,7 +2844,7 @@ class ResultsView(QWidget):
     def annotate_ms3(self):
         if 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups):
             p, peaks, _ = self.ms3_groups[self.ms3_fragment.currentIndex()]
-            settings = self.payload['settings']
+            settings = _row_settings(self.payload['settings'], self.payload['tables'][self.source[0]][0], self.source[1])
             # As the pipeline scores MS3: without X cross-rings, which explain random MS3 peaks as often as real ones (MS3 cleavage counting)
             self.ms3_panel.annotate(self.ms3_args[0], list(peaks.keys()), list(peaks.values()), self.ms3_args[1], _mass_tag(settings),
                                     settings['sample_prep'], ms3_precursor = p, disable_X_cross_rings = True,
@@ -3018,7 +3036,7 @@ class ResultsView(QWidget):
         # From the MS3 tab, the MS3 spectra shown go, with the MS2 fragment they were isolated from
         ms3 = self.ms3_groups[self.ms3_fragment.currentIndex()] if self.tabs.currentWidget() is self.ms3_tab and 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups) else None
         self.open_in_crumbs.emit({'structure': structure if isinstance(structure, str) else _composition(table['composition'].iat[r]),
-                                  'peaks': ms3[1] if ms3 else spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': self.payload['settings'],
+                                  'peaks': ms3[1] if ms3 else spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': _row_settings(self.payload['settings'], table, r),
                                   'ms3_precursor': ms3[0] if ms3 else None})
 
     def export_frame(self, df):
@@ -3182,7 +3200,9 @@ class CrumbsTab(QWidget):
         self.structure.setText(request['structure'] or '')
         self.peaks.setPlainText('\n'.join(f'{mz:.4f}\t{intensity:.1f}' for mz, intensity in sorted(request['peaks'].items())))
         _set_combo(self.charge, request['charge'])
-        _set_combo(self.modification, 'unreduced' if settings.get('modification') == 'custom' and not settings.get('mass_tag') else settings.get('modification'))
+        modification = settings.get('modification')
+        modification = '+'.join(modification) if isinstance(modification, (list, tuple)) else modification
+        _set_combo(self.modification, 'unreduced' if modification == 'custom' and not settings.get('mass_tag') else modification)
         self.mass_tag.setValue(settings.get('mass_tag') or 0)
         _set_combo(self.sample_prep, settings.get('sample_prep'))
         self.sialic.setCurrentIndex(max(self.sialic.findData(settings.get('sialic_derivatization')), 0) if settings.get('sialic_derivatization') else 0)
