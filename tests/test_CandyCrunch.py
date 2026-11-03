@@ -398,6 +398,12 @@ def test_reducing_end_check(capsys):
     assert len(reduced) >= 15 and all(len(set(outs[m]['top1_pred'].dropna()) & reduced) >= 0.8 * len(reduced) for m in ['custom', '2AB'])
 
 
+def test_filter_out_is_airtight():
+    # A residue the user ignores stays out of every route to a structure, also the no-prediction rescue and impute
+    df = wrap_inference(str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx'), 'O', filter_out = {'HexA', 'Neu5Ac'})
+    assert not any('Neu5Ac' in p[0] for preds in df['predictions'] for p in (preds or []))
+
+
 def test_onnx_model_matches_torch():
     # The built app runs the weights of model.py's CandyCrunch_CNN on ONNX Runtime: same logits as PyTorch, also for a norm scale below zero (which cannot
     # be folded into the convolution after it), and the same predictions for the example run

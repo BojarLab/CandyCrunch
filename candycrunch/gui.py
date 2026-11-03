@@ -49,6 +49,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.backend_tools import Cursors
 from matplotlib.mathtext import MathTextParser
 from matplotlib.widgets import SpanSelector
+from candycrunch import references
 
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch
 _tree = ast.parse(open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8').read())
@@ -921,6 +922,15 @@ def _confidence_html(confidence, terms):
                    f'<td align="right" style="color:{LILAC if c > 0.05 else CANDY if c < -0.05 else MUTED}; white-space:nowrap">{c:+.2f}</td></tr>' for label, value, c in terms)
     return (f'<p>Confidence {confidence:.2f}: the probability that the structure is the glycan of this peak, as written. From a typical reported peak, '
             f'each term moves its log-odds up (+) or down (-):</p><table cellspacing="0" cellpadding="1">{rows}</table>')
+
+
+def _references_html(exact, related):
+    """The references of a structure as HTML: each with what it reports, then those of the same structure with its linkages specified differently"""
+    header = ''.join(f'<td style="color:{MUTED}; padding-right:16px">{title}</td>' for title in ('Reference', 'Species', 'Tissue or cell', 'Disease'))
+    return ''.join(f'<p>{title} ({len(refs)})</p><table cellspacing="0" cellpadding="2"><tr>{header}</tr>' + ''.join(
+        f'<tr><td style="padding-right:16px; white-space:nowrap"><a href="{html.escape(r["url"])}">{html.escape(r["label"])}</a></td>' + ''.join(
+            f'<td style="padding-right:16px">{html.escape(r[kind])}</td>' for kind in ('species', 'tissues', 'diseases')) + '</tr>' for r in refs) + '</table>'
+                   for title, refs in (('References in glycowork', exact), ('Same structure, linkages specified differently, in glycowork', related)) if refs)
 
 
 def _row_settings(settings, table, r):
@@ -2269,7 +2279,7 @@ class ResultsView(QWidget):
         self.composition = QLabel()
         self.composition.setStyleSheet('font-weight: 600')
         self.facts = QLabel()
-        self.facts.setOpenExternalLinks(True)
+        self.facts.linkActivated.connect(self.open_fact_link)
         self.facts.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.facts.setWordWrap(True)
         self.alternatives = QListWidget()
@@ -2336,6 +2346,9 @@ class ResultsView(QWidget):
         self.tabs.addTab(self.quant, 'Quantification')
         self.tabs.addTab(self.map, 'Glycan map')
         self.tabs.addTab(self.across, 'Across runs')
+        self.references = QTextBrowser()
+        self.references.setOpenExternalLinks(True)
+        self.tabs.addTab(self.references, 'References')
         bottom = QSplitter(Qt.Horizontal)
         bottom.addWidget(details)
         bottom.addWidget(self.tabs)
@@ -2540,7 +2553,7 @@ class ResultsView(QWidget):
             self.row, self.source, self.alternative, self.ms3_groups = None, None, None, []
             for button in (self.report_button, self.custom, self.exclude, self.crumbs):
                 button.setEnabled(False)
-            for widget in (self.structure, self.composition, self.facts, self.drawing, self.alternatives, self.ms3_fragment):
+            for widget in (self.structure, self.composition, self.facts, self.references, self.drawing, self.alternatives, self.ms3_fragment):
                 widget.clear()
             self.spectrum_file.setVisible(False)
             if self.tabs.currentWidget() is self.ms3_tab:
@@ -2620,6 +2633,13 @@ class ResultsView(QWidget):
         glytoucan = df['GlyTouCan_ID'].iat[row] if 'GlyTouCan_ID' in df.columns else ''
         if isinstance(glytoucan, str) and glytoucan:
             facts.append(('GlyTouCan', f'<a href="https://glytoucan.org/Structures/Glycans/{glytoucan}">{glytoucan}</a>'))
+        # What glycowork's database cites for the structure, with or without a GlyTouCan ID; from when it is read (MainWindow.load_taxa), so that selecting a
+        # peak never waits for it
+        known = isinstance(structure, str) and references.INDEX is not None
+        exact, related = references.glycan_references(structure) if known else ([], [])
+        if exact or related:
+            facts.append(('References', f'<a href="references">{len(exact)}{f" + {len(related)}" if related else ""}</a>'))
+        self.references.setHtml(_references_html(exact, related) or (f'<p style="color:{MUTED}">No references in glycowork for this structure</p>' if known else ''))
         if df['curation'].iat[row]:
             facts.append(('Curation', df['curation'].iat[row]))
         facts = [(k, v) for k, v in facts if v]
@@ -2639,6 +2659,12 @@ class ResultsView(QWidget):
         breakdown = _confidence_html(df['confidence'].iat[row], df['confidence_terms'].iat[row]) if 'confidence_terms' in df.columns else None
         self.facts.setText('<table cellspacing="0" cellpadding="1">' + ''.join(rows) + '</table>' + (breakdown or ''))
         self.exclude.setText('Include again' if df['excluded'].iat[row] else 'Exclude')
+
+    def open_fact_link(self, link):
+        if link == 'references':
+            self.tabs.setCurrentWidget(self.references)
+        else:
+            QDesktopServices.openUrl(QUrl(link))
 
     def update_drawing(self):
         structure = self.alternative or self.frame['top1_pred'].iat[self.row]
@@ -3061,7 +3087,9 @@ class ResultsView(QWidget):
     def export_frame(self, df):
         """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
         out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3', 'xic', 'confidence_terms', '_top1'], errors = 'ignore')
-        return out.drop(columns = ['curation']) if not out['curation'].astype(bool).any() else out
+        with IMPORT_LOCK:
+            references.reference_index()
+        return references.add_references(out.drop(columns = ['curation']) if not out['curation'].astype(bool).any() else out)
 
     def write(self, df, path, kind):
         if kind == 'snfg':
@@ -3967,6 +3995,7 @@ class ReportDialog(QDialog):
 
 class MainWindow(QMainWindow):
     taxa_ready = Signal(object)
+    references_ready = Signal()
     update_found = Signal(str)
     update_progress = Signal(int)
     update_downloaded = Signal(bool)
@@ -4127,6 +4156,7 @@ class MainWindow(QMainWindow):
         self.compare.log.connect(self.append_log)
         self.settings.inputs['taxonomy_level'].currentTextChanged.connect(self.load_taxa)
         self.taxa_ready.connect(lambda taxa: self.settings.taxa.setModel(QStringListModel(taxa, self.settings.taxa)))
+        self.references_ready.connect(lambda: self.results.row is not None and self.results.update_detail())
         self.images.ready.connect(self.image_ready)
         self.update_button.clicked.connect(self.install_update)
         self.update_found.connect(lambda tag: (self.update_button.setText(f'Update to CandyCrunch {tag}'), self.update_button.show()))
@@ -4379,6 +4409,8 @@ class MainWindow(QMainWindow):
                 # Imported here only so the first spectrum annotation does not wait for it
                 import candycrunch.analysis  # noqa: F401
             self.taxa_ready.emit(sorted({t for taxa in df_glycan[level] for t in (taxa if isinstance(taxa, list) else [taxa]) if isinstance(t, str)}))
+            references.reference_index()
+            self.references_ready.emit()
         threading.Thread(target = work, daemon = True).start()
 
     def image_ready(self, key):

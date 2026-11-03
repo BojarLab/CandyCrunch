@@ -3035,7 +3035,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
 
 
 def impute(df_out, pred_thresh, mode = 'negative', modification = 'reduced', sample_prep = 'underivatized', mass_tag = 0.0, glycan_class = "O",
-           sialic_derivatization = None):
+           sialic_derivatization = None, filter_out = frozenset()):
     """searches for specific isomers that could be added to the prediction dataframe\n
     | Arguments:
     | :-
@@ -3047,7 +3047,8 @@ def impute(df_out, pred_thresh, mode = 'negative', modification = 'reduced', sam
     | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:0.0
     | glycan_class (string or list): glycan class of the run, options are "O", "N", "lipid", "free", or a list of several measured together; default:"O"
     | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization (glycowork's SIALIC_DERIVATIZATIONS); variants with a sialic acid of
-    |                                          unknown linkage then have no mass and are not imputed; default:None\n
+    |                                          unknown linkage then have no mass and are not imputed; default:None
+    | filter_out (set): set of monosaccharide or modification types no imputed structure may contain; default:frozenset()\n
     | Returns:
     | :-
     | Returns prediction dataframe with imputed predictions (if possible)
@@ -3083,7 +3084,7 @@ def impute(df_out, pred_thresh, mode = 'negative', modification = 'reduced', sam
         variants.update(unwrap([_get_all_variants(s, 'GlcNAc6S(b1-6)', 'GlcNAc(b1-6)') for s in seqs]))
     # Every empty row tries the same variants (first match in sorted order, as mass_check would find it), so their masses and ion m/z are
     # computed once per charge state instead of once per row and variant
-    variants = sorted(variants)
+    variants = sorted(v for v in variants if not filter_out.intersection(get_comp(v)))
     variant_masses, ion_mzs = [], {}
     for v in variants:
         try:
@@ -3756,7 +3757,7 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     # Check for Neu5Ac-Neu5Gc swapped structures and search for glycans within SugarBase that could explain some of the spectra
     if experimental:
         df_out = impute(df_out, pred_thresh, mode = mode, modification = modification, mass_tag = mass_tag,
-                        glycan_class = glycan_class, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
+                        glycan_class = glycan_class, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization, filter_out = filter_out)
         try:
             df_out = filter_delayed_rts(df_out, mass_tolerance)
             df_out = Ac_follows_Gc(df_out)
@@ -4766,11 +4767,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         _tag = mass_tag if mass_tag else 0
         _adduct_list = get_adduct_list(mode)
         _model_tops = {}
+        # What the user excludes stays out here too; the default HexA does not, as this is how GlcA milk oligosaccharides come out
+        _excluded = filter_out - {'HexA'}
         for i in _no_pred_indices:
             for g_name, g_conf in _raw_predictions[i]:
                 if g_conf <= pred_thresh:
                     break
-                if (in_classes(g_name, classes, g_conf, extra_thresh = extra_thresh)
+                if (in_classes(g_name, classes, g_conf, extra_thresh = extra_thresh) and not _excluded.intersection(get_comp(g_name))
                         and mass_check(df_out.index[i], g_name, mode = mode, modification = modification,
                                        mass_tag = mass_tag, sample_prep = sample_prep,
                                        permitted_charges = [abs(int(df_out['charge'].iloc[i]))],

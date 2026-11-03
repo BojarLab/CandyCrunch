@@ -84,6 +84,7 @@ def main(argv=None):
         args_dict['reducing_end_variants'] = {k: v for k, v in {'free': 0, 'ethyl glycoside': 'C2H4', 'glycosylamine': 'C5H4N2-O', 'glycosylaminitol': 'NH3-O'}.items() if k.replace(' ', '_') in args.reducing_end_variants}
     # Imported only now: it loads the model, which --help and argument errors do not need, and every process of --n_jobs imports this module again
     from candycrunch.prediction import wrap_inference, wrap_inference_batch
+    from candycrunch.references import add_references
     if len(filepaths) == 1:
         tables = [(args.output, wrap_inference(filepaths[0], n_jobs=args.n_jobs, **args_dict))]
     else:
@@ -99,7 +100,7 @@ def main(argv=None):
             if 'ms3' in df_out.columns:
                 df_out['ms3'] = [[(round(p, 4), {round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()}) for p, d in x] if isinstance(x, list) else x for x in df_out['ms3']]
         # Per-file tables are indexed by m/z; the combined feature table has a plain row index that is not worth writing
-        df_flat = df_out.reset_index() if df_out.index.name else df_out
+        df_flat = add_references(df_out.reset_index() if df_out.index.name else df_out)
         if path.endswith('.csv'):
             df_flat.to_csv(path, index=False)
         if args.plot_glycans and 'top1_pred' in df_flat.columns:
