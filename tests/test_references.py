@@ -38,6 +38,8 @@ def test_gui_references():
     QtWidgets = pytest.importorskip('PySide6.QtWidgets')
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     from candycrunch import gui, references
+    # The details show references once the index is read, which the app does on a thread; another test may or may not have read it in this process
+    references.reference_index()
     structure = 'Neu5Ac(a2-3)Gal(b1-3)[Neu5Ac(a2-6)]GalNAc'
     df = pd.DataFrame({'top1_pred': [structure, 'Gal(b1-3)Gal(b1-3)Gal(b1-3)Gal(b1-3)Gal(b1-3)GalNAc'], 'predictions': [[], []],
                        'composition': [{'Hex': 1, 'HexNAc': 1, 'Neu5Ac': 2}, {'Hex': 5, 'HexNAc': 1}], 'num_spectra': [3, 5], 'charge': [-1, -1], 'RT': [14.3, 26.8],
