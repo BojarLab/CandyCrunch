@@ -138,11 +138,14 @@ _FORMULAS, _ISOTOPE_SHARES = {}, {}
 # The ions that carry the charge of the run's precursors in place of protons, from wrap_inference's / wrap_inference_batch's adducts (e.g., Li+ with lithium
 # salts in the mobile phase); the steps they run take their adducts from get_adduct_list
 RUN_ADDUCTS = contextvars.ContextVar('RUN_ADDUCTS', default = ())
+# The anion of the run's mobile phase, from wrap_inference's / wrap_inference_batch's run_anion
+RUN_ANION = contextvars.ContextVar('RUN_ANION', default = None)
 
 
 def get_adduct_list(mode, adducts = None):
-    # The run's own charge carriers first, then the mode's usual adducts
-    return list(dict.fromkeys([*(RUN_ADDUCTS.get() if adducts is None else adducts), *(NEGATIVE_ADDUCTS if mode == 'negative' else POSITIVE_ADDUCTS)]))
+    # The run's own charge carriers first, then a known mobile phase's anion, then the mode's usual adducts
+    usual = [*([RUN_ANION.get()] if RUN_ANION.get() else []), *NEGATIVE_ADDUCTS] if mode == 'negative' else POSITIVE_ADDUCTS
+    return list(dict.fromkeys([*(RUN_ADDUCTS.get() if adducts is None else adducts), *usual]))
 
 
 def unactivated(filter_string):
@@ -1383,6 +1386,17 @@ def ms1_mz_calibration(ms1, target_mzs, rt_centers, charges, mz_tolerance = 0.5,
     return shift, min(mz_tolerance, 4 * 1.4826 * float(np.median(np.abs(np.array(offsets) - shift))))
 
 
+def report_main_adduct(name, tables):
+    # What the main adduct set for a run explained, per ion: rows read as a charge carrier, peaks whose abundance holds the anion's ions (known only with MS1 and xic details).
+    # One that explains none of its peaks is likely not the run's, and the app shows that line to the user
+    peaks = sum(len(t) for t in tables)
+    counts = {ion: sum(isinstance(a, str) and ion.rstrip('+-') in a for t in tables if 'adduct' in t.columns for a in t['adduct']) for ion in RUN_ADDUCTS.get()}
+    if RUN_ANION.get() and any('xic' in t.columns and t.attrs.get('run_anion') for t in tables):
+        counts[RUN_ANION.get()] = sum(isinstance(x, list) and any(o['ion'] for d in x for o in d['others']) for t in tables if 'xic' in t.columns for x in t['xic'])
+    for ion, n in counts.items() if peaks else ():
+        print(f"{name}: {ion} as main adduct: {n} of {peaks} peak(s)." if n else f"WARNING: {name}: none of {peaks} peak(s) shows {ion}, the main adduct set for this run; Automatic may suit it better.")
+
+
 def anion_adduct_ions(charges, anion):
     """the ions of a glycan that carry an anion adduct and, from charge 2 on, lost at least one proton: [M+HCO3]-, [M+HCO3-H]2-, [M+HCO3-2H]3-, [M+2HCO3-H]3-, ...\n
     | Arguments:
@@ -1767,7 +1781,7 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
     # The ions of a glycan are the same for every row that asks (a run asks about a few hundred structures thousands of times), so they are kept in _IONS
     try:
         key = (glycan, mode, modification, sample_prep, mass_tag, double_thresh, triple_thresh, quadruple_thresh, max(permitted_charges, default = None),
-               sialic_derivatization, RUN_ADDUCTS.get())
+               sialic_derivatization, RUN_ADDUCTS.get(), RUN_ANION.get())
         ions = _IONS.get(key)
     except TypeError:
         key, ions = None, None
@@ -4038,6 +4052,60 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
             df_out.attrs['ms1_calibration'] = calibration
             if details is not None:
                 df_out['xic'] = [[d] for d in details]
+            # One MS1 peak is one glycan. DDA fragments a broad or tailing peak again and again, and condense_dataframe chains spectra only within rt_diff of
+            # an apex and cuts clusters at dips of the precursor intensity, which ion-trap survey scans make all along a PGC tail (a sialyl-T peak became ten
+            # rows trailing its apex over 7 min, as neither the peak joins nor the tenfold tail rule take a tail that falls this steeply). The rows of a
+            # composition and charge are therefore placed on the smoothed envelope trace of their ion (as extract_xic_areas takes and smooths it), each at the
+            # maximum its RT climbs to, and a row joins a row with a higher maximum within 3 min, with its abundance and spectra, if it is that peak's tail
+            # (its maximum later and at most half as high, the trace never below 0.6 of it in between) or if both have the same structure and no valley
+            # below 0.7 of its maximum separates them. Isomers keep their rows where a valley separates them, co-eluting ones where the model names them
+            # apart (the ground-truth audit's looser tail, down to 0.3 with an MS2 cosine >= 0.8, took real later isomers, whose spectra are as alike)
+            # Accurate survey scans give condense_dataframe real precursor intensities to cut at, so its rows there are isomers that elute as shoulders of
+            # one MS1 peak (high-mannose and sialyl linkage isomers, which the model names alike), and they stay
+            shift, half_width = calibration
+            ab, ns, xc = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra'), df_out.columns.get_loc('xic')
+            groups, into, keys1 = {}, {}, None
+            for i in range(len(df_out)):
+                if not accurate_ms1 and comps[i] is not None and not adducts[i] and offsets[i] == 0 and df_out['predictions'].iloc[i]:
+                    groups.setdefault((comps[i], zs[i]), []).append(i)
+            for (_, z), rows in groups.items():
+                mz, sp = df_out['theo_mz'].values[rows[0]], ISOTOPE_SPACING / z
+                s0, s1 = np.searchsorted(ms1[0], rts[rows].min() - 3.5), np.searchsorted(ms1[0], rts[rows].max() + 3.5, side = 'right')
+                if len(rows) < 2 or s1 - s0 < 5:
+                    continue
+                if keys1 is None:
+                    # every survey centroid keyed by scan and m/z, with cumulative intensities, so a window's trace over many scans is two searchsorted calls
+                    keys1 = np.repeat(np.arange(len(ms1[0])) * 1e4, np.diff(ms1[3]).astype(np.intp)) + ms1[1].astype(np.float64)
+                    order1 = np.argsort(keys1, kind = 'stable')
+                    keys1, cum1 = keys1[order1], np.concatenate([[0], np.cumsum(ms1[2][order1], dtype = np.float64)])
+                width, b1 = 0.5 * sp if half_width >= 0.2 * sp else max(half_width, 5e-6 * mz), np.arange(s0, s1) * 1e4
+                trace = sum(cum1[np.searchsorted(keys1, b1 + c + width)] - cum1[np.searchsorted(keys1, b1 + c - width)] for c in mz + shift + sp * np.arange(4))
+                t = ms1[0][s0:s1]
+                steps = np.diff(t)
+                sigma = max(0.7, 0.05 / np.median(steps[steps > 0])) if (steps > 0).any() else 0.7
+                kernel = np.exp(-0.5 * (np.arange(-int(3 * sigma), int(3 * sigma) + 1) / sigma) ** 2)
+                sm = np.convolve(np.pad(trace, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
+                apex = {}
+                for i in rows:
+                    a = int(np.clip(np.searchsorted(t, rts[i]), 0, len(t) - 1))
+                    while 0 < a < len(sm) - 1 and max(sm[a - 1], sm[a + 1]) > sm[a]:
+                        a += 1 if sm[a + 1] > sm[a - 1] else -1
+                    apex[i] = a
+                top1 = {i: df_out['predictions'].iloc[i][0][0] for i in rows}
+                for b in rows:
+                    tail = {a: t[apex[b]] > t[apex[a]] and sm[apex[a]] >= 2 * sm[apex[b]] for a in rows}
+                    heads = [a for a in rows if (sm[apex[a]], df_out.iat[a, ab]) > (sm[apex[b]], df_out.iat[b, ab]) and abs(t[apex[a]] - t[apex[b]]) <= 3 and
+                             (tail[a] or top1[a] == top1[b]) and sm[min(apex[a], apex[b]):max(apex[a], apex[b]) + 1].min() >= (0.6 if tail[a] else 0.7) * sm[apex[b]]]
+                    if heads:
+                        into[b] = max(heads, key = lambda a: (sm[apex[a]], df_out.iat[a, ab]))
+            for b in into:
+                a = into[b]
+                while a in into:
+                    a = into[a]
+                df_out.iat[a, ab] += df_out.iat[b, ab]
+                df_out.iat[a, ns] += df_out.iat[b, ns]
+                df_out.iat[a, xc] = df_out.iat[a, xc] + df_out.iat[b, xc]
+            df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in into]]
     df_out = df_out.drop(columns = ['theo_mz'])
     if mode == 'positive' and 'adduct' in df_out.columns and 'rt_range' in df_out.columns:
         # In positive mode a glycan's metal adduct ([M+K+H]2+, [M+Na+H]2+) can dominate its (de)protonated ion, whose weak, noisy precursor intensities then
@@ -4438,7 +4506,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                    filter_out = {'HexA'}, supplement = True,
                    experimental = True, mass_dic = None, sample_prep = 'underivatized',
                    taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
-                   sialic_derivatization = None, reducing_end_variants = None, adducts = None, n_jobs = 1, return_inputs = False, _return_intermediate = False, _loaded = None,
+                   sialic_derivatization = None, reducing_end_variants = None, adducts = None, run_anion = None, n_jobs = 1, return_inputs = False, _return_intermediate = False, _loaded = None,
                    _top_clusters = None,
                    _condensed = None, _pair = None):
     """wrapper function to get & curate CandyCrunch predictions\n
@@ -4510,6 +4578,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                           the mobile phase ([M+Li]+, [M+2Li]2+, [M+Li+H]2+, ...): their compositions come before the protonated ones, and fragments of such
    |                           precursors carry them; the mode's usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered after protons;
    |                           default:None
+   | run_anion (string): the anion of the mobile phase in negative mode ('HCO3-', 'Formate', or 'Acetate'): read before the other anion adducts, and with MS1 its
+   |                     adduct ions count for each peak's abundance; default:None (all three are considered, and with MS1 the anion the run's major neutral glycans show, if any, counts)
    | n_jobs (int): number of processes for fragment scoring (CandyCrumbs) and supporting peaks, which are pure Python; the model already uses every core.
    |               The processes stay up for later runs; a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS; default:1
    | return_inputs (bool): whether to return the model's inputs instead of predictions, as a callable model receives them (e.g., to build training data from
@@ -4528,7 +4598,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     adducts = [adducts] if isinstance(adducts, str) else list(adducts or [])
     if unknown := [a for a in adducts if a not in mass_dict or not (a[-1] in '+-' or a in NEGATIVE_ADDUCTS) or a == 'H+']:
         raise ValueError(f"adducts {unknown} are no charge carriers of glycowork's adduct table (e.g., 'Li+', 'Na+', 'Cl-'; protons are always considered).")
+    if run_anion is not None and run_anion not in NEGATIVE_ADDUCTS:
+        raise ValueError(f"run_anion {run_anion!r} is none of {NEGATIVE_ADDUCTS}.")
     RUN_ADDUCTS.set(tuple(adducts))
+    RUN_ANION.set(run_anion)
     # Spectra already in memory are processed as if loaded from a file named after attrs['name']
     if isinstance(spectra_filepath, pd.DataFrame):
         spectra_filepath, _loaded = spectra_filepath.attrs.get('name', 'spectra'), spectra_filepath
@@ -4585,6 +4658,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         trap = detected_trap
     if wrong := [a for a in adducts if a.endswith('+') != (mode == 'positive')]:
         raise ValueError(f"adducts {wrong} cannot carry the charge of {mode}-mode precursors.")
+    if run_anion and mode == 'positive':
+        raise ValueError(f"run_anion {run_anion} cannot be an adduct of positive-mode precursors.")
     # The run's fragmentation (its most frequent activation), which models of settings encoding version 2 take with the trap
     activation = loaded_file['activation'].dropna().mode().iloc[0] if 'activation' in loaded_file.columns and loaded_file['activation'].notna().any() else None
     detected_ms1_trap = loaded_file.attrs.get('detected_ms1_trap')
@@ -5334,9 +5409,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
                                                ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1,
                                                accurate_ms1 = accurate_ms1, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
-                                               ms1_ppm_floor = ms1_ppm_floor, ion_trap = trap in ('linear', 'amazon'), xic_details = spectra)
-    if df_out.attrs.get('run_anion'):
-        print(f"{os.path.basename(spectra_filepath)}: neutral glycans ionize largely as {df_out.attrs['run_anion']} adducts, whose ions count for their abundances.")
+                                               ms1_ppm_floor = ms1_ppm_floor, ion_trap = trap in ('linear', 'amazon'), xic_details = spectra, run_anion = run_anion)
+    if df_out.attrs.get('run_anion') and not run_anion:
+        print(f"{os.path.basename(spectra_filepath)}: neutral glycans ionize largely as {df_out.attrs['run_anion']} adducts ({df_out.attrs['anion_shares'][df_out.attrs['run_anion']]:.2f} of the signal of their own ions), whose ions count for their abundances.")
+    report_main_adduct(os.path.basename(spectra_filepath), [df_out])
     # The other of N and O (O-glycans in an N-glycan release, N-glycans in an O-glycan one), then free glycans (free oligosaccharides of milk or other body
     # fluids carried along by a glycan release): if >= 2 rows have a structure only that class has, the clusters without a row are processed again as glycans
     # of both classes, with only the compositions of that class (so the model only sees inputs that can add a row) and without the side-product search (none of
@@ -5416,7 +5492,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                          filter_out = {'HexA'}, supplement = True,
                          experimental = True, mass_dic = None, sample_prep = 'underivatized',
                          taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
-                         n_jobs = 1, sialic_derivatization = None, library_thresh = 0.9, reducing_end_variants = None, adducts = None):
+                         n_jobs = 1, sialic_derivatization = None, library_thresh = 0.9, reducing_end_variants = None, adducts = None, run_anion = None):
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
    | :-
@@ -5464,7 +5540,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of the samples, as in wrap_inference; default:None
    | library_thresh (float): MS2 cosine at which a peak without a structure takes the structure of a matching peak of another file (see below); None turns this off; default:0.9
    | reducing_end_variants (dict): other reducing ends that glycans of the samples may carry, as in wrap_inference; default:None
-   | adducts (string or list): ions that carry the charge of the samples' precursors in place of protons, as in wrap_inference; default:None\n
+   | adducts (string or list): ions that carry the charge of the samples' precursors in place of protons, as in wrap_inference; default:None
+   | run_anion (string): the anion of the samples' mobile phase in negative mode, as in wrap_inference; default:None\n
    | Returns:
    | :-
    | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file> ('ms2', or 'ms1_only' where the file has only MS1 signal of it); dict of per-file dataframes with the confidence of each structure (none for MS1-only rows) and the evidence of each row ('ms2' or 'ms1_only'), or of (dataframe, spectra) tuples if spectra=True, with the columns xic and confidence_terms, and ms3 for files with MS3 spectra, as in wrap_inference)
@@ -5496,6 +5573,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # Core inference per file via wrap_inference intermediate return; MS1 data is parked on disk so only one file's MS1 is in memory at a time
     ms1_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors = True)
     RUN_ADDUCTS.set(tuple([adducts] if isinstance(adducts, str) else adducts or ()))
+    RUN_ANION.set(run_anion)
     inference_kwargs = dict(glycans = glycans, bin_num = bin_num, max_charge = max_charge,
                             frag_num = frag_num, modification = ends or modification, mass_tag = mass_tag, lc = lc, trap = trap,
                             rt_min = rt_min, rt_max = rt_max, rt_diff = rt_diff, rt_max_default = rt_max_default,
@@ -5503,7 +5581,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                             crumbs_thresh = crumbs_thresh, ppm_thresh = ppm_thresh, filter_out = filter_out,
                             experimental = experimental, sample_prep = sample_prep, taxonomy_level = taxonomy_level,
                             taxonomy_filter = taxonomy_filter, sialic_derivatization = sialic_derivatization,
-                            reducing_end_variants = reducing_end_variants, adducts = adducts, _return_intermediate = True)
+                            reducing_end_variants = reducing_end_variants, adducts = adducts, run_anion = run_anion, _return_intermediate = True)
     # Worker processes load the default model themselves, so only a custom model has to be sent to them
     if model is not candycrunch:
         inference_kwargs['model'] = model
@@ -5703,19 +5781,20 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                          accurate_ms2 = accurate_ms2s[file_label])
             if len(df_out) > 0:
                 augmented[file_label] = df_out
-                df_out, spectra_out = finalise_file(file_label, df_out)
+                df_out, spectra_out = finalise_file(file_label, df_out, run_anion = run_anion)
         inference_dfs[file_label] = (df_out, spectra_out)
     # Runs of a batch share their mobile phase, and a run deciding on its own would count the adduct ions of some runs only, right where a share near the cut
     # varies between replicates: the anion is the one with the highest median share over the files, and files that decided otherwise are finalised again
     shares = [inference_dfs[k][0].attrs['anion_shares'] for k in file_labels if inference_dfs[k][0].attrs.get('anion_shares')]
     medians = {a: np.median([x[a] for x in shares]) for a in NEGATIVE_ADDUCTS} if shares else {}
-    batch_anion = max(medians, key = medians.get) if medians and max(medians.values()) >= 0.1 else False
+    batch_anion = run_anion or (max(medians, key = medians.get) if medians and max(medians.values()) >= 0.1 else False)
     for file_label in augmented:
         if file_modes[file_label] == 'negative' and ms1_paths[file_label] and (inference_dfs[file_label][0].attrs.get('run_anion') or False) != batch_anion:
             inference_dfs[file_label] = finalise_file(file_label, augmented[file_label], run_anion = batch_anion)
     del augmented
-    if batch_anion:
-        print(f"Neutral glycans of these runs ionize largely as {batch_anion} adducts, whose ions count for their abundances.")
+    if batch_anion and not run_anion:
+        print(f"Neutral glycans of these runs ionize largely as {batch_anion} adducts ({medians[batch_anion]:.2f} of the signal of their own ions), whose ions count for their abundances.")
+    report_main_adduct('These runs', [inference_dfs[k][0] for k in file_labels])
     # The other of N and O (O-glycans in N-glycan releases, N-glycans in O-glycan ones), then free glycans, as in wrap_inference: a file with >= 2 rows of a
     # structure only that class has (for free glycans: not a hexose chain) is processed again as glycans of both classes on its clusters without a row, and its rows of
     # such a structure from >= 2 spectra are harmonized across these files like the own rows (aligned RTs, isomer groups, modal structure, top_n_isomers),

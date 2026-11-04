@@ -545,6 +545,32 @@ def test_anion_adduct_quantification():
     assert abs(out[out['top1_pred'] == fucosylated]['rel_abundance'].iat[0] / out['rel_abundance'].sum() - 4 / 12) < 0.03
 
 
+def test_main_adduct(capsys):
+    from candycrunch.prediction import RUN_ADDUCTS, RUN_ANION, get_adduct_list, report_main_adduct
+    RUN_ANION.set('HCO3-')
+    assert get_adduct_list('negative') == ['HCO3-', 'Acetate', 'Formate'] and get_adduct_list('positive') == ['Na+', 'K+', 'NH4+']
+    RUN_ANION.set(None)
+    assert get_adduct_list('negative') == ['Acetate', 'Formate', 'HCO3-']
+    with pytest.raises(ValueError, match = 'run_anion'):
+        wrap_inference('spectra.mzML', 'N', run_anion = 'Na+')
+    RUN_ANION.set(None)
+    RUN_ADDUCTS.set(('Na+',))
+    report_main_adduct('run', [pd.DataFrame({'adduct': ['[M+Na]+', '[M+2Na]2+', None]})])
+    assert 'Na+ as main adduct: 2 of 3 peak(s)' in capsys.readouterr().out
+    report_main_adduct('run', [pd.DataFrame({'adduct': [None, '[M+K+H]2+']})])
+    assert 'the main adduct set' in capsys.readouterr().out
+    # An anion's report needs what MS1 integrated
+    RUN_ADDUCTS.set(())
+    RUN_ANION.set('HCO3-')
+    table = pd.DataFrame({'xic': [[{'others': [{'ion': '[M+HCO3-H]2-'}]}], [{'others': []}]]})
+    report_main_adduct('run', [table])
+    assert capsys.readouterr().out == ''
+    table.attrs['run_anion'] = 'HCO3-'
+    report_main_adduct('run', [table])
+    assert 'HCO3- as main adduct: 1 of 2 peak(s)' in capsys.readouterr().out
+    RUN_ANION.set(None)
+
+
 @pytest.mark.parametrize("quant_set", list(QUANT_SETS))
 def test_quantification_published(quant_set, result_collector):
     # The abundances of a run's ground-truth peaks as the pipeline quantifies a row (calibration, envelope over its own peak, co-eluting charge states no other

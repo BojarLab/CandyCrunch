@@ -32,6 +32,29 @@ def test_gui_settings_match_wrap_inference(app):
     assert panel.values()['sialic_derivatization'] is None
 
 
+def test_gui_main_adduct(app):
+    from candycrunch import gui
+    panel = gui.SettingsPanel()
+    assert (panel.values()['adducts'], panel.values()['run_anion']) == (None, None) and panel.advanced_toggle.text() == 'Advanced settings' and not panel.reset.isEnabled()
+    gui._set_combo(panel.adducts, 'HCO3-')
+    assert (panel.values()['adducts'], panel.values()['run_anion']) == (None, 'HCO3-') and panel.advanced_toggle.text() == 'Advanced settings (HCO3-)' and panel.reset.isEnabled()
+    # An ion of one mode is no choice in the other
+    gui._set_combo(panel.mode, 'positive')
+    assert panel.adducts.currentData() is None and panel.adducts.findData('HCO3-') < 0 and panel.advanced_toggle.text() == 'Advanced settings'
+    gui._set_combo(panel.adducts, 'Na+')
+    assert (panel.values()['adducts'], panel.values()['run_anion']) == ('Na+', None)
+    # From a session, also of an earlier version, and back
+    settings = panel.values()
+    panel.set_values(gui.DEFAULTS)
+    assert panel.adducts.currentData() is None and panel.mode.currentData() == 'negative'
+    panel.set_values(settings)
+    assert panel.adducts.currentData() == 'Na+'
+    panel.set_values({**settings, 'adducts': ['Li+'], 'run_anion': None})
+    assert panel.values()['adducts'] == 'Li+'
+    panel.set_values({**panel.values(), 'max_charge': -3, 'adducts': None, 'run_anion': 'Formate'})
+    assert panel.values()['run_anion'] == 'Formate'
+
+
 def test_gui_long_choices_keep_forms_narrow(app):
     from candycrunch import gui
     # A combo as wide as its longest choice widens its form beyond its view, which cuts off the form's right edge (combo arrows, buttons, Restore defaults)

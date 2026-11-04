@@ -23,7 +23,7 @@ from glycowork.motif.processing import canonicalize_composition, is_composition,
 from glycowork.motif.tokenization import map_to_basic as glycowork_map_to_basic, HYDROGEN_MASS, PROTON_MASS, ELECTRON_MASS, calculate_adduct_mass, \
     composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS, PEPTIDE_MODIFICATIONS, \
     SIALIC_DERIVATIZATIONS, SIALIC_PRODUCTS, SIALIC_PRODUCT_CAPS, SIALIC_KEYS, _carboxyl_sites, modification_formula_dict
-from glycowork.motif.graph import glycan_to_nxGraph, get_possible_topologies, graph_to_string
+from glycowork.motif.graph import glycan_to_glycangraph, get_possible_topologies, graph_to_string
 from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
 from glycowork.motif.draw import plot_glycans_excel
 from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
@@ -422,8 +422,8 @@ def glycan_to_graph_monos(glycan):
     # get_possible_topologies places one floating part per call, and a part left floating breaks the even/odd node order
     while '{' in glycan:
         glycan = get_possible_topologies(glycan)[0]
-    ggraph = glycan_to_nxGraph(glycan)
-    all_mask_dic = nx.get_node_attributes(ggraph, 'string_labels')
+    ggraph = glycan_to_glycangraph(glycan)
+    all_mask_dic = {k: d['string_labels'] for k, d in ggraph.nodes.items()}
     mono_mask_dic = {k // 2: v for k, v in all_mask_dic.items() if not k % 2}
     # A modified monosaccharide (GlcNAc6S, Neu5Ac9Ac, IdoA2S, GlcNS, ...) gets the tables of its base residue: each
     # substituent adds its mass and derivatization change to the cross-ring fragments keeping its position. One at an
@@ -468,9 +468,10 @@ def glycan_to_graph_monos(glycan):
                    for f in frags} for prop in ['mass', *derivatization_sites]}
     adj_matrix = np.zeros((len(mono_mask_dic), len(mono_mask_dic)), dtype = int)
     # glycowork alternates monosaccharide (even) and linkage (odd) nodes, with edges pointing parent -> linkage -> child
-    for parent, link in ggraph.edges():
-        if link % 2:
-            adj_matrix[link // 2, parent // 2] = 1
+    for parent, children in ggraph.succ.items():
+        for link in children:
+            if link % 2:
+                adj_matrix[link // 2, parent // 2] = 1
     return mono_mask_dic, adj_matrix, all_mask_dic
 
 
@@ -3355,19 +3356,23 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
         triples = set()
         for g in reference_glycans:
             try:
-                gr = glycan_to_nxGraph(g) if '{' not in g and (not glycan_class or get_class(g) == glycan_class) else None
+                gr = glycan_to_glycangraph(g) if '{' not in g and (not glycan_class or get_class(g) == glycan_class) else None
             except Exception:
                 gr = None
             if gr is not None:
-                labels = nx.get_node_attributes(gr, 'string_labels')
+                labels = {k: d['string_labels'] for k, d in gr.nodes.items()}
                 triples.update((labels[next(iter(gr.succ[n]))], labels[n], labels[next(iter(gr.pred[n]))]) for n in gr if n % 2)
         _PLACEMENTS[key] = sorted(triples)
     # A glycan's residues and their other placements depend only on it and the reference glycans, and the same structures come up for many spectra
     residues = _RESIDUES.get((glycan, key))
     if residues is None:
         triples = _PLACEMENTS[key]
-        gr = glycan_to_nxGraph(glycan)
-        labels, paths, canonical = nx.get_node_attributes(gr, 'string_labels'), {}, graph_to_string(gr)
+        slim = glycan_to_glycangraph(glycan)
+        labels, paths, canonical = {k: d['string_labels'] for k, d in slim.nodes.items()}, {}, graph_to_string(slim)
+        # a networkx graph of its own, as the placements below edit copies of it; glycowork's cached graphs are read-only
+        gr = nx.DiGraph()
+        gr.add_nodes_from((k, {'string_labels': v}) for k, v in labels.items())
+        gr.add_edges_from((u, v) for u in slim.succ for v in slim.succ[u])
         for n in sorted(gr, reverse = True):
             paths[n] = paths.get(next(iter(gr.pred[n]), None), ()) + (labels[n],)
         monos, root = [p for k, p in paths.items() if k % 2 == 0], max(gr)
@@ -3478,10 +3483,10 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
     for residue, name, placements, link in residues:
         linkage = None
         if sialic == 1 and link[0] == 'Neu5Ac' and link[1] in ('a2-3', 'a2-6') and link[2] == 'Gal':
-            gr = glycan_to_nxGraph(glycan)
+            gr = glycan_to_glycangraph(glycan)
             target = get_fragment_mass(glycan, 'M', charge = -1) - composition_to_mass({'Neu5Ac': 1}) + WATER_MASS
             # antennae as non-reducing ends other than Fuc; a scan that stops below the ion cannot read it
-            if sum(gr.out_degree(n) == 0 and gr.nodes[n]['string_labels'] != 'Fuc' for n in gr if n % 2 == 0) <= 2 and max(peaks) >= target - mass_tolerance:
+            if sum(not gr.succ[n] and gr.nodes[n]['string_labels'] != 'Fuc' for n in gr if n % 2 == 0) <= 2 and max(peaks) >= target - mass_tolerance:
                 intensity, mz = max(((i, mz) for mz, i in peaks.items() if abs(mz - target) <= mass_tolerance), default = (0, target))
                 rel = intensity / (max(peaks.values()) or 1)
                 linkage = (round(float(mz), 2), round(rel, 3), 'a2-3' if rel >= 0.15 else 'a2-6', (rel >= 0.15) == (link[1] == 'a2-3'))

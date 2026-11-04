@@ -85,8 +85,14 @@ SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethyl
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
                           ('Dimethylamidation (DMA)', 'DMA'), ('SALSA', 'SALSA'), ('Glycoqueuing, aniline (GQ)', 'GQ'), ('Glycoqueuing, d5/d0-aniline (GQ-d5)', 'GQ-d5')]
 SIALIC_TIP = 'Linkage-specific sialic acid derivatization: precursor masses then tell a2-6 from a2-3/8 sialic acids, and fragments carry the derivatized sialic acids'
-# Ions carrying the charge of the precursors in place of protons, as wrap_inference's adducts
-CHARGE_CARRIERS = [('None', None), ('Li+ (lithium salts in the mobile phase)', 'Li+')]
+# The main adduct of a run, by ion mode: a cation carries the charge of its precursors in place of protons (wrap_inference's adducts), an anion is its mobile phase's (run_anion)
+MAIN_ADDUCTS = {'positive': [('Automatic', None), ('Na+', 'Na+'), ('K+', 'K+'), ('NH4+', 'NH4+'), ('Li+', 'Li+')],
+                'negative': [('Automatic', None), ('HCO3-', 'HCO3-'), ('Formate', 'Formate'), ('Acetate', 'Acetate')]}
+MAIN_ADDUCT_TIPS = {'positive': 'Automatic suits most runs: protons first, then Na+, K+, and NH4+. Choose an ion only if it carries the charge in place of protons, e.g., Li+ with lithium acetate or Na+ in a '
+                                'sodiated run: precursors are then read as [M+Li]+, [M+2Li]2+, ... first, and their fragments carry it. Back to Automatic when CandyCrunch restarts',
+                    'negative': 'Automatic suits most runs: acetate, formate, and HCO3- are all considered, and with survey scans the anion that neutral glycans show counts for abundances. '
+                                'Choose the anion of your mobile phase (e.g., HCO3- with ammonium bicarbonate) to read it before the other anions and to count its adduct ions for abundances. '
+                                'Back to Automatic when CandyCrunch restarts'}
 LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
 FRAGMENT_TYPES = [('Automatic', None), ('Glycosidic only', 'glycosidic'), ('All cross-rings', 'cross_rings')]
@@ -713,7 +719,7 @@ def _neu5ac_readings(support, ion_trap):
 
 def _support_markers(ax, structure, support, ion_trap):
     """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red); gives the (target, what hovering it shows) of each set"""
-    from candycrunch.analysis import domon_costello_to_html, glycan_to_nxGraph
+    from candycrunch.analysis import domon_costello_to_html, glycan_to_glycangraph
     read, linkage = _neu5ac_readings(support, ion_trap)
     # Each marker carries what hovering it shows: the supported residues' fragment and cleaved bond in the drawing (lilac) and a tooltip naming
     # the fragment; added once per cached figure
@@ -725,7 +731,7 @@ def _support_markers(ax, structure, support, ion_trap):
             points['against'].setdefault(a[0], [a[1], None, f'{a[0]:.2f}: {domon_costello_to_html(list(a[2]))} = {a[3]}<br>fits'])[2] += f'<br>{a[4]}'
     for e in support['residues']:
         if id(e) in read and read[id(e)][2] == 'a2-3':
-            residues = range(len(glycan_to_nxGraph(structure)) // 2 + 1)
+            residues = range(len(glycan_to_glycangraph(structure)) // 2 + 1)
             points['support' if read[id(e)][3] else 'against'].setdefault(read[id(e)][0], [read[id(e)][1], (structure, tuple(i for i in residues if i != e['residue']), e['residue']), f'{linkage[id(e)]}<br>15% or more reads a2-3 (ion-trap CID)'])
     for color, side in ((LILAC, 'support'), (CANDY, 'against')):
         if points[side]:
@@ -2084,10 +2090,8 @@ class SettingsPanel(QScrollArea):
         self.inputs['sample_prep'] = _combo(SAMPLE_PREPS)
         self.sialic = _combo(SIALIC_DERIVATIZATIONS)
         self.sialic.setToolTip(SIALIC_TIP)
-        self.adducts = _combo(CHARGE_CARRIERS)
-        self.adducts.setToolTip('Protons and the usual adducts of the ion mode (Na+, K+, NH4+ in positive, acetate, formate, HCO3- in negative mode) are always '
-                                'considered. An extra charge carrier takes the place of protons where the mobile phase supplies it, e.g., Li+ with lithium '
-                                'acetate: precursors are read as [M+Li]+, [M+2Li]2+, ... first, and their fragments carry Li+')
+        self.adducts = QComboBox()
+        self.fill_main_adducts()
         # As wide as their longest choice, these made the panel wider than its view, which cut off its right edge (the hint, combo arrows, Restore defaults)
         for box in (self.inputs['glycan_class'], self.inputs['modification'], self.inputs['sample_prep'], self.sialic, self.adducts):
             box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -2196,7 +2200,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('RT until', self.inputs['rt_max'])
         form.addRow('Peak width', self.inputs['rt_diff'])
         form.addRow('Mass tolerance', self.inputs['ppm_thresh'])
-        form.addRow('Extra charge carrier', self.adducts)
+        form.addRow('Main adduct', self.adducts)
         form.addRow('Min. model probability', self.inputs['pred_thresh'])
         form.addRow('Fragment score above', self.inputs['crumbs_thresh'])
         form.addRow('Cross-class model probability', self.inputs['extra_thresh'])
@@ -2224,6 +2228,8 @@ class SettingsPanel(QScrollArea):
         self.inputs['modification'].currentIndexChanged.connect(lambda: self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom'))
         self.inputs['experimental'].toggled.connect(lambda on: (self.inputs['taxonomy_level'].setEnabled(on), self.inputs['taxonomy_filter'].setEnabled(on)))
         self.reset.clicked.connect(lambda: self.set_values(DEFAULTS))
+        self.mode.currentIndexChanged.connect(self.fill_main_adducts)
+        self.adducts.currentIndexChanged.connect(lambda: self.advanced_toggle.setText(f'Advanced settings ({self.adducts.currentData()})' if self.adducts.currentData() else 'Advanced settings'))
         self.import_model_button.clicked.connect(self.import_model)
         self.model_checked.connect(self.model_imported)
         self.remove.clicked.connect(self.remove_selected)
@@ -2463,6 +2469,12 @@ class SettingsPanel(QScrollArea):
     def paths(self):
         return [path for _, paths, _ in self.experiments() for path in paths]
 
+    def fill_main_adducts(self):
+        self.adducts.clear()
+        for label, value in MAIN_ADDUCTS[self.mode.currentData()]:
+            self.adducts.addItem(label, value)
+        self.adducts.setToolTip(MAIN_ADDUCT_TIPS[self.mode.currentData()])
+
     def values(self):
         values = {}
         for key, widget in self.inputs.items():
@@ -2478,7 +2490,7 @@ class SettingsPanel(QScrollArea):
         values['filter_out'] = {name for name, box in self.filter_boxes.items() if box.isChecked()}
         values['modification'], values['mass_tag'] = ('custom', None) if values['modification'] == 'unreduced' else (values['modification'], values['mass_tag'] if values['modification'] == 'custom' else None)
         values['sialic_derivatization'] = self.sialic.currentData()
-        values['adducts'] = self.adducts.currentData()
+        values['adducts'], values['run_anion'] = (None, self.adducts.currentData()) if self.mode.currentData() == 'negative' else (self.adducts.currentData(), None)
         values['model_file'] = self.model.currentData()
         # Classes measured together, and reducing ends side by side, go to wrap_inference as a list
         if '+' in values['glycan_class']:
@@ -2520,7 +2532,7 @@ class SettingsPanel(QScrollArea):
             _set_combo(self.inputs['modification'], 'unreduced')
         self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom')
         self.sialic.setCurrentIndex(max(self.sialic.findData(values.get('sialic_derivatization')), 0) if values.get('sialic_derivatization') else 0)
-        adducts = values.get('adducts')
+        adducts = values.get('run_anion') or values.get('adducts')
         self.adducts.setCurrentIndex(max(self.adducts.findData(adducts if isinstance(adducts, str) or not adducts else adducts[0]), 0) if adducts else 0)
         # A model from a session or the last run that is not in the list is added if its file still exists, else the built-in model is shown
         model = values.get('model_file')
@@ -4506,6 +4518,7 @@ class MainWindow(QMainWindow):
         self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
         if self.store.value('settings'):
             stored = json.loads(self.store.value('settings'))
+            stored.pop('adducts', None)
             # Settings stored before only changed ones were kept hold every default of their release, and filter_out's was this set until bddfc58
             if set(stored.get('filter_out', ())) == {'Ac', 'HexA', 'HexN', 'Kdn', 'Me', 'PCho', 'PEtN', 'Pen'}:
                 del stored['filter_out']
@@ -4785,8 +4798,8 @@ class MainWindow(QMainWindow):
                                 'add them again:\n\n' + '\n'.join(missing))
             return
         settings = self.settings.values()
-        # Only the settings that differ from the defaults, so that a later release's defaults reach those left at theirs
-        self.store.setValue('settings', json.dumps({k: sorted(v) if k == 'filter_out' else v for k, v in settings.items() if k not in DEFAULTS or v != DEFAULTS[k]}))
+        # Only the settings that differ from the defaults, so that a later release's defaults reach those left at theirs; the main adduct describes these runs, not the next ones
+        self.store.setValue('settings', json.dumps({k: sorted(v) if k == 'filter_out' else v for k, v in settings.items() if k not in ('adducts', 'run_anion') and (k not in DEFAULTS or v != DEFAULTS[k])}))
         self.weights = {**STAGE_WEIGHTS, **json.loads(self.store.value('stage_weights', '{}'))}
         self.runner.submit(experiments, self.weights)
         self.started, self.stage_text = time.time(), 'Waiting for the CandyCrunch model to load' if self.status_text.text().startswith('Loading') else 'Starting'
@@ -4921,7 +4934,8 @@ class MainWindow(QMainWindow):
             self.store.setValue('stage_weights', json.dumps({name: 0.5 * self.weights[name] + 0.5 * measured[name] * scale if name in measured else self.weights[name]
                                                              for name in STAGE_WEIGHTS}))
         peaks, runs = sum(len(df) for e in payload['experiments'] for df, _ in e['tables'].values()), sum(len(e['tables']) for e in payload['experiments'])
-        self.stop(f'Finished in {seconds // 60}:{seconds % 60:02d}: {peaks} glycan peaks in {runs} run{"s" if runs > 1 else ""}')
+        anions = sorted({df.attrs['run_anion'] for e in payload['experiments'] for df, _ in e['tables'].values() if df.attrs.get('run_anion')})
+        self.stop(f'Finished in {seconds // 60}:{seconds % 60:02d}: {peaks} glycan peaks in {runs} run{"s" if runs > 1 else ""}{"; " + ", ".join(anions) + " adducts counted" if anions else ""}')
         self.append_log(self.status_text.text() + '\n')
         if not peaks:
             QMessageBox.information(self, 'CandyCrunch', 'CandyCrunch found no glycan peaks. Check the glycan class, ion mode, and reducing end, '
@@ -4935,7 +4949,7 @@ class MainWindow(QMainWindow):
         self.save_action.setEnabled(True)
         self.save_as_action.setEnabled(True)
         # wrap_inference(_batch) processes files as another glycan class or with another reducing end if their predictions say so, which the user has to know
-        notes = [line.removeprefix('WARNING: ') for line in self.log.toPlainText().splitlines() if 'the glycan class' in line or 'the reducing end' in line]
+        notes = [line.removeprefix('WARNING: ') for line in self.log.toPlainText().splitlines() if 'the glycan class' in line or 'the reducing end' in line or 'the main adduct set' in line]
         if notes:
             QMessageBox.warning(self, 'CandyCrunch', '\n\n'.join(notes))
         QApplication.alert(self)
