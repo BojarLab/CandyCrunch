@@ -515,6 +515,36 @@ def test_quantification_synthetic(result_collector):
     assert score > 0.6
 
 
+def test_anion_adduct_quantification():
+    # A neutral glycan's [M+HCO3-H]2- follows its [M-2H]2- and counts for its abundance, whichever got MS2, so a row that read it as the formate adduct of the
+    # composition with a Hex for its Fuc goes; [M+2HCO3]2- stays out, and a sialylated glycan shows none
+    assert [i[2] for i in anion_adduct_ions([2, 1], 'HCO3-')] == ['[M+HCO3-H]2-', '[M+HCO3]-'] and [i[2] for i in anion_adduct_ions([3], 'Formate')] == ['[M+Formate-2H]3-', '[M+2Formate-H]3-']
+    fucosylated = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc'
+    sialylated = 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    isobar = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    m_fuc, m_sia = [composition_to_mass(get_comp(g), modification = 'reduced') for g in (fucosylated, sialylated)]
+    bicarbonate = mass_dict['HCO3-'] + PROTON_MASS
+    ion = lambda m, n: (m + n * bicarbonate - 2 * PROTON_MASS) / 2
+    rts = np.arange(10, 30, 0.05)
+    shape = lambda apex: np.exp(-0.5 * ((rts - apex) / 0.12) ** 2)
+    peaks = [(ion(m_fuc, 0), 4e6 * shape(20)), (ion(m_fuc, 1), 2e6 * shape(20)), (ion(m_fuc, 2), 1e6 * shape(20)), (ion(m_sia, 0), 8e6 * shape(22))]
+    scans = [sorted((mz + j * ISOTOPE_SPACING / 2, trace[i] * 0.5 ** j) for mz, trace in peaks for j in range(4)) for i in range(len(rts))]
+    ms1 = (rts, np.array([m for scan in scans for m, _ in scan], dtype = np.float32), np.array([x for scan in scans for _, x in scan], dtype = np.float32),
+           np.cumsum([0] + [len(scan) for scan in scans]).astype(np.int64))
+    row = lambda mz, g, rt, adduct: {'m/z': mz, 'predictions': [(g, 0.9)], 'composition': get_comp(g), 'num_spectra': 5, 'charge': -2, 'RT': rt, 'rel_abundance': 1e6, 'top_fragments': [731.0, 1113.0],
+                                     'peak_d': {731.0: 100.0, 1113.0: 50.0}, 'annotation_score': 12.0, 'evidence': 'strong', 'adduct': adduct, 'top1_pred': g}
+    rows = pd.DataFrame([row(ion(m_fuc, 0), fucosylated, 20.0, None), row(ion(m_sia, 0), sialylated, 22.0, None), row(ion(m_fuc, 1), isobar, 20.0, 'Formate')]).set_index('m/z')
+    out, _ = finalise_predictions(rows, False, 'negative', 'reduced', None, 300, 1.0, glycan_class = 'N', ms1 = ms1, accurate_ms1 = True, xic_details = True)
+    assert out.attrs['run_anion'] == 'HCO3-' and sorted(out['top1_pred']) == sorted([fucosylated, sialylated])
+    fuc = out[out['top1_pred'] == fucosylated].iloc[0]
+    assert {o['ion'] for d in fuc['xic'] for o in d['others'] if o['ion']} == {'[M+HCO3-H]2-'}
+    # The summed envelopes of both glycans have the same width: 4 + 2 against 8
+    assert abs(fuc['rel_abundance'] / out['rel_abundance'].sum() - 6 / 14) < 0.03
+    # Without the anion, as in a run whose neutral glycans do not show it, only its own ion counts
+    out, _ = finalise_predictions(rows.drop(rows.index[2]), False, 'negative', 'reduced', None, 300, 1.0, glycan_class = 'N', ms1 = ms1, accurate_ms1 = True, run_anion = False)
+    assert abs(out[out['top1_pred'] == fucosylated]['rel_abundance'].iat[0] / out['rel_abundance'].sum() - 4 / 12) < 0.03
+
+
 @pytest.mark.parametrize("quant_set", list(QUANT_SETS))
 def test_quantification_published(quant_set, result_collector):
     # The abundances of a run's ground-truth peaks as the pipeline quantifies a row (calibration, envelope over its own peak, co-eluting charge states no other

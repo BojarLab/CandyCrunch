@@ -163,6 +163,8 @@ n_jobs, type=int: number of processes for fragment scoring and supporting peaks 
 confidence is the probability that top1_pred is the glycan of the peak, exactly as written: one calibrated score built from the model's probability of the structure among the isomers of its composition (also in predictions, with the other candidates), the CandyCrumbs fragment evidence, the MS2 peaks that place each residue (see `supporting_ions`), other peaks with the same structure, where the structure came from, the peak's abundance, and more (see `candycrunch/confidence.py`; the app shows each row's breakdown). On curated test sets it is calibrated within about 0.03 overall; single datasets can deviate more. rel_abundance is the peak's share (in %) of the summed abundance of all rows, and supported_by the MS2 peaks that place each residue of the structure (see `supporting_ions`).
 ```
 
+rel_abundance is a peak's share of the run. With survey scans it sums the isotope envelope of the glycan's ion over its chromatographic peak, its other charge states that follow that peak, and, in a run whose neutral glycans ionize as adducts of the mobile phase's anion (e.g., ammonium bicarbonate), the adduct ions that follow it ([M+HCO3-H]2-, [M+HCO3]-), whether or not they were fragmented.
+
 <details>
 <summary>
 

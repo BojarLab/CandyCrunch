@@ -1906,9 +1906,10 @@ class QuantPanel(QWidget):
         self.summary.setWordWrap(True)
         self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary.setContentsMargins(10, 0, 6, 0)
-        self.summary.setToolTip('Area: the isotope envelope (M to M+3) above its baseline (dashed) over the range, by the trapezoid rule, plus the other charge '
-                                'states whose traces follow it there (r >= 0.9). Factor: its share of a peak that several rows landed on, divided by the share of '
-                                'its molecules within M to M+3. Part: its share of the abundance, which sums every row folded into this peak')
+        self.summary.setToolTip('Area: the isotope envelope (M to M+3) above its baseline (dashed) over the range, by the trapezoid rule, plus the other charge states '
+                                'and, in a run whose neutral glycans show them, the adduct ions of its mobile phase\'s anion (e.g., [M+HCO3-H]2-), whose traces follow it '
+                                'there (r >= 0.9, shown in the chart). Factor: its share of a peak that several rows landed on, divided by the share of its molecules within '
+                                'M to M+3. Part: its share of the abundance, which sums every row folded into this peak')
         self.message = _label('', 'hint')
         self.message.setAlignment(Qt.AlignCenter)
         self.chart = ChartView()
@@ -1952,13 +1953,13 @@ class QuantPanel(QWidget):
         parts = [(d['area'] + sum(o['area'] for o in d['others'])) * d['scale'] for d in records]
         cell = 'style="padding-right:12px; white-space:nowrap"'
         rows = [f'<tr><td style="color:{MUTED}; padding-right:12px">' + f'</td><td style="color:{MUTED}; padding-right:12px">'.join(
-            ('Ion', 'Range', 'Area', 'Charge states added', 'Factor', 'Part')) + '</td></tr>']
+            ('Ion', 'Range', 'Area', 'Other ions added', 'Factor', 'Part')) + '</td></tr>']
         for d, part in zip(records, parts):
             times = d['times']
             span = f'{times[d["left"]]:.2f}-{times[d["right"]]:.2f} min' if d['left'] >= 0 else 'not integrated (too few survey scans)'
-            added = ', '.join(f'z = {o["charge"]}: {o["area"]:.3g} (r {o["r"]:.2f})' for o in d['others'] if o['added']) or 'none'
+            added = ', '.join(f'{o.get("ion") or "z = " + str(o["charge"])}: {o["area"]:.3g}' for o in d['others'] if o['added']) or 'none'
             rows.append(f'<tr><td {cell}>m/z {d["mz"]:.4f}, z = {d["charge"]}</td><td {cell}>{span}{" (edited)" if "auto" in d else ""}</td><td {cell}>{d["area"]:.3g}</td>'
-                        f'<td {cell}>{added}</td><td {cell}>{d["scale"]:.3f}</td><td {cell}>{part / (sum(parts) or 1):.0%}</td></tr>')
+                        f'<td style="padding-right:12px">{added}</td><td {cell}>{d["scale"]:.3f}</td><td {cell}>{part / (sum(parts) or 1):.0%}</td></tr>')
         self.summary.setText((f'Abundance {abundance:.2f}% of the run, from ' if isinstance(abundance, float) and not np.isnan(abundance) else 'From ') +
                              f'{"these integrations" if len(records) > 1 else "this integration"}; drag across the chromatogram to integrate another range'
                              '<table cellspacing="0" cellpadding="1">' + ''.join(rows) + '</table>')
@@ -1985,7 +1986,7 @@ class QuantPanel(QWidget):
         ax.plot(times, trace, color = INK, lw = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"]}')
         for o in d['others']:
             ax.plot(times, o['trace'], color = LILAC if o['added'] else '#b8b0c0', dash = None if o['added'] else (3.0, 1.3), lw = 0.8,
-                    label = f'z = {o["charge"]} (m/z {o["mz"]:.2f}): ' + ('added' if o['added'] else 'not added') + (f', r {o["r"]:.2f}' if o['r'] is not None else ', flat'))
+                    label = f'{o.get("ion") or "z = " + str(o["charge"])} (m/z {o["mz"]:.2f}): ' + ('added' if o['added'] else 'not added') + (f', r {o["r"]:.2f}' if o['r'] is not None else ', flat'))
         ax.axvline(d['rt'], color = CANDY, dash = (0.8, 1.3), label = 'Peak RT')
         ax.set_xlim(times[0], times[-1]) if len(times) > 1 else None
         ax.set_xlabel('Retention time (min)')

@@ -761,7 +761,7 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
     dedup_in = captured.get('deduplicate_predictions')
     fin_in = captured.get('finalise_predictions')
     out = preds.reset_index()
-    out = out[out['top1_pred'].notna()].reset_index(drop = True)
+    out = out[out['top1_pred'].notna()].reset_index(drop = True).astype({'m/z': float, 'RT': float})
     out_z = out['charge'].values.astype(float) if 'charge' in out.columns else np.full(len(out), float(sign))
     # The metric's one-to-one matching
     pairs = out[['m/z', 'RT']].round(2).values
