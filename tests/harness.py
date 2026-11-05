@@ -821,7 +821,8 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
             specs = set(cand.loc[hit, 'spec_id']) if len(cand) else set()
             if comp is not None and comp not in comps:
                 stage = 'composition_not_candidate'
-            elif raw and not any(gt_comp(x) == comp if comp is not None else True for s in specs for k, top in raw.items() if k[0] == s and (comp is None or k[1] == comp) for x in top):
+            # an open peak needs a structure of one of its candidate compositions (a spectrum's top 25 always holds structures of other compositions)
+            elif raw and not any(gt_comp(x) == (comp if comp is not None else k[1]) for s in specs for k, top in raw.items() if k[0] == s and (comp is None or k[1] == comp) for x in top):
                 stage = 'model_no_composition'
             elif not row_preds(df_in, gmz, grt, gzz, comp):
                 stage = 'below_pred_thresh'

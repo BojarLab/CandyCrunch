@@ -124,7 +124,8 @@ def maps_for_run(project, path, maps_dir):
         return None, hint, []
     # Each row with the map file and row it came from (0-based, below the header), so map_rows points curation at it
     mapping = pd.concat([c[0].assign(map_file = c[2], map_row = c[0].index) for c in chosen], ignore_index = True)
-    classes = list(dict.fromkeys(c[1] for c in chosen if c[1]))
+    # (a map naming the run without any row present in it, a column of zeros, adds no class)
+    classes = list(dict.fromkeys(c[1] for c in chosen if c[1] and len(c[0])))
     cls = classes if len(classes) > 1 else (classes[0] if classes else hint or structure_class(mapping['glycan']))
     return mapping, cls, [c[2] for c in chosen]
 

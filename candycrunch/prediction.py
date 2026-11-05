@@ -2504,12 +2504,15 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             # and any known charge agrees
             return [(y, charge) if ((not x[0] or (replace and heavy and x[1] == 1) or (fallback and (out[min(x[1], 2) - 1] or (
                     ms1_ppm and x[0][1] > ms1_ppm * mz / 1e6)) and not out[min(charge, 2) - 1]) or (ms1_ppm and y and x[0][1] > ms1_ppm * mz / 1e6 >= y[1]
-                    and not out[min(charge, 2) - 1])) and y and (kc is None or kc == charge)) else x
+                    and not out[min(charge, 2) - 1])) and y and (kc is None or kc == charge) and (charge <= abs(max_charge) or (kc == charge and y[1] <= ms1_ppm * mz / 1e6))) else x
                     for x, y, kc, heavy, out, mz in zip(comps_out, chunked, known_charges, heavy_frags, ruled_out, red_masses)]
 
         # Try each charge state separately; higher charges produce lower observed m/z for the same neutral mass, so a ruled-out singly charged
         # match must not hide a multiply charged one at the same m/z (e.g., HexNAc1Neu5Ac2 [M-H]- vs. Hex3HexNAc4dHex2 [M-2H]2- at 804.3)
-        for charge in range(1, abs(max_charge) + 1):
+        # With accurate survey scans the instrument's charge state is read from a resolved isotope envelope, so a precursor whose header charge exceeds
+        # max_charge (e.g., [M+4H]4+ of a tetrasialylated tetraantennary glycan at max_charge 3) is matched at that charge instead of left without composition,
+        # within ms1_ppm, as the flat window would give compositions to the peptides and other highly charged ions of the run
+        for charge in range(1, max([abs(max_charge)] + [abs(kc) for kc in known_charges if kc and ms1_ppm]) + 1):
             if mode == 'negative':
                 charged_comp_masses = (comp_masses - charge * PROTON_MASS) / charge
             else:
@@ -2984,10 +2987,11 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                     # fucose there while the spectrum's B and C ions (655.2, 817.3 as base peak) show the sialylated antenna without it (z = 2 fucosylated
                     # sialylated N-glycans in an ion trap, all emptied); where the fucose sits is the structure ranking's business
                     lacnac = re.search(sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)(\[[^\]]*\])?GlcNAc', m) is not None or (floating and 'Gal(b1-4)GlcNAc' in m)
-                    # ... and, on an N-glycan antenna, together with the mannose it sits on (Neu5Ac-Hex-HexNAc-Hex C ion 835.3, the base peak of many z = 2
-                    # monosialylated N-glycans in ion traps, whose 290 ion lies below the low-mass cutoff and which lose no sialic acid as a charged fragment)
+                    # ... and, on an N-glycan antenna, together with the hexose it sits on (Neu5Ac-Hex-HexNAc-Hex C ion 835.3, the base peak of many z = 2
+                    # monosialylated N-glycans in ion traps, whose 290 ion lies below the low-mass cutoff and which lose no sialic acid as a charged fragment):
+                    # the antenna Man, or the Gal of a poly-LacNAc chain (Neu5Ac-Gal-GlcNAc-Gal-GlcNAc-Man), which gives the same ion
                     antenna = [res_mass['Hex'] + res_mass['HexNAc']] + ([2 * res_mass['Hex'] + res_mass['HexNAc']] if re.search(
-                        sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)(\[[^\]]*\])?GlcNAc\(b1-[^)]*\)Man', m) or (floating and re.search(r'Gal\(b1-4\)GlcNAc\(b1-[^)]*\)Man', m)) else [])
+                        sia + r'[^()]*\(a2-[^)]*\)Gal\(b1-4\)(\[[^\]]*\])?GlcNAc\(b1-[^)]*\)(Man|Gal|Glc)', m) or (floating and re.search(r'Gal\(b1-4\)GlcNAc\(b1-[^)]*\)(Man|Gal|Glc)', m)) else [])
                     truth.append(any(
                         any(abs(sm + PROTON_MASS * multiplier - j) < double_mass_tolerance for sm in sia_masses[sia]) or
                         (lacnac and j in float_frags[:5] and any(
@@ -3614,13 +3618,16 @@ def combine_charge_states(df_out):
         lowest = pred_rows['charge'].abs().min()
         # Every lowest-charge row and the higher charge states of this glycan that co-elute with it are one species, reported by its best-supported
         # ion (a reported structure, then the most abundant), as the lowest charge alone let a weak row (e.g. imputed with this structure, without a
-        # top1_pred) stand for a reported one, and a z = 1 row cannot match a peak curated at its z = 2 m/z while a z = 2 row matches both
+        # top1_pred) stand for a reported one, and a z = 1 row cannot match a peak curated at its z = 2 m/z while a z = 2 row matches both; of those a
+        # (de)protonated ion before an adduct one, which finalise_predictions drops later unless a (de)protonated row of its composition co-elutes (a Man5
+        # [M+H]+ taken by its stronger [M+2Na]2+ went with it)
         absorbed = set()
         for idx, row in pred_rows[pred_rows['charge'].abs() == lowest].iterrows():
             partners = pred_rows[(pred_rows['charge'].abs() > lowest) & ((pred_rows['RT'] - row['RT']).abs() < 1) & ~pred_rows.index.isin(absorbed)]
             absorbed.update(partners.index)
             group = pd.concat([pred_rows.loc[[idx]], partners])
-            rep = group.assign(_weak = group['top1_pred'].isna()).sort_values(['_weak', 'rel_abundance'], ascending = [True, False], kind = 'stable').index[0]
+            rep = group.assign(_weak = group['top1_pred'].isna(), _adduct = group['adduct'].apply(lambda a: isinstance(a, str)) if 'adduct' in group.columns else False).sort_values(
+                ['_weak', '_adduct', 'rel_abundance'], ascending = [True, True, False], kind = 'stable').index[0]
             df_filtered.at[rep, 'rel_abundance'] = group['rel_abundance'].sum()
             df_filtered.at[rep, 'num_spectra'] = group['num_spectra'].sum()
             if 'xic' in df_filtered.columns:
@@ -5057,9 +5064,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
             clear = np.array([isinstance(c, dict) and score >= 20 and score == best[spec][stringify_dict(c)] and score >= 1.5 * max(
                 [v for k, v in best[spec].items() if k != stringify_dict(c)], default = 0) for spec, c, score in zip(
                 df_out['spec_id'].values, df_out['composition'].values, df_out['annotation_score'].values)], dtype = bool)
+        # (in a run of several classes only for the free glycans' structures: in whole-glycome runs it gave every N- and O-glycan composition without a model
+        # structure its database structure)
+        free = set(df_use.loc[df_use['glycan_type'] == 'free', 'glycan']) if len(classes) > 1 and 'glycan_type' in df_use.columns else set()
         ok = (~has_pred & ~df_out['cross_class'].values & (df_out['annotation_score'].values >= 10) & ((df_out['charge'].values <= 2) | z3)
               & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']], dtype = bool)
-              & (np.array([isinstance(c, dict) and ('Neu5Gc' in c or 'free' in classes) for c in df_out['composition']], dtype = bool) | z3 | clear))
+              & (np.array([isinstance(c, dict) and ('Neu5Gc' in c or ('free' in classes and (len(classes) == 1 or g in free))) for c, g in zip(
+                  df_out['composition'], df_out['candidate_structure'])], dtype = bool) | z3 | clear))
         for i in df_out.reset_index(drop = True)[ok].groupby('spec_id')['annotation_score'].idxmax().values if ok.any() else []:
             g = df_out['candidate_structure'].iloc[i]
             df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
