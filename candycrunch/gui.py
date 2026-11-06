@@ -807,8 +807,10 @@ class Annotator(QObject):
                         # first is a noise peak below a fragment as often as the monoisotopic peak of a heavy fragment, whose M+1 is often the most intense one
                         # (and more so when the isolation window centred the precursor's M+1)
                         peaks = dict(zip(request['mzs'], request['intensities']))
+                        # (glycopeptides with bounded isotope ratios, as the glycopeptide functions score them)
+                        glycopeptide = bool(resolve_spectrum_input(request['structure'])[0])
                         mono = sorted({m for relabel in (False, True) for m in deisotope_ms2(peaks, max(abs(request['charge']), 1), min(request['tolerance'], 0.05),
-                                                                                              relabel = relabel)})
+                                                                                              relabel = relabel, bound_isotope_ratio = glycopeptide)})
                         # A ppm tolerance alone bounds the matches (CandyCrumbs' Da window, 0.5 by default, is then wider at any fragment m/z)
                         self.results[key] = CandyCrumbs(request['structure'], mono, request['tolerance'] if request['ppm'] is None else None, mass_threshold_ppm = request['ppm'],
                                                         max_cleavages = request['kwargs'].get('max_cleavages', 3),

@@ -7,7 +7,7 @@ import numpy as np
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
     build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
-    CHAIN_IONS, domon_costello_to_label, \
+    CHAIN_IONS, domon_costello_to_label, deisotope_ms2, \
     peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
     subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge, chance_fragment, relabel_graph
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
@@ -327,6 +327,18 @@ def test_rank_glycopeptide_compositions_folded_oxonium():
                 oxonium[0] - 1.0033548 / 2: 2, oxonium[1] - 1.0033548 / 2: 2}
     df = rank_glycopeptide_compositions('TPSAAYPTDR', ['N1F1G1', 'H1N1A1'], spectrum, charge = 2, glycosite = 2, fragmentation_method = 'HCD')
     assert df['composition'][0].get('Neu5Ac') == 1 and df['sialic_evidence'].tolist() == [1.0, 0.0]
+
+
+def test_deisotope_ms2_weak_neighbors():
+    # A shoulder within the tolerance below an oxonium ion never takes it up and drops its intensity, nor (with bound_isotope_ratio) does a weak peak one
+    # isotope spacing of any charge below it claim the ion as its 13C peak: HCD peaks of glycopeptides, as measured
+    spectrum = {204.0691: 9046, 204.0862: 519685, 205.0896: 45723, 291.6010: 300, 292.1027: 30000, 293.1060: 4000, 365.1361: 800, 366.1395: 60000,
+                367.1428: 9000, float('nan'): 5}
+    assert deisotope_ms2(spectrum, 3, 0.05)[204.0862] == 519685 + 45723
+    assert deisotope_ms2(spectrum, 3, 0.05, bound_isotope_ratio = True) == {204.0862: 519685 + 45723, 366.1395: 60000 + 9000, 292.1027: 30000 + 4000,
+                                                                              365.1361: 800, 291.6010: 300}
+    # an isotope pattern above 1 kDa, whose M+1 outweighs its monoisotopic peak, stays one peak
+    assert deisotope_ms2({1500.70: 100, 1501.70: 110, 1502.71: 60}, 1, 0.05, bound_isotope_ratio = True) == {1500.70: 270}
 
 
 def test_glycopeptide_structure_chance_categories():

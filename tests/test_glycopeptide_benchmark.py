@@ -17,10 +17,10 @@ ACTIVATIONS = ('HCD', 'EThcD', 'ETD')
 # Decoys: the same spectra shifted out of tolerance (+-50 ppm for orbitrap spectra, +-7.42 Da for ion-trap ones), whose annotated share is chance
 DECOY_SHIFTS = {True: (50e-6, -50e-6), False: (7.42, -7.42)}
 LETTERS = {'H': 'Hex', 'N': 'HexNAc', 'F': 'dHex', 'A': 'Neu5Ac', 'G': 'Neu5Gc'}
-REFERENCE = {'composition_HCD_precision': 0.978, 'composition_HCD_signal': 0.585, 'composition_EThcD_precision': 0.955, 'composition_EThcD_signal': 0.424,
-             'composition_ETD_precision': 0.708, 'composition_ETD_signal': 0.299, 'structure_HCD_precision': 0.987, 'structure_HCD_signal': 0.643,
-             'structure_EThcD_precision': 0.94, 'structure_EThcD_signal': 0.482, 'structure_ETD_precision': 0.723, 'structure_ETD_signal': 0.344,
-             'localization_EThcD': 0.769, 'localization_ETD': 0.683, 'localization_prior_EThcD': 0.824, 'localization_prior_ETD': 0.809,
+REFERENCE = {'composition_HCD_precision': 0.98, 'composition_HCD_signal': 0.623, 'composition_EThcD_precision': 0.959, 'composition_EThcD_signal': 0.448,
+             'composition_ETD_precision': 0.708, 'composition_ETD_signal': 0.299, 'structure_HCD_precision': 0.988, 'structure_HCD_signal': 0.664,
+             'structure_EThcD_precision': 0.949, 'structure_EThcD_signal': 0.524, 'structure_ETD_precision': 0.725, 'structure_ETD_signal': 0.344,
+             'localization_EThcD': 0.773, 'localization_ETD': 0.683, 'localization_prior_EThcD': 0.831, 'localization_prior_ETD': 0.809,
              'composition_ranking_HCD': 1.0, 'composition_ranking_EThcD': 0.929, 'composition_ranking_ETD': 0.92}
 # floating-point sums differ in their last digits between Python versions, which can flip a tie
 TOLERANCE = 0.005
@@ -41,7 +41,7 @@ def annotated_share(s, glycans, glycosites, shift = 0.0, **kwargs):
     accurate = s['analyzer'] != 'linear'
     peaks = dict(map(tuple, s['peaks']))
     if accurate:
-        peaks = deisotope_ms2(peaks, max(s['charge'], 1), 0.05)
+        peaks = deisotope_ms2(peaks, max(s['charge'], 1), 0.05, bound_isotope_ratio = True)
     peaks = sorted(peaks.items(), key = lambda x: -x[1])[:100]
     mz = [m * (1 + shift) if accurate else m + shift for m, _ in peaks]
     hits = CandyCrumbs({'peptide': s['peptide'], 'glycans': glycans, 'glycosites': glycosites}, mz, 0.5 if accurate else 0.2, charge = s['charge'],

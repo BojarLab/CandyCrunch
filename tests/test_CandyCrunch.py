@@ -817,6 +817,53 @@ def test_label_inputs_drift_terms():
     assert (labelled.set_index('spec_id').loc[[25, 26, 27], 'rt_error'].abs() < 0.01).all()
 
 
+def test_label_inputs_map_intercepts():
+    # A run reading two maps whose RTs come from different reference runs elutes 0.2 min after one map's RTs (7 anchors) and 2.5 min after the other's
+    # (5 anchors). One shift (the median of the 7 agreeing anchors) leaves the second map's rows 2.3 min off their peaks; an intercept per map (>= 5
+    # anchors each) puts every row within 0.1 min of its input
+    import training.pipeline_labels as pl
+    from glycowork.motif.tokenization import glycan_to_composition
+    chain = lambda f, m, h: ('Fuc(a1-2)' if f else '') + 'Gal(b1-4)GlcNAc(b1-3)' * m + 'Gal(b1-4)' * h + 'Glc'
+    glycans = [chain(f, m, h) for f in (0, 1) for m in range(3) for h in (1, 2)]
+    map_rts = [20.0 + 0.4 * k for k in range(12)]
+    offsets = [0.2, 0.24, 0.17, 0.25, 0.15, 0.22, 0.18, 2.5, 2.54, 2.46, 2.52, 2.48]
+    run_rts = [t + o for t, o in zip(map_rts, offsets)]
+    masses = [300.0 + 37 * k for k in range(12)]
+    inputs = pd.DataFrame({'spec_id': range(12), 'RT': run_rts, 'intensity': 1e5, 'peak_d': [{50.0: 1.0}] * 12, 'rt_range': [(t, t) for t in run_rts], 'num_spectra': 3,
+                           'composition': [glycan_to_composition(g) for g in glycans], 'charge': 1, 'annotation_score': 12.0,
+                           'model_input': [np.zeros((3, 1), np.float32)] * 12, 'RT2': 0.3, 'glycan_type': 1, 'compositional_vector': [np.zeros(12)] * 12},
+                          index = pd.Index(masses, name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    mapping = pd.DataFrame({'Mass': masses, 'RT': map_rts, 'glycan': glycans})
+    labelled, _ = pl.label_inputs(inputs, mapping)
+    assert labelled.attrs['rt_alignment'] == 'median' and sorted(labelled['spec_id']) == list(range(7))
+    labelled, _ = pl.label_inputs(inputs, mapping.assign(map_file = ['a.csv'] * 7 + ['b.csv'] * 5))
+    assert labelled.attrs['rt_alignment'] == 'model' and sorted(labelled['spec_id']) == list(range(12)) and (labelled['rt_error'].abs() < 0.1).all()
+
+
+def test_label_inputs_whole_map_check():
+    # Five compositions the map lists once anchor the shift, but each one's strongest input is an isomer the map does not list, 2.4-2.6 min after the
+    # mapped peak (a weak input sits on the row): their median moves the map 2.5 min, where the four compositions it lists as two isomers have no input
+    # within 1 min. Without a shift 13 rows have a passing input of their composition within the window against 5 with it, so the map stays where it is
+    # and the rows are labelled on their peaks
+    import training.pipeline_labels as pl
+    from glycowork.motif.tokenization import glycan_to_composition
+    chain = lambda m, h, link: 'Gal(b1-4)GlcNAc(b1-3)' * m + f'Gal(b1-{link})' * h + 'Glc'
+    glycans = [chain(m, 1, 4) for m in range(5)] + [chain(m, 2, link) for m in range(4) for link in (4, 3)]
+    masses = [300.0 + 37 * k for k in range(5)] + [600.0 + 37 * (k // 2) for k in range(8)]
+    map_rts = [10.0, 14.0, 18.0, 22.0, 26.0, 12.0, 13.0, 16.0, 17.0, 20.0, 21.0, 24.0, 25.0]
+    run_rts = [t + o for t, o in zip(map_rts, [2.4, 2.5, 2.6, 2.5, 2.45])] + map_rts
+    n = len(run_rts)
+    inputs = pd.DataFrame({'spec_id': range(n), 'RT': run_rts, 'intensity': [1e6] * 5 + [1e4] * 5 + [1e5] * 8, 'peak_d': [{50.0: 1.0}] * n,
+                           'rt_range': [(t, t) for t in run_rts], 'num_spectra': 3, 'composition': [glycan_to_composition(g) for g in glycans[:5] + glycans], 'charge': 1,
+                           'annotation_score': 12.0, 'model_input': [np.zeros((3, 1), np.float32)] * n, 'RT2': 0.3, 'glycan_type': 1,
+                           'compositional_vector': [np.zeros(12)] * n}, index = pd.Index(masses[:5] + masses, name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    labelled, _ = pl.label_inputs(inputs, pd.DataFrame({'Mass': masses, 'RT': map_rts, 'glycan': glycans}))
+    assert labelled.attrs['rt_alignment'] == 'none' and labelled.attrs['rt_shift'] == 0.0 and labelled.attrs['rt_anchors'] == 5
+    assert sorted(labelled['spec_id']) == list(range(5, n)) and (labelled['rt_error'].abs() < 0.01).all()
+
+
 def test_member_spectra_repool(monkeypatch):
     # The member spectra run_inputs keeps of a pooled input re-pool to the input the model got: their summed binned intensities, normalized, and the mean
     # of their m/z remainders over every member (one without a peak in the binned range counts too)

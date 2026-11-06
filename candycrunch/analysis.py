@@ -3765,7 +3765,7 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
     # chance labels from candidates with more residue kinds (ETD runs: database structures of every composition within 10 ppm and -1 to +2
     # isotopes of 516 spectra, the Byonic glycan ranked first 0.576 -> 0.584; CandyCrumbs told it from its isobar Neu5Gc + Fuc in HCD 0.45 -> 0.67)
     if mass_threshold_ppm:
-        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), min(mass_threshold, 0.05))
+        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), min(mass_threshold, 0.05), bound_isotope_ratio = True)
     peaks = sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]
     # a spectrum without intensities (all zero) weighs its peaks equally
     weights = {float(mz): math.sqrt(i / peaks[0][1]) if peaks[0][1] > 0 else 1.0 for mz, i in peaks}
@@ -3879,7 +3879,7 @@ def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, inten
     # weak one an isotope spacing (of any charge up to the precursor's) below it, while it lifts a weak oxonium ion with its 13C peak into the top peaks
     raw_top = np.array(sorted(m for m, _ in sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]))
     if mass_threshold_ppm:
-        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), min(mass_threshold, 0.05))
+        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), min(mass_threshold, 0.05), bound_isotope_ratio = True)
     peaks = sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]
     weights = np.sqrt(np.maximum([i for _, i in peaks], 0)) if peaks[0][1] > 0 else np.ones(len(peaks))
     observed = np.array([m for m, _ in peaks])
@@ -3967,7 +3967,7 @@ def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = Non
     placements = sorted({tuple(sorted(zip(pos, [keys[k] for k in perm]))) for pos in combinations(sites, len(glycans)) for perm in permutations(range(len(glycans)))})
     # Accurate spectra are scored deisotoped, as the app annotates them; in ion-trap spectra deisotoping cost more than it gained
     if mass_threshold_ppm:
-        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), mass_tolerance = min(mass_threshold, 0.05))
+        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), mass_tolerance = min(mass_threshold, 0.05), bound_isotope_ratio = True)
     peaks = sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]
     weights = np.sqrt(np.maximum([i for _, i in peaks], 0)) if peaks[0][1] > 0 else np.ones(len(peaks))
     observed = [m for m, _ in peaks]
@@ -4605,40 +4605,57 @@ def draw_peptide_ladder(peptide, hit_dict, glycosites = (), ax = None, fontsize 
 
 
 def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities = True, min_intensity = 0.0, min_isotope_count = 2,
-                  validate_pattern = False, relabel = False):
+                  validate_pattern = False, relabel = False, bound_isotope_ratio = False):
     """collapses isotope patterns of an MS2 spectrum onto their monoisotopic peak\n
    | Arguments:
    | :-
    | peaks (dict): dictionary of form (fragment) m/z : intensity
    | precursor_charge (int): highest fragment charge whose isotope spacing is tested
-   | mass_tolerance (float): m/z tolerance for isotope spacing and for peaks consumed by a pattern; default:0.2
+   | mass_tolerance (float): m/z tolerance for isotope spacing and for peaks consumed by a pattern; a peak within it of a more intense one is that peak's
+   |                         shoulder and dropped; default:0.2
    | sum_intensities (bool): whether a pattern's monoisotopic peak carries the summed intensity of the pattern; default:True
    | min_intensity (float): peaks below this intensity are ignored; default:0.0
    | min_isotope_count (int): minimum number of peaks of a pattern; default:2
    | validate_pattern (bool): whether a pattern only continues with peaks of 5-120% of the intensity of its previous peak; default:False
-   | relabel (bool): whether a pattern whose first peak has less than half the intensity of its most intense peak is named by the latter; default:False\n
+   | relabel (bool): whether a pattern whose first peak has less than half the intensity of its most intense peak is named by the latter; default:False
+   | bound_isotope_ratio (bool): whether each peak of a pattern has at most max(1, 0.0011 x fragment mass) times the intensity of the previous one, as
+   |                         isotope patterns of glycans and peptides do (used for glycopeptides); default:False\n
    | Returns:
    | :-
    | Returns a dictionary of form (fragment) m/z : intensity, sorted by descending intensity
    """
-    items = [(m, i) for m, i in peaks.items() if i >= min_intensity]
+    # a NaN m/z is no peak (it used to make the whole spectrum one peak at NaN)
+    items = [(m, i) for m, i in peaks.items() if i >= min_intensity and m == m]
     arr = np.array([m for m, _ in items], dtype = float)
     # Float masses (pooled spectra have numpy float64 ones, whose every comparison and subtraction in the loops below costs several times a float's) are
     # sorted with numpy and compared as floats; the peaks keep their own masses and intensities. As distinct keys, they sort as the (m/z, intensity) pairs
-    plain = not np.isnan(arr).any() and {type(m) for m, _ in items} <= {float, np.float64}
+    plain = {type(m) for m, _ in items} <= {float, np.float64}
     order = np.argsort(arr, kind = 'stable') if plain else None
     sorted_peaks = [items[k] for k in order.tolist()] if plain else sorted(items)
     # plain lists and bisect, as indexing numpy arrays element by element in these loops was most of the time
     arr = arr[order] if plain else np.array([m for m, _ in sorted_peaks], dtype = float)
     masses = arr.tolist() if plain else [m for m, _ in sorted_peaks]
     ints = [float(i) if type(i) is np.float64 else i for _, i in sorted_peaks]
+    # A peak within mass_tolerance of a more intense one (or of an equal one at lower m/z) is its shoulder or split centroid, no peak of its own: else,
+    # first in the sweep by m/z, a shoulder 0.02 Da below an oxonium ion took up the ion and dropped its intensity
+    # (compared k peaks apart for all peaks at once, k up to the most peaks within one tolerance window)
+    lo, hi, idx, iv = np.searchsorted(arr, arr - mass_tolerance), np.searchsorted(arr, arr + mass_tolerance, side = 'right'), np.arange(len(arr)), np.array(ints, dtype = float)
+    shoulder = np.zeros(len(arr), dtype = bool)
+    for k in range(1, int((hi - lo).max(initial = 1))):
+        above, below = idx + k < hi, idx - k >= lo
+        shoulder[above] |= iv[idx[above] + k] > iv[above]
+        shoulder[below] |= iv[idx[below] - k] >= iv[below]
+    if shoulder.any():
+        keep = np.flatnonzero(~shoulder)
+        sorted_peaks, ints, arr = [sorted_peaks[k] for k in keep.tolist()], [ints[k] for k in keep.tolist()], arr[keep]
+        masses = arr.tolist() if plain else [m for m, _ in sorted_peaks]
     consumed = [False] * len(sorted_peaks)
     deisotoped = {}
     spacings = [1.0034 / z for z in range(1, precursor_charge + 1)]
     # Whether any peak lies one isotope spacing of a tested charge above a peak, for all peaks at once (with the bounds the search below computes): a peak
     # without one starts no pattern, which spares most peaks of a pooled orbitrap or TOF spectrum the search
-    partner = np.zeros(len(arr), dtype = bool) if not np.isnan(arr).any() else np.ones(len(arr), dtype = bool)
-    for spacing in spacings if not partner.all() else []:
+    partner = np.zeros(len(arr), dtype = bool)
+    for spacing in spacings:
         start = np.maximum(np.searchsorted(arr, arr + spacing - mass_tolerance), np.arange(1, len(arr) + 1))
         partner |= (start < len(arr)) & (arr[np.minimum(start, len(arr) - 1)] <= arr + spacing + mass_tolerance)
     partner = partner.tolist()
@@ -4660,6 +4677,9 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
         for spacing in spacings if partner[i] else []:
             next_mass = current_mass
             charge_pattern = [i]
+            # With bound_isotope_ratio, an isotope peak is at most max(1, 0.0011 x fragment mass) times the peak before it (twice the M+1 share of
+            # glycans and peptides per Da): else a weak peak one isotope spacing below an oxonium or Y ion takes it up as its 13C peak
+            bound = max(1.0, 0.0011 * current_mass * 1.0034 / spacing) if bound_isotope_ratio else math.inf
             # Fast-forward to relevant mass range
             start_idx = bisect.bisect_left(masses, next_mass + spacing - mass_tolerance, i + 1)
             for j in range(start_idx, len(masses)):
@@ -4670,6 +4690,8 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
                     continue
                 if abs(candidate_mass - next_mass - spacing) <= mass_tolerance:
                     if validate_pattern and not (ints[charge_pattern[-1]] * 0.05 <= ints[j] <= ints[charge_pattern[-1]] * 1.20):
+                        continue
+                    if ints[j] > ints[charge_pattern[-1]] * bound:
                         continue
                     charge_pattern.append(j)
                     next_mass = candidate_mass

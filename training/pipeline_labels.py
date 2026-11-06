@@ -109,9 +109,11 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    | mz_tolerance (float): maximum distance between an input's m/z and a mapping Mass; default:0.5 (mapping masses are literature values)
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
    |                    5 compositions it lists once; with at least 10 of them, as a function of RT (within their RT range) and of the number of charged
-   |                    residues where that fits them better, each term only where it brings more of them closer than it pushes away; if their median deviation
-   |                    from it exceeds 1 min, the mapping counts as RT-less, unless at least 5 and 40% of them agree within 1 min, whose median then shifts it;
-   |                    rows with rt_own (RTs read in the run itself) neither anchor nor move, nor are dropped);
+   |                    residues where that fits them better, each term only where it brings more of them closer than it pushes away, and with an intercept
+   |                    per map file where several maps have >= 5 of them; if their median deviation from it exceeds 1 min, the mapping counts as RT-less,
+   |                    unless at least 5 and 40% of them agree within 1 min, whose median then shifts it; the plain median of them or no shift instead for
+   |                    a map file's rows where that puts >= 10% more of them within rt_window of a passing input of their composition; rows with rt_own
+   |                    (RTs read in the run itself) neither anchor nor move, nor are dropped);
    |                    default:1.0 (2.0 only added labels away from the
    |                    glycans' peaks)
    | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3
@@ -229,7 +231,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     # RTs read in the run itself (rt_own, a map's RT_<run> column) are already on its time axis: they neither anchor the shift of the other rows nor move
     # (the drift fitted on the other rows moved a run's own rows by up to 14 min)
     own = mapping.loc[row_ids, 'rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(row_ids), bool)
-    offsets, anchor_rts, anchor_acid, anchored = [], [], [], set()
+    files = mapping.loc[row_ids, 'map_file'].astype(str).to_numpy() if 'map_file' in mapping.columns else np.full(len(row_ids), '')
+    offsets, anchor_rts, anchor_acid, anchor_rows, anchored = [], [], [], [], set()
     for k in range(len(keys)):
         if not np.isnan(map_rts[k]) and not own[k] and single[keys[k]] == 1 and keys[k] not in anchored:
             hit = next((i for i in first.get(keys[k], []) if fits[i, k]), None)
@@ -238,6 +241,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                 offsets.append(inputs['RT'].iloc[hit] - map_rts[k])
                 anchor_rts.append(map_rts[k])
                 anchor_acid.append(acidic_count(dict(keys[k])))
+                anchor_rows.append(k)
     rt_shift = float(np.median(offsets)) if len(offsets) >= 5 else 0.0
     alignment = 'median' if len(offsets) >= 5 else 'none'
     given_rts = map_rts.copy()
@@ -251,9 +255,15 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         # disialylated rows of a map sat over 1 min off), so with >= 10 anchors it is fitted as in wrap_inference_batch: a + b * RT + c * acidic residues,
         # each term only where the anchors span it, iteratively reweighted from the median (Huber, then Tukey's biweight), and used if its anchors scatter less
         y, x, a = np.array(offsets), np.array(anchor_rts), np.array(anchor_acid, dtype = float)
+        # A run reading several maps (one per glycan class) has each map's RTs from that map's own reference runs, so every map with >= 5 anchors gets an
+        # intercept of its own (maps with fewer share the one of the map with the most; from 3 anchors on, intercepts of maps whose anchors disagree moved
+        # rows off): with one, the anchors of a run's N-glycan map pulled the rows of its O-glycan map 0.4 min off their peaks (rows within 0.5 min of an
+        # MS1 maximum 33 -> 44 of 50)
+        extra = [f for f, n in Counter(files[anchor_rows]).most_common()[1:] if n >= 5]
+        per_map = np.column_stack([files == f for f in extra]).astype(float) if extra else np.zeros((len(row_ids), 0))
 
         def fit(with_rt, with_acid):
-            X, r = np.column_stack([np.ones(len(y))] + [x] * with_rt + [a] * with_acid), y - np.median(y)
+            X, r = np.column_stack([np.ones(len(y)), per_map[anchor_rows]] + [x] * with_rt + [a] * with_acid), y - np.median(y)
             for it in range(30):
                 u = np.abs(r) / (1.4826 * np.median(np.abs(r)) + 0.01)
                 w = np.sqrt(np.clip(1.345 / np.maximum(u, 1e-9), 0, 1) if it < 20 else np.clip(1 - (u / 4.685) ** 2, 0, None) ** 2)
@@ -262,21 +272,21 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             return beta, r
 
         use_rt, use_acid = bool(np.percentile(x, 90) - np.percentile(x, 10) >= 5), bool((a == 0).sum() >= 3 and (a > 0).sum() >= 3)
-        if use_rt or use_acid:
+        if use_rt or use_acid or extra:
             beta, r = fit(use_rt, use_acid)
             # Each term then stays only where it brings more anchors closer than it pushes away, against the fit without it: the median |residual| hardly
             # sees a minority of anchors, so where the neutral ones sit tight, three acidic anchors whose composition's strongest input was another
             # isomer set an acid term that moved every sialylated row of a run 0.7 min off the peaks the median shift put them on
             closer = lambda r_without: bool((np.abs(r) < np.abs(r_without)).sum() > (np.abs(r) > np.abs(r_without)).sum())
-            keep_rt = use_rt and closer(fit(False, use_acid)[1] if use_acid else y - np.median(y))
-            keep_acid = use_acid and closer(fit(use_rt, False)[1] if use_rt else y - np.median(y))
-            if (keep_rt or keep_acid) and np.median(np.abs(r)) < np.median(np.abs(y - np.median(y))):
+            keep_rt = use_rt and closer(fit(False, use_acid)[1] if use_acid or extra else y - np.median(y))
+            keep_acid = use_acid and closer(fit(use_rt, False)[1] if use_rt or extra else y - np.median(y))
+            if (keep_rt or keep_acid or extra) and np.median(np.abs(r)) < np.median(np.abs(y - np.median(y))):
                 if (keep_rt, keep_acid) != (use_rt, use_acid):
                     beta, r = fit(keep_rt, keep_acid)
-                coefs = iter(beta[1:])
+                coefs = iter(beta[1 + len(extra):])
                 b, c = float(next(coefs)) if keep_rt else 0.0, float(next(coefs)) if keep_acid else 0.0
                 # The RT term only within the anchors' RT range: beyond it the slope of a few minutes of anchors moved rows 15 min later by 1-3 min
-                row_shift = beta[0] + b * np.clip(map_rts, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
+                row_shift = beta[0] + per_map @ beta[1:1 + len(extra)] + b * np.clip(map_rts, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
                 rt_shift = float(np.nanmedian(row_shift[~np.isnan(map_rts)]))
                 alignment = 'model'
                 scatter = float(np.median(np.abs(r - np.median(r))))
@@ -290,6 +300,28 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             row_shift = np.full(len(map_rts), rt_shift)
         else:
             rt_shift, map_rts, row_shift, alignment = 0.0, np.where(own, map_rts, np.nan), np.zeros(len(map_rts)), 'dropped'
+    if len(offsets) >= 5 and alignment != 'dropped':
+        # The whole map then checks the shift: each anchor is one input per composition, and where those inputs are other isomers' peaks (offsets in two
+        # clusters, or a minority mode the agreeing anchors picked: 8 of 17 at -2.5 min against a plain median of 0.0) the shift moves the map off its
+        # peaks. A structured row with RT (not rt_own) counts as placed where a passing input of its composition at its Mass sits within rt_window, and
+        # the plain median of the anchors or no shift replaces the shift where it places >= 10% more rows, for each map file on its own rows (maps of
+        # several classes come from reference runs of their own, so one map's rows can sit on their peaks while another's are off). On 320 runs scored
+        # against their MS1 maxima with MS2: 33 better, 8 worse, rows within 1 / 0.5 min of a maximum 12283 / 10971 -> 12474 / 10984 (a 5% margin, or
+        # only alternatives at least half the window away, did worse)
+        ids = {}
+        row_key, input_key = np.array([ids.setdefault(k, len(ids)) for k in keys]), np.array([ids.get(k, -1) for k in input_keys])
+        at_row = (fits | other_charge) & passing[:, None] & (input_key[:, None] == row_key[None, :])
+        counted, input_rts = ~np.isnan(given_rts) & ~own, inputs['RT'].to_numpy(dtype = float)
+        switched = False
+        for f in np.unique(files[counted]):
+            placed = lambda shift: int((at_row & (np.abs(input_rts[:, None] - (given_rts + np.where(own, 0.0, shift))[None, :]) <= rt_window)).any(axis = 0)[counted & (files == f)].sum())
+            best, now = max([float(np.median(offsets)), 0.0], key = placed), placed(row_shift)
+            if placed(best) >= max(1.1 * now, now + 1):
+                row_shift, switched = np.where(files == f, best, row_shift), True
+        if switched:
+            shifts = row_shift[~np.isnan(given_rts)]
+            rt_shift = float(np.median(shifts))
+            alignment = 'model' if np.ptp(shifts) > 0 else 'none' if rt_shift == 0.0 else 'median'
     map_rts = map_rts + np.where(own, 0.0, row_shift)
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
     near = [[k for k in np.flatnonzero(fits[i] | (other_charge[i] & ~np.isnan(map_rts) & passing[i])) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
