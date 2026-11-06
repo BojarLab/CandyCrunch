@@ -112,6 +112,12 @@ TEST_DICTS = [
     # mzml, its .xlsx otherwise); ground truth audited from the published identification table
     {'name': 'GPST000651', 'args': {'glycan_class': 'N', 'modification': '2AB', 'lc': 'other'},
      'test_files': [x for x in os.listdir(f"{TEST_DATA_DIR}/GPST000651/") if x.startswith('Plasma pooled sample')]},
+    # Mouse hippocampus cell-membrane N-glycans with free reducing ends (Lebrilla lab, PGC chip, Agilent Q-TOF CID, positive), one run as MassHunter
+    # mzData (.mzdata.xml with --input-format mzml, its .xlsx otherwise); ground truth audited from the run's MassHunter compound list, in-source fragments out
+    {'name': 'GPST000097', 'args': {'glycan_class': 'N', 'modification': 'custom', 'max_charge': 3}},
+    # Human colon organoid O-glycans (Thermo LTQ, ion-trap MS1 and CID MS2, negative, reduced, PGC), one run (.raw with --input-format mzml, its .xlsx
+    # otherwise); ground truth audited from the facility's per-run report
+    {'name': 'GPST000463', 'args': {'glycan_class': 'O'}},
 ]
 # timsTOF Pro serum N-glycans (negative, reduced, PGC, DDA-PASEF .d with --input-format mzml, its extract_spectra .xlsx otherwise) live in tests/untracked,
 # which git does not track, so the set is only added where its (preliminary, open-peak) ground truth is present; 'folder' is relative to TEST_DATA_DIR
@@ -130,8 +136,8 @@ if os.path.exists(UNTRACKED_DIR / 'mispredictions' / 'index.json'):
     with open(UNTRACKED_DIR / 'mispredictions' / 'index.json', encoding = 'utf-8') as file:
         # JSON has no sets, wrap_inference takes filter_out as one
         TEST_DICTS.extend({**d, 'folder': '../untracked/mispredictions', 'args': {k: set(v) if k == 'filter_out' else v for k, v in d['args'].items()}} for d in json.load(file))
-# Spectra files with MS1 (lower-case, Thermo writes .RAW too) and Bruker .d folders, run by --input-format mzml
-MS1_FORMATS = ('.mzml', '.mzxml', '.raw', '.d', '.cc')
+# Spectra files with MS1 (lower-case, Thermo writes .RAW too), Bruker .d folders and mzData, run by --input-format mzml
+MS1_FORMATS = ('.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.raw', '.d', '.cc')
 AVG_THRESHOLD = 0.05
 MASS_TOLERANCE = 0.5
 RT_TOLERANCE = 1.0
@@ -670,6 +676,8 @@ def test_label_run_mapping_rules(monkeypatch):
     assert labelled.attrs['rt_alignment'] == 'median' and labelled.attrs['rt_anchors'] == 5
     assert labelled['label_source'].tolist() == ['rt_median'] * 5 + ['no_rt'] * 2 and np.allclose(labelled['rt_error'].iloc[:5], 0, atol = 1e-6)
     assert [r['status'] for r in labelled.attrs['map_rows']] == ['labelled'] * 7 and [r['labels'] for r in labelled.attrs['map_rows']][5:] == [2, 0]
+    # each row's RT on the run's axis as the labels used it, for ground truths built from the mapping (RT-less rows stay without)
+    assert np.allclose([r['run_rt'] for r in labelled.attrs['map_rows']], [20.0 + k for k in range(5)] + [np.nan] * 2, equal_nan = True)
     # Mapping RTs of another gradient (the 5 anchors disagree): the rows count as RT-less, so each composition's strongest passing input is labeled
     shuffled = mapping.assign(RT = [22.7, 18.7, 25.7, 19.7, 30.7, np.nan, np.nan])
     labelled, unlabelled = pl.label_run('run.cc', shuffled, 'N')
@@ -741,6 +749,44 @@ def test_label_inputs_own_rt():
     assert labelled.attrs['rt_alignment'] == 'dropped' and sorted(labelled['spec_id']) == list(range(6, 12))
     labelled, _ = pl.label_inputs(inputs, mapping.assign(rt_own = True))
     assert labelled.attrs['rt_alignment'] == 'none' and sorted(labelled['spec_id']) == list(range(6)) and (labelled['rt_error'].abs() < 0.3).all()
+
+def test_label_inputs_drift_terms():
+    # The anchors of a run's drift as one run gave them: the neutral ones within 0.1 min of the median offset, three Neu5Gc ones too, while three Neu5Ac
+    # ones (their composition's strongest input another peak) sit 0.6-1.6 min later. The robust fit takes an acid term of +0.7 min from those three, which
+    # moves every sialylated row off its peak; it brings no more anchors closer than it pushes away, so it is left out and every row sits within 0.05 min
+    # of the median shift. A row with rt_own neither anchors nor moves, and each row's RT on the run is recorded (run_rt)
+    import training.pipeline_labels as pl
+    from glycowork.motif.tokenization import glycan_to_composition
+    rts = [15.97, 17.5, 20.18, 22.02, 20.5, 18.0, 18.26, 17.83, 20.0, 15.22, 19.45, 19.08, 20.69, 19.57, 17.7, 19.88, 21.22, 18.05, 17.87, 22.96, 23.04, 22.22,
+           24.42, 23.53, 24.86]
+    offsets = [-0.093, -0.095, -0.041, -0.102, -0.082, -0.072, -0.092, -0.059, -0.042, -0.076, -0.183, -0.096, -0.022, -0.05, -0.096, -0.106, -0.036, -0.058,
+               -0.079, -0.099, 0.63, -0.106, 1.069, -0.064, 1.561]
+    acid = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 2]
+    # Linear chains of distinct compositions: lactosamine units, extra galactoses and a fucose on a reducing-end glucose
+    chains = [(f, m, h) for f in (0, 1) for m in range(5) for h in range(3) if m + h > 0]
+    chain = lambda f, m, h: ('Fuc(a1-2)' if f else '') + 'Gal(b1-4)GlcNAc(b1-3)' * m + 'Gal(b1-4)' * h + 'Glc'
+    sialic = iter(['Neu5Gc(a2-3)', 'Neu5Gc(a2-3)', 'Neu5Gc(a2-3)', 'Neu5Ac(a2-3)', 'Neu5Ac(a2-3)', 'Neu5Ac(a2-8)Neu5Ac(a2-3)'])
+    glycans = [chain(*chains[k]) if n == 0 else next(sialic) + chain(0, *chains[k][1:]) for k, n in enumerate(acid)]
+    # A Neu5Gc composition the map lists as two isomers (no anchor), and a neutral row read in the run itself at 30.0
+    glycans += ['Neu5Gc(a2-3)' + chain(0, 4, 2), 'Neu5Gc(a2-6)' + chain(0, 4, 2), chain(1, 4, 2)]
+    map_rts = rts + [21.0, 23.0, 30.0]
+    run_rts = [t + o for t, o in zip(rts, offsets)] + [21.0 - 0.08, 23.0 - 0.08, 30.0]
+    masses = [300.0 + 37 * k for k in range(len(glycans))]
+    masses[26] = masses[25]
+    comps = [glycan_to_composition(g) for g in glycans]
+    inputs = pd.DataFrame({'spec_id': range(len(glycans)), 'RT': run_rts, 'intensity': 1e5, 'peak_d': [{50.0: 1.0}] * len(glycans), 'rt_range': [(t, t) for t in run_rts],
+                           'num_spectra': 3, 'composition': comps, 'charge': 1, 'annotation_score': 12.0, 'model_input': [np.zeros((3, 1), np.float32)] * len(glycans),
+                           'RT2': 0.3, 'glycan_type': 1, 'compositional_vector': [np.zeros(12)] * len(glycans)}, index = pd.Index(masses, name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    mapping = pd.DataFrame({'Mass': masses, 'RT': map_rts, 'glycan': glycans, 'rt_own': [False] * 27 + [True]})
+    labelled, _ = pl.label_inputs(inputs, mapping)
+    assert labelled.attrs['rt_anchors'] == 25 and abs(labelled.attrs['rt_shift'] - np.median(offsets)) < 0.05
+    run_rt = [r['run_rt'] for r in labelled.attrs['map_rows']]
+    assert np.allclose(run_rt[:27], np.array(map_rts[:27]) + np.median(offsets), atol = 0.05) and run_rt[27] == 30.0
+    # (the Neu5Ac inputs 1.1 and 1.6 min after their rows are other peaks; the Neu5Gc isomer and the own row are labelled at their peaks)
+    assert sorted(labelled['spec_id']) == [k for k in range(len(glycans)) if k not in (22, 24)]
+    assert (labelled.set_index('spec_id').loc[[25, 26, 27], 'rt_error'].abs() < 0.01).all()
+
 
 def test_member_spectra_repool(monkeypatch):
     # The member spectra run_inputs keeps of a pooled input re-pool to the input the model got: their summed binned intensities, normalized, and the mean

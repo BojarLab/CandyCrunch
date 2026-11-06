@@ -22,7 +22,6 @@ import json
 from typing import Dict
 import numpy as np
 import pandas as pd
-from networkx import descendants
 # df_glycan is read where it is used, as importing it loads it (1.2 s and 430 MB), which a process that only reads spectra or runs CandyCrumbs never needs
 import glycowork.glycan_data.loader as glycan_loader
 from glycowork.glycan_data.loader import stringify_dict, unwrap
@@ -34,7 +33,6 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           glycan_to_mass, modification_formula_dict, calculate_adduct_mass, get_formula,
                                           mz_to_composition, structure_to_basic, mass_dict, SIALIC_KEYS,
                                           sialic_linkage_splits, resolve_sialic_linkages, _carboxyl_sites)
-from glycowork.network.biosynthesis import construct_network, evoprune_network
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals
 from candycrunch.confidence import calibrated_confidence
@@ -4436,7 +4434,15 @@ def flag_coeluting_substructures(df_out, glycan_class, sample_prep = 'underivati
             link = next((n for n in graph.successors(root) if graph.nodes[n]['string_labels'].endswith('-3')), None)
             if graph.nodes[root]['string_labels'] == 'GalNAc' and link is not None:
                 child = next(graph.successors(link))
-                arms[g] = graph_to_string(graph.subgraph(descendants(graph, child) | {child}))
+                # the arm: child and everything below it, added to the set breadth-first as networkx's descendants adds them, as its order decides the
+                # subgraph's node order
+                arm, queue = set(), [child]
+                for n in queue:
+                    for below in graph.succ[n]:
+                        if below != child and below not in arm:
+                            arm.add(below)
+                            queue.append(below)
+                arms[g] = graph_to_string(graph.subgraph(arm | {child}))
         for a in range(len(df_out)):
             sources = [b for b in range(len(df_out)) if b != a and abundance[a] > 0 and abundance[b] >= min_ratio * abundance[a] and tops[b] in arms and isinstance(tops[a], str)
                        and tops[a].count('(') == arms[tops[b]].count('(') and compare_glycans(tops[a], arms[tops[b]])]
@@ -4779,7 +4785,21 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             for k in range(3):
                 rows, errors = isotope_ppm(k, abs(cal) + tol)
                 fits.append(np.isin(np.arange(len(mzs)), rows[np.abs(errors - cal) < tol]))
-            loaded_file.loc[known, idx_col] -= np.where(fits[0], 0, np.where(fits[1], 1, np.where(fits[2], 2, 0))) * ISOTOPE_SPACING / charges.ravel()
+            moves = np.where(fits[0], 0, np.where(fits[1], 1, np.where(fits[2], 2, 0)))
+            if not targeted and ms1 is not None and len(ms1[0]):
+                # A precursor whose survey scan shows it is only a 13C pick if that scan also shows the lighter peak it moves to (at least a tenth of the
+                # picked one; M is over a third of M+1 and M+2 up to ~4500 Da). Glycans 2 H heavier than the reducing end set (alditols processed as free)
+                # sit 2 spacings / z above a composition, 2.016 vs 2.007 Da, 3-5 ppm, inside the calibration of a run whose exact fits are mostly chance
+                # hits: such precursors moved onto free compositions with no signal at their m/z
+                ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
+                scans = np.clip(np.searchsorted(ms1_rts, loaded_file['RT'].values[known], side = 'right') - 1, 0, len(ms1_rts) - 1)
+                for i in np.flatnonzero(moves):
+                    m, x = ms1_mzs[ms1_offsets[scans[i]]:ms1_offsets[scans[i] + 1]], ms1_ints[ms1_offsets[scans[i]]:ms1_offsets[scans[i] + 1]]
+                    lighter = mzs[i] - moves[i] * ISOTOPE_SPACING / z_all[i]
+                    picked, below = x[np.abs(m - mzs[i]) <= 1e-5 * mzs[i]], x[np.abs(m - lighter) <= 1e-5 * lighter]
+                    if len(picked) and (not len(below) or below.max() < 0.1 * picked.max()):
+                        moves[i] = 0
+            loaded_file.loc[known, idx_col] -= moves * ISOTOPE_SPACING / charges.ravel()
             if targeted and (fits[0] | fits[1] | fits[2]).mean() >= 0.5:
                 # Targets set from computed m/z then pin their compositions like orbitrap survey scans, within the 10 ppm they were matched to (the z = 3
                 # targets of GPST000403 sit 3-5 ppm below their compositions, its z = 2 ones 0.7 ppm)
@@ -5150,6 +5170,18 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # z = 2, and chance annotations of the one without a structure won (Hex4HexNAc4S1 over Man7 779.27, Hex4HexNAc4Neu5Gc1dHex2 over A2G2S1F 1038.87 in GPST000054)
     df_out['_pred'] = np.array([bool(p) for p in df_out['predictions']], dtype = float)
     df_out['_rank'] = df_out['annotation_score'] + df_out['_pred']
+    # Rows that tie on that are often one reading of the spectrum told apart only by the class the model was told (a run of several classes codes each
+    # candidate by its database structure's class, and Hex-HexNAc-HexNAc fragments alike as core 3 or Man-chitobiose): the reading of the run's main class
+    # (the class of the most spectra whose predicted rows are all of one class) takes the spectrum, not the database's row order. The model's confidence
+    # cannot decide, as it is not comparable across class codes (O-coded small glycans came out surer, also in N and free-glycan runs)
+    top_class = [next((c for c in classes if enforce_class(p[0][0], c)), None) if p else None for p in df_out['predictions']]
+    spec_classes = defaultdict(set)
+    for spec, c in zip(df_out['spec_id'].values, top_class):
+        if c is not None:
+            spec_classes[spec].add(c)
+    votes = Counter(next(iter(x)) for x in spec_classes.values() if len(x) == 1)
+    main_class = votes.most_common(1)[0][0] if len(classes) > 1 and votes else None
+    df_out['_main'] = [float(c is not None and c == main_class) for c in top_class]
     # Neu5Ac + Hex and Neu5Gc + dHex are one formula, so a spectrum is a row of both compositions, and the one with more residue kinds explains more
     # fragments by chance. Of such a pair, the row whose sialic acid leaves the weaker specific ions (its B1 ion, less water, its LacNAc antenna as B and
     # C ion, also with the mannose below, and the precursor less that acid at its charge or one lower) ranks lower, if its rival's reach at least 5% of the
@@ -5192,7 +5224,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
                 df_out.iat[i, df_out.columns.get_loc('_pred')] = 1.0
                 database_rows.add(df_out['m/z'].iloc[i])
-    df_out = df_out.sort_values(['spec_id', 'doomed', '_sia', '_rank', '_pred'], ascending = [False, True, True, False, False]).groupby('spec_id').first().drop(columns = ['doomed', '_sia', '_rank', '_pred'])
+    df_out = df_out.sort_values(['spec_id', 'doomed', '_sia', '_rank', '_pred', '_main'], ascending = [False, True, True, False, False, False]).groupby('spec_id').first().drop(
+        columns = ['doomed', '_sia', '_rank', '_pred', '_main'])
     # A sparse spectrum (at most 6 fragments, as an ion trap near its detection limit gives) can never pass crumbs_thresh, so it passes if at least two and 60%
     # of its fragments are annotated and the model is confident in its in-class top structure; a multiply charged one already if one fragment is annotated and
     # the model gives its top structure at least 0.75
@@ -6175,6 +6208,8 @@ def supplement_prediction(df_in, glycan_class, mode = 'negative', modification =
    | :-
    | Returns dataframe with supplemented predictions based on biosynthetic network
    """
+    # glycowork's biosynthetic networks load networkx, which no other step of a run needs before it
+    from glycowork.network.biosynthesis import construct_network, evoprune_network
     df = copy.deepcopy(df_in)
     preds = [k[0][0] for k in df['predictions'] if k]
     permitted_roots = {

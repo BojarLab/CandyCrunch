@@ -108,9 +108,10 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    |                      without glycan but with Mass and RT labels nothing, yet keeps the inputs nearer it than any structured row of their mass
    | mz_tolerance (float): maximum distance between an input's m/z and a mapping Mass; default:0.5 (mapping masses are literature values)
    | rt_window (float): maximum distance between an input's RT and a mapping RT, after shifting the mapping's RTs onto the run (median offset of at least
-   |                    5 compositions it lists once; with at least 10 of them, as a function of RT and of the number of charged residues where that fits
-   |                    them better; if their median deviation from it exceeds 1 min, the mapping counts as RT-less, unless at least 5 and 40% of them agree within
-   |                    1 min, whose median then shifts it, or its rows with RT carry rt_own (RTs read in the run itself), which then stay unshifted);
+   |                    5 compositions it lists once; with at least 10 of them, as a function of RT (within their RT range) and of the number of charged
+   |                    residues where that fits them better, each term only where it brings more of them closer than it pushes away; if their median deviation
+   |                    from it exceeds 1 min, the mapping counts as RT-less, unless at least 5 and 40% of them agree within 1 min, whose median then shifts it;
+   |                    rows with rt_own (RTs read in the run itself) neither anchor nor move, nor are dropped);
    |                    default:1.0 (2.0 only added labels away from the
    |                    glycans' peaks)
    | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3
@@ -170,6 +171,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     open_rows = mapping[mapping['glycan'].isna() & mapping['Mass'].notna()]
     open_masses = open_rows['Mass'].to_numpy(dtype = float)
     open_rts = pd.to_numeric(open_rows['RT'], errors = 'coerce').to_numpy(dtype = float) if 'RT' in open_rows.columns else np.full(len(open_rows), np.nan)
+    open_own = open_rows['rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in open_rows.columns else np.zeros(len(open_rows), bool)
     # Which inputs fit which rows: within mz_tolerance of the Mass, with accurate survey scans within ppm_tolerance of it or of its first two 13C peaks at the
     # input's charge (13C picks: GPST000578 and 651 at z = 3), a Mass given with fewer decimals widened to half its last one (an integer Mass keeps
     # mz_tolerance). Further off is another ion, also with the row's composition among its candidates: at 0.5 m/z GPST000712's 720.321 took N3H3 [M+2Na]2+
@@ -220,9 +222,12 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     for i in by_intensity:
         if passing[i] and single.get(input_keys[i]) == 1:
             first.setdefault(input_keys[i], []).append(i)
+    # RTs read in the run itself (rt_own, a map's RT_<run> column) are already on its time axis: they neither anchor the shift of the other rows nor move
+    # (the drift fitted on the other rows moved a run's own rows by up to 14 min)
+    own = mapping.loc[row_ids, 'rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(row_ids), bool)
     offsets, anchor_rts, anchor_acid, anchored = [], [], [], set()
     for k in range(len(keys)):
-        if not np.isnan(map_rts[k]) and single[keys[k]] == 1 and keys[k] not in anchored:
+        if not np.isnan(map_rts[k]) and not own[k] and single[keys[k]] == 1 and keys[k] not in anchored:
             hit = next((i for i in first.get(keys[k], []) if fits[i, k]), None)
             if hit is not None:
                 anchored.add(keys[k])
@@ -242,18 +247,32 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         # disialylated rows of a map sat over 1 min off), so with >= 10 anchors it is fitted as in wrap_inference_batch: a + b * RT + c * acidic residues,
         # each term only where the anchors span it, iteratively reweighted from the median (Huber, then Tukey's biweight), and used if its anchors scatter less
         y, x, a = np.array(offsets), np.array(anchor_rts), np.array(anchor_acid, dtype = float)
-        use_rt, use_acid = bool(np.percentile(x, 90) - np.percentile(x, 10) >= 5), bool((a == 0).sum() >= 3 and (a > 0).sum() >= 3)
-        if use_rt or use_acid:
-            X, r = np.column_stack([np.ones(len(y))] + [x] * use_rt + [a] * use_acid), y - np.median(y)
+
+        def fit(with_rt, with_acid):
+            X, r = np.column_stack([np.ones(len(y))] + [x] * with_rt + [a] * with_acid), y - np.median(y)
             for it in range(30):
                 u = np.abs(r) / (1.4826 * np.median(np.abs(r)) + 0.01)
                 w = np.sqrt(np.clip(1.345 / np.maximum(u, 1e-9), 0, 1) if it < 20 else np.clip(1 - (u / 4.685) ** 2, 0, None) ** 2)
                 beta = np.linalg.lstsq(X * w[:, None], y * w, rcond = None)[0]
                 r = y - X @ beta
-            if np.median(np.abs(r)) < np.median(np.abs(y - np.median(y))):
+            return beta, r
+
+        use_rt, use_acid = bool(np.percentile(x, 90) - np.percentile(x, 10) >= 5), bool((a == 0).sum() >= 3 and (a > 0).sum() >= 3)
+        if use_rt or use_acid:
+            beta, r = fit(use_rt, use_acid)
+            # Each term then stays only where it brings more anchors closer than it pushes away, against the fit without it: the median |residual| hardly
+            # sees a minority of anchors, so where the neutral ones sit tight, three acidic anchors whose composition's strongest input was another
+            # isomer set an acid term that moved every sialylated row of a run 0.7 min off the peaks the median shift put them on
+            closer = lambda r_without: bool((np.abs(r) < np.abs(r_without)).sum() > (np.abs(r) > np.abs(r_without)).sum())
+            keep_rt = use_rt and closer(fit(False, use_acid)[1] if use_acid else y - np.median(y))
+            keep_acid = use_acid and closer(fit(use_rt, False)[1] if use_rt else y - np.median(y))
+            if (keep_rt or keep_acid) and np.median(np.abs(r)) < np.median(np.abs(y - np.median(y))):
+                if (keep_rt, keep_acid) != (use_rt, use_acid):
+                    beta, r = fit(keep_rt, keep_acid)
                 coefs = iter(beta[1:])
-                b, c = float(next(coefs)) if use_rt else 0.0, float(next(coefs)) if use_acid else 0.0
-                row_shift = beta[0] + b * map_rts + c * np.minimum(n_acid, a.max())
+                b, c = float(next(coefs)) if keep_rt else 0.0, float(next(coefs)) if keep_acid else 0.0
+                # The RT term only within the anchors' RT range: beyond it the slope of a few minutes of anchors moved rows 15 min later by 1-3 min
+                row_shift = beta[0] + b * np.clip(map_rts, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
                 rt_shift = float(np.nanmedian(row_shift[~np.isnan(map_rts)]))
                 alignment = 'model'
                 scatter = float(np.median(np.abs(r - np.median(r))))
@@ -262,17 +281,12 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         # input at another isomer, 10-50 min off, while the rest still sit on the mapping's gradient
         o = np.array(offsets)
         agree = np.abs(o - o[np.argmax([np.sum(np.abs(o - x) <= 1.0) for x in o])]) <= 1.0
-        own = mapping.loc[row_ids, 'rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(row_ids), bool)
         if agree.sum() >= 5 and agree.mean() >= 0.4:
             rt_shift, alignment = float(np.median(o[agree])), 'median'
             row_shift = np.full(len(map_rts), rt_shift)
-        elif own.any() and (own | np.isnan(map_rts)).all():
-            # RTs read in the run itself (rt_own, a map's RT_<run> column) are already on its time axis and stay unshifted: on long gradients a
-            # composition's strongest input sits minutes from the row of another of its peaks, which scatters the anchors without any drift
-            rt_shift, row_shift, alignment = 0.0, np.zeros(len(map_rts)), 'none'
         else:
-            rt_shift, map_rts, row_shift, alignment = 0.0, np.full(len(map_rts), np.nan), np.zeros(len(map_rts)), 'dropped'
-    map_rts = map_rts + row_shift
+            rt_shift, map_rts, row_shift, alignment = 0.0, np.where(own, map_rts, np.nan), np.zeros(len(map_rts)), 'dropped'
+    map_rts = map_rts + np.where(own, 0.0, row_shift)
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
     near = [[k for k in np.flatnonzero(fits[i] | (other_charge[i] & ~np.isnan(map_rts) & passing[i])) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
             for i, (rt, key) in enumerate(zip(inputs['RT'], input_keys))]
@@ -280,7 +294,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     # An input nearer a same-mass row without structure (moved by the run's median shift) than a structured row is the open row's peak, not the structured
     # row's: an isomer's composition-level row 0.3-0.8 min from a structured one otherwise gives its peak the structured row's label
     if alignment != 'dropped' and len(open_masses):
-        open_dist = np.array([np.nanmin(np.abs(open_rts[f] + rt_shift - rt), initial = np.inf) for f, rt in zip(open_fits, inputs['RT'])])
+        open_dist = np.array([np.nanmin(np.abs(open_rts[f] + np.where(open_own[f], 0.0, rt_shift) - rt), initial = np.inf) for f, rt in zip(open_fits, inputs['RT'])])
         near = [[k for k in n if not open_dist[i] < abs(map_rts[k] - rt)] for i, (n, rt) in enumerate(zip(near, inputs['RT']))]
     open_taken = windowed - {k for n in near for k in n}
     # A run holds about as many peaks of a composition as the mapping lists isomers of it, plus PGC tails, isotope picks and noise, so a row without RT only
@@ -384,6 +398,13 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                                                                        compositions = ('composition', list), compositional_vectors = ('compositional_vector', list),
                                                                        glycan_types = ('glycan_type', list), charges = ('precursor_charge', list))
     unlabelled = unlabelled.reset_index().set_index('m/z')[SPECTRUM_COLUMNS + ['compositions', 'compositional_vectors', 'glycan_types', 'charges'] + settings_columns]
+    # Each row's RT on the run's time axis as the labels used it (the shift per row where the drift was modelled, the median shift for rows without
+    # structure, none for rt_own rows), so a ground truth built from the mapping sits where the labels do: the median shift alone left late sialylated rows
+    # of runs on a compressed gradient 1-3 min off their peaks
+    own_rows = mapping['rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(mapping), bool)
+    map_rows['run_rt'] = (pd.to_numeric(mapping['RT'], errors = 'coerce').to_numpy(float) + np.where(own_rows, 0.0, np.nan if alignment == 'dropped' else rt_shift)
+                          if 'RT' in mapping.columns else np.nan)
+    map_rows.loc[row_ids, 'run_rt'] = map_rts
     # map_rows as records: pandas compares attrs when it concatenates frames, which a dataframe in them would break
     labelled.attrs.update(rt_shift = rt_shift, rt_alignment = alignment, rt_anchors = len(offsets), map_rows = map_rows.to_dict('records'))
     return labelled, unlabelled

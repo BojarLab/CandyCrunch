@@ -15,15 +15,13 @@ import multiprocessing
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-import networkx as nx
-import networkx.algorithms.isomorphism as iso
 import numpy as np
 import pandas as pd
 from glycowork.motif.processing import canonicalize_composition, is_composition, rescue_glycans, get_class
 from glycowork.motif.tokenization import map_to_basic as glycowork_map_to_basic, HYDROGEN_MASS, PROTON_MASS, ELECTRON_MASS, calculate_adduct_mass, \
     composition_to_mass, glycan_to_composition, get_core, get_modification, compositions_to_structures, AMINO_ACID_FORMULAS, PEPTIDE_MODIFICATIONS, \
     SIALIC_DERIVATIZATIONS, SIALIC_PRODUCTS, SIALIC_PRODUCT_CAPS, SIALIC_KEYS, _carboxyl_sites, modification_formula_dict
-from glycowork.motif.graph import glycan_to_glycangraph, get_possible_topologies, graph_to_string
+from glycowork.motif.graph import glycan_to_glycangraph, get_possible_topologies, graph_to_string, _attrs, _graph
 from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
 from glycowork.motif.draw import plot_glycans_excel
 
@@ -473,29 +471,235 @@ def glycan_to_graph_monos(glycan):
     return mono_mask_dic, adj_matrix, all_mask_dic
 
 
+class MonoGraph:
+    """The directed graph CandyCrumbs works on (residues, with edges pointing towards the reducing end and along a glycopeptide's peptide), in networkx's
+    DiGraph layout (node : attribute dict, successors and predecessors as node : {neighbor : edge attribute dict}, one dict per edge) and with the part of
+    its interface used here, iterating in its orders, so that every result is the one networkx gave. subgraph makes a graph over the same attribute
+    dicts, in the order a networkx subgraph view iterates its nodes: a set rebuilt from them if it holds less than half of the graph's nodes, else the
+    graph's order (neighbors always in the graph's order)"""
+    __slots__ = ('_node', '_succ', '_pred', 'graph')
+
+    def __init__(self, node = None, succ = None, pred = None, graph = None):
+        self._node, self._succ, self._pred = {} if node is None else node, {} if succ is None else succ, {} if pred is None else pred
+        self.graph = {} if graph is None else graph
+
+    def __iter__(self):
+        return iter(self._node)
+
+    def __contains__(self, node):
+        return node in self._node
+
+    def __len__(self):
+        return len(self._node)
+
+    def __getitem__(self, node):
+        return self._succ[node]
+
+    @property
+    def nodes(self):
+        return NodeView(self._node)
+
+    @property
+    def edges(self):
+        return EdgeView(self._succ)
+
+    @property
+    def out_degree(self):
+        return DegreeView(self._succ, (self._succ,))
+
+    @property
+    def in_degree(self):
+        return DegreeView(self._succ, (self._pred,))
+
+    @property
+    def degree(self):
+        return DegreeView(self._succ, (self._succ, self._pred))
+
+    def successors(self, node):
+        return iter(self._succ[node])
+
+    def predecessors(self, node):
+        return iter(self._pred[node])
+
+    def in_edges(self, node):
+        return [(u, node) for u in self._pred[node]]
+
+    def number_of_nodes(self):
+        return len(self._node)
+
+    def number_of_edges(self):
+        return sum(map(len, self._succ.values()))
+
+    def add_node(self, node, **attr):
+        if node not in self._node:
+            self._succ[node], self._pred[node], self._node[node] = {}, {}, {}
+        self._node[node].update(attr)
+
+    def add_edge(self, u, v, **attr):
+        for node in (u, v):
+            if node not in self._node:
+                self._succ[node], self._pred[node], self._node[node] = {}, {}, {}
+        data = self._succ[u].get(v, {})
+        data.update(attr)
+        self._succ[u][v] = self._pred[v][u] = data
+
+    def subgraph(self, nodes):
+        keep = set(n for n in nodes if n in self._node)
+        order = keep if 2 * len(keep) < len(self._node) else [n for n in self._node if n in keep]
+        return MonoGraph({n: self._node[n] for n in order}, {n: {v: d for v, d in self._succ[n].items() if v in keep} for n in order},
+                         {n: {u: d for u, d in self._pred[n].items() if u in keep} for n in order}, self.graph)
+
+
+class NodeView:
+    """The nodes of a MonoGraph, as networkx's NodeView: iterates them, indexes their attribute dicts, and called with data gives (node, attribute dict)
+    pairs, or with an attribute name (node, value or default) pairs"""
+    __slots__ = ('_node',)
+
+    def __init__(self, node):
+        self._node = node
+
+    def __iter__(self):
+        return iter(self._node)
+
+    def __len__(self):
+        return len(self._node)
+
+    def __contains__(self, node):
+        return node in self._node
+
+    def __getitem__(self, node):
+        return self._node[node]
+
+    def __call__(self, data = False, default = None):
+        if data is False:
+            return self
+        return [(n, d) if data is True else (n, d.get(data, default)) for n, d in self._node.items()]
+
+    def items(self):
+        return self._node.items()
+
+    def values(self):
+        return self._node.values()
+
+
+class EdgeView:
+    """The edges of a MonoGraph, as networkx's OutEdgeView: iterates (u, v), indexes edge attribute dicts by (u, v), and called with data gives
+    (u, v, attribute dict) triples, or with an attribute name (u, v, value or default) triples"""
+    __slots__ = ('_succ',)
+
+    def __init__(self, succ):
+        self._succ = succ
+
+    def __iter__(self):
+        return ((u, v) for u, nbrs in self._succ.items() for v in nbrs)
+
+    def __len__(self):
+        return sum(map(len, self._succ.values()))
+
+    def __getitem__(self, edge):
+        return self._succ[edge[0]][edge[1]]
+
+    def __call__(self, data = False, default = None):
+        if data is False:
+            return self
+        return [(u, v, d) if data is True else (u, v, d.get(data, default)) for u, nbrs in self._succ.items() for v, d in nbrs.items()]
+
+
+class DegreeView:
+    """Degrees of a MonoGraph's nodes (the number of their neighbors in each of adjs), as networkx's degree views: indexed by node, called with a node
+    for its degree, and iterating (node, degree) pairs in the graph's order"""
+    __slots__ = ('_nodes', '_adjs')
+
+    def __init__(self, nodes, adjs):
+        self._nodes, self._adjs = nodes, adjs
+
+    def __getitem__(self, node):
+        return sum(len(adj[node]) for adj in self._adjs)
+
+    def __call__(self, node = None):
+        return self if node is None else self[node]
+
+    def __iter__(self):
+        return ((n, self[n]) for n in self._nodes)
+
+
+def node_attributes(graph, attr):
+    """networkx's get_node_attributes: node : value of attr, for the nodes of graph that have it"""
+    return {n: d[attr] for n, d in graph._node.items() if attr in d}
+
+
+def edge_attributes(graph, attr):
+    """networkx's get_edge_attributes: (u, v) : value of attr, for the edges of graph that have it"""
+    return {(u, v): d[attr] for u, nbrs in graph._succ.items() for v, d in nbrs.items() if attr in d}
+
+
+def ancestors(graph, node):
+    """networkx's ancestors: the nodes with a path to node, added to the set breadth-first, in the order networkx adds them"""
+    found, queue = set(), [node]
+    for n in queue:
+        for p in graph._pred[n]:
+            if p != node and p not in found:
+                found.add(p)
+                queue.append(p)
+    return found
+
+
+def nodes_outside(graph, nodes):
+    """The nodes of graph not in nodes (a set of its nodes), as networkx's NodeView ^ nodes gives them: a set built in graph order, then copied, which
+    can change its order"""
+    return set({v for v in graph if v not in nodes})
+
+
+def path_to(graph, source, target):
+    """The path from source to target along successors, or None; every node here has at most one successor (towards the reducing end or the peptide's
+    C-terminus), so this is the one path networkx's shortest_path and all_simple_paths find"""
+    path = [source]
+    while path[-1] != target:
+        nxt = next(iter(graph._succ[path[-1]]), None)
+        if nxt is None:
+            return None
+        path.append(nxt)
+    return path
+
+
+def relabel_graph(graph, mapping):
+    """networkx's relabel_nodes with copy: a new graph with the nodes renamed by mapping (dict), in graph's order, attribute dicts copied"""
+    new = MonoGraph()
+    for n, d in graph._node.items():
+        new.add_node(mapping.get(n, n))
+        new._node[mapping.get(n, n)] = d.copy()
+    for u, nbrs in graph._succ.items():
+        for v, d in nbrs.items():
+            new.add_edge(mapping.get(u, u), mapping.get(v, v), **d)
+    new.graph.update(graph.graph)
+    return new
+
+
 def mono_graph_to_nx(mono_graph, directed = True):
-    """Modified version of glycan_to_nxGraph, converts a mono adjacency matrix into a networkx graph, adds bonds as edge labels, and terminal,reducing end labels\n
+    """Converts the output of glycan_to_graph_monos into a graph (MonoGraph, the same networkx gave), with the bonds as edge labels and the terminal and
+    reducing-end labels\n
     | Arguments:
     | :-
     | mono_graph (tuple): output of glycan_to_graph_monos
-    | directed (bool): if True, creates a directed graph with bonds pointing from leaf to reducing end ; default:True\n
+    | directed (bool): bonds pointing from leaf to reducing end, the only kind of graph CandyCrumbs makes; default:True\n
     | Returns:
     | :-
-    | Returns networkx graph object of a glycan made up of only monosaccharides
+    | Returns a MonoGraph of a glycan made up of only monosaccharides
     """
-    template = nx.DiGraph if directed else nx.Graph
+    if not directed:
+        raise ValueError('CandyCrumbs only makes directed graphs')
     node_dict_mono, adj_matrix, all_dict = mono_graph
-    if len(node_dict_mono) > 1:
-        gr = nx.from_numpy_array(adj_matrix, create_using = template)
-        for _, _, d in gr.edges(data = True):
-            del d['weight']
-    else:
-        gr = template()
-        gr.add_node(0)
-    nx.set_node_attributes(gr, node_dict_mono, 'string_labels')
-    nx.set_node_attributes(gr, {k: 'terminal' if gr.degree[k] == 1 else 'internal' for k in gr.nodes()}, 'termini')
-    nx.set_node_attributes(gr, {max(gr.nodes()): 2}, 'reducing_end')
-    nx.set_edge_attributes(gr, {(e[0], e[1]): {'bond_label': all_dict[(e[0] * 2) + 1]} for e in gr.edges})
+    gr = MonoGraph()
+    # nodes in index order and the edges of the adjacency matrix row by row, as networkx's from_numpy_array adds them
+    for n in range(len(node_dict_mono)):
+        gr.add_node(n)
+    for u, v in zip(*np.nonzero(adj_matrix)):
+        gr.add_edge(int(u), int(v), bond_label = all_dict[(int(u) * 2) + 1])
+    for n, label in node_dict_mono.items():
+        gr._node[n]['string_labels'] = label
+    for n in gr:
+        gr._node[n]['termini'] = 'terminal' if gr.degree[n] == 1 else 'internal'
+    gr._node[max(gr)]['reducing_end'] = 2
     return gr
 
 
@@ -503,7 +707,7 @@ def enumerate_subgraphs(nx_mono, masks = False):
     """Returns the node sets of all connected induced subgraphs of a graph\n
     | Arguments:
     | :-
-    | nx_mono (networkx_object): monosaccharide only graph
+    | nx_mono (MonoGraph): monosaccharide only graph
     | masks (bool): whether to also return each node set as a bit mask (bit i for the i-th node in sorted order); default:False\n
     | Returns:
     | :-
@@ -539,11 +743,11 @@ def enumerate_k_graphs(nx_mono, k):
     """Finds all connected induced subgraphs of size k, implementation of Wernicke, S. (2005). A Faster Algorithm for Detecting Network Motifs. In: Casadio, R., Myers, G. (eds) Algorithms in Bioinformatics\n
     | Arguments:
     | :-
-    | nx_mono (networkx_object): monosaccharide only graph
+    | nx_mono (MonoGraph): monosaccharide only graph
     | k (int): size of subgraphs to be enumerated\n
     | Returns:
     | :-
-    | Returns a list of all networkx subgraphs of size k
+    | Returns a list of all subgraphs (MonoGraph) of size k
     """
     neighbor_dict = {v: set(nx_mono.predecessors(v)) | set(nx_mono.successors(v)) for v in nx_mono.nodes}
     k_subgraphs = []
@@ -564,7 +768,7 @@ def extend_subgraph(subgraph, extension, node, k, k_subgraphs, neighbor_dict, nx
     | k (int): size of subgraph at which to stop extending and add it to the list of subgraphs
     | k_subgraphs (list): list used to accumulate all subgraphs already found of size k
     | neighbor_dict (dict): mapping of all nodes and their neighbors in the original graph
-    | nx_mono (networkx_object): the original monosaccharide only graph being searched
+    | nx_mono (MonoGraph): the original monosaccharide only graph being searched
     | all_sizes (bool): whether to also collect every smaller subgraph passed on the way to size k, as node sets instead of subgraph views; default:False
     | neighbors (set): all neighbors of the subgraph's nodes, if already at hand; default:None\n
     | Returns:
@@ -590,7 +794,7 @@ def get_broken_bonds(subg, nx_edge_dict):
     """Determines bonds which are floating on the subgraph nodes\n
     | Arguments:
     | :-
-    | subg (networkx_object): a subgraph of the original monosaccharide only graph
+    | subg (MonoGraph): a subgraph of the original monosaccharide only graph
     | nx_edge_dict (dict): a mapping of each edge in the original graph to its bond label\n
     | Returns:
     | :-
@@ -611,7 +815,7 @@ def atom_mods_init(subg, present_breakages, terminals, terminal_labels):
     """Creates the initial nested dict of each terminal node with floating bonds labeled 1 and the reducing end floating bond labeled 2\n
     | Arguments:
     | :-
-    | subg (networkx_object): a subgraph
+    | subg (MonoGraph): a subgraph
     | present_breakages (dict): floating bonds and their bond label
     | terminals (list): node labels of nodes with floating bonds
     | terminal_labels (list): string labels of nodes in terminals\n
@@ -657,7 +861,7 @@ def get_mono_mods_list(root_node, subg, terminals, terminal_labels, nx_edge_dict
     | Arguments:
     | :-
     | root_node (int): node label which is the root of the directed nx_mono the subgraph comes from
-    | subg (networkx_object): a subgraph
+    | subg (MonoGraph): a subgraph
     | terminals (list): node labels of nodes with floating bonds
     | terminal_labels (list): string labels of nodes in terminals
     | nx_edge_dict (dict): a mapping of each edge in the original graph to its bond label
@@ -689,7 +893,7 @@ def get_valid_A_frags(subg, node, label, nx_edge_dict):
     """Checks which A cross-ring fragmentation is possible for the input node\n
     | Arguments:
     | :-
-    | subg (networkx_object): a subgraph
+    | subg (MonoGraph): a subgraph
     | node (int): label of node to be checked
     | label (string): string labels of nodes in terminals
     | nx_edge_dict (dict): a mapping of each edge in the original graph to its bond label\n
@@ -788,11 +992,11 @@ def precalculate_mod_masses(all_mono_mods, all_terminal_perms, terminal_labels, 
 
 def temporary_root_calc_func(subg, parent_graph = None):
     """Determines whether and where to add label and extra oxygen masses to the reducing end of a glycan\n"""
-    reducing_ends = list(nx.get_node_attributes(subg, 'reducing_end'))
+    reducing_ends = list(node_attributes(subg, 'reducing_end'))
     if not reducing_ends:
         return False, None
     graph = subg if parent_graph is None else parent_graph
-    bond_labels = nx.get_edge_attributes(graph, 'bond_label')
+    bond_labels = edge_attributes(graph, 'bond_label')
     for red_end in reducing_ends:
         for x in graph.in_edges(red_end):
             if bond_labels.get(x) == 'glycosite':
@@ -976,7 +1180,7 @@ def update_global_mods(subg, global_mods, special_residues, amide_label = False)
     """Returns the valid list of global modifications for a given subgraph\n
     | Arguments:
     | :-
-    | subg (networkx_object): a subgraph
+    | subg (MonoGraph): a subgraph
     | global_mods (list): global modifications of the whole glycan, from get_initial_global_mods
     | special_residues (list): residues of the glycan with losses of their own (CO2 of acids, SO4 of S, PO4 of P), from get_initial_global_mods
     | amide_label (bool): whether the reducing end carries a label of AMIDE_LABELS, whose NH3 loss fragments holding the reducing end may show; default:False\n
@@ -984,7 +1188,7 @@ def update_global_mods(subg, global_mods, special_residues, amide_label = False)
     | :-
     | Returns a list of modification names
     """
-    all_labels = list(nx.get_node_attributes(subg, 'string_labels').values())
+    all_labels = list(node_attributes(subg, 'string_labels').values())
     node_labels = ''.join(v for v in all_labels if len(v) > 1)
     excluded = set()
     if not node_labels:
@@ -1048,7 +1252,7 @@ def annotate_subgraph(node_data, succ, graph_attributes, mono_mods, atom_mods, g
     | terminals (list): node labels of the terminal nodes, in the order of mono_mods and atom_mods\n
     | Returns:
     | :-
-    | Returns a networkx graph with node attributes 'mod_labels', 'atomic_mod_dict' (terminals) and 'global_mod' (all nodes, one shared list)
+    | Returns a MonoGraph with node attributes 'mod_labels', 'atomic_mod_dict' (terminals) and 'global_mod' (all nodes, one shared list)
     """
     # what copying the subgraph and set_node_attributes give (node, attribute and edge order, attribute dicts copied), built straight as dicts, as
     # networkx adds nodes and edges one by one; every candidate fragment is such a graph
@@ -1063,10 +1267,7 @@ def annotate_subgraph(node_data, succ, graph_attributes, mono_mods, atom_mods, g
     for u, nbrs in succ.items():
         for v, d in nbrs.items():
             adj[u][v] = pred[v][u] = d.copy()
-    graph = nx.DiGraph()
-    graph.graph.update(graph_attributes)
-    graph._node, graph._adj, graph._pred = node_data, adj, pred
-    return graph
+    return MonoGraph(node_data, adj, pred, dict(graph_attributes))
 
 
 class Fragment:
@@ -1112,7 +1313,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     """Calculates the graph and mass of all possible fragments of the input\n
     | Arguments:
     | :-
-    | nx_mono (networkx_object): the original monosaccharide only graph
+    | nx_mono (MonoGraph): the original monosaccharide only graph
     | global_mods (list): global modifications of the whole glycan, from get_initial_global_mods
     | special_residues (list): residues of the glycan with losses of their own, from get_initial_global_mods
     | allowed_X_cleavages (list): X-type cross-rings allowed on terminal nodes
@@ -1146,7 +1347,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     true_root_node = next(v for v, d in nx_mono.out_degree() if d == 0)
     all_other_terminals = {node for node in nx_mono.nodes() if nx_mono.degree()[node] < 2 or node == true_root_node}
     nx_edge_dict = {(node[0], node[1]): node[2] for node in nx_mono.edges(data = True)}
-    node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
+    node_dict = node_attributes(nx_mono, 'string_labels')
     node_dict_basic = {k: map_to_basic(v, obfuscate_ptm = False) for k, v in node_dict.items()}
     subgraph_fragments = {}
     present_global_masses = [global_mod_mass(x, -PROTON_MASS if charge < 0 else PROTON_MASS)
@@ -1453,9 +1654,7 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
             exact.append((fragments, row, terminals, inner_mass, bonus_root_mass, bonus_root_node, opts))
         else:
             # a real graph makes every later degree/edge query far cheaper than the view
-            subg = nx.DiGraph()
-            subg.graph.update(nx_mono.graph)
-            subg._node, subg._adj, subg._pred = node_data, succ, {v: {u: succ[u][v] for u in node_data if v in succ[u]} for v in node_data}
+            subg = MonoGraph(node_data, succ, {v: {u: succ[u][v] for u in node_data if v in succ[u]} for v in node_data}, dict(nx_mono.graph))
             terminal_labels = [node_dict_basic[x] for x in terminals]
             bonus_root_mass, bonus_root_node = temporary_root_calc_func(subg, nx_mono)
             subg_global_mods = update_global_mods(subg, global_mods, special_residues, amide_label = amide_label)
@@ -1582,15 +1781,15 @@ def rank_chains(nx_mono):
     """Ranks each glycan chain (terminal to reducing end) by mass in the form alpha, beta, etc.\n
     | Arguments:
     | :-
-    | nx_mono (networkx_object): the original monosaccharide only graph\n
+    | nx_mono (MonoGraph): the original monosaccharide only graph\n
     | Returns:
     | :-
     | A iterable of tuples containing the string rank and a list of integer node labels describing the chain
     """
-    node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
+    node_dict = node_attributes(nx_mono, 'string_labels')
     og_root = next(v for v, d in nx_mono.out_degree() if d == 0)
     og_leaves = set(v for v, d in nx_mono.in_degree() if d == 0)
-    leaf_chains = [nx.shortest_path(nx_mono, source = og_leaf, target = og_root) for og_leaf in og_leaves]
+    leaf_chains = [path_to(nx_mono, og_leaf, og_root) for og_leaf in og_leaves]
     basic = {n: map_to_basic(v, obfuscate_ptm = False) for n, v in node_dict.items()}
     main_chains = sorted(leaf_chains,
                          key = lambda x: sum(mono_attributes[basic[n]]['mass'][basic[n]] for n in x), reverse = True)
@@ -1664,15 +1863,15 @@ def find_main_chain(subgraph, leaves, root_node):
     """Calculates the main chain of a subgraph\n
     | Arguments:
     | :-
-    | subgraph (networkx_object): a subgraph
+    | subgraph (MonoGraph): a subgraph
     | leaves (list): integer labels of leaf nodes
     | root_node (int): integer label of the root node\n
     | Returns:
     | :-
     | Returns a list of integer node labels representing the inputs main chain
     """
-    bond_dict = nx.get_edge_attributes(subgraph, 'bond_label')
-    all_paths = [path for leaf in leaves for path in nx.all_simple_paths(subgraph, source = leaf, target = root_node)]
+    bond_dict = edge_attributes(subgraph, 'bond_label')
+    all_paths = [path for leaf in leaves if (path := path_to(subgraph, leaf, root_node)) is not None]
     main_chain = max(all_paths, key = len)
     main_chain_len = len(main_chain)
     main_chains = [k for k in all_paths if len(k) == main_chain_len]
@@ -1688,7 +1887,7 @@ def subgraph_to_label_skeleton(sub_g):
     """Breaks up a graph object into the skeleton of the IUPAC condensed nomenclature\n
     | Arguments:
     | :-
-    | sub_g (networkx_object): a graph or subgraph of monosaccharides\n
+    | sub_g (MonoGraph): a graph or subgraph of monosaccharides\n
     | Returns:
     | :-
     | Returns a list of integer node labels and branching brackets in the same order as the IUPAC condensed string
@@ -1701,11 +1900,11 @@ def subgraph_to_label_skeleton(sub_g):
     n_skelly = main_chain
     while {str(k) for k in sub_g.nodes} != {k for k in n_skelly if k.isnumeric()}:
         for i in [m for m in main_chain if m.isnumeric()][::-1]:
-            new_root_node = [x for x in nx.all_neighbors(sub_g, int(i)) if str(x) not in main_chain]
+            new_root_node = [x for x in (*sub_g._pred[int(i)], *sub_g._succ[int(i)]) if str(x) not in main_chain]
             if len(new_root_node) < 1:
                 continue
             new_root_node = new_root_node[0]
-            new_leaves = set(nx.ancestors(sub_g, new_root_node)) & set(leaves)
+            new_leaves = set(ancestors(sub_g, new_root_node)) & set(leaves)
             if len(new_leaves) == 0:
                 new_chain = [new_root_node]
             else:
@@ -1720,14 +1919,14 @@ def label_skeleton_to_string(n_skelly, sub_g):
     | Arguments:
     | :-
     | n_skelly (list): a list of integer node labels and branching brackets in the same order as the IUPAC condensed string
-    | sub_g (networkx_object): a graph or subgraph of monosaccharides\n
+    | sub_g (MonoGraph): a graph or subgraph of monosaccharides\n
     | Returns:
     | :-
     | Returns an IUPAC condensed representation of the input graph, in the case of fragment graphs it returns the closest canonical string representation
     """
-    bond_dict = nx.get_edge_attributes(sub_g, 'bond_label')
+    bond_dict = edge_attributes(sub_g, 'bond_label')
     mono_to_bond = {k[0]: v for k, v in bond_dict.items()}
-    string_labels = nx.get_node_attributes(sub_g, 'string_labels')
+    string_labels = node_attributes(sub_g, 'string_labels')
     for i in n_skelly:
         if i.isnumeric():
             if int(i) in mono_to_bond:
@@ -1740,7 +1939,7 @@ def mono_frag_to_string(sub_g):
     """Converts a monosaccharide graph to a string\n
     | Arguments:
     | :-
-    | sub_g (networkx_object): a graph or subgraph of monosaccharides\n
+    | sub_g (MonoGraph): a graph or subgraph of monosaccharides\n
     | Returns:
     | :-
     | Returns an IUPAC condensed representation of the input graph, in the case of fragment graphs it returns the closest canonical string representation
@@ -1756,8 +1955,11 @@ def domon_costello_to_fragIUPAC(glycan_string, fragment):
     | fragment (list): underscore separated string form of Domon-Costello e.g(['Y_1_Alpha'])\n
     | Returns:
     | :-
-    | Returns the fragmented glycan in a version of IUPAC condensed which is GlycoDraw compatible
+    | Returns the fragmented glycan in a version of IUPAC condensed which is GlycoDraw compatible, or None for an ion without a residue (I_ names)
     """
+    # a reporter, label or open-chain ion (I_02X0, HSO4-) has no structure to draw; its name failed to unpack as a cleavage
+    if any(cut.startswith('I_') for cut in fragment):
+        return None
     mono_graph = glycan_to_graph_monos(glycan_string)
     nx_mono = mono_graph_to_nx(mono_graph, directed = True)
     chain_rank = dict(rank_chains(nx_mono))
@@ -1765,27 +1967,27 @@ def domon_costello_to_fragIUPAC(glycan_string, fragment):
     excluded_nodes = set()
     for k, v in skelly_dict.items():
         if v[-1] == 'A':
-            excluded_nodes.update(nx_mono.nodes() ^ nx.ancestors(nx_mono, k).union({k}))
+            excluded_nodes.update(nodes_outside(nx_mono, ancestors(nx_mono, k) | {k}))
             # as in get_fragment_mass, an A-type cross-ring takes any branch attached to a ring atom it does not retain
             retained_atoms = mono_attributes[map_to_basic(nx_mono.nodes[k]['string_labels'], obfuscate_ptm = False)]['atoms'][v]
             for child, _ in nx_mono.in_edges(k):
                 if (pos := nx_mono.edges[child, k]['bond_label'][-1]).isdigit() and int(pos) not in retained_atoms:
-                    excluded_nodes.update(nx.ancestors(nx_mono, child) | {child})
+                    excluded_nodes.update(ancestors(nx_mono, child) | {child})
         elif v[-1] in {'B', 'C'}:
-            excluded_nodes.update(nx_mono.nodes() ^ nx.ancestors(nx_mono, post_mono).union({post_mono, k}))
+            excluded_nodes.update(nodes_outside(nx_mono, ancestors(nx_mono, post_mono) | {post_mono, k}))
         elif v[-1] == 'X':
             # an X cross-ring keeps the children on the ring atoms it retains, unless a cleavage of their own takes them
             retained_atoms = mono_attributes[map_to_basic(nx_mono.nodes[k]['string_labels'], obfuscate_ptm = False)]['atoms'][v]
             for child, _ in nx_mono.in_edges(k):
                 if not ((pos := nx_mono.edges[child, k]['bond_label'][-1]).isdigit() and int(pos) in retained_atoms):
-                    excluded_nodes.update(nx.ancestors(nx_mono, child) | {child})
+                    excluded_nodes.update(ancestors(nx_mono, child) | {child})
         elif v[-1] in {'Y', 'Z'}:
-            excluded_nodes.update(nx.ancestors(nx_mono, k))
+            excluded_nodes.update(ancestors(nx_mono, k))
     frag_subg = nx_mono.subgraph(set(nx_mono.nodes()) ^ set(excluded_nodes))
     label_skelly = subgraph_to_label_skeleton(frag_subg)
     skelly_dict = {str(k): v for k, v in skelly_dict.items()}
-    mono_to_bond = {str(k[0]): v for k, v in nx.get_edge_attributes(frag_subg, 'bond_label').items()}
-    node_dict = {str(k): v for k, v in nx.get_node_attributes(frag_subg, 'string_labels').items()}
+    mono_to_bond = {str(k[0]): v for k, v in edge_attributes(frag_subg, 'bond_label').items()}
+    node_dict = {str(k): v for k, v in node_attributes(frag_subg, 'string_labels').items()}
     for i in label_skelly[::-1]:
         if i in mono_to_bond:
             label_skelly.insert(label_skelly.index(i) + 1, f'({mono_to_bond[i]})')
@@ -1850,8 +2052,8 @@ def subgraphs_to_domon_costello(nx_mono, subgs, chain_rank = None):
     """Converts the subgraphs of a given graph object into their canonical Domon & Costello fragment names\n
     | Arguments:
     | :-
-    | nx_mono (networkx_object): the original monosaccharide only graph
-    | subgs (list): a list of Fragments (generate_atomic_frags) or modified networkx subgraphs
+    | nx_mono (MonoGraph): the original monosaccharide only graph
+    | subgs (list): a list of Fragments (generate_atomic_frags) or fragment graphs (MonoGraph)
     | chain_rank (list): rank_chains of nx_mono, if already at hand; default:None\n
     | Returns:
     | :-
@@ -1891,7 +2093,7 @@ def subgraphs_to_domon_costello(nx_mono, subgs, chain_rank = None):
             ion_names.append(sorted(dc_cuts or ['M']))
             continue
         cuts, global_mods, mono_mod_dict, atomic_mod_dict = [], {}, {}, {}
-        # plain reads of the node data in one pass, as nx.get_node_attributes (or even making a NodeDataView of a new graph) costs more than the naming itself
+        # plain reads of the node data in one pass, as node_attributes (or even making a node view of a new graph) costs more than the naming itself
         for n, d in subg._node.items():
             if 'global_mod' in d:
                 global_mods[n] = d['global_mod']
@@ -2041,13 +2243,13 @@ def score_gp_prior(gp_names, charge):
 def glycopeptide_frag_to_string(pep_gr, subg):
     """IUPAC-condensed representation of a glycopeptide fragment, glycans delimited by asterisks"""
     peptide_nodes = set(pep_gr.nodes)
-    labels = nx.get_node_attributes(subg, 'string_labels')
+    labels = node_attributes(subg, 'string_labels')
     pep_part = ''.join(v for k, v in sorted(((k, v) for k, v in labels.items() if k in peptide_nodes),
                                             key = lambda x: int(x[0].split('-')[1])))
     glycan_strings = []
     for prefix in sorted({x.split('-')[0] for x in subg.nodes if x not in peptide_nodes}, key = int):
         glyc = subg.subgraph([x for x in subg.nodes if x.split('-')[0] == prefix])
-        glycan_strings.append(mono_frag_to_string(nx.relabel_nodes(glyc, {x: int(x.split('-')[1]) for x in glyc.nodes}, copy = True)))
+        glycan_strings.append(mono_frag_to_string(relabel_graph(glyc, {x: int(x.split('-')[1]) for x in glyc.nodes})))
     if not pep_part:
         return '*'.join(glycan_strings)
     if not glycan_strings:
@@ -2091,12 +2293,12 @@ def max_fragment_charge(graph, peptide = False):
         return graph.number_of_nodes()
     # a Fragment's labels and terminal atom dictionaries are read directly, without building its graph
     fragment = isinstance(graph, Fragment)
-    labels = {k: d['string_labels'] for k, d in graph.nodes.items()} if fragment else nx.get_node_attributes(graph, 'string_labels')
+    labels = {k: d['string_labels'] for k, d in graph.nodes.items()} if fragment else node_attributes(graph, 'string_labels')
     pep_labels = [v for k, v in labels.items() if k.split('-')[0] == '0']
     if not pep_labels:
         return graph.number_of_nodes()
     n_glycan = len(labels) - len(pep_labels)
-    backbone = any(isinstance(x, str) and x.startswith('peptide_') for d in (graph.atom_mods if fragment else nx.get_node_attributes(graph, 'atomic_mod_dict').values())
+    backbone = any(isinstance(x, str) and x.startswith('peptide_') for d in (graph.atom_mods if fragment else node_attributes(graph, 'atomic_mod_dict').values())
                    for x in d.values())
     return 1 + sum(1 for v in pep_labels if v in BASIC_RESIDUES) + (min(n_glycan, 1) if backbone else math.ceil(n_glycan / 4))
 
@@ -2230,7 +2432,7 @@ def get_initial_global_mods(nx_mono, charge, disable_global_mods = False, max_gl
     charge_mods = {-1: ['+Na', '+K', '+Li'], 1: ['+Acetate']}
     metals = DEFAULT_METAL_CATIONS if metal_cations is True else set(metal_cations or ())
     global_mods = [mod for mod in global_mods if mod not in charge_mods[np.sign(charge)] and (mod in metals or mod not in METAL_GLOBAL_MODS)]
-    labels = [v for v in nx.get_node_attributes(nx_mono, 'string_labels').values() if len(v) > 1]
+    labels = [v for v in node_attributes(nx_mono, 'string_labels').values() if len(v) > 1]
     special_mod_residues = ['Neu5Ac', 'Neu5Gc', 'GlcA', 'HexA', 'Kdn', 'S', 'P']
     # residue by residue (the joined labels of Glc(a1-4)Ara contain GlcA), with every uronic acid (IdoA, GalA) as HexA and only phosphate
     # substituents (Man6P, GlcNAcOP) as P, not the P of Pen, Pse, Pyr or Prop; a derivatized carboxyl (derivatize_carboxyls) loses no CO2
@@ -2338,10 +2540,12 @@ def create_peptide_graph(pep_seq):
     """Creates a network object of a peptide"""
     pep_arr = np.roll(np.eye(len(pep_seq)), (2, 1), axis = (1, 0))
     pep_arr[:, 0] = 0
-    pep_gr = nx.from_numpy_array(pep_arr, create_using = nx.DiGraph)
-    nx.set_node_attributes(pep_gr, dict(enumerate(pep_seq)), 'string_labels')
-    bond_dict = {(e[0], e[1]): {'bond_label': 'peptide'} for e in pep_gr.edges}
-    nx.set_edge_attributes(pep_gr, bond_dict)
+    pep_gr = MonoGraph()
+    # as networkx's from_numpy_array made it: nodes in index order, the edges row by row with their weight
+    for n, label in enumerate(pep_seq):
+        pep_gr.add_node(n, string_labels = label)
+    for u, v in zip(*np.nonzero(pep_arr)):
+        pep_gr.add_edge(int(u), int(v), weight = float(pep_arr[u, v]), bond_label = 'peptide')
     return pep_gr
 
 
@@ -2349,9 +2553,16 @@ def create_glycopeptide_graph(peptide, glycans, glycosites):
     """Creates and merges network objects of a peptide and glycans"""
     pep_gr = create_peptide_graph(peptide)
     glycan_graphs = [mono_graph_to_nx(glycan_to_graph_monos(glyc), directed = True) for glyc in glycans]
-    red_nodes = [next(iter(nx.get_node_attributes(glyc, 'reducing_end'))) for glyc in glycan_graphs]
+    red_nodes = [next(iter(node_attributes(glyc, 'reducing_end'))) for glyc in glycan_graphs]
     prefixes = [f'{l}-' for l in range(len(glycan_graphs) + 1)]
-    glyco_pep = nx.union_all([pep_gr] + glycan_graphs, rename = prefixes)
+    glyco_pep = MonoGraph()
+    for prefix, gr in zip(prefixes, [pep_gr] + glycan_graphs):
+        glyco_pep.graph.update(gr.graph)
+        for n, d in gr._node.items():
+            glyco_pep.add_node(f'{prefix}{n}', **d)
+        for u, nbrs in gr._succ.items():
+            for v, d in nbrs.items():
+                glyco_pep.add_edge(f'{prefix}{u}', f'{prefix}{v}', **d)
     for pref, gsite, red_node in zip(prefixes[1:], glycosites, red_nodes):
         glyco_pep.add_edge(f'0-{gsite}', f'{pref}{red_node}')
         glyco_pep[f'0-{gsite}'][f'{pref}{red_node}']['bond_label'] = 'glycosite'
@@ -2379,7 +2590,7 @@ def get_glycan_cleavages(gp, subgs, glycosites, chain_ranks):
     """Return Domon-Costello labels for all glycans on each glycopeptide fragment (Fragments or graphs; chain_ranks: rank_chains of each glycan, keyed by its
     graph prefix), each glycan's cleavages named for all fragments in one call"""
     all_mods = [[] for _ in subgs]
-    atom_dicts = [dict(zip(subg.terminals, subg.atom_mods)) if isinstance(subg, Fragment) else nx.get_node_attributes(subg, 'atomic_mod_dict') for subg in subgs]
+    atom_dicts = [dict(zip(subg.terminals, subg.atom_mods)) if isinstance(subg, Fragment) else node_attributes(subg, 'atomic_mod_dict') for subg in subgs]
     for prefix, glycosite in enumerate(glycosites, 1):
         prefix = str(prefix)
         glyc = [x for x in gp.nodes() if x.split('-')[0] == prefix]
@@ -2415,9 +2626,9 @@ def peptide_to_RF_nomenclature(peptide, pep_subg, allowed_ion_types = None, allo
         pep_atom_dict = {k: v for k, v in zip(pep_subg.terminals, pep_subg.atom_mods) if k in peptide_node_set}
         global_mods = {None: [pep_subg.global_mod]} if pep_subg.global_mod else {}
     else:
-        pep_atom_dict = {k: v for k, v in nx.get_node_attributes(pep_subg, 'atomic_mod_dict').items() if
+        pep_atom_dict = {k: v for k, v in node_attributes(pep_subg, 'atomic_mod_dict').items() if
                          k in peptide_node_set}
-        global_mods = nx.get_node_attributes(pep_subg, 'global_mod')
+        global_mods = node_attributes(pep_subg, 'global_mod')
     n_term_cuts, c_term_cuts = 0, 0
     for node, cleavages in pep_atom_dict.items():
         for cleavage in [x for x in cleavages.values() if isinstance(x, str) and x.startswith('peptide_')]:
@@ -3072,7 +3283,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     else:
         fragment_masses = sorted(fragment_masses)
     nx_mono, pep_gr = input_to_graph(input_dict)
-    node_labels = nx.get_node_attributes(nx_mono, 'string_labels')
+    node_labels = node_attributes(nx_mono, 'string_labels')
     if any(map_to_basic(v, obfuscate_ptm = False) not in mono_attributes for v in node_labels.values() if len(v) > 1):
         return dict.fromkeys(fragment_masses)
     global_mods, special_residues = get_initial_global_mods(nx_mono, charge,
@@ -3129,7 +3340,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         for prefix in sorted({x.split('-')[0] for x in nx_mono} - {'0'}, key = int):
             glyc = [x for x in nx_mono if x.split('-')[0] == prefix]
             chain_rank[prefix] = [(rank, [f'{prefix}-{n}' for n in chain]) for rank, chain in
-                                  rank_chains(nx.relabel_nodes(nx_mono.subgraph(glyc), {x: int(x.split('-')[1]) for x in glyc}))]
+                                  rank_chains(relabel_graph(nx_mono.subgraph(glyc), {x: int(x.split('-')[1]) for x in glyc}))]
     else:
         # read once with get, as another thread (the app's annotation) may clear the store in between
         chain_rank = _CHAIN_RANKS.get(input_dict['glycans'][0])
@@ -3367,13 +3578,9 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
         triples = _PLACEMENTS[key]
         slim = glycan_to_glycangraph(glycan)
         labels, paths, canonical = {k: d['string_labels'] for k, d in slim.nodes.items()}, {}, graph_to_string(slim)
-        # a networkx graph of its own, as the placements below edit copies of it; glycowork's cached graphs are read-only
-        gr = nx.DiGraph()
-        gr.add_nodes_from((k, {'string_labels': v}) for k, v in labels.items())
-        gr.add_edges_from((u, v) for u in slim.succ for v in slim.succ[u])
-        for n in sorted(gr, reverse = True):
-            paths[n] = paths.get(next(iter(gr.pred[n]), None), ()) + (labels[n],)
-        monos, root = [p for k, p in paths.items() if k % 2 == 0], max(gr)
+        for n in sorted(slim, reverse = True):
+            paths[n] = paths.get(next(iter(slim.pred[n]), None), ()) + (labels[n],)
+        monos, root = [p for k, p in paths.items() if k % 2 == 0], max(slim)
         def node_name(q):
             # A residue is named by its path towards the reducing end, as far as it takes to tell it apart from every other residue
             if q == root:
@@ -3383,25 +3590,27 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
                 d += 2
             return path[-1] + ''.join(f'({path[-k]}){path[-k - 1]}' for k in range(2, d + 1, 2))
         residues = []
-        for n in sorted(gr):
+        for n in sorted(slim):
             if not n % 2 or '?' in labels[n] or '/' in labels[n]:
                 continue
-            child, parent, donor = next(iter(gr.succ[n])), next(iter(gr.pred[n])), labels[n].split('-')[0]
-            placements, subtree = {}, nx.descendants(gr, n)
-            for q in sorted(gr):
+            child, parent, donor = next(iter(slim.succ[n])), next(iter(slim.pred[n])), labels[n].split('-')[0]
+            placements, subtree, stack = {}, set(), list(slim.succ[n])
+            while stack:
+                subtree.add(stack[-1])
+                stack.extend(slim.succ[stack.pop()])
+            for q in sorted(slim):
                 if q % 2 or q in subtree:
                     continue
-                used = {labels[s].split('-')[1] for s in gr.succ[q] if s != n}
+                used = {labels[s].split('-')[1] for s in slim.succ[q] if s != n}
                 # Glycosidic fragments do not depend on the position on the new parent, so one free position this donor takes there is enough
                 link = next((link for c, link, p in triples if c == labels[child] and p == labels[q] and link.startswith(donor + '-') and '?' not in link and
                              '/' not in link and link.split('-')[1] not in used), None)
                 if link is None or q == parent:
                     continue
-                variant = gr.copy()
-                variant.remove_edge(parent, n)
-                variant.add_edge(q, n)
-                variant.nodes[n]['string_labels'] = link
-                variant = graph_to_string(variant)
+                # the glycan with the residue moved onto q, built as glycowork read the edited networkx copy this was before (edges in node order,
+                # the moved one last among q's)
+                variant = graph_to_string(_graph({k: _attrs(link if k == n else v) for k, v in labels.items()},
+                                                 [(u, v) for u in slim for v in slim.succ[u] + ((n,) if u == q else ()) if (u, v) != (parent, n)]))
                 if variant != canonical:
                     placements[variant] = f'{labels[child]} on {node_name(q)}'
             residues.append((child // 2, f'{labels[child]}({labels[n]}) on {node_name(parent)}', placements, (labels[child], labels[n], labels[parent])))
@@ -3587,7 +3796,7 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
     rows = []
     for combo in product(*structures):
         graphs = [mono_graph_to_nx(glycan_to_graph_monos(g)) for g in combo]
-        labels = [{n: map_to_basic(v, obfuscate_ptm = False) for n, v in nx.get_node_attributes(gr, 'string_labels').items()} for gr in graphs]
+        labels = [{n: map_to_basic(v, obfuscate_ptm = False) for n, v in node_attributes(gr, 'string_labels').items()} for gr in graphs]
         if any(v not in mono_attributes for lab in labels for v in lab.values()):
             continue
         res_masses = [{n: mono_attributes[v]['mass'][v] for n, v in lab.items()} for lab in labels]
@@ -3597,7 +3806,7 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
         expected = []
         for gr, m in zip(graphs, res_masses):
             for child, _ in gr.edges():
-                branch = nx.ancestors(gr, child) | {child}
+                branch = ancestors(gr, child) | {child}
                 if len(branch) <= 3:
                     expected.append(np.array([sum(m[n] for n in branch) + PROTON_MASS]))
                 expected.append((pep_mass + total - sum(m[n] for n in branch) + np.arange(1, abs(charge) + 1) * PROTON_MASS) /
@@ -3838,7 +4047,7 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
     nx_mono = mono_graph_to_nx(glycan_to_graph_monos(glycan), directed = True)
     if any(c.startswith('I_') for c in fragment):
         # an ion named without a graph (HSO4-, a label's reporter or open-chain ion) stands alone, if the glycan gives it
-        labels = nx.get_node_attributes(nx_mono, 'string_labels')
+        labels = node_attributes(nx_mono, 'string_labels')
         root_label = labels[next(v for v, d in nx_mono.out_degree() if d == 0)]
         return (small_ions(labels.values(), charge, mass_tag) | chain_ions(root_label, charge, mass_tag, sample_prep)).get(fragment[0]) if len(fragment) == 1 else None
     chain_rank = list(rank_chains(nx_mono))
@@ -3846,12 +4055,12 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
         skelly_dict, post_mono, global_mod = domon_costello_to_node_labels(fragment, dict(chain_rank))
     except (IndexError, KeyError):
         return None
-    node_dict = nx.get_node_attributes(nx_mono, 'string_labels')
-    bond_labels = nx.get_edge_attributes(nx_mono, 'bond_label')
+    node_dict = node_attributes(nx_mono, 'string_labels')
+    bond_labels = edge_attributes(nx_mono, 'bond_label')
     keep = set(nx_mono.nodes())
     for node, cut_type in skelly_dict.items():
         if cut_type[-1] == 'A':
-            keep &= nx.ancestors(nx_mono, node) | {node}
+            keep &= ancestors(nx_mono, node) | {node}
             # an A-type cross-ring silently takes any branch attached to a ring atom it does not retain
             retained_atoms = mono_attributes[map_to_basic(node_dict[node], obfuscate_ptm = False)]['atoms'].get(cut_type)
             # a cross-ring this residue has no table entry for (0,4A of Fuc) cannot exist on it
@@ -3859,9 +4068,9 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
                 return None
             for child, _ in nx_mono.in_edges(node):
                 if (pos := bond_labels[(child, node)][-1]).isdigit() and int(pos) not in retained_atoms:
-                    keep -= nx.ancestors(nx_mono, child) | {child}
+                    keep -= ancestors(nx_mono, child) | {child}
         elif cut_type[-1] in {'B', 'C'}:
-            keep &= nx.ancestors(nx_mono, post_mono) | {post_mono}
+            keep &= ancestors(nx_mono, post_mono) | {post_mono}
         elif cut_type[-1] == 'X':
             retained_atoms = mono_attributes[map_to_basic(node_dict[node], obfuscate_ptm = False)]['atoms'].get(cut_type)
             if retained_atoms is None:
@@ -3869,9 +4078,9 @@ def get_fragment_mass(glycan, fragment, charge = -1, mass_tag = None, sample_pre
             # an X cross-ring keeps the children on the ring atoms it retains, unless a cleavage of their own takes them
             for child, _ in nx_mono.in_edges(node):
                 if not ((pos := bond_labels[(child, node)][-1]).isdigit() and int(pos) in retained_atoms):
-                    keep -= nx.ancestors(nx_mono, child) | {child}
+                    keep -= ancestors(nx_mono, child) | {child}
         else:
-            keep -= nx.ancestors(nx_mono, node) | {node}
+            keep -= ancestors(nx_mono, node) | {node}
     if not keep:
         return None
     global_mods, special_residues = get_initial_global_mods(nx_mono, charge, disable_global_mods = global_mod is None,
@@ -3891,14 +4100,24 @@ def get_unique_subgraphs(nx_mono1, nx_mono2):
     """Gets the subgraphs unique to each of two input graphs\n
     | Arguments:
     | :-
-    | nx_mono1 (networkx object): a monosaccharide only graph
-    | nx_mono2 (networkx object): a different monosaccharide only graph\n
+    | nx_mono1 (MonoGraph): a monosaccharide only graph
+    | nx_mono2 (MonoGraph): a different monosaccharide only graph\n
     | Returns:
     | :-
-    | Returns two lists of networkx subgraphs of the inputs
+    | Returns two lists of subgraphs (MonoGraph) of the inputs
     """
+    # networkx's VF2 compares the subgraphs as undirected graphs, the one thing here still needing networkx, which only this imports
+    import networkx as nx
+    from networkx.algorithms.isomorphism import categorical_node_match
+
+    def undirected(g):
+        h = nx.Graph()
+        h.add_nodes_from(g.nodes(data = True))
+        h.add_edges_from(g.edges(data = True))
+        return h
+
     # This is the criterion used to match nodes (it can also be something more general, i.e., Hex, HexNAc etc)
-    nm = iso.categorical_node_match("string_labels", None)
+    nm = categorical_node_match("string_labels", None)
     all_unique_graphs1 = []
     all_unique_graphs2 = []
     # Only compare subgraphs of the same size
@@ -3907,8 +4126,8 @@ def get_unique_subgraphs(nx_mono1, nx_mono2):
         graphs2 = set()
         first_graphs = enumerate_k_graphs(nx_mono1, i)
         second_graphs = enumerate_k_graphs(nx_mono2, i)
-        undir1 = [g.to_undirected() for g in first_graphs]
-        undir2 = [g.to_undirected() for g in second_graphs]
+        undir1 = [undirected(g) for g in first_graphs]
+        undir2 = [undirected(g) for g in second_graphs]
         for a, ua in enumerate(undir1):
             for b, ub in enumerate(undir2):
                 if nx.is_isomorphic(ua, ub, node_match = nm):

@@ -49,5 +49,6 @@ tests/data/*/*.mzML
 tests/data/*/*.mzXML
 tests/data/*/*.raw
 tests/data/*/*.d/
+tests/data/*/*.mzdata.xml
 tests/data/*/*.mgf
 tests/untracked/*

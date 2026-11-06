@@ -3,7 +3,7 @@
 Usage (from the repo root, in the CandyCrunch environment):
     python tests/audit_gt.py <spectra file> <source GT csv> --glycan_class N [--run NAME] [--modification reduced] [--mass_tag 0]
                              [--sample_prep underivatized] [--output df_mz_X.csv] [--predictions <CandyCrunch output .xlsx/.csv>]
-                             [--rt_window 1.5] [--lc PGC] [--library_cache PATH] [--data_dir tests/data] [--mode positive] [--max_charge 4]
+                             [--rt_window 1.5] [--rt_shift 0] [--lc PGC] [--library_cache PATH] [--data_dir tests/data] [--mode positive] [--max_charge 4]
 
 <spectra file> is a .raw/.mzML/.mzXML/.d (MS1 used) or an extract_spectra .xlsx (no MS1: only the MS2-based checks apply). <source GT csv> has Mass,
 RT (or <run>_RT), glycan, optionally charge, and the run's abundance column (<run>, the spectra file's stem unless --run says otherwise). Writes the
@@ -358,7 +358,7 @@ def describe_fragments(f):
 
 
 def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = 'reduced', mass_tag = 0.0, sample_prep = 'underivatized',
-          predictions = None, rt_window = 1.5, library_cache = None, data_dir = DATA_DIR, lc = 'PGC', mode = None, max_charge = 3):
+          predictions = None, rt_window = 1.5, library_cache = None, data_dir = DATA_DIR, lc = 'PGC', mode = None, max_charge = 3, rt_shift = None):
     """audits a source GT against its run; returns the audited GT, the removed rows (with reasons), the review list, and a summary text"""
     t_start = time.time()
     spectra_path, gt_path = Path(spectra_path), Path(gt_path)
@@ -598,7 +598,10 @@ def audit(spectra_path, gt_path, glycan_class, run_name = None, modification = '
     taken = Counter(id(c[0]) for c in cands if len(c) == 1)
     unique = [(e[0]['RT_source'], c[0]['RT'] - e[0]['RT_source']) for e, c in zip(entities, cands) if len(c) == 1 and taken[id(c[0])] == 1]
     global_shift = float(np.median([d for _, d in unique])) if len(unique) >= 2 else 0.0
+    fixed_shift = rt_shift
     def rt_shift(t):
+        if fixed_shift is not None:
+            return fixed_shift
         local = [d for s, d in unique if abs(s - t) <= 10]
         return float(np.median(local)) if len(local) >= 3 else global_shift
     # Assignment per composition: Hungarian on |apex - expected RT| with penalties for peaks that fail a criterion, so a row prefers a good peak
@@ -888,6 +891,8 @@ def main():
     parser.add_argument('--library_cache', default = str(Path.home() / '.cache' / 'candycrunch' / 'audit_gt_library.pkl'))
     parser.add_argument('--data_dir', default = str(DATA_DIR), help = 'test data folder whose curated GTs and .xlsx form the spectral library')
     parser.add_argument('--mode', default = None, choices = ['negative', 'positive'], help = 'ion mode, for spectra files that record none (Agilent mgf/xlsx)')
+    parser.add_argument('--rt_shift', type = float, default = None, help = 'fixed RT shift (apex - source RT) in place of the fitted one, e.g. 0 for a '
+                                                                          'source whose RTs are the apexes of this run (MassHunter compound lists)')
     parser.add_argument('--max_charge', type = int, default = 3, help = 'highest charge searched for the compositions of open rows (the test set\'s max_charge)')
     args = parser.parse_args()
     gt_path = Path(args.gt)
@@ -898,7 +903,7 @@ def main():
     audited, removed, review, summary = audit(args.spectra, gt_path, args.glycan_class, run_name = args.run, modification = args.modification,
                                               mass_tag = args.mass_tag, sample_prep = args.sample_prep, predictions = args.predictions,
                                               rt_window = args.rt_window, library_cache = args.library_cache, data_dir = args.data_dir, lc = args.lc,
-                                              mode = args.mode, max_charge = args.max_charge)
+                                              mode = args.mode, max_charge = args.max_charge, rt_shift = args.rt_shift)
     audited.to_csv(output, index = False)
     removed.to_csv(output.with_name(output.stem + '_removed.csv'), index = False)
     review.to_csv(output.with_name(output.stem + '_review.csv'), index = False)

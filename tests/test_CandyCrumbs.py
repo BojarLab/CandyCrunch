@@ -4,13 +4,12 @@ import random
 import time
 from collections import Counter
 import numpy as np
-import networkx as nx
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
     build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
     CHAIN_IONS, domon_costello_to_label, \
     peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
-    subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge, chance_fragment
+    subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge, chance_fragment, relabel_graph
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
 
 TEST_DICTS = [{'glycan_string':'GalNAc(b1-4)GlcNAc(b1-3)[GalNAc(b1-4)GlcNAc(b1-6)]Gal(b1-4)Glc',
@@ -581,7 +580,7 @@ def test_candycrumbs_glycopeptide_precheck(case):
     for prefix in sorted({x.split('-')[0] for x in nx_mono} - {'0'}, key = int):
         glyc = [x for x in nx_mono if x.split('-')[0] == prefix]
         chain_rank[prefix] = [(rank, [f'{prefix}-{n}' for n in chain]) for rank, chain in
-                              rank_chains(nx.relabel_nodes(nx_mono.subgraph(glyc), {x: int(x.split('-')[1]) for x in glyc}))]
+                              rank_chains(relabel_graph(nx_mono.subgraph(glyc), {x: int(x.split('-')[1]) for x in glyc}))]
     for threshold_ppm in (None, 10):
         found = generate_atomic_frags(nx_mono, global_mods, special_residues, x_rings, fragment_masses = masses, threshold = 0.02, threshold_ppm = threshold_ppm,
                                       **kwargs)
