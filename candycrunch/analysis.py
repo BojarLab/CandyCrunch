@@ -26,8 +26,6 @@ from glycowork.motif.tokenization import map_to_basic as glycowork_map_to_basic,
 from glycowork.motif.graph import glycan_to_glycangraph, get_possible_topologies, graph_to_string
 from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
 from glycowork.motif.draw import plot_glycans_excel
-from glycowork.glycan_data.stats import cohen_d, correct_multiple_testing
-from scipy.stats import ttest_ind
 
 
 @lru_cache(maxsize = 4096)
@@ -3999,11 +3997,11 @@ def run_controls(df_a, df_b):
     | :-
     | Returns printed p-values of comparing systematic differences in tested glycans (length & branching)
     """
-    len_comp = ttest_ind([len(k) for k in df_a.Prediction],
-                         [len(k) for k in df_b.Prediction], equal_var = False)
+    # glycowork's Welch test is scipy's ttest_ind(equal_var = False) p-value bit for bit, and its statistics module (scipy.special) loads only here
+    from glycowork.glycan_data.stats import _ttest_pvalue
+    len_comp = _ttest_pvalue([len(k) for k in df_a.Prediction], [len(k) for k in df_b.Prediction])
     print("p-value (Welch's t-test) for differences in glycan length: " + str(len_comp))
-    branch_comp = ttest_ind([k.count('[') for k in df_a.Prediction],
-                            [k.count('[') for k in df_b.Prediction], equal_var = False)
+    branch_comp = _ttest_pvalue([k.count('[') for k in df_a.Prediction], [k.count('[') for k in df_b.Prediction])
     print("p-value (Welch's t-test) for differences in glycan branching: " + str(branch_comp))
 
 
@@ -4051,14 +4049,17 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
         run_controls(df_a, df_b)
     df_r = pd.concat([df_a, df_b], axis = 0)
     remainder = [np.median([x for x in col if x] or [0]) for col in zip(*df_r.mz_remainder.values.tolist())]
-    df_a = np.array(df_a.binned_intensities.values.tolist())
-    df_b = np.array(df_b.binned_intensities.values.tolist())
-    pvals = np.array([ttest_ind(df_a[:, k], df_b[:, k], equal_var = False)[1] for k in range(max_bin)])
+    from glycowork.glycan_data.stats import _ttest_pvalue, cohen_d, correct_multiple_testing
+    # Cohen's d of all bins at once (one contiguous row per bin, summed in the order a single bin's would be); Welch's test bin by bin, as numpy squares a
+    # single value through pow but a whole array by multiplying, which moved a p-value in the last digit
+    df_a = np.ascontiguousarray(np.array(df_a.binned_intensities.values.tolist())[:, :max_bin].T)
+    df_b = np.ascontiguousarray(np.array(df_b.binned_intensities.values.tolist())[:, :max_bin].T)
+    pvals = np.array([_ttest_pvalue(a, b) for a, b in zip(df_a, df_b)])
     tested = ~np.isnan(pvals)
     pvals[tested] = correct_multiple_testing(pvals[tested], 0.05)[0]
-    cohensd = [cohen_d(df_a[:, k], df_b[:, k]) for k in range(max_bin)]
+    cohensd = cohen_d(df_a, df_b)[0]
     sig_bins = [k for k in range(max_bin) if pvals[k] < 0.05]
-    sig_bins = [(min_mz + ((max_mz - min_mz) / (bin_num - 1)) * k + remainder[k], pvals[k], cohensd[k][0]) for k in
+    sig_bins = [(min_mz + ((max_mz - min_mz) / (bin_num - 1)) * k + remainder[k], pvals[k], cohensd[k]) for k in
                 sig_bins]
     return sorted(sig_bins, key = lambda x: (x[1], 1 / abs(x[2])))
 
@@ -4085,6 +4086,7 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
     | :-
     | Returns a plot of fragment effect size across prediction confidences and a dictionary of form peak : list of effect sizes across prediction confidences
     """
+    from glycowork.glycan_data.stats import _ttest_pvalue, cohen_d, correct_multiple_testing
     max_bin = round((mz_cap - min_mz) / ((max_mz - min_mz) / (bin_num - 1)))
     df_a = df[df.Prediction == glycan_list[0]].reset_index(drop = True)
     df_b = df[df.Prediction == glycan_list[1]].reset_index(drop = True)
@@ -4102,12 +4104,14 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
             for k in bin_keys:
                 bins[k].append(0)
             continue
-        cohensd = [cohen_d(df_a2[:, k], df_b2[:, k]) for k in range(max_bin)]
-        pvals = np.array([ttest_ind(df_a2[:, k], df_b2[:, k], equal_var = False)[1] for k in range(max_bin)])
+        # one contiguous row per bin, as in get_sig_bins
+        df_a2, df_b2 = np.ascontiguousarray(df_a2[:, :max_bin].T), np.ascontiguousarray(df_b2[:, :max_bin].T)
+        cohensd = cohen_d(df_a2, df_b2)[0]
+        pvals = np.array([_ttest_pvalue(a, b) for a, b in zip(df_a2, df_b2)])
         tested = ~np.isnan(pvals)
         pvals[tested] = correct_multiple_testing(pvals[tested], 0.05)[0]
         for c, cd in enumerate(cohensd):
-            bins[bin_keys[c]].append(cd[0] if pvals[c] < 0.05 else 0)
+            bins[bin_keys[c]].append(cd if pvals[c] < 0.05 else 0)
     bins = {k: v for k, v in bins.items() if
             max(abs(v2) for v2 in v) >= thresh and not any(math.isinf(v2) for v2 in v)}
     from candycrunch.utils import figure, finish

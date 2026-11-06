@@ -15,6 +15,7 @@ from collections import defaultdict
 
 from candycrunch.prediction import *
 import candycrunch.utils
+from glycowork.glycan_data.loader import df_glycan
 from glycowork.motif.graph import compare_glycans, get_possible_topologies, graph_to_string
 from glycowork.motif.annotate import get_glycan_similarity
 from itertools import product

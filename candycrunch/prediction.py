@@ -23,14 +23,9 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 from networkx import descendants
-try:
-    import torch
-    import torch.nn.functional as F
-    from candycrunch.model import CandyCrunch_CNN
-except ImportError:
-    # The built app ships without PyTorch and runs the model on ONNX Runtime (inference.py)
-    torch = None
-from glycowork.glycan_data.loader import df_glycan, stringify_dict, unwrap
+# df_glycan is read where it is used, as importing it loads it (1.2 s and 430 MB), which a process that only reads spectra or runs CandyCrumbs never needs
+import glycowork.glycan_data.loader as glycan_loader
+from glycowork.glycan_data.loader import stringify_dict, unwrap
 from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, graph_to_string
 from glycowork.motif.processing import enforce_class, canonicalize_iupac, get_class, is_composition
 from glycowork.motif.annotate import get_molecular_properties
@@ -55,18 +50,43 @@ bin_num = 2048
 temperature = 1.15
 comp_vector_order = ['dHex', 'Hex', 'HexA', 'HexN', 'HexNAc', 'Kdn', 'Me', 'Neu5Ac', 'Neu5Gc', 'P', 'Pen', 'S']
 
-if torch is not None:
-    # Choose the correct computing architecture
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda:0"
-    sdict = torch.load(sdict, map_location = device, weights_only = True)
-    sdict = {k.replace('module.', ''): v for k, v in sdict.items()}
-    candycrunch = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12).to(device)
-    candycrunch.load_state_dict(sdict)
-    candycrunch = candycrunch.eval()
-else:
-    candycrunch = CandyCrunchCNN(load_weights(sdict))
+# PyTorch and the default model are loaded at the first prediction: a process that only reads spectra or runs CandyCrumbs, such as each pool process
+# run_jobs starts from a script importing this module, held them for nothing (about 3 s and 640 MB each). torch is None until tried, False without PyTorch
+torch, device = None, 'cpu'
+
+
+def _torch():
+    """PyTorch, imported at its first use, with device the GPU if there is one; None without it (the built app ships without PyTorch and runs the model on
+    ONNX Runtime, inference.py)"""
+    global torch, device
+    if torch is None:
+        try:
+            import torch as module
+        except ImportError:
+            module = False
+        torch, device = module, ('cuda:0' if module and module.cuda.is_available() else 'cpu')
+    return torch or None
+
+
+def default_model():
+    """The shipped CandyCrunch model, made at its first use and then kept as the module's candycrunch: on PyTorch where it is installed, else on ONNX Runtime"""
+    global candycrunch
+    if 'candycrunch' not in globals():
+        if _torch() is not None:
+            from candycrunch.model import CandyCrunch_CNN
+            model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12).to(device)
+            model.load_state_dict({k.replace('module.', ''): v for k, v in torch.load(sdict, map_location = device, weights_only = True).items()})
+            candycrunch = model.eval()
+        else:
+            candycrunch = CandyCrunchCNN(load_weights(sdict))
+    return candycrunch
+
+
+def __getattr__(name):
+    # candycrunch.prediction.candycrunch, read from outside before the first prediction, makes the default model
+    if name == 'candycrunch':
+        return default_model()
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 # checkpoint_path = pathlib.Path(this_dir).parent / 'training' / 'models' / 'CandyCrunch_CNN2_ShCl_GShS_CMLOSS_NoCS_full20261021.pt'
 # if torch is not None:
@@ -115,7 +135,6 @@ POSITIVE_ADDUCTS = ['Na+', 'K+', 'NH4+']
 # the survey scans moved its precursor (header m/z less m/z). Constant columns and the
 # mostly zero shift cost a .cc next to nothing; the scan range's upper end (+0.07%) and the header m/z itself (+0.15%) were left out
 SPECTRUM_DETAILS = ['analyzer', 'polarity', 'collision_energy', 'isolation_width', 'scan_low', 'header_shift']
-temperature = torch.Tensor([temperature]).to(device) if torch is not None else temperature
 MZ_REF = 1600  # reference m/z used internally to turn the user's single ppm tolerance into the flat-Da window for binning/fragments; corresponds to ~0.5 Da at 300ppm
 ISOTOPE_SPACING = 1.003355  # 13C - 12C
 # Whether Python's sum adds floats with compensation (from 3.12), which numpy versions of it have to follow to be bitwise identical
@@ -1661,7 +1680,7 @@ def get_topk(batches, model, glycans, k = 25, temp = False, temperature = temper
    | glycans (list): full list of glycans used for training CandyCrunch
    | k (int): how many top predictions to provide for each spectrum; default:25
    | temp (bool): whether to calibrate logits by temperature factor; default:False
-   | temperature (tensor): the temperature factor used to calibrate logits; default:1.15\n
+   | temperature (float or tensor): the temperature factor used to calibrate logits; default:1.15\n
    | Returns:
    | :-
    | (1) a nested list of topk glycans for each spectrum
@@ -1669,14 +1688,16 @@ def get_topk(batches, model, glycans, k = 25, temp = False, temperature = temper
    """
     preds, conf = [], []
     # PyTorch runs every model but the ONNX one (also the app's progress counter around a PyTorch model), on the GPU if there is one
-    on_torch = torch is not None and not isinstance(model, CandyCrunchCNN)
+    on_torch = not isinstance(model, CandyCrunchCNN) and _torch() is not None
+    if on_torch and temp and not torch.is_tensor(temperature):
+        temperature = torch.Tensor([temperature]).to(device)
     for batch in batches:
         if on_torch:
             with torch.inference_mode():
                 pred = model(*[torch.from_numpy(x if x.ndim > 1 else x[:, None]).to(device, non_blocking = True) for x in batch])
                 if temp:
                     pred = pred / temperature
-                conf_topk, idx_topk = torch.topk(F.softmax(pred, dim = 1), k, dim = 1)
+                conf_topk, idx_topk = torch.topk(torch.nn.functional.softmax(pred, dim = 1), k, dim = 1)
             idx, top = idx_topk.cpu().numpy(), conf_topk.cpu().numpy()
         else:
             pred = model(*batch)
@@ -2863,7 +2884,7 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
    | Returns a filtered prediction dataframe
    """
     if df_use is None:
-        df_use = df_glycan
+        df_use = glycan_loader.df_glycan
     multiplier = -1 if mode == 'negative' else 1
     # Identify which spectra carry common adducts so downstream checks can account for the mass offset
     adduct_list = get_adduct_list(mode)
@@ -4470,7 +4491,7 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
     # processed with every other reducing end (unreduced, 2AA, 2AB, procainamide, PA); if one gives at least 1.5x as many model predictions (and at least 2), the
     # whole file is processed with it, which takes over if it gives at least 1.5x as many (and at least 5) as the chosen reducing end did. The random state is
     # restored, so a run the check leaves alone stays as it was
-    rng = (random.getstate(), np.random.get_state(), torch.get_rng_state() if torch is not None else None)
+    rng = (random.getstate(), np.random.get_state(), torch.get_rng_state() if torch else None)
     args = {k: v for k, v in run_args.items() if k != '_return_intermediate'}
     chosen = ('custom' if args['modification'] in (None, 'custom') else args['modification'], args['mass_tag'])
     ends = {'reduced': ('reduced', None), 'unreduced': ('custom', None), **{k: (k, None) for k in ('2AA', '2AB', 'procainamide', 'PA')}}
@@ -4504,12 +4525,12 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
             out = (best, df_end)
     random.setstate(rng[0])
     np.random.set_state(rng[1])
-    if torch is not None:
+    if rng[2] is not None:
         torch.set_rng_state(rng[2])
     return out
 
 
-def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans = glycans, bin_num = bin_num,
+def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glycans, bin_num = bin_num,
                    max_charge = -3, frag_num = 100, modification = 'reduced', mass_tag = None, lc = 'PGC', trap = 'linear',
                    rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
                    pred_thresh = 0.01, temperature = temperature, spectra = False, get_missing = False,
@@ -4538,7 +4559,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
    |                              and member_rts, the peak dictionaries and RTs of the MS2 spectra pooled into peak_d, as loaded and shared with the
    |                              run's later passes, so not to be changed in place; run settings
    |                              glycan_class, mode, modification, mass_tag, lc, trap, sample_prep in .attrs) and returns, per row, a list of
-   |                              (IUPAC structure, probability) tuples; temperature and test-time augmentation only apply to a CandyCrunch model
+   |                              (IUPAC structure, probability) tuples; temperature and test-time augmentation only apply to a CandyCrunch model;
+   |                              default:None (the shipped model)
    | glycans (list): full list of glycans used for training CandyCrunch, and the vocabulary a callable model's structures are written like; don't change default without changing model
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
@@ -4644,7 +4666,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {modification} glycans, {lc} LC, and {trap} ion trap. If any of that seems off to you, please restart with correct parameters.")
     database_rows = None
     if df_use is None:
-        df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin(classes)])
+        df_use = glycan_loader.df_glycan
+        df_use = copy.deepcopy(df_use[df_use.glycan_type.isin(classes)])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)]
         # (the rows of df_glycan it holds, whose structure maps are kept)
         database_rows = df_use.index
@@ -4714,8 +4737,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     loaded_file[idx_col] += np.random.RandomState(0).uniform(10 ** (-20), 0.00001, size = len(loaded_file))
     maps = None
     if database_rows is not None:
-        maps = [_STRUCT_MAPS[k] if (k := (id(df_glycan), c, frozenset(filter_out), taxonomy_level, taxonomy_filter)) in _STRUCT_MAPS else _STRUCT_MAPS.setdefault(k, create_struct_map(
-            df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in classes]
+        maps = [_STRUCT_MAPS[k] if (k := (id(glycan_loader.df_glycan), c, frozenset(filter_out), taxonomy_level, taxonomy_filter)) in _STRUCT_MAPS else _STRUCT_MAPS.setdefault(k, create_struct_map(
+            glycan_loader.df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in classes]
         # indexed by their rows in df_use, as made from it
         maps = [(m[0], m[1].set_axis(database_rows.get_indexer(m[1].index)), m[2]) for m in maps]
     common_structure_map, df_use, topo_struct_map = create_struct_maps(df_use, classes, filter_out = filter_out,
@@ -4806,8 +4829,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
     # inside it. The 20 ppm allow for the few ppm of orbitrap calibration offset seen in practice (up to -9 ppm)
     cross_class = None
     if accurate_ms1 and any(c not in classes for c in ['N', 'O', 'free']):
-        cross_maps = [_STRUCT_MAPS[k] if (k := (id(df_glycan), c, frozenset(filter_out), taxonomy_level, taxonomy_filter)) in _STRUCT_MAPS else _STRUCT_MAPS.setdefault(k, create_struct_map(
-            df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in ['N', 'O', 'free'] if c not in classes]
+        cross_maps = [_STRUCT_MAPS[k] if (k := (id(glycan_loader.df_glycan), c, frozenset(filter_out), taxonomy_level, taxonomy_filter)) in _STRUCT_MAPS else _STRUCT_MAPS.setdefault(k, create_struct_map(
+            glycan_loader.df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in ['N', 'O', 'free'] if c not in classes]
         cross_class = (pd.concat([m[1] for m in cross_maps]), {k: v for m in cross_maps[::-1] for k, v in m[0].items()},
                        {k: v for m in cross_maps[::-1] for k, v in m[2].items()})
     df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, mass_tolerance, mode,
@@ -4856,7 +4879,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = candycrunch, glycans 
         df_in.attrs.update(glycan_class = glycan_class, mode = mode, modification = modification, mass_tag = mass_tag, lc = lc, trap = trap,
                            sample_prep = sample_prep, accurate_ms1 = accurate_ms1, activation = activation, ms1_trap = detected_ms1_trap)
         return df_in
-    if isinstance(model, CandyCrunchCNN) or (torch is not None and isinstance(model, torch.nn.Module)):
+    model = default_model() if model is None else model
+    if isinstance(model, CandyCrunchCNN) or (_torch() is not None and isinstance(model, torch.nn.Module)):
         # Predict glycans from spectra
         preds, pred_conf = get_topk(loader, model, glycans, temp = True, temperature = temperature)
         del loader
@@ -5498,7 +5522,7 @@ def concat_files(frames):
     return pd.concat([v.astype({c: np.float64 if dtypes[c].kind in 'iu' else object if dtypes[c].kind == 'b' else dtypes[c] for c in v.columns if c in dtypes and v[c].isna().all()}) for v in frames])
 
 
-def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers = 5, model = candycrunch,
+def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, top_n_isomers = 5, model = None,
                          glycans = glycans, bin_num = bin_num, max_charge = -3,
                          frag_num = 100, modification = 'reduced', mass_tag = None, lc = 'PGC',
                          trap = 'linear', rt_min = 0, rt_max = 0, rt_diff = 1.0, rt_max_default = 30.0,
@@ -5519,7 +5543,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    |                               that class among the peaks it did not report, as in wrap_inference
    | intra_cat_thresh (float): minutes the RT of a structure can differ from the mean of a group, after correcting each file's consistent RT drift against the file with the most predicted peaks (over peaks both files share; with enough of them as a function of RT and of the number of sialic acids and other charged residues)
    | top_n_isomers (int): number of isomer groups at each composition to retain per file (a group stays if it is among the top_n_isomers of any file); default:5
-   | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable (see wrap_inference); with n_jobs > 1 it has to be picklable (a module-level function or class instance)
+   | model (PyTorch or callable): trained CandyCrunch model, or any other structure predictor as a callable (see wrap_inference); with n_jobs > 1 it has to be picklable (a module-level function or class instance); default:None (the shipped model)
    | glycans (list): full list of glycans used for training CandyCrunch; don't change default without changing model
    | bin_num (int): number of bins for binning; don't change; default: 2048
    | max_charge (int): maximum signed charge to consider for composition matching etc.; default -3
@@ -5575,7 +5599,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # The runs of the files take database glycans as None, as they then build the same ones and keep their structure maps across files (wrap_inference)
     given_df_use = df_use
     if df_use is None:
-        df_use = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin(classes)])
+        df_use = glycan_loader.df_glycan
+        df_use = copy.deepcopy(df_use[df_use.glycan_type.isin(classes)])
         df_use = df_use[df_use[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
         if df_use.empty:
             raise ValueError(f"No {'+'.join(classes)} glycans of {taxonomy_level} '{taxonomy_filter}' in df_glycan; check taxonomy_level and taxonomy_filter")
@@ -5598,7 +5623,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                             taxonomy_filter = taxonomy_filter, sialic_derivatization = sialic_derivatization,
                             reducing_end_variants = reducing_end_variants, adducts = adducts, run_anion = run_anion, _return_intermediate = True)
     # Worker processes load the default model themselves, so only a custom model has to be sent to them
-    if model is not candycrunch:
+    if model is not None and model is not globals().get('candycrunch'):
         inference_kwargs['model'] = model
     # The reducing end check of wrap_inference, on the first file: all files are then processed with the reducing end it takes over. The file is read once,
     # with its MS1 data, which the check does not need; when files are processed one after the other, the first one's prediction then takes it as read
@@ -5627,12 +5652,13 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             c = max(counts, key = counts.get, default = None)
             if c is None or counts[c] < max(5, own):
                 break
-            use_c = copy.deepcopy(df_glycan[df_glycan.glycan_type == c])
+            use_c = glycan_loader.df_glycan
+            use_c = copy.deepcopy(use_c[use_c.glycan_type == c])
             use_c = use_c[use_c[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
         tasks = [(fp, os.path.join(ms1_dir.name, f'{i}.npz'), {**inference_kwargs, 'glycan_class': glycan_class if c == key else c, 'df_use': given_df_use if c == key else None, **({'_loaded': first.pop()} if i == 0 and first else {}),
                                                                        **({'_condensed': condensed.pop()} if i == 0 and condensed else {})}) for i, fp in enumerate(spectra_filepath_list)]
         if n_jobs > 1:
-            with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if torch is None else torch.set_num_threads,
+            with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if _torch() is None else torch.set_num_threads,
                                      initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
                 runs[c] = (list(pool.map(_batch_inference_file, *zip(*tasks))), use_c)
         else:
@@ -5823,12 +5849,13 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         triggered = [k for k in file_labels if sum(only_class(g) for g in inference_dfs[k][0]['top1_pred']) >= 2]
         pair_rows = []
         if triggered:
-            use_pair = copy.deepcopy(df_glycan[df_glycan.glycan_type.isin([classes[0], pair])])
+            use_pair = glycan_loader.df_glycan
+            use_pair = copy.deepcopy(use_pair[use_pair.glycan_type.isin([classes[0], pair])])
             use_pair = use_pair[use_pair[taxonomy_level].apply(lambda x: taxonomy_filter in x)].reset_index(drop = True)
             tasks = [(spectra_filepath_list[file_labels.index(k)], None, {**inference_kwargs, 'glycan_class': [classes[0], pair], 'df_use': None, 'reducing_end_variants': {},
                                                                           '_pair': (pair, list(zip(inference_dfs[k][0].index.values, inference_dfs[k][0]['RT'].values)))}) for k in triggered]
             if n_jobs > 1:
-                with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if torch is None else torch.set_num_threads,
+                with ProcessPoolExecutor(max_workers = n_jobs, initializer = set_num_threads if _torch() is None else torch.set_num_threads,
                                          initargs = (max(1, (os.cpu_count() or 1) // n_jobs),)) as pool:
                     pair_runs = list(pool.map(_batch_inference_file, *zip(*tasks)))
             else:
