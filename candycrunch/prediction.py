@@ -3653,13 +3653,15 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
     df_out['top_pred'] = [(stringify_dict(get_comp(k[0][0])) if mode == 'negative' else k[0][0]) if len(k) > 0 else np.nan for k in df_out.predictions]
     repeated = df_out['top_pred'].value_counts()
     repeated = repeated[repeated > 1].index.tolist()
+    # Rows by position, as two rows can share an m/z label, on which .at returns both
+    mzs, df_out = df_out.index, df_out.reset_index(drop = True)
     # Only act when multiple rows share a prediction but differ in m/z (i.e., different ionization forms)
     rows_to_drop = []
     # The (de)protonated ion reports the species when it was observed, as it is the m/z every other tool lists, else the stronger signal
     plain = dict(zip(df_out.index, ~df_out['adduct'].apply(lambda a: isinstance(a, str)))) if 'adduct' in df_out.columns else defaultdict(lambda: True)
     for pred in repeated:
         pred_df = df_out[df_out['top_pred'] == pred].sort_values('RT')
-        mz_vals = pred_df.index.values
+        mz_vals = mzs[pred_df.index].values
         if mz_vals.max() - mz_vals.min() < 1.0:
             continue
         used = set()
@@ -3671,7 +3673,7 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
                     continue
                 if abs(row_i['RT'] - row_j['RT']) > rt_diff:
                     continue
-                if abs(idx_i - idx_j) < 1.0:
+                if abs(mzs[idx_i] - mzs[idx_j]) < 1.0:
                     continue
                 # Fold the weaker signal into the stronger one, with current values, as either row may already have absorbed another
                 if (plain[idx_i], df_out.at[idx_i, 'rel_abundance']) >= (plain[idx_j], df_out.at[idx_j, 'rel_abundance']):
@@ -3689,7 +3691,9 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
                     rows_to_drop.append(idx_i)
                     used.add(idx_i)
                     break
-    return df_out.drop(rows_to_drop).drop(['top_pred'], axis = 1)
+    df_out = df_out.drop(rows_to_drop).drop(['top_pred'], axis = 1)
+    df_out.index = mzs[df_out.index.values]
+    return df_out
 
 
 def Ac_follows_Gc(df_out):
