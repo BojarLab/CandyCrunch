@@ -709,10 +709,7 @@ def peak_outcomes(preds, gt, rt_col):
         pred = p['top1_pred'].iloc[matched[i]] if i in matched else None
         sim = None
         if glycan and pred:
-            options = [glycan]
-            while any('{' in x for x in options):
-                options = list(dict.fromkeys(q for x in options for q in ([tc.graph_to_string(y) for y in tc.get_possible_topologies(x, exhaustive = True)] if '{' in x else [x])))
-            sim = 1.0 if tc.compare_glycans(glycan, pred) else max(1.0 if tc.compare_glycans(x, pred) else tc.get_glycan_similarity(x, pred) for x in options)
+            sim = 1.0 if tc.compare_glycans(glycan, pred) else (tc.floating_similarity if '{' in glycan else tc.get_glycan_similarity)(glycan, pred)
         peaks.append(dict(mass = float(mass), rt = float(rt), gt = glycan, pred = pred, sim = None if sim is None else round(float(sim), 4),
                           row = None if i not in matched else [round(float(p['m/z'].iloc[matched[i]]), 4), round(float(p['RT'].iloc[matched[i]]), 2)]))
     taken = set(matched.values())
@@ -723,7 +720,7 @@ def peak_outcomes(preds, gt, rt_col):
 def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
     # Where each ground-truth peak was lost, what is wrong about each wrong structure, and what each false positive is
     # the test module's glycowork functions, which run_file memoizes
-    from tests.test_CandyCrunch import match_spectra, MASS_TOLERANCE, RT_TOLERANCE, compare_glycans, canonicalize_iupac, get_possible_topologies, graph_to_string
+    from tests.test_CandyCrunch import match_spectra, MASS_TOLERANCE, RT_TOLERANCE, compare_glycans, canonicalize_iupac, floating_topologies
     from candycrunch.prediction import get_comp, glycans
     vocabulary = glycans if vocabulary is None else vocabulary
     comp_key = lambda c: tuple(sorted(sum((Counter({k.split('_a2-')[0]: v}) for k, v in c.items() if v), Counter()).items())) if isinstance(c, dict) else None
@@ -786,9 +783,7 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
         if i in matched:
             p = out.iloc[matched[i]]['top1_pred']
             # as the metric scores it: a ground truth with floating parts is right through any of its placements, and the prediction is canonicalized
-            placed = [glycan] if glycan else []
-            while any('{' in x for x in placed):
-                placed = list(dict.fromkeys(q for x in placed for q in ([graph_to_string(y) for y in get_possible_topologies(x, exhaustive = True)] if '{' in x else [x])))
+            placed = floating_topologies(glycan) if glycan else []
             if glycan is None or compare_glycans(glycan, canonicalize_iupac(p)) or any(compare_glycans(x, canonicalize_iupac(p)) for x in placed):
                 continue
             # A wrong structure: which step put the true one out of reach
@@ -862,7 +857,7 @@ def run_file(task):
     TIMES['imports'] = time.perf_counter() - start
     if not hasattr(tc, '_harness_memo'):
         tc._harness_memo = GlycoworkMemo(task['cache'], task['use_cache'])
-        for n in ['canonicalize_iupac', 'compare_glycans', 'get_glycan_similarity']:
+        for n in ['canonicalize_iupac', 'compare_glycans', 'get_glycan_similarity', 'floating_similarity']:
             setattr(tc, n, tc._harness_memo.wrap(getattr(tc, n)))
     out = []
     model, vocab = cp.candycrunch, cp.glycans

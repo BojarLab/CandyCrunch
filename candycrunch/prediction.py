@@ -2677,7 +2677,8 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
     comp_map = dict(zip(unq_structs.candidate_structure, unq_structs.composition))
     charge_vals = np.asarray(df_in['charge'].values, dtype = float)
     mz_vals, peak_vals, spec_ids = df_in[idx_col].values, df_in['peak_d'].values, df_in['spec_id'].values
-    scores_out, annotated_out, fragments_out = np.zeros(len(df_in)), np.zeros(len(df_in)), np.zeros(len(df_in))
+    scores_out, annotated_out, fragments_out, losses_out, share_out = np.zeros(len(df_in)), np.zeros(len(df_in)), np.zeros(len(df_in)), np.zeros(len(df_in)), np.zeros(len(df_in))
+    explained_out = np.zeros(len(df_in))
     # A spectrum is a row of every candidate structure it matched, so its deisotoped fragments (only the 15 kept get rounded) and MS3 spectra are computed
     # once per charge state
     # The deisotoped fragments are kept in deisotoped across calls, keyed by the peak dict (alive as long as the caller's condensed clusters) and what else
@@ -2695,6 +2696,13 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
                    np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) - spec_masses) < mass_tolerance) or
                    np.any(np.abs(comp_mass + mass_dict.get(adduct, 999) * charges_arr - spec_masses) < mass_tolerance)]
         is_adduct = bool(adducts)
+        # A sulfate or phosphate, far more acidic than anything else in a glycan, holds the charge of a negative ion, which then fragments charge-remotely:
+        # fragments without it hardly show (a monosulfated disaccharide gives B1 and C1, or Y1 and Z1, never the four annotations crumbs_thresh asks for),
+        # and the intact precursor loses small neutrals instead (ketene and C2H4O2 of a reduced HexNAc, water, CO2 of a sialic acid). It loses SO3 (HPO3)
+        # only if another acidic group can take the charge (a sialic acid, a further sulfate), so a monosulfated [M-H]- does not (a hexose oligomer read as
+        # sulfated core 2, 667, explained its 1% peak at M - 80 so)
+        fixed_charge = mode == 'negative' and any(comp_map[glycan].get(k, 0) for k in ('S', 'P'))
+        spare_acid = acidic_count(comp_map[glycan]) > abs(row_charge)
         # Clusters of at least 20 MS2 spectra name a deisotoped pattern by its most intense peak (relabel), as their pooled noise puts a weak peak 1-3 Da
         # below most fragments, which deisotope_ms2 otherwise takes as their monoisotopic peak (10 or 40 spectra were worse)
         # Peaks above the heaviest fragment a precursor of this charge can give (its singly charged ion, plus a charge-reduced one) are noise or another
@@ -2704,7 +2712,7 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         # A sparse spectrum is judged by its fragments above 2% of its most intense one: pooled from several spectra, a singly charged precursor carries noise
         # peaks among its 15 most intense fragments, which hid that GM3 (634.22 in GPST000239) or sialyl-Tn (513.31 in GPST000350) show little but the Neu5Ac
         # B ion. Multiply charged ones count all 15, as the floor let junk z = 2 rows through (GPST000487 617.32, GPST000029 1463.81)
-        rounded_mass_rows, strong_counts = [], []
+        rounded_mass_rows, strong_counts, weights = [], [], []
         for x, n, mz in zip(peak_vals[rows], df_in['num_spectra'].values[rows], mz_vals[rows]):
             if (key := (id(x), n == 1, n >= 20, row_charge, mz, decimals)) not in rounded_masses:
                 # Nor is anything within 1.5 m/z of the precursor a fragment of any charge: the unfragmented precursor and co-isolated ions, which CandyCrumbs
@@ -2712,9 +2720,10 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
                 deiso = list(deisotope_ms2({m: i for m, i in x.items() if (n == 1 or m <= abs(row_charge) * mz + 1.5) and abs(m - mz) > 1.5}, int(abs(row_charge)), 0.05, relabel = n >= 20, validate_pattern = decimals == 1).items())[:15]
                 # (rounded all at once, as np.round does each one)
                 rounded = list(np.round(ys, decimals)) if (ys := np.array([y for y, _ in deiso])).dtype == np.float64 else [np.round(y, decimals) for y, _ in deiso]
-                rounded_masses[key] = (rounded, len({y for y, (_, i) in zip(rounded, deiso) if abs(row_charge) > 1 or i >= 0.02 * deiso[0][1]}))
+                rounded_masses[key] = (rounded, len({y for y, (_, i) in zip(rounded, deiso) if abs(row_charge) > 1 or i >= 0.02 * deiso[0][1]}), [i for _, i in deiso])
             rounded_mass_rows.append(rounded_masses[key][0])
             strong_counts.append(rounded_masses[key][1])
+            weights.append(rounded_masses[key][2])
         # MS3 spectra (if the file has them) are pooled per isolated MS2 fragment, as CandyCrumbs only explains their peaks with fragments of
         # what that fragment is in this structure
         ms3_rows = [rounded_ms3[key] if (key := (spec, row_charge)) in rounded_ms3 else
@@ -2725,17 +2734,17 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         pools = {None: (None, {x for y in rounded_mass_rows for x in y})}
         for key, p, masses in [x for y in ms3_rows for x in y]:
             pools.setdefault(key, (p, set()))[1].update(masses)
-        structs.append((rows, rounded_mass_rows, ms3_rows, list(pools), strong_counts))
+        structs.append((rows, rounded_mass_rows, ms3_rows, list(pools), strong_counts, weights, fixed_charge, spare_acid))
         jobs += [(CandyCrumbs, (glycan, unq_rounded_masses, fragment_tolerance),
-                  dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative"),
+                  dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative") and not fixed_charge,
                        disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0) + offset,
                        sample_prep = sample_prep, ms3_precursor = ms3_precursor, sialic_derivatization = sialic_derivatization, mass_threshold_ppm = fragment_ppm,
                        metal_cations = precursor_metals(adducts)))
                  for ms3_precursor, unq_rounded_masses in pools.values()]
     # Every CandyCrumbs call first, so that n_jobs processes can share them
     results = iter(run_jobs(jobs, n_jobs))
-    for rows, rounded_mass_rows, ms3_rows, keys, strong_counts in structs:
-        tester_mass_scores = {}
+    for rows, rounded_mass_rows, ms3_rows, keys, strong_counts, weights, fixed_charge, spare_acid in structs:
+        tester_mass_scores, losses = {}, set()
         for key in keys:
             cc_out = next(results)
             # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
@@ -2749,6 +2758,13 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
                             continue
                         if 'M' in prefs and len(prefs) > 2:
                             continue
+                        # A fixed-charge candidate's intact-precursor losses and inorganic ions (HSO4-, SO3-) name no composition (any glycan of that mass
+                        # loses water or ketene), so they are kept apart from the score that ranks a spectrum's compositions; stacked on a cleavage, they
+                        # do not count
+                        if fixed_charge and any(a.startswith(('M_', 'I_')) for a in ant):
+                            if key is None and all(a.startswith(('M_', 'I_')) for a in ant) and (spare_acid or not {'M_SO4', 'M_PO4'} & set(ant)):
+                                losses.add(_k)
+                            continue
                         _filtered.append(ant)
                     tester_mass_scores[(key, _k)] = len(_filtered)
                 else:
@@ -2756,14 +2772,26 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         row_scores = [sum([tester_mass_scores[(None, x)] for x in y]) for y in rounded_mass_rows]
         # A sparse spectrum (a few fragments above the noise) cannot reach crumbs_thresh, so how many of its fragments are annotated counts too
         annotated_out[rows] = [sum(tester_mass_scores[(None, x)] > 0 for x in set(y)) for y in rounded_mass_rows]
+        losses_out[rows] = [sum(x in losses and not tester_mass_scores[(None, x)] for x in set(y)) for y in rounded_mass_rows]
+        explained_out[rows] = [sum(i for x, i in zip(y, w) if x in losses or tester_mass_scores[(None, x)]) / (sum(w) or 1) for y, w in zip(rounded_mass_rows, weights)]
         fragments_out[rows] = strong_counts
+        # A disaccharide gives at most its four glycosidic ions, so its score can hardly pass crumbs_thresh, but its CID spectrum is mostly one of them: the share
+        # of the fragment intensity that is annotated, counted only when the most intense fragment is
+        share_out[rows] = [sum(i for x, i in zip(y, w) if tester_mass_scores[(None, x)] > 0) / sum(w) if y and tester_mass_scores[(None, y[0])] > 0 else 0
+                           for y, w in zip(rounded_mass_rows, weights)]
         # A row's MS3 evidence is the mean score of its MS3 spectra, so it does not grow with how often the instrument repeated them
         if ms3_rows:
             row_scores = [score + (np.mean([sum(tester_mass_scores[(key, x)] for x in masses) for key, _, masses in ms3]) if ms3 else 0)
                           for score, ms3 in zip(row_scores, ms3_rows)]
         scores_out[rows] = row_scores
+    # Losses only stand in for the cleavages a fixed-charge ion does not give if, with the cleavages, they explain a good part of its fragment intensity:
+    # charge-remote fragmentation leaves few, intense ions, so a spectrum whose strongest fragments are unexplained is another ion's (junk and tails near a
+    # sulfated composition's mass passed on chance losses with 20-35% of their fragment intensity explained, the real glycans 40-99%). It is the best of
+    # the composition's candidate structures, as which of them a row carries is incidental to the model's reading of it
+    explained = pd.Series(explained_out).groupby([spec_ids, [stringify_dict(c) if isinstance(c, dict) else '' for c in df_in['composition']]]).transform('max').values
+    losses_out[explained < 0.4] = 0
     df_in['annotation_score'] = scores_out
-    df_in['annotated'], df_in['fragments'] = annotated_out, fragments_out
+    df_in['annotated'], df_in['fragments'], df_in['losses'], df_in['annotated_share'] = annotated_out, fragments_out, losses_out, share_out
     return df_in
 
 
@@ -5229,11 +5257,25 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # A sparse spectrum (at most 6 fragments, as an ion trap near its detection limit gives) can never pass crumbs_thresh, so it passes if at least two and 60%
     # of its fragments are annotated and the model is confident in its in-class top structure; a multiply charged one already if one fragment is annotated and
     # the model gives its top structure at least 0.75
+    # The fragments a fixed-charge (sulfated or phosphorylated) row explains only as losses of its intact precursor count too, though not in the choice of
+    # its spectrum's composition above: at most as many as its annotated cleavages and, as for a sparse spectrum, only if the model is confident in its
+    # top structure, since losses confirm a glycan of the precursor's mass but do not identify one (junk spectra and tails near a sulfated composition's
+    # mass passed on chance losses, at every RT)
     sparse = (df_out['fragments'] <= 6) & ~df_out['cross_class']
     top_conf = np.array([p[0][1] if p else 0 for p in df_out['predictions']])
-    passes = (df_out['annotation_score'] > np.where(df_out['cross_class'], cross_crumbs_thresh, crumbs_thresh)) | (
-        sparse & (df_out['annotated'] >= np.maximum(2, 0.6 * df_out['fragments'])) & (top_conf >= 0.5)) | (
-        sparse & (np.abs(df_out['charge']) > 1) & (df_out['annotated'] >= 1) & (top_conf >= 0.75))
+    thresh = np.where(df_out['cross_class'], cross_crumbs_thresh, crumbs_thresh)
+    annotated = df_out['annotated'] + np.minimum(df_out['losses'], df_out['annotated'])
+    passes = (df_out['annotation_score'] > thresh) | (
+        (df_out['annotation_score'] + np.minimum(df_out['losses'], df_out['annotation_score']) > thresh) & (top_conf >= 0.5)) | (
+        sparse & (annotated >= np.maximum(2, 0.6 * df_out['fragments'])) & (top_conf >= 0.5)) | (
+        sparse & (np.abs(df_out['charge']) > 1) & (annotated >= 1) & (top_conf >= 0.75))
+    # A composition of two residues (sulfated and phosphorylated ones fragment charge-remotely and have their own rule) gives at most B1, C1, Y1 and Z1, so it
+    # passes if its most intense fragment and 70% of its fragment intensity are annotated, the model is confident, and it is the strongest appearance of its
+    # composition: repeats of a small glycan at other RTs (column bleed of an abundant one, re-triggered for many minutes) are weaker than its own peak
+    comp_keys = [str(sorted(c.items())) for c in df_out['composition']]
+    strongest = df_out['rel_abundance'] >= df_out['rel_abundance'].where(df_out['annotated'] >= 2).groupby(comp_keys).transform('max').fillna(np.inf)
+    passes = passes | (np.array([sum(c.values()) <= 2 and not {'S', 'P'} & set(c) for c in df_out['composition']]) & ~df_out['cross_class'] &
+                       (df_out['annotated'] >= 2) & (df_out['annotated_share'] >= 0.7) & (top_conf >= 0.5) & strongest)
     # One chromatographic peak is one glycan: when a cluster's fragments fail crumbs_thresh while a cluster at least ten times weaker at the same m/z,
     # whose spectra continue it (within 0.25 min), passes with the same top prediction, the tail's evidence counts for the peak, reported at its apex
     tails = []

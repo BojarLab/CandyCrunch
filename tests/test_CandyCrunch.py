@@ -17,9 +17,11 @@ from candycrunch.prediction import *
 import candycrunch.utils
 from glycowork.glycan_data.loader import df_glycan
 from glycowork.motif.graph import compare_glycans, get_possible_topologies, graph_to_string
-from glycowork.motif.annotate import get_glycan_similarity
+from glycowork.motif.annotate import get_glycan_similarity, annotate_dataset
 from itertools import product
+from functools import lru_cache
 from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cosine
 from scipy.stats import exponnorm, spearmanr
 from glycowork.motif.processing import canonicalize_iupac, canonicalize_composition
 import time
@@ -188,6 +190,37 @@ def add_pred_column(df_in, col_name, matches, pred_df, rt_col):
   return df_in
 
 
+@lru_cache(maxsize = 64)
+def floating_topologies(glycan):
+    # Every placement of a glycan's floating parts: get_possible_topologies places one part per call, so it runs until none is left (a GT with two placed
+    # none of them before, and no prediction could match it exactly); a glycan without floating parts is its own only placement
+    placed = [glycan]
+    while any('{' in p for p in placed):
+        placed = list(dict.fromkeys(q for p in placed for q in ([graph_to_string(x) for x in get_possible_topologies(p, exhaustive = True)] if '{' in p else [p])))
+    return placed
+
+
+@lru_cache(maxsize = 16)
+def floating_known_counts(glycan):
+    # The 'known' motif counts of every placement, the costliest part of get_glycan_similarity, annotated at once: they are counts of each glycan alone
+    # ('exhaustive' and 'terminal' columns merge the linkage variants of both glycans of a pair, so those are counted per pair)
+    counts = annotate_dataset(floating_topologies(glycan), feature_set = ['known'])
+    return counts.columns, counts.values.astype(np.int16)
+
+
+@lru_cache(maxsize = 4096)
+def floating_similarity(glycan, pred):
+    # get_glycan_similarity of the prediction to the best placement of a ground truth with floating parts, 1.0 for a placement that is the prediction; the
+    # counts are integers, so their cosine over the same columns is the same to the last bit as get_glycan_similarity's
+    placed = floating_topologies(glycan)
+    if any(compare_glycans(p, pred) for p in placed):
+        return 1.0
+    columns, counts = floating_known_counts(glycan)
+    pred_counts = annotate_dataset([pred], feature_set = ['known']).reindex(columns = columns, fill_value = 0).values[0]
+    pairs = (annotate_dataset([p, pred], feature_set = ['exhaustive', 'terminal']).values for p in placed)
+    return max(1 - cosine(np.concatenate([c, pair[0]]), np.concatenate([pred_counts, pair[1]])) for c, pair in zip(counts, pairs))
+
+
 def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbose = False):
   # Same rules as GlycoGauntlet's evaluator: rows without a structure are no predictions, structures are canonicalized, and both sides are also
   # compared as singly charged equivalents (a ground truth without a charge column counts as singly charged)
@@ -212,12 +245,8 @@ def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbos
       similarity_scores.append(0.0)
       continue
     if '{' in gt_glycan:
-      # get_possible_topologies places one floating part per call, so it runs until none is left (a GT with two placed none of them before, and no prediction
-      # could match it exactly); a prediction written with the same floating parts is the GT itself
-      possible_structures = [gt_glycan]
-      while any('{' in p for p in possible_structures):
-        possible_structures = list(dict.fromkeys(q for p in possible_structures for q in ([graph_to_string(x) for x in get_possible_topologies(p, exhaustive = True)] if '{' in p else [p])))
-      similarity_scores.append(1.0 if compare_glycans(gt_glycan, pred_glycan) else max([1.0 if compare_glycans(p, pred_glycan) else get_glycan_similarity(p, pred_glycan) for p in possible_structures]))
+      # a prediction written with the same floating parts is the GT itself
+      similarity_scores.append(1.0 if compare_glycans(gt_glycan, pred_glycan) else floating_similarity(gt_glycan, pred_glycan))
     elif compare_glycans(gt_glycan, pred_glycan):
       similarity_scores.append(1.0)
     else:
