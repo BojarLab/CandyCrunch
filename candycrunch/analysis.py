@@ -3875,6 +3875,9 @@ def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, inten
         raise ValueError("No peaks to score")
     # Accurate spectra are scored deisotoped, as the app annotates them: the 13C peaks of the oxonium and Y ions took chance labels from candidates with more
     # residue kinds; in ion-trap spectra deisotoping cost more than it gained
+    # The sialic acid oxonium ions are looked up among the most intense peaks both as measured and deisotoped: deisotoping folds an intense peak into any
+    # weak one an isotope spacing (of any charge up to the precursor's) below it, while it lifts a weak oxonium ion with its 13C peak into the top peaks
+    raw_top = np.array(sorted(m for m, _ in sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]))
     if mass_threshold_ppm:
         fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), min(mass_threshold, 0.05))
     peaks = sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]
@@ -3897,12 +3900,12 @@ def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, inten
         # -1..+2 (1,206 spectra, 51 of them still on a 13C peak) the identified glycan came first in 0.948, against 0.890 by the isotope error alone and 0.865 by
         # explained share alone; the isotope penalty scanned 0-0.3 (0.05: 0.911, 0.1: 0.931, 0.2: 0.948, 0.3: 0.953, the 13C-picked spectra 0.745 from 0.1 on)
         sialic = [r for r in ('Neu5Ac', 'Neu5Gc') if comp.get(r)]
-        found = [check_masses(observed, np.array([mono_attributes[r]['mass'][r] + PROTON_MASS - d for d in (0, WATER_MASS)]), np.minimum(
+        found = [check_masses(np.union1d(observed, raw_top), np.array([mono_attributes[r]['mass'][r] + PROTON_MASS - d for d in (0, WATER_MASS)]), np.minimum(
             mass_threshold, (mono_attributes[r]['mass'][r] + PROTON_MASS) * mass_threshold_ppm / 1e6) if mass_threshold_ppm else mass_threshold).any() for r in sialic]
         evidence = float(np.mean(found)) if sialic else 1.0
         rows.append([comp, isotope_error, explained * evidence - isotope_penalty * abs(isotope_error), explained, evidence])
     df_out = pd.DataFrame(rows, columns = ['composition', 'isotope_error', 'score', 'explained', 'sialic_evidence'])
-    df_out = df_out.sort_values('score', ascending = False, kind = 'stable').reset_index(drop = True)
+    df_out = df_out.sort_values(['score', 'explained'], ascending = False, kind = 'stable').reset_index(drop = True)
     df_out.insert(3, 'rank', df_out['score'].round(10).rank(ascending = False, method = 'min').astype(int))
     return df_out
 

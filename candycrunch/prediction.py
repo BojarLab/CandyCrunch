@@ -1837,13 +1837,16 @@ def mass_check(mass, glycan, mode = 'negative', modification = 'reduced', sample
 MS1_PPM_FLOORS = {'orbitrap': 3.0, 'tof': 5.0}
 
 
-def accurate_ms1_window(ppm, scores, ppm_thresh, floor = 3.0, groups = None):
+def accurate_ms1_window(ppm, scores, ppm_thresh, floor = 3.0, groups = None, prior = None):
     """center and half-width (ppm) of the composition errors of a run with accurate (orbitrap, timsTOF) survey scans: real glycans pile up within a few ppm,
     while matches of other compositions spread over the whole ppm_thresh and swamp a plain median and MAD (permethylated serum on a Q Exactive: 3 robust SD
     of all rows 116 ppm). The center is the densest 4 ppm window, refined to the median of the rows within 5 ppm of it whose fragments back them up best
     (annotation score in their top 10%, at least 20 rows), and the half-width 3 robust SD of those rows, at least floor; None with fewer than 5 rows. With groups (e.g., the
     rows' spectra and compositions), the densest window counts each group once, at its median error: one junk spectrum of GPST000461 gave 8 rows (one
-    per candidate structure) at -41.9 ppm, which made it the densest window of its free oligosaccharide run"""
+    per candidate structure) at -41.9 ppm, which made it the densest window of its free oligosaccharide run. With prior (center, half-width: the run's
+    calibration from every precursor's composition match), the densest window lies within it if any row does: in a run whose real glycans the model
+    rarely names, its rows are mostly matches of other compositions, and one family of them (neutral permethylated glycans read as deprotonated ions,
+    -37 ppm) made the densest window, so the database fallback lost every real glycan"""
     ok = np.isfinite(ppm) & (np.abs(ppm) <= ppm_thresh)
     ppm, scores = ppm[ok], np.asarray(scores, dtype = float)[ok]
     if len(ppm) < 5:
@@ -1854,6 +1857,8 @@ def accurate_ms1_window(ppm, scores, ppm_thresh, floor = 3.0, groups = None):
         groups = np.asarray(groups, dtype = object)[ok]
         s = np.sort([np.median(ppm[groups == g]) for g in pd.unique(groups)])
     grid = np.arange(s[0], s[-1] + 0.25, 0.25)
+    if prior is not None and (np.abs(s - prior[0]) <= prior[1]).any():
+        grid = grid[np.abs(grid - prior[0]) <= prior[1]]
     center = grid[np.argmax(np.searchsorted(s, grid + 2, side = 'right') - np.searchsorted(s, grid - 2))]
     near = np.abs(ppm - center) <= 5
     best = near & (scores >= np.quantile(scores[near], 0.9))
@@ -4778,6 +4783,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     common_structure_map, df_use, topo_struct_map = create_struct_maps(df_use, classes, filter_out = filter_out,
                                                                        phylo_level = taxonomy_level,
                                                                        phylo_filter = taxonomy_filter, maps = maps)
+    # The run's calibration from the instrument's own monoisotopic picks (all precursors, model aside), which the database fallback below holds its window to
+    precursor_calibration = None
     if (loaded_file.attrs.get('detected_ms1_trap') == 'orbitrap' or targeted) and 'precursor_charge' in loaded_file.columns and loaded_file['precursor_charge'].notna().any():
         # With a header charge, the precursor m/z is the instrument's own monoisotopic pick in the orbitrap survey scan, which for large multiply charged
         # glycans sometimes lands on the 13C isotope. Such a precursor sits one or two isotope spacings / z above a
@@ -4809,6 +4816,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         if targeted or len(exact) >= 5:
             cal = 0 if targeted else np.median(exact)
             tol = 10 if targeted else max(3 * 1.4826 * np.median(np.abs(exact - cal)), 2)
+            precursor_calibration = None if targeted else (cal, tol)
             fits = []
             for k in range(3):
                 rows, errors = isotope_ppm(k, abs(cal) + tol)
@@ -4818,14 +4826,18 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 # A precursor whose survey scan shows it is only a 13C pick if that scan also shows the lighter peak it moves to (at least a tenth of the
                 # picked one; M is over a third of M+1 and M+2 up to ~4500 Da). Glycans 2 H heavier than the reducing end set (alditols processed as free)
                 # sit 2 spacings / z above a composition, 2.016 vs 2.007 Da, 3-5 ppm, inside the calibration of a run whose exact fits are mostly chance
-                # hits: such precursors moved onto free compositions with no signal at their m/z
+                # hits: such precursors moved onto free compositions with no signal at their m/z. The peaks are summed over that scan and its two
+                # neighbours (as refine_precursor_mz centroids them): a weak precursor's lighter isotope drops out of single noisy scans or is centroided
+                # more than 10 ppm off, and its real 13C picks stayed on the 13C peak (an [M+4H]4+ at 1e5 whose M was in the scans before and after its own)
                 ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
                 scans = np.clip(np.searchsorted(ms1_rts, loaded_file['RT'].values[known], side = 'right') - 1, 0, len(ms1_rts) - 1)
                 for i in np.flatnonzero(moves):
-                    m, x = ms1_mzs[ms1_offsets[scans[i]]:ms1_offsets[scans[i] + 1]], ms1_ints[ms1_offsets[scans[i]]:ms1_offsets[scans[i] + 1]]
-                    lighter = mzs[i] - moves[i] * ISOTOPE_SPACING / z_all[i]
-                    picked, below = x[np.abs(m - mzs[i]) <= 1e-5 * mzs[i]], x[np.abs(m - lighter) <= 1e-5 * lighter]
-                    if len(picked) and (not len(below) or below.max() < 0.1 * picked.max()):
+                    lighter, picked, below = mzs[i] - moves[i] * ISOTOPE_SPACING / z_all[i], 0.0, 0.0
+                    for scan in range(max(scans[i] - 1, 0), min(scans[i] + 2, len(ms1_rts))):
+                        m, x = ms1_mzs[ms1_offsets[scan]:ms1_offsets[scan + 1]], ms1_ints[ms1_offsets[scan]:ms1_offsets[scan + 1]]
+                        picked += x[np.abs(m - mzs[i]) <= 1e-5 * mzs[i]].max(initial = 0)
+                        below += x[np.abs(m - lighter) <= 1e-5 * lighter].max(initial = 0)
+                    if picked and below < 0.1 * picked:
                         moves[i] = 0
             loaded_file.loc[known, idx_col] -= moves * ISOTOPE_SPACING / charges.ravel()
             if targeted and (fits[0] | fits[1] | fits[2]).mean() >= 0.5:
@@ -5098,7 +5110,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         ppm = (df_out.index.values - theo) / theo * 1e6
         # ppm is to the (de)protonated ion, so rows matched as adducts sit thousands of ppm off; they never pass and must not set the calibration either
         window = accurate_ms1_window(ppm[has_pred], df_out['annotation_score'].values[has_pred], ppm_thresh, floor = ms1_ppm_floor,
-                                     groups = [f'{i} {c}' for i, c in zip(df_out['spec_id'].values[has_pred], df_out['composition'].values[has_pred])])
+                                     groups = [f'{i} {c}' for i, c in zip(df_out['spec_id'].values[has_pred], df_out['composition'].values[has_pred])], prior = precursor_calibration)
         if window is not None:
             center, width = window
             predicted_specs = set(df_out['spec_id'][has_pred])

@@ -317,6 +317,18 @@ def test_rank_glycopeptide_compositions():
     assert df['isotope_error'].tolist() == [0, 1]
 
 
+def test_rank_glycopeptide_compositions_folded_oxonium():
+    # deisotoping folds Neu5Ac's 292/274 into weak peaks one 2+ isotope spacing below them, so their evidence is read from the peaks as measured too: else
+    # Neu5Ac + Hex and its isobar Neu5Gc + Fuc both score 0 and the first-listed candidate wins
+    pep = mass.calculate_mass(sequence = 'TPSAAYPTDR')
+    res = {k: composition_to_mass({k: 1}) - composition_to_mass({}) for k in ('HexNAc', 'Neu5Ac')}
+    oxonium = [res['Neu5Ac'] + PROTON_MASS, res['Neu5Ac'] - WATER_MASS + PROTON_MASS]
+    spectrum = {res['HexNAc'] + PROTON_MASS: 100, pep + PROTON_MASS: 70, pep + res['HexNAc'] + PROTON_MASS: 90, oxonium[0]: 80, oxonium[1]: 60,
+                oxonium[0] - 1.0033548 / 2: 2, oxonium[1] - 1.0033548 / 2: 2}
+    df = rank_glycopeptide_compositions('TPSAAYPTDR', ['N1F1G1', 'H1N1A1'], spectrum, charge = 2, glycosite = 2, fragmentation_method = 'HCD')
+    assert df['composition'][0].get('Neu5Ac') == 1 and df['sialic_evidence'].tolist() == [1.0, 0.0]
+
+
 def test_glycopeptide_structure_chance_categories():
     # As for compositions, a glycopeptide structure's fragments of kinds that were annotated no more often than by chance are not matched: backbone ions
     # with part of a glycan other than an N-glycan's core HexNAc, glycan-only ions above 1+, metal adducts and NH3 on backbone ions
