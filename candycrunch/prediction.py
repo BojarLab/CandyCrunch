@@ -2479,7 +2479,7 @@ def complementary_pairs(mz, peaks, charge, tolerance, n = 15):
 
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag,
                                 modification = 'reduced', sample_prep = 'underivatized', max_charge = -3, cross_class = None, ms1_ppm = None,
-                                sialic_derivatization = None, adducts = ()):
+                                sialic_derivatization = None, adducts = (), vocabulary = None):
     idx_col = 'm/z' if 'm/z' in df_in.columns else 'reducing_mass'
     red_masses = np.array(df_in[idx_col])
     known_charges = [None if pd.isna(c) else int(c) for c in df_in['precursor_charge'].values] if 'precursor_charge' in df_in.columns else [None] * len(red_masses)
@@ -2654,9 +2654,29 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
         mz, peaks, x[1], 0.75 * mass_tolerance)] if x[0] and x[1] >= 2 and kc is None and x[0][0][0][1] is comp_struct_map else e
              for e, x, m_all, kc, mz, peaks in zip(extra, comps_out, multi_all, known_charges, red_masses, df_in['peak_d'])]
     extra = [e + a if x[0] and not lad else [] for e, a, x, lad in zip(extra, alts, comps_out, ladder)]
+    # Compositions that no database of the run's taxon holds but the model's vocabulary does (vocabulary: database, composition map and topology map of its
+    # structures, learned from labelled runs) join a spectrum only at a charge state that its fragments prove, by at least two pairs of a B/C ion and its
+    # complement and more than at the charge it was read at, and where no in-class database composition fits its m/z; the annotation scores decide. The
+    # 5-9 HexNAc O-glycans of fish mucins ([M-2H]2- 699-1004 m/z) are in no Mammalia or Animalia database, so their spectra were read as N-glycans at
+    # z = 3 or as Ac compositions at z = 1, with 2-7 such pairs at z = 2 and none at their reading. As candidates of every spectrum (any charge, no
+    # pairs), such compositions lost in 21 of 100 projects
+    if vocabulary is not None:
+        v_comps = [x for c, x in vocabulary[0].groupby('comp_str').first()['Composition'].items() if c not in comp_struct_map]
+        v_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep, modification = modification) + tag for x in v_comps])
+        for i, (x, m_all, kc, mz, peaks) in enumerate(zip(comps_out, multi_all, known_charges, red_masses, df_in['peak_d'])):
+            if ladder[i] or not len(v_comps) or (x[0] and x[0][0][0][1] is not comp_struct_map):
+                continue
+            read = complementary_pairs(mz, peaks, x[1], 0.75 * mass_tolerance) if x[0] and x[1] >= 2 else 0
+            for z in range(2, abs(max_charge) + 1):
+                if z == x[1] or z in m_all or kc not in (None, z) or complementary_pairs(mz, peaks, z, 0.75 * mass_tolerance) < max(2, read + 1):
+                    continue
+                errors = np.abs((v_masses - z * PROTON_MASS if mode == 'negative' else v_masses + z * PROTON_MASS) / z - mz)
+                hits = np.flatnonzero(errors < (ms1_ppm * mz / 1e6 if ms1_ppm else mass_tolerance))
+                if len(hits):
+                    extra[i].append((([(v_comps[k], vocabulary[1], vocabulary[2]) for k in hits], errors[hits].min()), z))
     candidate_data = []
     for x, e in zip(comps_out, extra):
-        matched = ([(c, x[1]) for c in x[0][0]] + [(c, z) for y, z in e for c in y[0]]) if x[0] else None
+        matched = ([(c, x[1]) for c in x[0][0]] if x[0] else []) + [(c, z) for y, z in e for c in y[0]]
         if not matched:
             candidate_data.append(([None], [None], [None]))
         else:
@@ -4141,14 +4161,14 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
             # one MS1 peak (high-mannose and sialyl linkage isomers, which the model names alike), and they stay
             shift, half_width = calibration
             ab, ns, xc = df_out.columns.get_loc('rel_abundance'), df_out.columns.get_loc('num_spectra'), df_out.columns.get_loc('xic')
-            groups, into, keys1 = {}, {}, None
+            groups, into, keys1, orphans = {}, {}, None, set()
             for i in range(len(df_out)):
                 if not accurate_ms1 and comps[i] is not None and not adducts[i] and offsets[i] == 0 and df_out['predictions'].iloc[i]:
                     groups.setdefault((comps[i], zs[i]), []).append(i)
             for (_, z), rows in groups.items():
                 mz, sp = df_out['theo_mz'].values[rows[0]], ISOTOPE_SPACING / z
                 s0, s1 = np.searchsorted(ms1[0], rts[rows].min() - 3.5), np.searchsorted(ms1[0], rts[rows].max() + 3.5, side = 'right')
-                if len(rows) < 2 or s1 - s0 < 5:
+                if s1 - s0 < 5:
                     continue
                 if keys1 is None:
                     # every survey centroid keyed by scan and m/z, with cumulative intensities, so a window's trace over many scans is two searchsorted calls
@@ -4162,6 +4182,24 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 sigma = max(0.7, 0.05 / np.median(steps[steps > 0])) if (steps > 0).any() else 0.7
                 kernel = np.exp(-0.5 * (np.arange(-int(3 * sigma), int(3 * sigma) + 1) / sigma) ** 2)
                 sm = np.convolve(np.pad(trace, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
+                # A row needs a peak of its own: DDA fragments a precursor m/z on the far flanks of its peaks and in background too, where the envelope
+                # trace of its ion has no maximum within 0.5 min of the row, as the ground-truth audit takes them: above the trace's median over 2 min
+                # around it, and twice that or with a valley below half its height towards the nearest higher point on either side (a bump on a
+                # flank is none); such a row reports no chromatographic peak and goes
+                for i in rows:
+                    for j in np.flatnonzero(np.abs(t - rts[i]) <= 0.5):
+                        if not (0 < j < len(sm) - 1 and sm[j] > sm[j - 1] and sm[j] >= sm[j + 1]):
+                            continue
+                        med = np.median(trace[np.abs(t - t[j]) <= 2])
+                        higher = [h for h in (np.flatnonzero(sm[:j] > sm[j])[-1:], j + 1 + np.flatnonzero(sm[j + 1:] > sm[j])[:1]) if len(h)]
+                        valley = max((sm[min(j, h[0]):max(j, h[0]) + 1].min() / sm[j] for h in higher), default = 0)
+                        if sm[j] >= 2 * med or (sm[j] >= med and valley < 0.5):
+                            break
+                    else:
+                        orphans.add(i)
+                rows = [i for i in rows if i not in orphans]
+                if len(rows) < 2:
+                    continue
                 apex = {}
                 for i in rows:
                     a = int(np.clip(np.searchsorted(t, rts[i]), 0, len(t) - 1))
@@ -4182,7 +4220,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 df_out.iat[a, ab] += df_out.iat[b, ab]
                 df_out.iat[a, ns] += df_out.iat[b, ns]
                 df_out.iat[a, xc] = df_out.iat[a, xc] + df_out.iat[b, xc]
-            df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in into]]
+            df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in into and k not in orphans]]
     df_out = df_out.drop(columns = ['theo_mz'])
     if mode == 'positive' and 'adduct' in df_out.columns and 'rt_range' in df_out.columns:
         # In positive mode a glycan's metal adduct ([M+K+H]2+, [M+Na+H]2+) can dominate its (de)protonated ion, whose weak, noisy precursor intensities then
@@ -4930,10 +4968,23 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             glycan_loader.df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in ['N', 'O', 'free'] if c not in classes]
         cross_class = (pd.concat([m[1] for m in cross_maps]), {k: v for m in cross_maps[::-1] for k, v in m[0].items()},
                        {k: v for m in cross_maps[::-1] for k, v in m[2].items()})
+    # The model's structures of compositions that no database of the taxon holds, for spectra whose fragments prove a charge state at which the database
+    # has no composition (assign_candidate_structures); kept per vocabulary and class
+    vocabulary = []
+    for c in classes:
+        if (k := ('vocabulary', id(glycans), c, frozenset(filter_out))) not in _STRUCT_MAPS:
+            vocab = [g for g in glycans if enforce_class(g, c) and get_comp(g)]
+            _STRUCT_MAPS[k] = create_struct_map(pd.DataFrame({'glycan': vocab, 'glycan_type': c, 'Composition': [get_comp(g) for g in vocab], 'Kingdom': [['vocabulary']] * len(vocab),
+                                                              'ref': [[]] * len(vocab), 'tissue_ref': [[]] * len(vocab), 'disease_ref': [[]] * len(vocab)}),
+                                                c, filter_out = filter_out, phylo_level = 'Kingdom', phylo_filter = 'vocabulary') if vocab else None
+        if _STRUCT_MAPS[k] is not None:
+            vocabulary.append(_STRUCT_MAPS[k])
+    vocabulary = create_struct_maps(None, classes, maps = vocabulary) if vocabulary and sialic_derivatization is None and _pair is None else None
+    vocabulary = (vocabulary[1], vocabulary[0], vocabulary[2]) if vocabulary else None
     df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, mass_tolerance, mode,
                                          mass_tag, modification = modification, max_charge = max_charge,
                                          sample_prep = sample_prep, cross_class = cross_class, ms1_ppm = 20 if accurate_ms1 else None,
-                                         sialic_derivatization = sialic_derivatization, adducts = adducts)
+                                         sialic_derivatization = sialic_derivatization, adducts = adducts, vocabulary = vocabulary)
     if _pair is not None:
         # and only compositions of the other class can give one of its structures, so only they go to the model
         pair_comps = set(df_use.loc[df_use['glycan_type'] == _pair[0], 'comp_str'])
@@ -4958,10 +5009,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     if len(classes) == 1:
         coded_class = CLASS_CODES[glycan_class]
     else:
+        # (a structure of the model's vocabulary, as candidate of a composition no database holds, by the class whose vocabulary it is in)
         struct_class = {}
-        for c in classes:
-            for g in df_use.loc[df_use['glycan_type'] == c, 'glycan']:
-                struct_class.setdefault(g, c)
+        for structs in [df_use] + ([vocabulary[0]] if vocabulary else []):
+            for c in classes:
+                for g in structs.loc[structs['glycan_type'] == c, 'glycan']:
+                    struct_class.setdefault(g, c)
         coded_class = [CLASS_CODES[struct_class.get(g, classes[0])] for g in df_out['candidate_structure']]
     loader, df_out = process_for_inference(df_out, coded_class, mode = mode, modification = 'permethylated' if sample_prep in ('permethylated', 'deuteropermethylated') else (
         'reduced' if modification is None and not mass_tag else modification), lc = lc, trap = trap,
@@ -5129,6 +5182,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                     df_out.iat[_idx, df_out.columns.get_loc('annotation_score')] = float(_score)
     database_rows = set(ladder_rows)
     has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
+    # A composition that no database of the taxon holds (assign_candidate_structures' vocabulary candidates) counts only with a structure of the model:
+    # its candidate structure is one labelled glycan of the vocabulary, not one the taxon is known to carry, so it takes no database structure below, and
+    # without a model structure it does not take its spectrum from a row that has one (in an ion-trap run of trisialylated N-glycans, Hex6HexNAc7dHex1Neu5Ac3
+    # [M+3H]3+ took the Sda-capped structure of the vocabulary without any GalNAc-capped B ion, and Hex7HexNAc7dHex1Neu5Ac3 without a structure emptied its spectrum)
+    df_out['_vocab'] = np.array([vocabulary is not None and not xc and isinstance(c, dict) and stringify_dict(plain_composition(c)) not in common_structure_map
+                                 for c, xc in zip(df_out['composition'], df_out['cross_class'])], dtype = bool)
     if accurate_ms1:
         # Accurate survey scans pin a precursor's composition, so a spectrum without any model prediction whose in-class composition matches within the
         # file's own calibration (median and 3 robust SD, at least 3 ppm, of the rows with a prediction) and whose fragments back up a database structure of
@@ -5162,7 +5221,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             # Orbitrap MS2 hold hundreds of fragments, so there a database structure needs 14 annotations; permethylated orbitrap DDA (GPST000403/548)
             # samples a real chromatographic peak repeatedly, so there it also needs 3 spectra (one-spectrum rows: 56 FP vs 5 TP in GPST000403), while with
             # dynamic exclusion most glycans get one or two (GPST000651, 2AB HILIC: 0.516 with 3 spectra, 0.589 with 2, 0.761 with 1)
-            ok = (~has_pred & ~df_out['cross_class'].values & (np.abs(ppm - center) <= width) & (
+            ok = (~has_pred & ~df_out['cross_class'].values & ~df_out['_vocab'].values & (np.abs(ppm - center) <= width) & (
                         df_out['annotation_score'].values > cross_crumbs_thresh) & (
                     (((df_out['num_spectra'].values >= 3) | (sample_prep not in ('permethylated', 'deuteropermethylated'))) & (df_out['annotation_score'].values >= 14)) if trap == 'orbitrap' else True)
                   & ~df_out['spec_id'].isin(predicted_specs).values & np.array(
@@ -5208,7 +5267,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                            sialic_derivatization = sialic_derivatization) if isinstance(g, str) and z > 1 else None
                 for mz, g, z in zip(df_out.index, df_out['candidate_structure'], df_out['charge'])]
         reachable = np.array([t is None or bool(t) and abs(t[0] - mz) / t[0] * 1e6 < ppm_thresh for t, mz in zip(theo, df_out.index)], dtype = bool)
-        ok = (~has_pred & ~df_out['cross_class'].values & (df_out['annotation_score'].values >= 10) & ((df_out['charge'].values <= 2) | z3)
+        ok = (~has_pred & ~df_out['cross_class'].values & ~df_out['_vocab'].values & (df_out['annotation_score'].values >= 10) & ((df_out['charge'].values <= 2) | z3)
               & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']], dtype = bool)
               & (np.array([isinstance(c, dict) and ('Neu5Gc' in c or ('free' in classes and (len(classes) == 1 or g in free))) for c, g in zip(
                   df_out['composition'], df_out['candidate_structure'])], dtype = bool) | z3 | clear))
@@ -5260,6 +5319,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # (assign_candidate_structures)
     zabs = np.abs(df_out['charge'].values.astype(float))
     df_out['doomed'] |= (zabs >= 2) & np.array([not p for p in df_out['predictions']], dtype = bool) & pd.Series(zabs == 1).groupby(df_out['spec_id'].values).transform('max').values
+    df_out['doomed'] |= df_out['_vocab'] & np.array([not p for p in df_out['predictions']], dtype = bool)
     # Of the rest, a composition with a model structure counts one annotation more (ties going to it too): an ion-trap precursor fits isobars 0.5 m/z apart at
     # z = 2, and chance annotations of the one without a structure won (Hex4HexNAc4S1 over Man7 779.27, Hex4HexNAc4Neu5Gc1dHex2 over A2G2S1F 1038.87 in GPST000054)
     df_out['_pred'] = np.array([bool(p) for p in df_out['predictions']], dtype = float)
@@ -5313,13 +5373,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         # A row promoted this way without a model structure takes its composition's database structure, as in the Neu5Gc fallback above, if the row it
         # outranks had one: the model often has a structure only for the wrong one of the pair, and the peak, reported before, would go unreported
         for i, (spec, key, preds, g) in enumerate(zip(df_out['spec_id'].values, keys, df_out['predictions'].values, df_out['candidate_structure'].values)):
-            if (spec, key) in promoted and not preds and isinstance(g, str):
+            if (spec, key) in promoted and not preds and isinstance(g, str) and not df_out['_vocab'].iloc[i]:
                 df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
                 df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
                 df_out.iat[i, df_out.columns.get_loc('_pred')] = 1.0
                 database_rows.add(df_out['m/z'].iloc[i])
     df_out = df_out.sort_values(['spec_id', 'doomed', '_sia', '_rank', '_pred', '_main'], ascending = [False, True, True, False, False, False]).groupby('spec_id').first().drop(
-        columns = ['doomed', '_sia', '_rank', '_pred', '_main'])
+        columns = ['doomed', '_sia', '_rank', '_pred', '_main', '_vocab'])
     # A sparse spectrum (at most 6 fragments, as an ion trap near its detection limit gives) can never pass crumbs_thresh, so it passes if at least two and 60%
     # of its fragments are annotated and the model is confident in its in-class top structure; a multiply charged one already if one fragment is annotated and
     # the model gives its top structure at least 0.75
