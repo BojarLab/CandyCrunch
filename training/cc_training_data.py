@@ -61,7 +61,7 @@ sys.path.insert(0, str(BASE_DIR))
 NON_SAMPLE = {'Mass', 'RT', 'glycan', 'added_db', 'removed_db', 'glycan_class', 'rt_group', 'charge', 'reducing_end', 'sialic_derivatization', 'trap', 'lc',
               'adduct'}
 # Class of a map by the first part of its suffix (_N_rt: N)
-SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid', 'milk': 'free'}
+SUFFIX_CLASSES = {'N': 'N', 'Nsulf': 'N', 'O': 'O', 'Osulf': 'O', 'GSL': 'lipid', 'milk': 'free', 'free': 'free'}
 LOG_COLUMNS = ['project', 'run', 'path', 'excluded', 'maps', 'glycan_class', 'rt_shift', 'rt_alignment', 'rt_anchors', 'masses_rescued', 'settings_fitted', 'status',
                'error', 'settings', 'inputs', 'labelled', 'unique', 'structures', 'map_rows', 'map_rows_with_rt', 'map_row_status', 'unlabelled', 'inputs_cached',
                'seconds']
