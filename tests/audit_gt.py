@@ -318,11 +318,15 @@ def glycan_fragments(run, hits, comp, z, precursor, cc_kwargs):
     """how many of the TOP_FRAGMENTS most intense deisotoped fragments of the pooled MS2 (outside the precursor envelope) CandyCrumbs explains as
     fragments of the composition, how many there were, the share of their intensity that is explained, and the share of the pooled signal outside
     the precursor envelope (how much the precursor fragmented at all)"""
-    pooled = Counter()
+    pooled, weighted = Counter(), Counter()
     for k in hits:
         d = run.peak_d[k]
         total = sum(d.values()) or 1
         pooled.update({round(m, 1): i / total for m, i in d.items()})
+        weighted.update({round(m, 1): m * i / total for m, i in d.items()})
+    # Pooled in 0.1 m/z bins, each named by its intensity-weighted m/z: the bin's rounded name was up to 0.05 off the fragment, a miss at the 0.05 Da
+    # tolerance of accurate MS2
+    pooled = Counter({weighted[m] / i if i else m: i for m, i in pooled.items()})
     # Named by the most intense peak of each pattern whatever the number of spectra: in the noise-rich centroids of Bruker ion traps, peaks 1-2 Da below a
     # fragment claimed it as their isotope (GPST000239 Gb3 505.18: 161.04, 263.04 and 343.14 became 159.1, 261.0 and 340.2, 1 of 10 annotated instead of 6)
     deisotoped = deisotope_ms2(dict(pooled), z, 0.2, relabel = True)
@@ -331,10 +335,10 @@ def glycan_fragments(run, hits, comp, z, precursor, cc_kwargs):
     if not frags:
         return 0, 0, 0.0, fragmentation, float(np.mean(run.tic_pct[list(hits)]))
     # Positive-mode glycans are mostly metal adducts ([M+K+H]2+ in GPST000134) whose fragments keep the cation, so global modifications count there
-    out = CandyCrumbs(comp, [round(m, 1) for m in frags], cc_kwargs['tolerance'], charge = (-z if run.mode == 'negative' else z), simplify = False,
+    out = CandyCrumbs(comp, frags, cc_kwargs['tolerance'], charge = (-z if run.mode == 'negative' else z), simplify = False,
                       disable_global_mods = run.mode == 'negative', disable_X_cross_rings = True, disable_A_cross_rings = run.mode == 'positive', max_cleavages = 2,
                       mass_tag = cc_kwargs['mass_tag'], sample_prep = cc_kwargs['sample_prep'])
-    explained = sum(deisotoped[m] for m in frags if out.get(round(m, 1)))
+    explained = sum(deisotoped[m] for m in frags if out.get(m))
     return (sum(bool(v) for v in out.values()), len(frags), explained / (sum(deisotoped[m] for m in frags) or 1), fragmentation,
             float(np.mean(run.tic_pct[list(hits)])))
 

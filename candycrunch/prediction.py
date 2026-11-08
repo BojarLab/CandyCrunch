@@ -4045,14 +4045,17 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         # Without z = 1 rows to calibrate on (N-glycan runs of [M-2H]2- ions), survey scans that merge each isotope envelope into one centroid show in the
         # multiply charged rows reading high as a population (median above half an isotope spacing of neutral mass; 0.3-0.4 m/z for [M-2H]2- N-glycans
         # in unit-resolution scans), whereas in survey scans that resolve the isotopes only the odd 13C-triggered spectrum reads a spacing / z high (whose
-        # admission cost false positives next to the glycan's monoisotopic row): the file's offset is then taken as 0
-        offset = 0.0
+        # admission cost false positives next to the glycan's monoisotopic row): the file's offset is then taken as 0, with no spread known
+        offset, width = 0.0, 0.0
     if offset is not None:
         # ... unless fragments back a multiply charged row that the model or the database fallback named (annotation score of at least 10): its merged centroid
         # then counts anywhere between the monoisotopic and the M+2 position above the file's offset, as large glycans, whose 13C peaks outgrow the
-        # monoisotopic one, read half a spacing high or more (GPST000556 [M-2H]2- milk oligosaccharides 0.23-0.38 m/z high, most of them database structures)
+        # monoisotopic one, read half a spacing high or more (GPST000556 [M-2H]2- milk oligosaccharides 0.23-0.38 m/z high, most of them database structures),
+        # and down to half the singly charged rows' window below it (2 robust SD), as the survey scan's calibration scatters every reading while the merged
+        # centroid only adds to it (sulfated [M-2H]2- O-glycans 0.06-0.07 m/z under an ion-trap run's offset fell to its ppm cut; with the whole window,
+        # rows 0.16-0.18 under it came in, composition isobars of the peak)
         backed = np.isin(df_out['evidence'].values, ['strong', 'composition']) & (df_out['annotation_score'].values >= 10)
-        keep = keep | (backed & (z > 1) & (np.abs(errors - offset - ISOTOPE_SPACING / z) <= ISOTOPE_SPACING / z))
+        keep = keep | (backed & (z > 1) & (errors - offset >= -width / 2) & (errors - offset <= 2 * ISOTOPE_SPACING / z))
     df_out = df_out[keep]
     # Retention-time outlier removal: drop predictions whose RT lies far outside the file's overall
     # elution distribution, scaled to the observed spread (tight cluster => strict, wide spread => permissive)
@@ -4221,7 +4224,6 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 df_out.iat[a, ns] += df_out.iat[b, ns]
                 df_out.iat[a, xc] = df_out.iat[a, xc] + df_out.iat[b, xc]
             df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in into and k not in orphans]]
-    df_out = df_out.drop(columns = ['theo_mz'])
     if mode == 'positive' and 'adduct' in df_out.columns and 'rt_range' in df_out.columns:
         # In positive mode a glycan's metal adduct ([M+K+H]2+, [M+Na+H]2+) can dominate its (de)protonated ion, whose weak, noisy precursor intensities then
         # split one chromatographic peak into several clusters; (de)protonated rows of a composition inside the RT span of one of its adduct clusters are
@@ -4343,6 +4345,16 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
             else:
                 plain[i] = df_out['adduct'].iat[i] in RUN_ADDUCTS.get()
         df_out = df_out[plain]
+    if not accurate_ms1 and len(df_out):
+        # Survey scans that do not resolve the isotopes of a multiply charged ion merge its envelope into one centroid a varying fraction of a spacing above
+        # the monoisotopic peak (0.25-0.45 m/z for [M-2H]2- glycans of 1.5-2.5 kDa), which is no m/z of the ion and, as a neutral mass, up to a Da off: a row
+        # with a composition is reported at the monoisotopic m/z of its ion, from which the adduct and reducing-end rows below are moved on (ppm_error keeps
+        # the error of the precursor as measured). Not in the run's z = 1 calibration: the monoisotopic picks among such rows read the theoretical m/z where
+        # the singly charged rows of the run read 0.1-0.15 low
+        zs = np.abs(df_out['charge'].values)
+        theo = df_out['theo_mz'].values - (df_out['re_offset'].values / zs if 're_offset' in df_out.columns else 0)
+        df_out.index = pd.Index(np.where((zs > 1) & df_out['ppm_error'].notna().values, theo, df_out.index.values), name = df_out.index.name)
+    df_out = df_out.drop(columns = ['theo_mz'])
     if 'adduct' in df_out.columns and sialic_derivatization is None:
         # A species seen only as an adduct is reported at the m/z of the (de)protonated ion of its charge, the m/z it is listed by elsewhere (and that its
         # (de)protonated row would have had); 'adduct' then names the observed ion
@@ -5182,6 +5194,26 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                     df_out.iat[_idx, df_out.columns.get_loc('annotation_score')] = float(_score)
     database_rows = set(ladder_rows)
     has_pred = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
+    # Survey scans that do not resolve a multiply charged ion's isotopes read it at the centroid of its merged envelope, which lies at or above its
+    # monoisotopic m/z (plus the run's calibration offset) and never further below it than the readings of the run scatter, so a composition whose ion lies
+    # further above the precursor than that is not the ion: at z = 2 the composition with two dHex for a Neu5Ac (or a Hex and a dHex for a Neu5Gc) lies 0.51 m/z
+    # above the right one, inside the ppm tolerance, and explained more fragments by chance. The floor lies 3 robust SD (at least 0.15 m/z, as
+    # finalise_predictions' window of such rows is at least 0.2 m/z on either side) under the median error of the run's singly charged rows that the model
+    # named (one per spectrum, its best-scoring), or under that of its multiply charged rows if lower: their merged centroids only read high, so a lower
+    # median shows that the calibration of the singly charged ions does not hold for them (the [M-2H]2- N-glycans of a run read 0.28 m/z under its singly
+    # charged rows). Without 5 singly charged rows the run's calibration is unknown and no floor applies
+    floor = None
+    if not accurate_ms1:
+        named = df_out[has_pred].sort_values('annotation_score', ascending = False, kind = 'stable')
+        errs = []
+        for multi in (False, True):
+            rows = named[(np.abs(named['charge'].values) > 1) == multi].drop_duplicates('spec_id')
+            e = np.array([mz - (composition_to_mass(c, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization) + (mass_tag or 0)
+                                + multiplier * abs(z) * PROTON_MASS) / abs(z) for mz, c, z in zip(rows.index, rows['composition'], rows['charge']) if isinstance(c, dict)])
+            # (rows matched as adducts sit an adduct's mass off their (de)protonated ion)
+            errs.append(e[np.abs(e) < mass_tolerance])
+        if len(errs[0]) >= 5:
+            floor = min(np.median(errs[0]), np.median(errs[1]) if len(errs[1]) >= 5 else np.inf) - max(3 * 1.4826 * np.median(np.abs(errs[0] - np.median(errs[0]))), 0.15)
     # A composition that no database of the taxon holds (assign_candidate_structures' vocabulary candidates) counts only with a structure of the model:
     # its candidate structure is one labelled glycan of the vocabulary, not one the taxon is known to carry, so it takes no database structure below, and
     # without a model structure it does not take its spectrum from a row that has one (in an ion-trap run of trisialylated N-glycans, Hex6HexNAc7dHex1Neu5Ac3
@@ -5267,11 +5299,14 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                            sialic_derivatization = sialic_derivatization) if isinstance(g, str) and z > 1 else None
                 for mz, g, z in zip(df_out.index, df_out['candidate_structure'], df_out['charge'])]
         reachable = np.array([t is None or bool(t) and abs(t[0] - mz) / t[0] * 1e6 < ppm_thresh for t, mz in zip(theo, df_out.index)], dtype = bool)
+        # ... and a row whose ion lies further above the precursor than the run's floor (see above) comes after every other, also after rows off by ppm_thresh:
+        # finalise_predictions keeps a fragment-backed row whose merged centroid reads high, never one below the floor
+        fits = np.array([floor is None or not t or mz - t[0] >= floor for t, mz in zip(theo, df_out.index)], dtype = bool)
         ok = (~has_pred & ~df_out['cross_class'].values & ~df_out['_vocab'].values & (df_out['annotation_score'].values >= 10) & ((df_out['charge'].values <= 2) | z3)
               & ~df_out['spec_id'].isin(set(df_out['spec_id'][has_pred])).values & np.array([isinstance(g, str) for g in df_out['candidate_structure']], dtype = bool)
               & (np.array([isinstance(c, dict) and ('Neu5Gc' in c or ('free' in classes and (len(classes) == 1 or g in free))) for c, g in zip(
                   df_out['composition'], df_out['candidate_structure'])], dtype = bool) | z3 | clear))
-        picks = df_out.reset_index(drop = True).assign(_reach = reachable)[ok].sort_values(['_reach', 'annotation_score'], ascending = False).groupby('spec_id').head(1)
+        picks = df_out.reset_index(drop = True).assign(_fit = fits, _reach = reachable)[ok].sort_values(['_fit', '_reach', 'annotation_score'], ascending = False).groupby('spec_id').head(1)
         for i in picks.index.values:
             g = df_out['candidate_structure'].iloc[i]
             df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
@@ -5315,6 +5350,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                        sialic_derivatization = sialic_derivatization) if preds and (accurate_ms1 or abs(charge) > 1) else None
             for mz, preds, charge in zip(df_out['m/z'], df_out['predictions'], df_out['charge'])]
     df_out['doomed'] = [t is not None and (not t or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh) for t, mz in zip(theo, df_out['m/z'])]
+    # A multiply charged composition, with a model structure or without, whose ion lies further above the precursor than the run's floor (see above) comes
+    # after every other row of its spectrum, also after rows off by ppm_thresh: finalise_predictions keeps a fragment-backed row whose merged centroid reads
+    # high, never one below the floor (at z = 2 a sialylated glycan read 0.35 m/z high lost its spectrum to its two-dHex isobar 0.16 m/z under it)
+    df_out['_below'] = np.array([floor is not None and abs(z) > 1 and isinstance(c, dict) and mz - (composition_to_mass(c, sample_prep = sample_prep, modification = modification,
+                                 sialic_derivatization = sialic_derivatization) + (mass_tag or 0) + multiplier * abs(z) * PROTON_MASS) / abs(z) < floor
+                                 for mz, c, z in zip(df_out['m/z'], df_out['composition'], df_out['charge'])], dtype = bool)
     # The same for a multiply charged composition without a model structure that joined a singly charged one for its doubly charged fragment pairs
     # (assign_candidate_structures)
     zabs = np.abs(df_out['charge'].values.astype(float))
@@ -5378,8 +5419,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
                 df_out.iat[i, df_out.columns.get_loc('_pred')] = 1.0
                 database_rows.add(df_out['m/z'].iloc[i])
-    df_out = df_out.sort_values(['spec_id', 'doomed', '_sia', '_rank', '_pred', '_main'], ascending = [False, True, True, False, False, False]).groupby('spec_id').first().drop(
-        columns = ['doomed', '_sia', '_rank', '_pred', '_main', '_vocab'])
+    df_out = df_out.sort_values(['spec_id', '_below', 'doomed', '_sia', '_rank', '_pred', '_main'], ascending = [False, True, True, True, False, False, False]).groupby('spec_id').first().drop(
+        columns = ['_below', 'doomed', '_sia', '_rank', '_pred', '_main', '_vocab'])
     # A sparse spectrum (at most 6 fragments, as an ion trap near its detection limit gives) can never pass crumbs_thresh, so it passes if at least two and 60%
     # of its fragments are annotated and the model is confident in its in-class top structure; a multiply charged one already if one fragment is annotated and
     # the model gives its top structure at least 0.75
@@ -5489,7 +5530,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         # it lost every glycan of the run
         off_mass = {(mz, rt) for mz, rt, preds, charge, e in zip(df_out.index, df_out['RT'], df_out['predictions'], df_out['charge'], df_out['evidence']) if e == 'strong' and (
             accurate_ms1 or abs(charge) > 1) and (not (t := mass_check(mz, preds[0][0], modification = modification, mass_tag = mass_tag, mode = mode, sample_prep = sample_prep,
-                                                                       mass_tolerance = mass_tolerance, sialic_derivatization = sialic_derivatization)) or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh)}
+                                                                       mass_tolerance = mass_tolerance, sialic_derivatization = sialic_derivatization)) or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh
+                                                                       or (floor is not None and abs(charge) > 1 and mz - t[0] < floor))}
     if re_names and not df_out.empty:
         # A glycan of another reducing end is a side product of a glycan of the run, so the structures the run reports are looked for at each variant's mass
         # (re_offset) in every spectrum, with their best confidence. A spectrum is such a variant if fragments of one of them at that reducing end pass the
@@ -5527,7 +5569,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             theo = [mass_check(mz, g, modification = modification, mass_tag = (mass_tag or 0) + o, mode = mode, sample_prep = sample_prep,
                                mass_tolerance = mass_tolerance, sialic_derivatization = sialic_derivatization) if accurate_ms1 or abs(z) > 1 else None
                     for mz, g, z, o in zip(df_var['m/z'], df_var['candidate_structure'], df_var['charge'], df_var['re_offset'])]
-            doomed = np.array([t is not None and (not t or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh) for t, mz in zip(theo, df_var['m/z'])], dtype = bool)
+            doomed = np.array([t is not None and (not t or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh or (floor is not None and abs(z) > 1 and mz - t[0] < floor))
+                               for t, mz, z in zip(theo, df_var['m/z'], df_var['charge'])], dtype = bool)
             # A glycosylamine lies 2.016 Da below its PA glycan, so an ion trap's precursor window also fits the glycosylamine of a composition about 1 Da heavier
             # (two dHex for a Neu5Ac) at a real PA glycan: in GPST000237 the 8 spectra of Hex7HexNAc6Neu5Ac3 1108.41 [M+3H]3+ went to a fucosylated
             # glycosylamine. One has to outscore every candidate of its spectrum at the run's own reducing end, whether the model named one or not. So does a
