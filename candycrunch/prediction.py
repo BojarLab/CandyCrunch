@@ -2703,8 +2703,10 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
             comps_out = _fill_adducts(plain, own, carriers = True)
     # Glucose oligomers in glycan preparations sit, as reduced Hex_n, 0.05 Da from sulfated O-glycans (Hex4 667.23 / Hex1HexNAc2S1 667.18, Hex5
     # 829.29 / Hex2HexNAc2S1 829.24), which ion-trap survey scans do not separate, and the sulfated composition took them. Their 1-4 linkages give a
-    # series of 2,4A ions (221, 383, 545, 707 for the reduced oligomers): a singly charged spectrum whose base peak is the 2,4A ion of the residue next
-    # to the reducing end (the precursor minus that residue and C4H6O3) and that has the next one (a Hex lighter) among its 10 most intense fragments
+    # series of 2,4A ions (221, 383, 545, 707 for the reduced oligomers): a singly charged spectrum whose base peak (the unfragmented precursor aside,
+    # often the most intense ion of ion-trap spectra of long chains) is the 2,4A ion of the residue next to the reducing end (the precursor minus that
+    # residue and C4H6O3) and that has another 2,4A ion of the series among its 10 most intense fragments (the next one, 221 for Hex4, can lie below an
+    # ion trap's low-mass cutoff, and in long chains it is often weaker than lower ones)
     # is the oligomer of n >= 4 Hex and keeps only that composition, scored as the 1-4 linked glucose chain (1-4 linked galactose would give the same
     # ions, glucose is the oligomer found in glycan preparations; Hex3 has a single 2,4A ion, which 4-linked lactose-based trisaccharides share)
     ladder = [False] * len(red_masses)
@@ -2713,11 +2715,11 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
         hex_res = composition_to_mass({'Hex': 2}, mass_value = 'monoisotopic') - composition_to_mass({'Hex': 1}, mass_value = 'monoisotopic')
         for i, (mz, peaks, kc) in enumerate(zip(red_masses, df_in['peak_d'], known_charges)):
             n = round((mz + PROTON_MASS - hex_end) / hex_res) + 1
-            top = sorted(peaks.items(), key = lambda x: x[1], reverse = True)[:10] if isinstance(peaks, dict) else []
+            top = sorted(((m, v) for m, v in peaks.items() if abs(m - mz) > 1.5), key = lambda x: x[1], reverse = True)[:10] if isinstance(peaks, dict) else []
             if n < 4 or kc not in (None, 1) or not top or abs(hex_end + (n - 1) * hex_res - PROTON_MASS - mz) > (ms1_ppm * mz / 1e6 if ms1_ppm else mass_tolerance):
                 continue
             a24 = mz - hex_end - calculate_adduct_mass('C4H6O3')
-            if abs(top[0][0] - a24) < mass_tolerance and any(abs(m - a24 + hex_res) < mass_tolerance for m, _ in top[1:]):
+            if abs(top[0][0] - a24) < mass_tolerance and any(abs(m - a24 + k * hex_res) < mass_tolerance for m, _ in top[1:] for k in range(1, n - 2)):
                 key, chain = stringify_dict({'Hex': n}), '(a1-4)'.join(['Glc'] * n)
                 comps_out[i] = (([({'Hex': n}, {key: chain}, {key: [chain]})], 0.0), 1)
                 ladder[i] = True
@@ -4348,6 +4350,92 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 df_out.iat[a, ns] += df_out.iat[b, ns]
                 df_out.iat[a, xc] = df_out.iat[a, xc] + df_out.iat[b, xc]
             df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in into and k not in orphans]]
+            # A row whose composition is a co-eluting row's with two dHex for a Neu5Ac (or Hex + dHex for a Neu5Gc), 1.02 Da heavier at the same charge, is
+            # mostly that row's 13C peak read as the heavier isobar, and sometimes the reverse (the light row the heavy glycan's ion read 1 Da low). Ion traps
+            # merge their isotopes, the light glycan's M+1 and M+2 outweigh its M above ~2.5 kDa at z = 2, and the MS2 of the two fit both compositions, so
+            # neither spectra nor the precursor intensities deduplicate_predictions compares tell them apart (31 such pairs in our test runs, 17 of them a
+            # true light row with a false heavy one). The intensity-weighted centre of the whole isotope envelope does: it lies 1.02 / z higher for the heavy
+            # glycan alone. Centres are taken relative to the run's offset, the median offset of the other rows' envelope centres from their compositions'
+            # isotope patterns (a z = 1 calibration is often missing and ion-trap readings move by up to 0.2 m/z); a pair whose envelope sits within a third
+            # of the way from one glycan's pattern keeps that row, which takes the other's spectra (not its abundance, the same envelope's isotopes). Singly
+            # charged pairs, resolved on every instrument, are judged by peaks (BSM's Hex1HexNAc2Neu5Gc1 894.32 is a glycan 0.3 min before a 40x stronger
+            # Hex2HexNAc2dHex1 [M-H]-, which the envelope centre took it for)
+            isobar_deltas = ({'dHex': 2, 'Neu5Ac': -1}, {'Hex': 1, 'dHex': 1, 'Neu5Gc': -1})
+            comps2, zs2, rts2, mzs2 = list(df_out['composition']), np.abs(df_out['charge'].values).astype(int), df_out['RT'].values, df_out['theo_mz'].values
+            pairs = [(i, k) for i in range(len(df_out)) for k in range(len(df_out)) if i != k and isinstance(comps2[i], dict) and isinstance(comps2[k], dict)
+                     and zs2[i] == zs2[k] and abs(rts2[i] - rts2[k]) <= 0.3 and abs(mzs2[k] - mzs2[i] - 1.0204 / zs2[i]) < 0.01
+                     and any(all(comps2[k].get(r, 0) - comps2[i].get(r, 0) == d.get(r, 0) for r in set(comps2[k]) | set(comps2[i]) | set(d)) for d in isobar_deltas)]
+            if pairs:
+
+                def envelope_centre(mz, z, rt):
+                    # intensity-weighted mean m/z of the survey centroids from 0.45 / z below an ion to 5.5 / z above it, over 0.15 min around rt
+                    num, den = 0.0, 0.0
+                    for s in range(np.searchsorted(ms1[0], rt - 0.15), np.searchsorted(ms1[0], rt + 0.15, side = 'right')):
+                        m, v = ms1[1][ms1[3][s]:ms1[3][s + 1]], ms1[2][ms1[3][s]:ms1[3][s + 1]]
+                        a, b = np.searchsorted(m, mz - 0.45 / z), np.searchsorted(m, mz + 5.5 / z)
+                        num, den = num + float(np.dot(m[a:b].astype(np.float64), v[a:b])), den + float(v[a:b].sum())
+                    return num / den if den > 0 else np.nan
+
+                def isotope_pattern(comp):
+                    # relative abundances of a composition's isotope peaks M, M+1, ... from its elemental formula (None without one)
+                    try:
+                        formula = get_formula(comp, sample_prep = 'permethylated' if sample_prep == 'deuteropermethylated' else sample_prep)
+                    except ValueError:
+                        return None
+                    dist = np.array([1.0])
+                    for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', formula):
+                        for _ in range(int(k or 1)):
+                            dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:12]
+                    return dist
+
+                def peak_sum(mz, rt):
+                    # summed survey intensity within 0.3 m/z of an ion over 0.15 min around rt
+                    total = 0.0
+                    for s in range(np.searchsorted(ms1[0], rt - 0.15), np.searchsorted(ms1[0], rt + 0.15, side = 'right')):
+                        m = ms1[1][ms1[3][s]:ms1[3][s + 1]]
+                        total += float(ms1[2][ms1[3][s]:ms1[3][s + 1]][np.searchsorted(m, mz - 0.3):np.searchsorted(m, mz + 0.3)].sum())
+                    return total
+
+                def pattern_centre(comp, mz, z, ref):
+                    # mean m/z of a composition's isotope pattern (monoisotopic at mz) within the window envelope_centre sums around ref
+                    dist = isotope_pattern(comp)
+                    if dist is None:
+                        return np.nan
+                    pos = mz + ISOTOPE_SPACING / z * np.arange(len(dist))
+                    inside = (pos >= ref - 0.45 / z) & (pos <= ref + 5.5 / z)
+                    return float(np.dot(pos[inside], dist[inside]) / dist[inside].sum())
+
+                paired = {x for p in pairs for x in p}
+                refs = [i for i in np.argsort(-np.nan_to_num(df_out['rel_abundance'].values.astype(float)), kind = 'stable') if isinstance(comps2[i], dict) and i not in paired][:30]
+                offs = [c - e for c, e in ((envelope_centre(mzs2[i], zs2[i], rts2[i]), pattern_centre(comps2[i], mzs2[i], zs2[i], mzs2[i])) for i in refs)
+                        if np.isfinite(c) and np.isfinite(e)]
+                off = float(np.median(offs)) if len(offs) >= 5 else shift
+                isobar_into = {}
+                for i, k in pairs:
+                    if i in isobar_into or k in isobar_into:
+                        continue
+                    if zs2[i] == 1:
+                        # singly charged ions are resolved, and a glycan 1 Da lighter is no misreading of one: the heavy row is the light glycan's M+1
+                        # if its peak (at its own RT) is at most 1.5x what the light glycan's peak there predicts, else both are glycans
+                        dist = isotope_pattern(comps2[i])
+                        if dist is None or len(dist) < 2:
+                            continue
+                        at_heavy, heavy_peak = peak_sum(mzs2[i] + off, rts2[k]), peak_sum(mzs2[k] + off, rts2[k])
+                        if heavy_peak <= 1.5 * at_heavy * dist[1] / dist[0]:
+                            isobar_into[k] = i
+                        continue
+                    light, heavy = pattern_centre(comps2[i], mzs2[i], zs2[i], mzs2[i]), pattern_centre(comps2[k], mzs2[k], zs2[i], mzs2[i])
+                    frac = (envelope_centre(mzs2[i], zs2[i], (rts2[i] + rts2[k]) / 2) - off - light) / (heavy - light)
+                    if frac <= 1 / 3:
+                        isobar_into[k] = i
+                    elif frac >= 2 / 3:
+                        isobar_into[i] = k
+                for b in isobar_into:
+                    a = isobar_into[b]
+                    while a in isobar_into:
+                        a = isobar_into[a]
+                    df_out.iat[a, ns] += df_out.iat[b, ns]
+                df_out = df_out.iloc[[k for k in range(len(df_out)) if k not in isobar_into]]
     if mode == 'positive' and 'adduct' in df_out.columns and 'rt_range' in df_out.columns:
         # In positive mode a glycan's metal adduct ([M+K+H]2+, [M+Na+H]2+) can dominate its (de)protonated ion, whose weak, noisy precursor intensities then
         # split one chromatographic peak into several clusters; (de)protonated rows of a composition inside the RT span of one of its adduct clusters are
