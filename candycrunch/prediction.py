@@ -172,6 +172,48 @@ def unactivated(filter_string):
     return bool(stage) and not any(float(e) for e in re.findall(r'@[a-z]+([\d.]+)', stage[-1][1]))
 
 
+def averaged_precursor_mz(ms1, rt, mz, charge, averaged = 6, isotope_spacing = ISOTOPE_SPACING):
+    """the monoisotopic m/z of a peptide-like precursor from its survey scans, after Monocle (Rad et al. 2021): the scans around it summed, the offset of -3 to +1 isotope steps whose
+    envelope best fits a peptide averagine (5% better than the lighter offsets before it), and the intensity-weighted m/z there\n
+    | Arguments:
+    | :-
+    | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
+    | rt (float): retention time of the precursor
+    | mz (float): its m/z as the instrument reported it
+    | charge (int): its charge
+    | averaged (int): survey scans summed on either side; default:6
+    | isotope_spacing (float): spacing of the isotopes; default:ISOTOPE_SPACING\n
+    | Returns:
+    | :-
+    | Returns the refined m/z
+    """
+    from scipy.stats import binom
+    rts, mzs, ints, offsets = ms1
+    center = max(int(np.searchsorted(rts, rt)) - 1, 0)
+    steps = np.arange(-4, 8)
+    total, weighted = np.zeros(len(steps)), np.zeros(len(steps))
+    for scan in range(max(center - averaged, 0), min(center + averaged + 1, len(rts) - 1)):
+        scan_mz, scan_int = mzs[offsets[scan]:offsets[scan + 1]], ints[offsets[scan]:offsets[scan + 1]]
+        for j, step in enumerate(steps):
+            target = mz + step * isotope_spacing / charge
+            lo, hi = np.searchsorted(scan_mz, target * (1 - 1e-5)), np.searchsorted(scan_mz, target * (1 + 1e-5), side = 'right')
+            if hi > lo:
+                k = lo + int(np.argmax(scan_int[lo:hi]))
+                total[j] += scan_int[k]
+                weighted[j] += scan_mz[k] * scan_int[k]
+    expected = np.concatenate([[0.0], binom.pmf(np.arange(6), int((mz - PROTON_MASS) * charge / 111 * 5.1), 0.011)])
+    best, offset = -1.0, 0
+    for step in (-3, -2, -1, 0, 1):
+        j = step + 4
+        observed = np.concatenate([[total[j - 1]], total[j:j + 6]])
+        if observed.sum() > 0:
+            fit = float(observed.dot(expected) / (np.linalg.norm(observed) * np.linalg.norm(expected)))
+            if fit > best * 1.05:
+                best, offset = fit, step
+    j = offset + 4
+    return weighted[j] / total[j] if total[j] > 0 else mz + offset * isotope_spacing / charge
+
+
 def refine_precursor_mz(ms1, mzs, rts, scans, refine, mz_tolerance = 0.3, isotope_tolerance = 0.25, min_explained = 0.7, charges = None, isolation_mz = False,
                         max_lighter = None, walk_charges = (1, 2)):
     """moves precursor m/z values the instrument never refined onto the monoisotopic centroid of their survey scan\n
@@ -1429,6 +1471,54 @@ def anion_adduct_ions(charges, anion):
             for z in charges for k in range(1, max(z, 2))]
 
 
+def ion_trace(ms1, mz, rt, half_width = 0.75, ppm = 7.0):
+    """an ion's extracted chromatogram around a retention time: the highest peak within its m/z window, per survey scan\n
+    | Arguments:
+    | :-
+    | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
+    | mz (float): m/z of the ion
+    | rt (float): retention time at the trace's center
+    | half_width (float): minutes on either side; default:0.75
+    | ppm (float): half-width of the m/z window in ppm; default:7.0\n
+    | Returns:
+    | :-
+    | Returns an array with one intensity per survey scan
+    """
+    rts, mzs, ints, offsets = ms1
+    first, last = np.searchsorted(rts, rt - half_width), min(np.searchsorted(rts, rt + half_width), len(rts) - 1)
+    out = np.zeros(max(last - first, 0))
+    for n, scan in enumerate(range(first, last)):
+        scan_mz = mzs[offsets[scan]:offsets[scan + 1]]
+        lo, hi = np.searchsorted(scan_mz, mz * (1 - ppm * 1e-6)), np.searchsorted(scan_mz, mz * (1 + ppm * 1e-6), side = 'right')
+        if hi > lo:
+            out[n] = ints[offsets[scan]:offsets[scan + 1]][lo:hi].max()
+    return out
+
+
+def coeluting_lighter_ion(ms1, mz, charge, rt, mass_delta, min_height = 0.02, min_r = 0.8):
+    """whether an ion has a partner mass_delta lighter at the same charge that co-elutes with it, as an adduct has its protonated form\n
+    | Arguments:
+    | :-
+    | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
+    | mz (float): monoisotopic m/z of the ion
+    | charge (int): its charge
+    | rt (float): its retention time
+    | mass_delta (float): how much lighter the partner is, in Da
+    | min_height (float): lowest apex of the partner, as a share of the ion's apex; default:0.02
+    | min_r (float): lowest correlation of the two traces; default:0.8\n
+    | Returns:
+    | :-
+    | Returns True if such a partner is there
+    """
+    hit = ion_trace(ms1, mz, rt)
+    if len(hit) < 5 or hit.max() <= 0:
+        return False
+    partner = ion_trace(ms1, mz - mass_delta / charge, rt)
+    if partner.max() < min_height * hit.max() or (partner > 0).sum() < 3:
+        return False
+    return bool(np.corrcoef(hit, partner)[0, 1] >= min_r)
+
+
 def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1.0, mz_tolerance = 0.5, search_window = 0,
                       isotopes = 3, weights = None, mz_calibration = None, glycans = None, sample_prep = 'underivatized', other_charges = None, mode = 'negative',
                       details = None, adduct_ions = None):
@@ -1509,16 +1599,20 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             apex_rts[t], apex_ints[t] = rts[apex], ints_arr[apex]
         else:
             apex = np.argmin(np.abs(rts - rt_centers[t]))
-        # Climb to the top of the peak the precursor sits on, then walk down both flanks to a valley (splitting co-eluting isomers), 1% of the peak height, or rt_window
+        # Climb to the top of the peak the precursor sits on, then walk down both flanks to a valley (splitting co-eluting isomers), 1% of the peak height, or rt_window.
+        # On the top 30% of a peak a rise of up to 10% above the lowest point so far is ripple, not a valley, as it cut flat-topped peaks (an overloaded column) short
         while 0 < apex < len(smooth) - 1 and max(smooth[apex - 1], smooth[apex + 1]) > smooth[apex]:
             apex += 1 if smooth[apex + 1] > smooth[apex - 1] else -1
         baseline = np.percentile(ints_arr, 10)
         cut = baseline + 0.01 * (smooth[apex] - baseline)
-        left, right = apex, apex
-        while left > 0 and rts[apex] - rts[left - 1] <= rt_window and smooth[left - 1] <= smooth[left] and smooth[left] > cut:
+        left, right, top, low = apex, apex, baseline + 0.7 * (smooth[apex] - baseline), smooth[apex]
+        while left > 0 and rts[apex] - rts[left - 1] <= rt_window and (smooth[left - 1] <= smooth[left] or (low >= top and smooth[left - 1] <= 1.1 * low)) and smooth[left] > cut:
             left -= 1
-        while right < len(smooth) - 1 and rts[right + 1] - rts[apex] <= rt_window and smooth[right + 1] <= smooth[right] and smooth[right] > cut:
+            low = min(low, smooth[left])
+        low = smooth[apex]
+        while right < len(smooth) - 1 and rts[right + 1] - rts[apex] <= rt_window and (smooth[right + 1] <= smooth[right] or (low >= top and smooth[right + 1] <= 1.1 * low)) and smooth[right] > cut:
             right += 1
+            low = min(low, smooth[right])
         areas[t], apex_scans[t] = _trapezoid(np.clip(ints_arr[left:right + 1] - baseline, 0, None), rts[left:right + 1]), s0 + apex
         if records is not None:
             # The trace again from rt_window before to rt_window after the scans searched, which shows the neighbouring peaks, and the survey scan at the
@@ -3390,6 +3484,36 @@ class DictStorage:
         df = pd.read_csv(filepath)
         df[dict_col] = df[dict_col].apply(self.deserialize_dict)
         return df
+
+
+def pair_spectra(df, max_scans = 30, ppm = 10.0):
+    """pairs each HCD scan with the EThcD, ETD, ECD, or ETciD scan it triggered in a product-triggered method: the next such scan of the same precursor\n
+    | Arguments:
+    | :-
+    | df (dataframe): MS2 spectra of one run, as load_spectra_filepath returns them, with activation and scan
+    | max_scans (int): how many scans later the partner may come; default:30
+    | ppm (float): tolerance of the precursor m/z; default:10.0\n
+    | Returns:
+    | :-
+    | Returns the HCD scans of df, with their partners' peaks, activation, analyzer, and scan number in paired_peak_d, paired_activation, paired_analyzer, and paired_scan
+    """
+    df = df.dropna(subset = ['precursor_charge']).sort_values('scan')
+    # Survey scans stay with the reader's table: pandas compares attrs when runs are concatenated, which raises on the arrays of different runs
+    df.attrs = {k: v for k, v in df.attrs.items() if k != 'ms1'}
+    electron = df[df['activation'].isin(['EThcD', 'ETD', 'ECD', 'ETciD'])]
+    hcd = df[~df.index.isin(electron.index)].copy()
+    e_scan, e_mz, e_z = electron['scan'].values, electron['m/z'].values, electron['precursor_charge'].values
+    partner = {}
+    for i, scan, mz, z in zip(hcd.index, hcd['scan'].values, hcd['m/z'].values, hcd['precursor_charge'].values):
+        for j in range(np.searchsorted(e_scan, scan), np.searchsorted(e_scan, scan + max_scans)):
+            if abs(e_mz[j] - mz) <= mz * ppm * 1e-6 and e_z[j] == z:
+                partner[i] = electron.index[j]
+                break
+    rows = pd.Series(partner, dtype = object)
+    hcd['paired_peak_d'] = pd.Series([df.at[j, 'peak_d'] for j in rows.values], index = rows.index, dtype = object).reindex(hcd.index)
+    for col in ('activation', 'analyzer', 'scan'):
+        hcd[f'paired_{col}'] = pd.Series(df.loc[rows.values, col].values if col in df else None, index = rows.index).reindex(hcd.index)
+    return hcd
 
 
 def load_spectra_filepath(spectra_filepath, extract_ms1 = False):

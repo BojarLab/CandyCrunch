@@ -4604,6 +4604,120 @@ def draw_peptide_ladder(peptide, hit_dict, glycosites = (), ax = None, fontsize 
     return ax
 
 
+def has_ion(peaks, ions, tolerance_ppm = 20.0, top_n_peaks = 100):
+    """whether one of the ions, such as an oxonium ion, is among the most intense peaks of a spectrum as measured\n
+    | Arguments:
+    | :-
+    | peaks (dict): m/z : intensity of a spectrum
+    | ions (array-like): m/z values to look for
+    | tolerance_ppm (float): m/z tolerance in ppm; default:20.0
+    | top_n_peaks (int): how many of the most intense peaks count; default:100\n
+    | Returns:
+    | :-
+    | Returns True if one of the ions is among them
+    """
+    if not peaks:
+        return False
+    top = sorted(peaks.items(), key = lambda x: -x[1])[:top_n_peaks]
+    return any(abs(m - t) <= t * tolerance_ppm * 1e-6 for m, _ in top for t in ions)
+
+
+def intensity_share(peaks, neutral_mass, charge, tolerance_ppm = 20.0):
+    """share of a spectrum's intensity at a neutral mass, at any charge from 1+ to charge+\n
+    | Arguments:
+    | :-
+    | peaks (dict): m/z : intensity of a spectrum
+    | neutral_mass (float): neutral mass to look for
+    | charge (int): highest charge state
+    | tolerance_ppm (float): m/z tolerance in ppm; default:20.0\n
+    | Returns:
+    | :-
+    | Returns the share of the spectrum's intensity, from 0 to 1
+    """
+    mz, intensity = np.array(list(peaks.keys())), np.array(list(peaks.values()))
+    ions = (neutral_mass + np.arange(1, charge + 1) * PROTON_MASS) / np.arange(1, charge + 1)
+    return float(sum(intensity[np.abs(mz - t) <= t * tolerance_ppm * 1e-6].sum() for t in ions) / intensity.sum())
+
+
+def _match_peaks_loop(ions, charges, padded, tolerance, ppm):
+    n, m = ions.shape[0], padded.shape[0]
+    hit, best = np.empty(n * charges.shape[0], dtype = np.bool_), np.empty(n * charges.shape[0], dtype = np.int64)
+    for k in range(charges.shape[0]):
+        c = charges[k]
+        shift = (c - 1) * PROTON_MASS
+        for i in range(n):
+            x = (ions[i] + shift) / c
+            lo, hi = 0, m
+            while lo < hi:
+                mid = (lo + hi) >> 1
+                if padded[mid] < x:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            d_left, d_right = x - padded[lo - 1], padded[lo] - x
+            tol = x * tolerance * 1e-6 if ppm else tolerance
+            j = k * n + i
+            if d_left <= d_right:
+                hit[j], best[j] = d_left <= tol, lo - 2
+            else:
+                hit[j], best[j] = d_right <= tol, lo - 1
+    return hit, best
+
+
+# _match_peaks_loop compiled on the first call, or None without numba: importing numba takes as long as importing this module, and only many ions per spectrum need it
+_MATCH_COMPILED = []
+
+
+def match_peaks(ions, spec_mz, tolerance, ppm, charges = None):
+    """closest-peak matching of many theoretical ions at once, compiled with numba when it is installed, where the charge states are never written out; numpy otherwise\n
+    | Arguments:
+    | :-
+    | ions (array): theoretical m/z values or, with charges, neutral + H+ masses, matched at each charge c as (ion + (c - 1) H+) / c
+    | spec_mz (array): m/z values of the spectrum, sorted
+    | tolerance (float): m/z tolerance
+    | ppm (bool): whether the tolerance is in ppm, or else in m/z
+    | charges (array-like): charge states; default:None (ions are m/z values)\n
+    | Returns:
+    | :-
+    | Returns (matched mask, index of the closest peak, the lower one at equal distance); with charges, charge-major (all ions at charges[0] first)
+    """
+    # The -inf / +inf sentinels give every ion both neighbors without clipping, and their distances need no abs
+    padded = np.concatenate(([-np.inf], spec_mz, [np.inf]))
+    one = charges is None
+    charges = np.ones(1, dtype = np.int64) if one else np.asarray(charges, dtype = np.int64)
+    if not _MATCH_COMPILED:
+        try:
+            from numba import njit
+            _MATCH_COMPILED.append(njit(cache = True)(_match_peaks_loop))
+        except ImportError:
+            _MATCH_COMPILED.append(None)
+    if _MATCH_COMPILED[0] is not None:
+        return _MATCH_COMPILED[0](np.ascontiguousarray(ions, dtype = np.float64), charges, padded, float(tolerance), bool(ppm))
+    mz = ions if one else ((ions[None, :] + (charges[:, None] - 1) * PROTON_MASS) / charges[:, None]).ravel()
+    pos = np.searchsorted(padded, mz)
+    d_left, d_right = mz - padded[pos - 1], padded[pos] - mz
+    use_left = d_left <= d_right
+    return np.where(use_left, d_left, d_right) <= (mz * tolerance * 1e-6 if ppm else tolerance), pos - 1 - use_left
+
+
+def add_qvalues(df, score = 'score', decoy = 'is_decoy'):
+    """target-decoy q-values of top hits, one row per spectrum: decoys / targets at or above each score, made monotone\n
+    | Arguments:
+    | :-
+    | df (dataframe): top hits
+    | score (string): column with the score; default:'score'
+    | decoy (string): column saying whether a hit is a decoy; default:'is_decoy'\n
+    | Returns:
+    | :-
+    | Returns df sorted by descending score, with the column q_value
+    """
+    df = df.sort_values(score, ascending = False, kind = 'stable').reset_index(drop = True)
+    d = df[decoy].astype(bool).values
+    fdr = np.cumsum(d) / np.maximum(np.cumsum(~d), 1)
+    df['q_value'] = np.minimum.accumulate(fdr[::-1])[::-1]
+    return df
+
+
 def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities = True, min_intensity = 0.0, min_isotope_count = 2,
                   validate_pattern = False, relabel = False, bound_isotope_ratio = False):
     """collapses isotope patterns of an MS2 spectrum onto their monoisotopic peak\n

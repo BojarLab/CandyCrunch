@@ -33,7 +33,7 @@ dependencies = [
     "pandas>=2.2.2",
     "zstandard; python_version < '3.14'",
     "openpyxl",
-    "viscose>=0.1.3",
+    "viscose>=0.2.2",
 ]
 
 [project.urls]

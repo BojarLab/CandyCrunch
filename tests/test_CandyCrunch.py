@@ -500,6 +500,10 @@ def test_xic_quantification():
     assert np.array_equal(extract_xic_areas(ms1, [p[0] for p in peaks], [8.05, 8.55, 12.1], charges = [p[1] for p in peaks], weights = [4, 1, 2], details = details), areas)
     assert np.allclose([(d['area'] + sum(o['area'] for o in d['others'])) * d['scale'] for d in details], areas)
     assert [round(float(d['times'][d['apex']]), 1) for d in details] == [8.0, 8.6, 12.0] and all(d['left'] < d['apex'] < d['right'] for d in details)
+    # A flat-topped peak (an overloaded column) with ripple of a few percent is integrated from flank to flank, and a clear valley still splits it from its isomer
+    flat = 1e6 * (1 + 0.05 * np.cos(rts * 2 * np.pi / 0.32)) * np.minimum(np.exp(-0.5 * ((rts - 10) / 0.25) ** 2) * 4, 1) + 5e5 * np.exp(-0.5 * ((rts - 12) / 0.1) ** 2)
+    ms1 = (rts, np.full(len(rts), 700.2, dtype = np.float32), flat.astype(np.float32), np.arange(len(rts) + 1, dtype = np.int64))
+    assert np.allclose(extract_xic_areas(ms1, [700.2, 700.2], [10.0, 12.0], isotopes = 0), [flat[rts < 11].sum() * 0.08, flat[rts > 11].sum() * 0.08], rtol = 0.05)
 
 
 def test_quantification_synthetic(result_collector):
@@ -1982,3 +1986,39 @@ def test_spectra_readers(tmp_path):
                     '290.09 100 1+\nEND IONS\nBEGIN IONS\nPEPMASS=675.25\nCHARGE=2+ and 3+\n# a comment\nRTINSECONDS=602\nEND IONS\n')
     params = [s['params'] for s in read_mgf(str(path))]
     assert [p['charge'] for p in params] == [[2], [-3], [2, 3]] and [p['pepmass'] for p in params] == [(675.25, None), (675.25, 1e5), (675.25, None)]
+
+
+def test_mass_spec_helpers_from_glycopeptide_search():
+    from candycrunch.analysis import add_qvalues, has_ion, intensity_share, match_peaks
+    from candycrunch.prediction import averaged_precursor_mz, coeluting_lighter_ion, ion_trace, pair_spectra
+    peaks = {204.0867: 100.0, 366.1395: 50.0, 500.0: 10.0}
+    assert has_ion(peaks, [204.087]) and not has_ion(peaks, [290.09]) and not has_ion({}, [204.087]) and not has_ion(peaks, [500.0], top_n_peaks = 2)
+    neutral = 500.0 - 1.007276
+    assert np.isclose(intensity_share(peaks, neutral, 2), 10 / 160)
+    # Compiled where numba is installed, and the same by numpy: 1+ and 2+ of two ions, the closest peak, the lower at equal distance
+    spec = np.array([100.0, 200.0, 300.0])
+    hit, best = match_peaks(np.array([200.0, 250.0]), spec, 1.0, False)
+    assert hit.tolist() == [True, False] and best[0] == 1
+    hit, best = match_peaks(np.array([200.0, 399.0]), spec, 2.0, False, charges = [1, 2])
+    assert hit.shape == (4,) and hit[0] and best[0] == 1
+    # A target at the top, a decoy, then two targets: decoys / targets at or above each score, made monotone
+    q = add_qvalues(pd.DataFrame({'score': [1.0, 3.0, 2.0, 4.0], 'is_decoy': [False, True, False, False]}))
+    assert q['score'].tolist() == [4.0, 3.0, 2.0, 1.0] and q['q_value'].tolist() == [0.0, 1 / 3, 1 / 3, 1 / 3]
+    # Survey scans with an ion at m/z 500 and its lighter partner, both over ten scans, and an isotope envelope
+    rts, mzs, ints, offsets = np.arange(20) / 10.0, [], [], [0]
+    for k in range(20):
+        height = np.exp(-((k - 10) / 3.0) ** 2) * 1000
+        mzs.extend([491.5, 500.0, 500.5017, 501.0033])
+        ints.extend([height / 2, height, height * 0.6, height * 0.2])
+        offsets.append(offsets[-1] + 4)
+    ms1 = (rts, np.array(mzs), np.array(ints), np.array(offsets))
+    trace = ion_trace(ms1, 500.0, 1.0)
+    assert len(trace) > 5 and trace.max() == 1000
+    assert coeluting_lighter_ion(ms1, 500.0, 2, 1.0, 17.0) and not coeluting_lighter_ion(ms1, 500.0, 2, 1.0, 40.0)
+    assert np.isclose(averaged_precursor_mz(ms1, 1.0, 500.0, 2), 500.0, atol = 0.01) and np.isclose(averaged_precursor_mz(ms1, 1.0, 500.5017, 2), 500.0, atol = 0.01)
+    # An EThcD scan pairs with the HCD scan that triggered it, not across charges or too many scans
+    df = pd.DataFrame({'scan': [1, 2, 3, 50], 'm/z': [500.0, 500.001, 700.0, 700.0], 'precursor_charge': [2, 2, 3, 3], 'activation': ['HCD', 'EThcD', 'HCD', 'EThcD'],
+                       'analyzer': ['orbitrap'] * 4, 'peak_d': [{1.0: 1.0}, {2.0: 2.0}, {3.0: 3.0}, {4.0: 4.0}]})
+    paired = pair_spectra(df).set_index('scan')
+    assert paired.index.tolist() == [1, 3] and paired.loc[1, 'paired_peak_d'] == {2.0: 2.0} and paired.loc[1, 'paired_activation'] == 'EThcD' and pd.isna(paired.loc[3, 'paired_peak_d'])
+    assert paired.loc[1, 'paired_scan'] == 2 and pd.isna(paired.loc[3, 'paired_scan'])

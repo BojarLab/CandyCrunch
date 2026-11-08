@@ -15,8 +15,8 @@ def app():
 
 
 def chart(xs = (1.0, 2.0, 3.0), ys = (10.0, 20.0, 30.0)):
-    from candycrunch.gui import ChartView
-    view = ChartView()
+    from candycrunch.gui import ChartView, PALETTE
+    view = ChartView(palette = PALETTE)
     view.resize(600, 300)
     view.canvas.resize(600, 300)
     ax = view.new_figure().add_axes([0.1, 0.2, 0.8, 0.7])
@@ -57,7 +57,7 @@ def test_canvas_shows_the_figure_at_its_size_and_ratio(app):
 
 
 def test_painter_draws_what_the_rasterizer_draws(app):
-    from candycrunch.gui import paint_page
+    from viscose.qt import paint_page
     from candycrunch.utils import PALETTE, vc
     # Lines, dashes, sticks, bands, transparent points with edges, markers, text with subscripts, a gradient color bar, a legend, and an image with alpha
     figure = vc.Figure(6, 4, PALETTE)
@@ -90,7 +90,7 @@ def test_painter_draws_what_the_rasterizer_draws(app):
 
 
 def test_painter_redraws_after_a_change_and_stays_on_the_page_size(app):
-    from candycrunch.gui import paint_page
+    from viscose.qt import paint_page
     view, ax = chart()
     before = paint_page(view.figure, 100)
     assert (before.width(), before.height()) == (600, 300)
