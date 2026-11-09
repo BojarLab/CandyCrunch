@@ -3597,7 +3597,7 @@ class CompareTab(QWidget):
             text = (f'{sizes}: {"linear-model" if covariates else test} t-test of each {"motif" if self.level.currentData() else "glycan"} (variance-moderated), with Benjamini-Hochberg correction; '
                     f'fold changes are {html.escape(list(members)[1])} over {html.escape(list(members)[0])}.{adjusted}')
         else:
-            text = (f"{sizes}: {'ANCOVA' if covariates else 'one-way ANOVA'} of each {"motif" if self.level.currentData() else "glycan"} (variance-moderated), with Benjamini-Hochberg correction and "
+            text = (f"{sizes}: {'ANCOVA' if covariates else 'one-way ANOVA'} of each {'motif' if self.level.currentData() else 'glycan'} (variance-moderated), with Benjamini-Hochberg correction and "
                     f"Tukey's post-hoc tests." + (' Pairs only work for two groups: clear them.' if pairs else adjusted))
         self.plan.setText(text)
         self.go.setEnabled(self.busy is None and ready)
