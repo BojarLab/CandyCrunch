@@ -330,7 +330,7 @@ def read_mzxml(filepath, centroid_levels = ()):
             scan['retentionTime'] = float(scan['retentionTime'])
         else:
             # MALDI spectra exported to mzXML have none; as for MGF spectra without RTINSECONDS
-            raise ValueError(f"{filepath} has no retentionTime for scan {scan.get('num')} (e.g., MALDI spectra); CandyCrunch needs retention times")
+            raise ValueError(f"{os.path.basename(filepath)} has no retentionTime for scan {scan.get('num')} (e.g., MALDI spectra); CandyCrunch needs retention times")
         scan['precursorMz'] = []
         for p in el.findall(f'{ns}precursorMz'):
             prec = dict(p.attrib)
@@ -459,7 +459,10 @@ def read_mgf(filepath):
                 if 'rtinseconds' in params:
                     # A retention time, or ranges and lists of them (e.g., 600.5-612.5): the middle of their span
                     rts = [float(v) for v in re.findall(r'\d*\.?\d+(?:[eE][-+]?\d+)?', params['rtinseconds'])]
-                    params['rtinseconds'] = (min(rts) + max(rts)) / 2
+                    if rts:
+                        params['rtinseconds'] = (min(rts) + max(rts)) / 2
+                    else:
+                        del params['rtinseconds']
                 yield {'params': params, 'm/z array': np.array(mzs), 'intensity array': np.array(ints)}
                 params = None
             elif not sline or sline[0] in '#;!/':
@@ -516,7 +519,7 @@ def read_raw_scan_table(filepath):
                 break
         else:
             raise ValueError(incomplete if any(int.from_bytes(addrs[a:a + width], 'little') >= file_size for a in range(0, len(addrs), stride)) else
-                             f"{filepath} holds no scan events (e.g. SRM data of a triple quadrupole), which CandyCrunch cannot use.")
+                             f"{filepath} holds no scan events (e.g., SRM data of a triple quadrupole), which CandyCrunch cannot use.")
         first, last, _, n_errors = struct.unpack_from('<4I', run_header, 8)
         if wide:
             index_addr, data_addr, _, error_addr, _, trailer_addr, params_addr = struct.unpack_from('<7Q', run_header, 7408)
@@ -765,7 +768,7 @@ def read_compound_file(filepath):
     with open(filepath, 'rb') as f:
         data = f.read()
     if data[:8] != b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
-        raise ValueError(f"{os.path.basename(filepath)} is no OLE compound file (a .wiff is one)")
+        raise ValueError(f"{os.path.basename(filepath)} is not an OLE compound file, as a .wiff is")
     sector, mini = 1 << struct.unpack_from('<H', data, 30)[0], 1 << struct.unpack_from('<H', data, 32)[0]
     n_fat, first_dir, cutoff, first_minifat, n_minifat, difat_sector, n_difat = struct.unpack_from('<2I4x5I', data, 44)
     # The sectors of the allocation table: 109 listed in the header, the rest in a chain of DIFAT sectors whose last entry points to the next one
@@ -845,7 +848,7 @@ def read_wiff(filepath):
     # A stream with more slots than the index has dependent scans has another layout
     if (n_exp < 2 or sorted(headers) != list(range(n_exp)) or len(dde) < 32 or (len(dde) - 32) % 32 or (len(sample['Idx']) - 32) % WIFF_SCAN.itemsize or
             n_slots > rows - -(-rows // n_exp)):
-        raise ValueError(f"{name} has no information-dependent MS/MS scans CandyCrunch can read (TOF MS only, SWATH or an unknown layout); CandyCrunch needs "
+        raise ValueError(f"{name} has no information-dependent MS/MS scans CandyCrunch can read (TOF MS only, SWATH, or an unknown layout); CandyCrunch needs "
                          f"data-dependent MS2 spectra.")
     slots = np.zeros((-(-rows // n_exp), n_exp - 1, 4))
     slots.reshape(-1, 4)[:n_slots] = np.frombuffer(dde, '<f8', n_slots * 4, 32).reshape(-1, 4)
@@ -1119,7 +1122,7 @@ def read_waters(folder, peaks = True):
     # File names differ in case between MassLynx versions (_FUNC001.DAT, _func001.cdt, _inlet.inf)
     files = {x.lower(): os.path.join(folder, x) for x in os.listdir(folder)}
     if '_functns.inf' not in files:
-        raise ValueError(f"{name} is no Waters MassLynx .raw folder (no _FUNCTNS.INF).")
+        raise ValueError(f"{name} is not a Waters MassLynx .raw folder (no _FUNCTNS.INF).")
     with open(files['_functns.inf'], 'rb') as f:
         functions = f.read()
     # Uncalibrated scans (continuum data) take the header's calibration of their function, a polynomial in sqrt(m/z) ('T1') whose square is the m/z

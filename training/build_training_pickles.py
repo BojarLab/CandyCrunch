@@ -1,5 +1,5 @@
 """
-Helper script to convert the output of training/cc_training_data.py (train.pkl: labelled model inputs with their candidate
+Helper script to convert the output of training/cc_training_data.py (train.pkl: labeled model inputs with their candidate
 sets; pretrain/<project>.pkl: unlabelled ones) into CandyCrunch-ready training pickles: X/y tuples for training_script.py,
 per-sample candidate masks and the pretraining inputs.  Adjust the paths in the configuration block before running.
 """
@@ -84,7 +84,7 @@ train = train[~train["GlycoPost_ID"].isin(exclude_projects)]
 structures = set(train["glycan"]).union(*train["glycan_candidates"])
 readable = {g for g in structures if _readable(g)}
 print(f"Labelled inputs: {len(train)}, structures: {len(structures)}, unreadable: {len(structures) - len(readable)}")
-# A label outside its candidate set (narrowed after labelling) goes in front of it in place of the candidates it only refines
+# A label outside its candidate set (narrowed after labeling) goes in front of it in place of the candidates it only refines
 train = train.assign(glycan_candidates=[c if g in c else [g] + [x for x in c if not compare_glycans(g, x)] for g, c in zip(train["glycan"], train["glycan_candidates"])])
 # Unreadable structures leave the candidate sets: an input whose set is then empty goes, one whose nearest-RT label went takes the next of its set
 train = train.assign(glycan_candidates=[[g for g in c if g in readable] for c in train["glycan_candidates"]])

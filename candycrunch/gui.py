@@ -32,7 +32,7 @@ try:
     from PySide6.QtCore import Qt, QObject, Signal, QTimer, QSettings, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QRectF, QSize, QUrl, QStringListModel, \
         QStandardPaths, QEvent
     from PySide6.QtGui import QTextOption, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, \
-        QBrush, QShortcut, QFontDatabase, QCursor
+        QShortcut, QFontDatabase, QCursor
     from PySide6.QtWidgets import (QApplication, QMainWindow, QDialog, QDialogButtonBox, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QLabel, QPushButton,
                                    QToolButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QPlainTextEdit, QTextBrowser, QListWidget,
                                    QListWidgetItem, QTreeWidget, QTreeWidgetItem, QTableView, QAbstractItemView, QSplitter, QStackedWidget, QTabWidget, QScrollArea,
@@ -323,7 +323,7 @@ def _worker_main(jobs, messages, warm_up = False):
         if job is None:
             return
         experiments, weights = job
-        start, results = time.time(), []
+        results = []
         try:
             # Experiments one after the other, each with its own settings; only the runs of one experiment are harmonized into a feature table
             for name, files, settings in experiments:
@@ -340,7 +340,7 @@ def _worker_main(jobs, messages, warm_up = False):
                 else:
                     features, tables = cp.wrap_inference_batch(files, spectra = True, **kwargs, **{k: settings[k] for k in BATCH_KEYS})
                 results.append({'name': name, 'files': files, 'settings': settings, 'tables': tables, 'features': features})
-            messages.put(('result', {'experiments': results, 'elapsed': time.time() - start, 'finished': time.strftime('%Y-%m-%d %H:%M')}))
+            messages.put(('result', {'experiments': results, 'finished': time.strftime('%Y-%m-%d %H:%M')}))
         except Exception as error:
             messages.put(('error', (traceback.format_exc(), _exception_values(error))))
 
@@ -642,7 +642,7 @@ class InferenceRunner(QObject):
                 except OSError:
                     dump = ''
                 self.report = {'files': {'worker_crash.txt': f'Exit code {self.process.exitcode}\n{dump}'}}
-                self.failed.emit('The CandyCrunch worker stopped unexpectedly, most likely because it ran out of memory.')
+                self.failed.emit('The prediction process stopped unexpectedly, most likely because it ran out of memory. Close other programs or lower Parallel processes, then run again.')
             self.forget()
             self.start()
 
@@ -803,7 +803,7 @@ class Annotator(QObject):
                         # Isotope peaks stay unlabeled, as the pipeline scores deisotoped spectra: offered to CandyCrumbs, the M+1 and M+2 of carbon-rich
                         # (permethylated) fragments took cross-ring or three-cleavage labels. A pattern whose apex is more than twice its first peak keeps both: the
                         # first is a noise peak below a fragment as often as the monoisotopic peak of a heavy fragment, whose M+1 is often the most intense one
-                        # (and more so when the isolation window centred the precursor's M+1)
+                        # (and more so when the isolation window centered the precursor's M+1)
                         peaks = dict(zip(request['mzs'], request['intensities']))
                         # (glycopeptides with bounded isotope ratios, as the glycopeptide functions score them)
                         glycopeptide = bool(resolve_spectrum_input(request['structure'])[0])
@@ -1112,7 +1112,7 @@ class StructureDelegate(QStyledItemDelegate):
 
 
 class BarDelegate(QStyledItemDelegate):
-    """Abundance as a bar behind the number; hatched where the abundance only comes from MS1 gap filling"""
+    """Abundance as a bar behind the number; pale where the abundance only comes from MS1 gap filling"""
 
     def paint(self, painter, option, index):
         bar = index.data(TableModel.BAR_ROLE)
@@ -1120,7 +1120,7 @@ class BarDelegate(QStyledItemDelegate):
             rect = option.rect.adjusted(3, 6, -3, -6)
             painter.save()
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor('#cbb2e0'), Qt.BDiagPattern) if bar[1] else QColor(LILAC_LIGHT))
+            painter.setBrush(QColor('#f1e9f7' if bar[1] else LILAC_LIGHT))
             painter.drawRoundedRect(QRectF(rect.x(), rect.y(), max(2.0, rect.width() * min(bar[0], 1.0)), rect.height()), 2, 2)
             painter.restore()
         super().paint(painter, option, index)
@@ -1295,6 +1295,8 @@ class SpectrumPanel(QWidget):
         self.stack.setCurrentWidget(self.message)
         self.summary.setText('')
         self.fragments.setHtml(f'<p style="color:{MUTED}">{text}</p>')
+        if self.toolbar is not None:
+            self.toolbar.hide()
 
     def store(self, key, figure, hit_dict, support):
         """Keeps the last 12 spectra drawn (current, earlier, or ahead), with their canvas and toolbar once shown, so returning to one or moving on to a
@@ -1316,7 +1318,9 @@ class SpectrumPanel(QWidget):
             self.drawn = None
             self.save.setEnabled(False)
             self.fragments.setHtml(f'<p style="color:{MUTED}">CandyCrumbs could not annotate this spectrum with {self.request["structure"]}</p>')
-            self.message.setText(f'CandyCrumbs could not annotate this spectrum with {self.request["structure"]}.\n\n{error}')
+            self.message.setText(f'CandyCrumbs could not annotate this spectrum with {self.request["structure"]}. Check its notation: IUPAC-condensed, a composition such as Hex3HexNAc2, or a glycopeptide.\n\n{error}')
+            if self.toolbar is not None:
+                self.toolbar.hide()
             self.stack.setCurrentWidget(self.message)
             self.summary.setText('')
             return
@@ -1363,9 +1367,10 @@ class SpectrumPanel(QWidget):
         total, top = sum(peaks.values()) or 1, max(peaks.values()) or 1
         hits = {mz: hit for mz, hit in hit_dict.items() if hit}
         self.summary.setText(f'{len(hits)} of {len(peaks)} peaks annotated, {sum(peaks.get(mz, 0) for mz in hits) / total:.0%} of the ion current' + (
-            f'; \u25b2 marks the {len(self.request["ms3"])} peak(s) with MS3 spectra, click one to annotate them' if self.request['ms3'] else ''))
+            f'; \u25b2 marks the {len(self.request["ms3"])} peak{"s" if len(self.request["ms3"]) != 1 else ""} with MS3 spectra, click one to annotate them' if self.request['ms3'] else ''))
         if self.request['kwargs'].get('ms3_precursor') is not None and not hits:
             self.summary.setText(f'm/z {self.request["kwargs"]["ms3_precursor"]:.2f} is no fragment of {self.request["structure"]}, so none of its MS3 peaks can be annotated')
+        self.summary.setToolTip(self.summary.text())
         # The row may be too narrow for all of it next to the toolbar
         self.summary.setToolTip(self.summary.text())
         from candycrunch.analysis import domon_costello_to_html, PROTON_MASS
@@ -1387,8 +1392,8 @@ class SpectrumPanel(QWidget):
                 theo = (theo + np.sign(z) * (abs(z) - 1) * PROTON_MASS) / abs(z)
                 flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
                 first = f'<td>{mz:.4f}</td><td align="right">{peaks.get(mz, 0) / top * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
-                rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{theo - mz:+.3f}</td><td align="right">{(theo - mz) / theo * 1e6:+.1f}</td><td align="right">{z}</td></tr>')
-                tips[mz] = tips.get(mz, f'Observed m/z <b>{mz:.4f}</b>') + f'<br>{domon_costello_to_html(flat)}: theoretical m/z <b>{theo:.4f}</b> (error {theo - mz:+.4f} Da' + (f', z = {z}' if abs(z) > 1 else '') + ')'
+                rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{mz - theo:+.3f}</td><td align="right">{(mz - theo) / theo * 1e6:+.1f}</td><td align="right">{z}</td></tr>')
+                tips[mz] = tips.get(mz, f'Observed m/z <b>{mz:.4f}</b>') + f'<br>{domon_costello_to_html(flat)}: theoretical m/z <b>{theo:.4f}</b> (error {mz - theo:+.4f} Da' + (f', z = {z}' if abs(z) > 1 else '') + ')'
         self.fragment_html = (f'<table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Observed m/z</th>'
                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
                               f'<th align="right">Error (ppm)</th><th align="right">z</th></tr>{"".join(rows)}</table>')
@@ -1462,7 +1467,7 @@ class SpectrumPanel(QWidget):
         tested = [e for e in support['residues'] if e['support'] or e['open']]
         partly = sum(bool(e['support'] and e['open']) for e in tested)
         read, linkage = _neu5ac_readings(support, self.request['ion_trap'])
-        self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) and not e["open"] for e in tested)} of {len(tested)} residues placed by diagnostic fragments' + (f', {partly} narrowed down' if partly else '') +
+        self.summary.setText(self.summary.text() + f'; {sum(bool(e["support"]) and not e["open"] for e in tested)} of {len(tested)} residue{"s" if len(tested) != 1 else ""} placed by diagnostic fragments' + (f', {partly} narrowed down' if partly else '') +
                              ''.join(f'; Neu5Ac linkage reads {v[2]}' + ('' if v[3] else ', not as shown') for v in read.values()))
         self.summary.setToolTip(self.summary.text())
         self.hover_targets += getattr(self.canvas.figure, 'support_markers', [])
@@ -1557,7 +1562,7 @@ class QuantPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.records, self.selector = [], None
+        self.records = []
         controls = QHBoxLayout()
         controls.setContentsMargins(6, 4, 6, 0)
         self.run, self.ion = QComboBox(), QComboBox()
@@ -1601,7 +1606,7 @@ class QuantPanel(QWidget):
         self.message.setText(text)
         self.stack.setCurrentWidget(self.message)
 
-    def show(self, records, abundance, keep = 0):
+    def show(self, records, abundance, keep = 0, sign = 1):
         if not isinstance(records, list):
             self.show_message('These results were made by an earlier CandyCrunch, which kept no record of how it integrated the peaks; predict the run again to see it')
             return
@@ -1609,11 +1614,11 @@ class QuantPanel(QWidget):
             self.show_message('Not integrated from survey scans: this run has none (e.g., an .xlsx or .mgf file), so abundances are the precursor intensities of the '
                               'MS2 spectra')
             return
-        self.records = records
+        self.records, self.sign = records, sign
         self.ion.blockSignals(True)
         self.ion.clear()
         for d in records:
-            self.ion.addItem(f'm/z {d["mz"]:.4f}, z = {d["charge"]}, {d["rt"]:.2f} min' + (' (edited)' if 'auto' in d else ''))
+            self.ion.addItem(f'm/z {d["mz"]:.4f}, z = {d["charge"] * sign}, {d["rt"]:.2f} min' + (' (edited)' if 'auto' in d else ''))
         self.ion.setCurrentIndex(keep if 0 <= keep < len(records) else 0)
         self.ion.blockSignals(False)
         self.ion.setVisible(len(records) > 1)
@@ -1625,8 +1630,8 @@ class QuantPanel(QWidget):
         for d, part in zip(records, parts):
             times = d['times']
             span = f'{times[d["left"]]:.2f}-{times[d["right"]]:.2f} min' if d['left'] >= 0 else 'not integrated (too few survey scans)'
-            added = ', '.join(f'{o.get("ion") or "z = " + str(o["charge"])}: {o["area"]:.3g}' for o in d['others'] if o['added']) or 'none'
-            rows.append(f'<tr><td {cell}>m/z {d["mz"]:.4f}, z = {d["charge"]}</td><td {cell}>{span}{" (edited)" if "auto" in d else ""}</td><td {cell}>{d["area"]:.3g}</td>'
+            added = ', '.join(f'{o.get("ion") or "z = " + str(o["charge"] * sign)}: {o["area"]:.3g}' for o in d['others'] if o['added']) or 'none'
+            rows.append(f'<tr><td {cell}>m/z {d["mz"]:.4f}, z = {d["charge"] * sign}</td><td {cell}>{span}{" (edited)" if "auto" in d else ""}</td><td {cell}>{d["area"]:.3g}</td>'
                         f'<td style="padding-right:12px">{added}</td><td {cell}>{d["scale"]:.3f}</td><td {cell}>{part / (sum(parts) or 1):.0%}</td></tr>')
         self.summary.setText((f'Abundance {abundance:.2f}% of the run, from ' if isinstance(abundance, float) and not np.isnan(abundance) else 'From ') +
                              f'{"these integrations" if len(records) > 1 else "this integration"}; drag across the chromatogram to integrate another range'
@@ -1651,10 +1656,10 @@ class QuantPanel(QWidget):
         if 'auto' in d and d['auto'][0] >= 0:
             ax.axvline(times[d['auto'][0]], color = MUTED, dash = (0.8, 1.3), label = 'CandyCrunch\'s range')
             ax.axvline(times[d['auto'][1]], color = MUTED, dash = (0.8, 1.3))
-        ax.plot(times, trace, color = INK, lw = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"]}')
+        ax.plot(times, trace, color = INK, lw = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"] * self.sign}')
         for o in d['others']:
             ax.plot(times, o['trace'], color = LILAC if o['added'] else '#b8b0c0', dash = None if o['added'] else (3.0, 1.3), lw = 0.8,
-                    label = f'{o.get("ion") or "z = " + str(o["charge"])} (m/z {o["mz"]:.2f}): ' + ('added' if o['added'] else 'not added') + (f', r {o["r"]:.2f}' if o['r'] is not None else ', flat'))
+                    label = f'{o.get("ion") or "z = " + str(o["charge"] * self.sign)} (m/z {o["mz"]:.2f}): ' + ('added' if o['added'] else 'not added') + (f', r {o["r"]:.2f}' if o['r'] is not None else ', flat'))
         ax.axvline(d['rt'], color = CANDY, dash = (0.8, 1.3), label = 'Peak RT')
         ax.set_xlim(times[0], times[-1]) if len(times) > 1 else None
         ax.set_xlabel('Retention time (min)')
@@ -1722,11 +1727,11 @@ class SettingsPanel(QScrollArea):
         # As high as its runs, from 110 to 240 px: at its default height the empty list pushed Advanced settings out of view in a 720 px high window
         self.files.setFixedHeight(110)
         self.files.setToolTip('Runs of one experiment are predicted together and harmonized into one feature table; experiments are predicted and reported '
-                              'separately, each with its own settings. Double-click an experiment to rename it, right-click runs to move them.')
+                              'separately, each with its own settings. Double-click an experiment to rename it, right-click runs to move them')
         layout.addWidget(self.files)
         buttons = QGridLayout()
         self.add_files, self.add_folder, self.experiment_button, self.remove = QPushButton('Add files…'), QPushButton('Add folder…'), QPushButton('New experiment'), QPushButton('Remove')
-        self.experiment_button.setToolTip('Moves the selected runs into a new experiment with its own settings, for samples that must not be compared with the others')
+        self.experiment_button.setToolTip('Starts a new experiment with its own settings and moves the selected runs into it, for samples that must not be compared with the others')
         for n, button in enumerate((self.add_files, self.add_folder, self.experiment_button, self.remove)):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
@@ -1743,7 +1748,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['glycan_class'].setToolTip('Glycan class of the samples. N- and O-glycans measured in one run: candidate compositions and structures come from '
                                                'both classes, and only structures of other classes need the cross-class model probability')
         self.mode = _combo([('Negative', 'negative'), ('Positive', 'positive')])
-        self.mode.setToolTip('Overridden by the polarity stored in .raw/mzML/mzXML files and in .xlsx files made by extract_spectra')
+        self.mode.setToolTip('Overridden by the polarity stored in the file (.raw, mzML, mzXML, other vendor formats, .cc or .xlsx made by extract_spectra)')
         self.charge = _spin(1, 8, 1)
         self.charge.setToolTip('Highest absolute precursor charge considered for composition matching')
         self.inputs['modification'] = _combo(REDUCING_ENDS)
@@ -1759,21 +1764,17 @@ class SettingsPanel(QScrollArea):
             box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
-        self.inputs['trap'].setToolTip('The analyzer that records the fragment spectra (MS2), e.g., Linear ion trap for orbitrap MS1 with ion-trap MS2. The survey scan (MS1) analyzer is no setting, it is '
+        self.inputs['trap'].setToolTip('The analyzer that records the fragment spectra (MS2), e.g., Linear ion trap for orbitrap MS1 with ion-trap MS2. The survey scan (MS1) analyzer is not a setting; it is '
                                        'read from the file. Overridden by the instrument stored in the file (.raw, mzML, mzXML, other vendor formats, .xlsx made by extract_spectra)')
         # Imported models are copies in the app's data folder, so they stay available wherever their file was; each experiment keeps its model
         self.model_dir = os.path.join(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation), 'models')
-        self.model = _combo([('CandyCrunch (built-in)', None)] + [(os.path.splitext(os.path.basename(p))[0], p) for p in
+        self.model = _combo([('Built-in', None)] + [(os.path.splitext(os.path.basename(p))[0], p) for p in
                                                                    sorted(glob.glob(os.path.join(self.model_dir, '*.pt')), key = str.lower)])
         self.model.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.model.setToolTip('Model that predicts the structures. Import… adds a CandyCrunch model file (.pt): weights for the built-in vocabulary, or '
                               'weights saved with their own vocabulary ({"state_dict": ..., "glycans": [...]})')
         self.import_model_button = QPushButton('Import…')
         self.import_model_button.setToolTip('Adds a CandyCrunch model file (.pt) to the models to choose from')
-        model_row = QHBoxLayout()
-        model_row.setContentsMargins(0, 0, 0, 0)
-        model_row.addWidget(self.model, 1)
-        model_row.addWidget(self.import_model_button)
         form.addRow('Glycans', self.inputs['glycan_class'])
         form.addRow('Ion mode', self.mode)
         form.addRow('Max. charge', self.charge)
@@ -1805,7 +1806,6 @@ class SettingsPanel(QScrollArea):
         self.inputs['n_jobs'].setToolTip('Runs processed in parallel, and processes for fragment scoring and supporting peaks within a run; each needs its own memory')
         form.addRow('RT tolerance', self.inputs['intra_cat_thresh'])
         form.addRow('Isomers per composition', self.inputs['top_n_isomers'])
-        form.addRow('Parallel processes', self.inputs['n_jobs'])
         batch_layout.addLayout(form)
         layout.addWidget(self.batch)
         self.advanced_toggle = QToolButton()
@@ -1853,7 +1853,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['taxonomy_level'] = QComboBox()
         self.inputs['taxonomy_level'].addItems(TAXONOMY_LEVELS)
         self.inputs['taxonomy_filter'] = QLineEdit()
-        self.inputs['taxonomy_filter'].setToolTip('Database searches only use glycans of this taxon')
+        self.inputs['taxonomy_filter'].setToolTip('Only glycans of this taxon supply candidate compositions and database structures')
         self.taxa = QCompleter([])
         self.taxa.setCaseSensitivity(Qt.CaseInsensitive)
         self.taxa.setFilterMode(Qt.MatchContains)
@@ -1867,6 +1867,7 @@ class SettingsPanel(QScrollArea):
         form.addRow('Fragment score above', self.inputs['crumbs_thresh'])
         form.addRow('Cross-class model probability', self.inputs['extra_thresh'])
         form.addRow('Top fragments', self.inputs['frag_num'])
+        form.addRow('Parallel processes', self.inputs['n_jobs'])
         form.addRow(self.inputs['supplement'])
         form.addRow(self.inputs['experimental'])
         form.addRow(self.inputs['get_missing'])
@@ -1879,7 +1880,8 @@ class SettingsPanel(QScrollArea):
             grid.addWidget(self.filter_boxes[name], n // 3, n % 3)
         form.addRow(_label('Ignore compositions containing', 'hint'))
         form.addRow(grid)
-        form.addRow('Model', model_row)
+        form.addRow('Model', self.model)
+        form.addRow('', self.import_model_button)
         self.advanced.setVisible(False)
         layout.addWidget(self.advanced)
         layout.addStretch(1)
@@ -1888,7 +1890,6 @@ class SettingsPanel(QScrollArea):
         self.advanced_toggle.toggled.connect(lambda on: (self.advanced.setVisible(on), self.advanced_toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow),
                                                          on and QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.advanced_toggle.y() - 8))))
         self.inputs['modification'].currentIndexChanged.connect(lambda: self.sample_form.setRowVisible(self.inputs['mass_tag'], self.inputs['modification'].currentData() == 'custom'))
-        self.inputs['experimental'].toggled.connect(lambda on: (self.inputs['taxonomy_level'].setEnabled(on), self.inputs['taxonomy_filter'].setEnabled(on)))
         self.reset.clicked.connect(lambda: self.set_values(DEFAULTS))
         self.mode.currentIndexChanged.connect(self.fill_main_adducts)
         self.adducts.currentIndexChanged.connect(lambda: self.advanced_toggle.setText(f'Advanced settings ({self.adducts.currentData()})' if self.adducts.currentData() else 'Advanced settings'))
@@ -1971,6 +1972,8 @@ class SettingsPanel(QScrollArea):
             return
         menu = QMenu(self)
         for i in range(self.files.topLevelItemCount()):
+            if all(run.parent() is self.files.topLevelItem(i) for run in runs):
+                continue
             menu.addAction(f'Move to {self.files.topLevelItem(i).text(0)}',
                            lambda experiment = self.files.topLevelItem(i): self.move_runs(runs, experiment))
         menu.addAction('Move to a new experiment',
@@ -2001,6 +2004,9 @@ class SettingsPanel(QScrollArea):
         for path in map(os.path.normpath, paths):
             # A .d or Waters .raw folder is one run; any other folder adds its runs
             found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith(('.d', '.raw')) else [path]
+            # A run's raw file and the .cc made from it are one run, read from its .cc
+            extracted = {os.path.splitext(f)[0].lower() for f in found if f.lower().endswith('.cc')}
+            found = [f for f in found if f.lower().endswith('.cc') or os.path.splitext(f)[0].lower() not in extracted]
             for file in found:
                 if file.lower().endswith(SPECTRA_SUFFIXES + ('.xlsx',)) and os.path.abspath(file) not in existing:
                     existing.add(os.path.abspath(file))
@@ -2096,15 +2102,19 @@ class SettingsPanel(QScrollArea):
         self.import_model_button.setEnabled(True)
         self.import_model_button.setText('Import…')
         if error:
-            QMessageBox.warning(self, 'CandyCrunch', f'{os.path.basename(path)} cannot be used: {error}')
+            QMessageBox.warning(self, 'CandyCrunch', f'This model cannot be used: {error}')
             return
-        os.makedirs(self.model_dir, exist_ok = True)
         stem, n = os.path.splitext(os.path.basename(path))[0], 1
         target = os.path.join(self.model_dir, f'{stem}.pt')
         while os.path.exists(target):
             n += 1
             target = os.path.join(self.model_dir, f'{stem}_{n}.pt')
-        shutil.copyfile(path, target)
+        try:
+            os.makedirs(self.model_dir, exist_ok = True)
+            shutil.copyfile(path, target)
+        except OSError as error:
+            QMessageBox.warning(self, 'CandyCrunch', f'Could not copy the model into {self.model_dir}:\n{error}')
+            return
         self.model.addItem(os.path.splitext(os.path.basename(target))[0], target)
         self.model.setItemData(self.model.count() - 1, f'{structures} structures; {target}', Qt.ToolTipRole)
         _set_combo(self.model, target)
@@ -2330,10 +2340,12 @@ class ResultsView(QWidget):
         # It may shrink below its longest run name (the list shows them in full): 50-character names made the window at least 1430 px wide
         self.spectrum_file.setMinimumWidth(80)
         self.spectrum.controls.insertWidget(1, self.spectrum_file)
+        QWidget.setTabOrder(self.spectrum_file, self.spectrum.tolerance)
         # MS3 spectra of the selected peak, pooled per isolated MS2 fragment, annotated as fragments of that fragment
         self.ms3_panel, self.ms3_fragment, self.ms3_tab = SpectrumPanel(), QComboBox(), QSplitter(Qt.Vertical)
         self.ms3_fragment.setToolTip('MS2 fragment whose MS3 spectra are shown (pooled)')
         self.ms3_panel.controls.insertWidget(1, self.ms3_fragment)
+        QWidget.setTabOrder(self.ms3_fragment, self.ms3_panel.tolerance)
         self.ms3_tab.addWidget(self.ms3_panel)
         self.ms3_tab.addWidget(self.ms3_panel.fragments)
         self.ms3_tab.setSizes([320, 120])
@@ -2487,7 +2499,7 @@ class ResultsView(QWidget):
             columns.append(_number_column('MS2 runs', df['n_files_ms2'], 0, 'Runs in which this feature has MS2 evidence'))
             for run in self.payload['tables']:
                 if run in df.columns:
-                    column = _number_column(run, df[run], 2, f'Abundance in {run} (%); hatched where MS1 signal only')
+                    column = _number_column(run, df[run], 2, f'Abundance in {run} (%); pale where MS1 signal only')
                     evidence = list(df.get(f'evidence_{run}', [None] * len(df)))
                     top = max([v for v in column['raw'] if v is not None] or [1]) or 1
                     column.update(kind = 'bar', bar = [None if v is None else (v / top, e == 'ms1_only') for v, e in zip(column['raw'], evidence)],
@@ -2545,7 +2557,7 @@ class ResultsView(QWidget):
         shown, total = self.proxy.rowCount(), self.model.rowCount()
         excluded = sum(e for e, _ in self.model.marks)
         # Excluded peaks are left out of every export, so how many there are stays in view
-        self.counter.setText((f'{total} glycan peaks' if shown == total else f'{shown} of {total} glycan peaks') + (f', {excluded} excluded' if excluded else ''))
+        self.counter.setText((f'{total} glycan peak{"s" if total != 1 else ""}' if shown == total else f'{shown} of {total} glycan peak{"s" if total != 1 else ""}') + (f', {excluded} excluded' if excluded else ''))
 
     def select_row(self, row):
         if row is None:
@@ -2561,6 +2573,10 @@ class ResultsView(QWidget):
             self.tabs.setTabVisible(self.tabs.indexOf(self.ms3_tab), False)
             # A filter that matches nothing is told apart from a run without glycan peaks
             self.spectrum.show_message('No glycan peaks match the filter' if self.model.rowCount() else 'No glycan peaks to show')
+            self.quant_source = None
+            self.quant.show_message('No glycan peaks match the filter' if self.model.rowCount() else 'No glycan peaks to show')
+            self.map.canvas.rings = []
+            self.map.canvas.update()
             return
         index = self.proxy.mapFromSource(self.model.index(row, 0))
         if not index.isValid():
@@ -2626,7 +2642,7 @@ class ResultsView(QWidget):
         if self.dataset.currentData() == FEATURES:
             facts.append(('MS2 runs', f'{df["n_files_ms2"].iat[row]} of {len(self.payload["tables"])}'))
         else:
-            facts += [('Abundance', f'{_fmt(df["rel_abundance"].iat[row], 2)} %' if 'rel_abundance' in df.columns else ''),
+            facts += [('Abundance', f'{_fmt(df["rel_abundance"].iat[row], 2)}%' if 'rel_abundance' in df.columns else ''),
                       ('Confidence', _fmt(df['confidence'].iat[row], 2) if 'confidence' in df.columns else ''),
                       ('Spectra', str(df['num_spectra'].iat[row])), ('ppm error', _fmt(df['ppm_error'].iat[row], 1) if 'ppm_error' in df.columns else ''),
                       ('Notes', df['notes'].iat[row] if 'notes' in df.columns and isinstance(df['notes'].iat[row], str) else '')]
@@ -2703,6 +2719,11 @@ class ResultsView(QWidget):
             button.setEnabled(self.source is not None)
         self.alternatives.clear()
         if self.source is None:
+            self.ms3_groups = []
+            self.ms3_fragment.clear()
+            if self.tabs.currentWidget() is self.ms3_tab:
+                self.tabs.setCurrentIndex(0)
+            self.tabs.setTabVisible(self.tabs.indexOf(self.ms3_tab), False)
             self.spectrum.show_message('This feature has MS2 evidence in no run, only MS1 signal')
             return
         table = self.payload['tables'][self.source[0]][0]
@@ -2741,7 +2762,7 @@ class ResultsView(QWidget):
             return
         table = self.payload['tables'][source[0]][0]
         self.quant.show(table['xic'].iat[source[1]] if 'xic' in table.columns else None,
-                        float(table['rel_abundance'].iat[source[1]]) if 'rel_abundance' in table.columns else None, keep)
+                        float(table['rel_abundance'].iat[source[1]]) if 'rel_abundance' in table.columns else None, keep, -1 if table['charge'].iat[source[1]] < 0 else 1)
 
     def integrate(self, k, span):
         """Integration k of the peak shown over span (indices into its trace; None: CandyCrunch's own range): the run's abundances stay percentages of its
@@ -2791,7 +2812,7 @@ class ResultsView(QWidget):
         """What a misprediction report sends about the peak shown: its row (for a feature also the feature's, without the other runs' values), its MS2 and
         MS3 spectra, the structure the pipeline gave it and the one shown, and the experiment's settings; not the run's name"""
         table, spectra = self.payload['tables'][self.source[0]]
-        r, run = self.source[1], next((f for f in self.payload['files'] if os.path.splitext(os.path.basename(os.path.normpath(f)))[0] == self.source[0]), None)
+        r, run = self.source[1], self.payload['files'][list(self.payload['tables']).index(self.source[0])]
         report = {'peak': {k: v for k, v in table.iloc[r].items() if k not in ('ms3', 'xic', 'excluded', '_top1')}, 'predicted': table['_top1'].iat[r],
                   'shown': self.alternative or table['top1_pred'].iat[r], 'ms2': spectra[r], 'ms3': table['ms3'].iat[r] if 'ms3' in table.columns else None,
                   'run_format': os.path.splitext(run)[1].lower() if run is not None else None,
@@ -2999,7 +3020,7 @@ class ResultsView(QWidget):
         try:
             structure = canonicalize_iupac(text.strip())
             # Like the pipeline's structures, reduced glycans go without -ol, since the experiment's reducing end already says so
-            structure = structure[:-3] if structure.endswith('-ol') and self.payload['settings'].get('modification') == 'reduced' else structure
+            structure = structure[:-3] if structure.endswith('-ol') and self.payload['settings'].get('modification') in ('reduced', 'reduced_D') else structure
             composition = glycan_to_composition(structure)
         except Exception as error:
             QMessageBox.warning(self, 'Enter structure', f'glycowork cannot read this structure:\n{error}')
@@ -3015,7 +3036,11 @@ class ResultsView(QWidget):
     def toggle_excluded(self):
         if self.row is not None:
             df = self.frame
-            df.loc[df.index[self.row], 'excluded'] = not df['excluded'].iat[self.row]
+            excluded = not df['excluded'].iat[self.row]
+            # A feature's exclusion also goes to the per-run rows it was matched to, as its structure does
+            targets = [(df, self.row)] + ([(self.payload['tables'][run][0], r) for run, r in self.matched_rows(self.row).items()] if self.dataset.currentData() == FEATURES else [])
+            for frame, row in targets:
+                frame.loc[frame.index[row], 'excluded'] = excluded
             self.dirty = True
             self.refresh()
 
@@ -3031,11 +3056,11 @@ class ResultsView(QWidget):
         structure = self.frame['top1_pred'].iat[self.row]
         menu.addAction('Copy structure' if isinstance(structure, str) else 'Copy composition', lambda: QApplication.clipboard().setText(
             structure if isinstance(structure, str) else _composition(self.frame['composition'].iat[self.row])))
-        menu.addAction(('Include again' if self.frame['excluded'].iat[self.row] else 'Exclude from export') + '\t' +
+        menu.addAction(('Include again' if self.frame['excluded'].iat[self.row] else 'Exclude') + '\t' +
                        QKeySequence(QKeySequence.Delete).toString(QKeySequence.NativeText), self.toggle_excluded)
         menu.addAction('Enter structure…', self.enter_structure)
-        menu.addAction('Open in CandyCrumbs', self.send_to_crumbs)
         if self.source is not None:
+            menu.addAction('Open in CandyCrumbs', self.send_to_crumbs)
             menu.addAction('Report misprediction…', self.report_button.click)
         menu.exec(self.table.viewport().mapToGlobal(position))
 
@@ -3053,9 +3078,10 @@ class ResultsView(QWidget):
         structure = self.alternative or table['top1_pred'].iat[r]
         # From the MS3 tab, the MS3 spectra shown go, with the MS2 fragment they were isolated from
         ms3 = self.ms3_groups[self.ms3_fragment.currentIndex()] if self.tabs.currentWidget() is self.ms3_tab and 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups) else None
+        panel = self.ms3_panel if ms3 else self.spectrum
         self.open_in_crumbs.emit({'structure': structure if isinstance(structure, str) else _composition(table['composition'].iat[r]),
                                   'peaks': ms3[1] if ms3 else spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': _row_settings(self.payload['settings'], table, r),
-                                  'ms3_precursor': ms3[0] if ms3 else None})
+                                  'ms3_precursor': ms3[0] if ms3 else None, 'tolerance': (panel.tolerance.value(), panel.unit.currentData())})
 
     def export_frame(self, df):
         """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
@@ -3098,6 +3124,7 @@ class ResultsView(QWidget):
         if not path:
             return
         stem = os.path.splitext(path)[0]
+        self.status.emit('Exporting…')
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             self.write(self.export_frame(self.payload['features']), stem + suffix, suffix)
@@ -3139,7 +3166,7 @@ class CrumbsTab(QWidget):
         form = QFormLayout()
         # Up to 8 as in the Predict tab; glycopeptides often carry 5+ and more
         self.charge = _combo([(f'{z:+d}', z) for z in [*range(-1, -9, -1), *range(1, 9)]])
-        self.modification = _combo(REDUCING_ENDS)
+        self.modification = _combo(REDUCING_ENDS + [('Glycolic acid (on Ser)', 'glycolate'), ('Lactic acid (on Thr)', 'lactate')])
         self.mass_tag = _spin(-1000, 3000, 1, 4, ' Da')
         self.sample_prep = _combo(SAMPLE_PREPS)
         self.sialic = _combo(SIALIC_DERIVATIZATIONS)
@@ -3231,6 +3258,7 @@ class CrumbsTab(QWidget):
         _set_combo(self.sample_prep, settings.get('sample_prep'))
         self.sialic.setCurrentIndex(max(self.sialic.findData(settings.get('sialic_derivatization')), 0) if settings.get('sialic_derivatization') else 0)
         self.ms3_precursor.setValue(request.get('ms3_precursor') or 0)
+        self.spectrum.set_tolerance(*request['tolerance'])
         self.annotate()
 
     def annotate(self):
@@ -3254,6 +3282,17 @@ class CrumbsTab(QWidget):
             kwargs.update(ms3_precursor = self.ms3_precursor.value(), disable_X_cross_rings = True)
         self.spectrum.annotate(self.structure.text().strip(), [p[0] for p in peaks], [p[1] if len(p) > 1 else 100.0 for p in peaks],
                                self.charge.currentData(), _mass_tag(settings), self.sample_prep.currentData(), **kwargs)
+
+
+class _SortItem(QTableWidgetItem):
+    """A table cell shown as text and sorted by its value, where it has one"""
+
+    def __init__(self, text, value = None):
+        super().__init__(text)
+        self.value = value
+
+    def __lt__(self, other):
+        return self.value < other.value if self.value is not None and other.value is not None else super().__lt__(other)
 
 
 class CompareTab(QWidget):
@@ -3326,7 +3365,7 @@ class CompareTab(QWidget):
         self.transform = _combo([('Automatic', None), ('CLR', 'CLR'), ('ALR', 'ALR')])
         self.transform.setToolTip('Log-ratio transform of the relative abundances, which removes their compositional bias: centered (CLR, with a scale model) '
                                   'or additive against the most stable glycan (ALR); automatic is ALR for more than 50 N-glycans, else CLR')
-        self.min_samples = _spin(0, 100, 5, suffix = ' % of runs')
+        self.min_samples = _spin(0, 100, 5, suffix = '% of runs')
         self.min_samples.setValue(10)
         self.min_samples.setToolTip('Glycans found in fewer runs are left out of the test')
         self.impute = QCheckBox('Impute missing values')
@@ -3348,6 +3387,7 @@ class CompareTab(QWidget):
         self.summary.setTextFormat(Qt.RichText)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Filter by glycan, motif, or composition')
+        QShortcut(QKeySequence.Find, self, lambda: (self.search.setFocus(), self.search.selectAll()))
         self.search.setClearButtonEnabled(True)
         self.export = QPushButton('Export')
         self.export.setMenu(QMenu(self))
@@ -3405,6 +3445,7 @@ class CompareTab(QWidget):
         outer.addWidget(splitter)
         self.experiments.currentIndexChanged.connect(self.show_experiment)
         self.runs.itemChanged.connect(self.store_groups)
+        self.level.currentIndexChanged.connect(self.update_plan)
         self.set_group.clicked.connect(lambda: self.set_selected(1))
         self.set_covariate.clicked.connect(lambda: self.set_selected(3))
         self.guess.clicked.connect(self.guess_groups)
@@ -3553,10 +3594,10 @@ class CompareTab(QWidget):
         elif pairs and covariates:
             text = 'Pairs and covariates do not go together (a paired test already compares each subject with itself): clear one of them.'
         elif len(members) == 2:
-            text = (f'{sizes}: {"linear-model" if covariates else test} t-test of each glycan (variance-moderated), with Benjamini-Hochberg correction; '
+            text = (f'{sizes}: {"linear-model" if covariates else test} t-test of each {"motif" if self.level.currentData() else "glycan"} (variance-moderated), with Benjamini-Hochberg correction; '
                     f'fold changes are {html.escape(list(members)[1])} over {html.escape(list(members)[0])}.{adjusted}')
         else:
-            text = (f"{sizes}: {'ANCOVA' if covariates else 'one-way ANOVA'} of each glycan (variance-moderated), with Benjamini-Hochberg correction and "
+            text = (f"{sizes}: {'ANCOVA' if covariates else 'one-way ANOVA'} of each {"motif" if self.level.currentData() else "glycan"} (variance-moderated), with Benjamini-Hochberg correction and "
                     f"Tukey's post-hoc tests." + (' Pairs only work for two groups: clear them.' if pairs else adjusted))
         self.plan.setText(text)
         self.go.setEnabled(self.busy is None and ready)
@@ -3569,7 +3610,7 @@ class CompareTab(QWidget):
         experiment['comparison']['options'] = options = self.options()
         runs = [run for run in self.run_names(experiment) if run in groups]
         columns = [c for c in ('top1_pred', 'composition', 'excluded') if c in experiment['features'].columns] + runs
-        if self.pool is None:
+        if self.pool is None or getattr(self.pool, '_broken', False):
             # One process for every comparison of the session, so glycowork is imported once; the window stays responsive while it runs
             self.pool = ProcessPoolExecutor(1, mp_context = mp.get_context('spawn'))
         from candycrunch.differential import compare_groups
@@ -3594,7 +3635,8 @@ class CompareTab(QWidget):
         experiment['comparison']['result'] = result
         if result['log'].strip():
             self.log.emit(result['log'])
-        self.changed.emit()
+        if any(e is experiment for e in (self.session or {}).get('experiments', [])):
+            self.changed.emit()
         self.update_plan()
         if experiment is self.experiment:
             self.show_result(result)
@@ -3643,8 +3685,9 @@ class CompareTab(QWidget):
         self.absent = ~np.logical_and.reduce([present[result['members'][g]].any(axis = 1).to_numpy() for g in result['groups']])
         absent = (f" {int(self.absent.sum())} {what} missing from every run of a group are tested on their detection (Fisher's exact test)."
                   if self.absent.any() else '')
+        left_out = f' Left out, without glycan signal: {html.escape(", ".join(result["left_out"]))}.' if result.get('left_out') else ''
         self.summary.setText(f'{groups}: {result["test"]}, {result["transform"]}-transformed, alpha = {result["alpha"]:.3f} (adjusted for {sum(map(len, result["members"].values()))} '
-                             f'runs). <b>{significant} of {len(df)} {what}</b> differ significantly.{absent}{stale}')
+                             f'runs). <b>{significant} of {len(df)} {what}</b> differ significantly.{absent}{left_out}{stale}')
         labels = df['Glycan'].tolist()
         columns = [{'title': 'Motif' if result['motifs'] else 'Glycan', 'kind': 'structure', 'raw': labels, 'text': labels, 'image': labels}]
         for g in result['groups']:
@@ -3665,16 +3708,18 @@ class CompareTab(QWidget):
                 texts = ['yes' if s else '' for s in df['significant']]
                 columns.append({'title': 'Significant', 'kind': 'text', 'raw': texts, 'text': texts, 'tip': f'Corrected p-value below alpha = {result["alpha"]:.3f}'})
         self.model.set_table(df, columns)
-        self.table.resizeColumnsToContents()
-        self.table.setColumnWidth(0, 250)
-        titles = [c['title'] for c in columns]
-        self.table.sortByColumn(titles.index('q'), Qt.AscendingOrder)
+        if keep_row is None:
+            self.table.resizeColumnsToContents()
+            self.table.setColumnWidth(0, 250)
+            self.table.sortByColumn([c['title'] for c in columns].index('q'), Qt.AscendingOrder)
+        else:
+            self.table.sortByColumn(self.table.horizontalHeader().sortIndicatorSection(), self.table.horizontalHeader().sortIndicatorOrder())
         self.proxy.set_needle(self.search.text())
         menu.addAction('Results as CSV…', lambda: self.export_results('csv'))
         menu.addAction('Results as Excel…', lambda: self.export_results('xlsx'))
         menu.addAction('Results as Excel with SNFG drawings…', lambda: self.export_results('snfg'))
         menu.addSeparator()
-        menu.addAction('Plot as image…', self.save_plot)
+        menu.addAction('Volcano plot as image…', self.save_plot)
         if two:
             menu.addAction('Volcano plot (glycowork)…', self.save_volcano)
         self.draw_volcano(self.volcano.new_figure())
@@ -3722,12 +3767,12 @@ class CompareTab(QWidget):
         ax = figure.add_axes([0.09, 0.14, 0.86, 0.8] if small else [0.12, 0.12, 0.83, 0.82])
         x, y, colors, two = self.volcano_axes()
         # those tested on detection as triangles pointing to the group they were found in
-        self.volcano_rows = {}
+        rows_at = {}
         for rows, marker in ((~self.absent, 'o'), (self.absent & (x > 0), '>'), (self.absent & (x <= 0), '<')):
             if rows.any():
                 ax.scatter(x[rows], y[rows], s = 34 if marker != 'o' else 28, hue = colors[rows], colors = {c: c for c in set(colors[rows])}, marker = marker if two else 'D' if marker != 'o' else 'o',
                            edge = ('white', 0.5), legend = None)
-                self.volcano_rows[Target(ax, x[rows], y[rows], radius = 4.0)] = np.flatnonzero(rows)
+                rows_at[Target(ax, x[rows], y[rows], radius = 4.0)] = np.flatnonzero(rows)
         if self.absent.any():
             ax.text(0.99, 0.98, f'{"Triangles at the edges" if two else "Diamonds"}: missing from every run of a group, tested on detection', axes_fraction = True,
                     ha = 'right', va = 'top', size = 7, color = MUTED)
@@ -3743,6 +3788,7 @@ class CompareTab(QWidget):
         if small:
             # The selection marker is a ring the canvas paints over the plot, as on the glycan map
             self.volcano_ax = ax
+            self.volcano_rows = rows_at
             self.volcano.canvas.draw_idle()
 
     def add_cartoons(self, ax, x, y, dpi):
@@ -3818,11 +3864,13 @@ class CompareTab(QWidget):
             table = self.result['posthoc'].get(label)
             self.posthoc.setRowCount(0 if table is None else len(table))
             self.posthoc_note.setText(f"Tukey's honestly significant difference tests of {label}, on the transformed abundances" if table is not None else
-                                      "Tukey's tests are run for the glycans the ANOVA finds significant (with at least two runs measured in each group).")
+                                      f"Tukey's tests are run for the {'motifs' if self.result['motifs'] else 'glycans'} the ANOVA finds significant (with at least two runs measured in each group).")
+            self.posthoc.setSortingEnabled(False)
             rows = [] if table is None else table[['group1', 'group2', 'meandiff', 'p-adj', 'lower', 'upper', 'reject']].itertuples(index = False)
             for r, (a, b, difference, p, lower, upper, reject) in enumerate(rows):
-                for c, text in enumerate((str(a), str(b), f'{difference:.2f}', f'{p:.2g}', f'{lower:.2f} to {upper:.2f}', 'yes' if reject else '')):
-                    self.posthoc.setItem(r, c, QTableWidgetItem(text))
+                for c, (text, value) in enumerate(((str(a), None), (str(b), None), (f'{difference:.2f}', difference), (f'{p:.2g}', p), (f'{lower:.2f} to {upper:.2f}', lower), ('yes' if reject else '', None))):
+                    self.posthoc.setItem(r, c, _SortItem(text, value))
+            self.posthoc.setSortingEnabled(True)
             self.posthoc.resizeColumnsToContents()
 
     def export_results(self, kind):
@@ -3866,7 +3914,10 @@ class CompareTab(QWidget):
         if path:
             figure = vc.Figure(self.volcano.figure.width / 72, self.volcano.figure.height / 72, PALETTE)
             self.draw_volcano(figure, small = False)
-            figure.save(path)
+            try:
+                figure.save(path)
+            except Exception as error:
+                QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
 
     def save_volcano(self):
         path, _ = QFileDialog.getSaveFileName(self, 'Save volcano plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.svg'),
@@ -3874,7 +3925,7 @@ class CompareTab(QWidget):
         if not path:
             return
         from candycrunch.differential import save_volcano
-        if self.pool is None:
+        if self.pool is None or getattr(self.pool, '_broken', False):
             self.pool = ProcessPoolExecutor(1, mp_context = mp.get_context('spawn'))
         self.status.emit('Drawing the volcano plot…')
         self.pool.submit(save_volcano, self.result, path).add_done_callback(
@@ -3900,7 +3951,7 @@ class ReportDialog(QDialog):
             self.problem, self.correct = _combo(MISPREDICTIONS), QLineEdit()
             # A structure the user already assigned to this peak is the likely answer
             self.correct.setText(peak['peak'].get('top1_pred') if peak['peak'].get('curation') and isinstance(peak['peak'].get('top1_pred'), str) else '')
-            self.correct.setPlaceholderText('The right structure or composition, if you know it (e.g., Neu5Ac(a2-3)Gal(b1-3)GalNAc or Hex1HexNAc1NeuAc1)')
+            self.correct.setPlaceholderText('The right structure or composition, if you know it (e.g., Neu5Ac(a2-3)Gal(b1-3)GalNAc or Hex1HexNAc1Neu5Ac1)')
             layout.addWidget(self.problem)
             layout.addWidget(self.correct)
             self.include_data = QCheckBox('Include the full peak')
@@ -4064,7 +4115,7 @@ class MainWindow(QMainWindow):
         self.clock.setInterval(1000)
         self.clock.timeout.connect(self.tick)
         file_menu = self.menuBar().addMenu('&File')
-        file_menu.addAction('Add runs…', self.choose_files, QKeySequence.Open)
+        file_menu.addAction('Add files…', self.choose_files, QKeySequence.Open)
         file_menu.addAction('Add folder…', self.choose_folder)
         file_menu.addAction('Add example run', lambda: (self.settings.add_example(), self.tabs.setCurrentWidget(self.split)))
         file_menu.addAction('Import model…', self.settings.import_model)
@@ -4083,7 +4134,7 @@ class MainWindow(QMainWindow):
         for action in (self.save_action, self.save_as_action):
             action.setEnabled(False)
         file_menu.addSeparator()
-        file_menu.addAction('Quit', self.close, QKeySequence.Quit)
+        file_menu.addAction('Quit', self.close, QKeySequence('Ctrl+Q'))
         view_menu = self.menuBar().addMenu('&View')
         view_menu.addAction(self.log_dock.toggleViewAction())
         help_menu = self.menuBar().addMenu('&Help')
@@ -4110,7 +4161,7 @@ class MainWindow(QMainWindow):
         self.run_button.clicked.connect(self.run)
         self.settings.detections_done.connect(self.run_waiting)
         self.cancel_button.clicked.connect(self.cancel)
-        self.runner.ready.connect(lambda: self.runner.busy or self.status_text.setText('Ready'))
+        self.runner.ready.connect(lambda: self.runner.busy or not self.status_text.text().startswith('Loading') or self.status_text.setText('Ready'))
         self.runner.stage.connect(self.show_stage)
         self.runner.progress.connect(self.show_progress)
         self.runner.log.connect(self.append_log)
@@ -4188,7 +4239,7 @@ class MainWindow(QMainWindow):
         # The panes as the user left them: settings and results, table and details, details and spectrum, MS3 spectrum and fragments, CandyCrumbs
         # form and spectrum, comparison table and plots (restoreState only holds the log dock, so every start reset them)
         self.splitters = (self.split, self.results.splitter, self.results.splitter.widget(1), self.results.ms3_tab, self.crumbs.findChild(QSplitter),
-                          self.compare.splitter)
+                          self.compare.splitter, self.compare.findChild(QSplitter))
         if self.store.value('geometry'):
             self.restoreGeometry(self.store.value('geometry'))
             self.restoreState(self.store.value('state'))
@@ -4394,7 +4445,7 @@ class MainWindow(QMainWindow):
             self.emblem.setPixmap(pixmap)
 
     def add_runs(self, paths):
-        """Adds files and folders as runs and says so if none of them was a new run: files CandyCrunch cannot read (e.g., .wiff, .pdf), runs already in the
+        """Adds files and folders as runs and says so if none of them was a new run: files CandyCrunch cannot read (e.g., .pdf), runs already in the
         list, and folders without runs (a folder's .xlsx are not taken, as CandyCrunch writes its results next to the runs as .xlsx) were passed over
         without a word by Add files and Add folder"""
         count = len(self.settings.paths())
@@ -4405,13 +4456,13 @@ class MainWindow(QMainWindow):
 
     def choose_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, 'Add LC-MS/MS runs', self.store.value('folder', os.path.expanduser('~')),
-                                                'Spectra (*.raw *.RAW *.wiff *.mzML *.mzXML *.mzdata *.xml *.mgf *.cc *.xlsx);;All files (*)')
+                                                'Spectra (*.raw *.RAW *.wiff *.mzML *.mzXML *.mzdata *.mzdata.xml *.mgf *.cc *.xlsx);;All files (*)')
         if paths:
             self.store.setValue('folder', os.path.dirname(paths[0]))
             self.add_runs(paths)
 
     def choose_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Add a .d folder (Bruker, Agilent MassHunter) or Waters .raw folder, or every .raw, .wiff, .d, mzML, mzXML, mzData, mgf, and .cc run of a folder', self.store.value('folder', os.path.expanduser('~')))
+        path = QFileDialog.getExistingDirectory(self, 'Add a folder of runs, a .d folder, or a Waters .raw folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
             self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith(('.d', '.raw')) else path)
             self.add_runs([path])
@@ -4432,6 +4483,7 @@ class MainWindow(QMainWindow):
         """Starts the run asked for while a run's settings check was still reading it"""
         if self.run_pending:
             self.run_pending = False
+            self.cancel_button.setEnabled(False)
             self.run_button.setText('Run CandyCrunch')
             self.run_button.setEnabled(True)
             self.run()
@@ -4441,6 +4493,7 @@ class MainWindow(QMainWindow):
         if self.settings.waiting():
             self.run_pending = True
             self.run_button.setEnabled(False)
+            self.cancel_button.setEnabled(True)
             self.run_button.setText('Reading the run settings…')
             return
         # The results shown are replaced once this run is done
@@ -4597,9 +4650,10 @@ class MainWindow(QMainWindow):
                                                              for name in STAGE_WEIGHTS}))
         peaks, runs = sum(len(df) for e in payload['experiments'] for df, _ in e['tables'].values()), sum(len(e['tables']) for e in payload['experiments'])
         anions = sorted({df.attrs['run_anion'] for e in payload['experiments'] for df, _ in e['tables'].values() if df.attrs.get('run_anion')})
-        self.stop(f'Finished in {seconds // 60}:{seconds % 60:02d}: {peaks} glycan peaks in {runs} run{"s" if runs > 1 else ""}{"; " + ", ".join(anions) + " adducts counted" if anions else ""}')
+        self.stop(f'Finished in {seconds // 60}:{seconds % 60:02d}: {peaks} glycan peak{"s" if peaks != 1 else ""} in {runs} run{"s" if runs > 1 else ""}{"; " + ", ".join(anions) + " adducts counted" if anions else ""}')
         self.append_log(self.status_text.text() + '\n')
         if not peaks:
+            QApplication.alert(self)
             QMessageBox.information(self, 'CandyCrunch', 'CandyCrunch found no glycan peaks. Check the glycan class, ion mode, and reducing end, '
                                     'or open the log (View > Log) for details.')
             return
@@ -4617,16 +4671,26 @@ class MainWindow(QMainWindow):
         QApplication.alert(self)
 
     def failed(self, text):
+        QApplication.alert(self)
         self.stop('CandyCrunch stopped with an error; details are in the log')
         self.append_log(text)
         self.log_dock.show()
         report = self.runner.report or {}
+        if report.get('values') and report['values'][-1].get('type') in ('ValueError', 'FileNotFoundError'):
+            QMessageBox.warning(self, 'CandyCrunch', report['values'][-1]['value'])
+            return
         self.report_error(text.strip().splitlines()[-1], report.get('values'), report.get('files'), box = True)
 
     def cancel(self):
+        if self.run_pending:
+            self.run_pending = False
+            self.run_button.setText('Run CandyCrunch')
+            self.run_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
+            return
         self.runner.cancel()
-        self.stop('Run cancelled')
-        self.append_log('Run cancelled\n')
+        self.stop('Run canceled')
+        self.append_log('Run canceled\n')
 
     def save_session(self, choose = False):
         """Saves the results to the file they were opened from or last saved to; asks where for new results, or with choose (Save as…)"""
@@ -4646,6 +4710,8 @@ class MainWindow(QMainWindow):
             os.replace(path + '.part', path)
         except OSError as error:
             # A folder without write access or a full disk is no crash; returning False keeps the window (and the curation) open
+            with contextlib.suppress(OSError):
+                os.remove(path + '.part')
             QMessageBox.critical(self, 'Save results', f'Could not write {path}:\n{error}')
             return False
         self.results.dirty, self.session_path = False, path
@@ -4683,7 +4749,7 @@ class MainWindow(QMainWindow):
         return self.save_session() if answer == QMessageBox.Save else answer == QMessageBox.Discard
 
     def open_session(self, path = None):
-        if self.runner.busy:
+        if self.runner.busy or self.run_pending:
             # Opening would replace the run list while results of the runs it held are still to come
             self.statusBar().showMessage('Wait for the run to finish or cancel it before opening results', 6000)
             return
@@ -4777,6 +4843,8 @@ def main():
                         (QPalette.ButtonText, INK), (QPalette.Button, '#efe8f4'), (QPalette.Highlight, LILAC), (QPalette.HighlightedText, '#ffffff'),
                         (QPalette.ToolTipBase, '#ffffff'), (QPalette.ToolTipText, INK), (QPalette.Link, '#7a3fa8'), (QPalette.PlaceholderText, MUTED)):
         palette.setColor(role, QColor(color))
+    for role in (QPalette.ButtonText, QPalette.WindowText, QPalette.Text):
+        palette.setColor(QPalette.Disabled, role, QColor(MUTED))
     app.setPalette(palette)
     app.setStyleSheet(STYLE)
     app.installEventFilter(_WheelGuard(app))

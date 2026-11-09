@@ -198,7 +198,7 @@ fragmentation_priors = {
     'hydrogen_shift': {1: 0.5, 2: 0.25},
     # an ion without a residue (HSO4-, a label's reporter ion) is specific to its group, so it outranks any single cleavage
     'small_ion': 1.5,
-    # an open-chain ion of a labelled reducing end (CHAIN_IONS) is a cleavage of that residue, as likely as a Y ion
+    # an open-chain ion of a labeled reducing end (CHAIN_IONS) is a cleavage of that residue, as likely as a Y ion
     'chain_ion': 1.0,
     # Alkali-cation-adducted fragments only (Na+/CID; from doi:10.1021/acs.jpca.6c00953): cross-ring dissociation needs reducing-end
     # ring-opening via the free anomeric O1, so it concentrates on the reducing-terminal residue.
@@ -359,7 +359,7 @@ def derivatize_carboxyls(glycan, sialic_derivatization):
     | :-
     | Returns the glycan with every sialic acid written as its product at C1 (Neu5Ac(a2-6) of ethyl esterification as Neu1Et5Ac(a2-6), a lactone as
     | Neu1lactone5Ac) and every uronic acid as the a2-6 product at C6 (GlcA6Et), or the composition with such residues as keys; the product's mass counts
-    | on every fragment that keeps that carbon, the lactone's water loss included (it bridges to the neighbouring residue, which is not modelled)
+    | on every fragment that keeps that carbon, the lactone's water loss included (it bridges to the neighboring residue, which is not modeled)
     """
     products = SIALIC_DERIVATIZATIONS.get(sialic_derivatization) if isinstance(sialic_derivatization, str) else tuple(sialic_derivatization)
     if products is None or len(products) != 2 or not set(products) <= SIALIC_PRODUCTS.keys():
@@ -763,7 +763,7 @@ def extend_subgraph(subgraph, extension, node, k, k_subgraphs, neighbor_dict, nx
     | Arguments:
     | :-
     | subgraph (set): nodes making up a connected induced subgraph
-    | extension (set): nodes neighbouring the subgraph with a higher node label than the start node
+    | extension (set): nodes neighboring the subgraph with a higher node label than the start node
     | node (int): single node used to start the subgraph and take neighbors higher than
     | k (int): size of subgraph at which to stop extending and add it to the list of subgraphs
     | k_subgraphs (list): list used to accumulate all subgraphs already found of size k
@@ -1061,7 +1061,7 @@ def preliminary_calculate_mass(mono_mods_mass, atom_mods_mass, global_mods_mass,
 
 GLYCAN_ONLY_GLOBAL_MODS = {'CH2O', 'C2H2O', 'C2H4O2', 'C3H8O4', 'CO2', 'SO4', 'PO4'}
 PEPTIDE_ONLY_GLOBAL_MODS = {'NH3'}
-# labels whose primary amide loses ammonia, so a glycan fragment that keeps the labelled reducing end loses NH3 like a peptide does: 2-AB Y ions of
+# labels whose primary amide loses ammonia, so a glycan fragment that keeps the labeled reducing end loses NH3 like a peptide does: 2-AB Y ions of
 # positive-mode ion-trap CID show [Y - NH3]+ as strong as Y itself (Gal-GalNAc-2AB: Y1 342.17 and 325.14 at the top of the spectrum)
 AMIDE_LABELS = ('2AB',)
 ADDUCT_GLOBAL_MODS = {'+Na', '+K', '+Li', '+Acetate'}
@@ -1153,7 +1153,7 @@ def small_ions(residues, charge, mass_tag):
 
 
 def chain_ions(root_label, charge, mass_tag, sample_prep = 'underivatized'):
-    """The open-chain ions of a labelled reducing end (CHAIN_IONS) a glycan gives, as {token: m/z}: in negative mode, for an underivatized Hex or HexNAc
+    """The open-chain ions of a labeled reducing end (CHAIN_IONS) a glycan gives, as {token: m/z}: in negative mode, for an underivatized Hex or HexNAc
     carrying a reductive amination label, recognized by mass_tag\n
     | Arguments:
     | :-
@@ -2870,7 +2870,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         # as for a structure, a glycan without fragments (a residue without fragment tables) leaves nothing to annotate
         if not all(all_glycan_frags):
             return dict.fromkeys(fragment_masses)
-        glycan_totals = [next((m for m, lb, nc in gf if nc == 0), 0) for gf in all_glycan_frags]
+        glycan_totals = [next((m for m, _, nc in gf if nc == 0), 0) for gf in all_glycan_frags]
         total_glycan = sum(glycan_totals)
         # Peptide masses
         pep_res = [AA_masses.get(aa, 0) for aa in peptide_seq]
@@ -3153,7 +3153,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         return {}
     # Any other sample_prep would be annotated at underivatized masses
     if sample_prep not in ('underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated'):
-        raise ValueError(f"Unknown sample_prep {sample_prep!r}; CandyCrumbs annotates 'underivatized', 'permethylated', 'deuteropermethylated' or 'peracetylated' glycans.")
+        raise ValueError(f"Unknown sample_prep {sample_prep!r}; CandyCrumbs annotates 'underivatized', 'permethylated', 'deuteropermethylated', or 'peracetylated' glycans.")
     if sialic_derivatization is not None:
         if sample_prep not in ('underivatized', 'permethylated', 'deuteropermethylated'):
             raise ValueError(f"sialic_derivatization is a derivatization of underivatized glycans or of glycans (deutero)permethylated after it, not of {sample_prep} ones.")
@@ -3884,6 +3884,8 @@ def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, inten
     weights = np.sqrt(np.maximum([i for _, i in peaks], 0)) if peaks[0][1] > 0 else np.ones(len(peaks))
     observed = np.array([m for m, _ in peaks])
     isotope_errors = [0] * len(compositions) if isotope_errors is None else list(isotope_errors)
+    if len(isotope_errors) != len(compositions):
+        raise ValueError(f"isotope_errors holds {len(isotope_errors)} values for {len(compositions)} compositions; give one per composition")
     kwargs.setdefault('max_cleavages', 2)
     rows = []
     for comp, isotope_error in zip(compositions, isotope_errors):
@@ -4263,7 +4265,7 @@ def get_sig_bins(df, glycan_list, conf_range = None, mz_cap = 3000, max_mz = 300
         df_a = df_a[df_a.Confidence.between(conf_range[0], conf_range[1])]
         df_b = df_b[df_b.Confidence.between(conf_range[0], conf_range[1])]
     if len(df_a) < min_spectra or len(df_b) < min_spectra:
-        print("Not enough spectra for at least one of the two sequences")
+        print(f"Fewer than {min_spectra} spectra for at least one of the two groups; lower min_spectra or widen conf_range")
         return []
     if controls:
         print("Number of spectra in df_a: " + str(len(df_a)))
@@ -4310,9 +4312,20 @@ def follow_sigs(df, glycan_list, mz_cap = 3000, max_mz = 3000, min_mz = 39.714, 
     """
     from glycowork.glycan_data.stats import _ttest_pvalue, cohen_d, correct_multiple_testing
     max_bin = round((mz_cap - min_mz) / ((max_mz - min_mz) / (bin_num - 1)))
-    df_a = df[df.Prediction == glycan_list[0]].reset_index(drop = True)
-    df_b = df[df.Prediction == glycan_list[1]].reset_index(drop = True)
+    if motif is None:
+        df_a = df[df.Prediction == glycan_list[0]].reset_index(drop = True)
+        df_b = df[df.Prediction == glycan_list[1]].reset_index(drop = True)
+    else:
+        df_a = df[df.Prediction.str.contains(motif, regex = False)].reset_index(drop = True)
+        if motif2 is None:
+            df_b = df[~df.Prediction.str.contains(motif, regex = False)].reset_index(drop = True)
+        else:
+            df_a = df_a[~df_a.Prediction.str.contains(motif2, regex = False)].reset_index(drop = True)
+            df_b = df[df.Prediction.str.contains(motif2, regex = False)].reset_index(drop = True)
+            df_b = df_b[~df_b.Prediction.str.contains(motif, regex = False)].reset_index(drop = True)
     df_r = pd.concat([df_a, df_b], axis = 0)
+    if df_r.empty:
+        raise ValueError(f"No spectra of {glycan_list[0]} or {glycan_list[1]} in df")
     remainder = [np.median([x for x in col if x] or [0]) for col in zip(*df_r.mz_remainder.values.tolist())]
     bins = {min_mz + ((max_mz - min_mz) / (bin_num - 1)) * k + remainder[k]: [] for k in range(max_bin)}
     bin_keys = list(bins)
@@ -4568,7 +4581,7 @@ def place_peak_label(px, py, label, placed, bounds, fontsize, attempts, pad = 1.
     return None
 
 
-def draw_peptide_ladder(peptide, hit_dict, glycosites = (), ax = None, fontsize = 9):
+def draw_peptide_ladder(peptide, hit_dict, glycosites = (), *, ax, fontsize = 9):
     """Draws the peptide fragment ladder: N-terminal ions tick up-left, C-terminal ions tick down-right"""
     n_cuts, c_cuts = {}, {}
     for hit in hit_dict.values():
@@ -4636,6 +4649,8 @@ def intensity_share(peaks, neutral_mass, charge, tolerance_ppm = 20.0):
     """
     mz, intensity = np.array(list(peaks.keys())), np.array(list(peaks.values()))
     ions = (neutral_mass + np.arange(1, charge + 1) * PROTON_MASS) / np.arange(1, charge + 1)
+    if not intensity.sum():
+        return 0.0
     return float(sum(intensity[np.abs(mz - t) <= t * tolerance_ppm * 1e-6].sum() for t in ions) / intensity.sum())
 
 
@@ -4713,7 +4728,7 @@ def add_qvalues(df, score = 'score', decoy = 'is_decoy'):
     """
     df = df.sort_values(score, ascending = False, kind = 'stable').reset_index(drop = True)
     d = df[decoy].astype(bool).values
-    fdr = np.cumsum(d) / np.maximum(np.cumsum(~d), 1)
+    fdr = (np.cumsum(d) / np.maximum(np.cumsum(~d), 1))[np.searchsorted(-df[score].values, -df[score].values, side = 'right') - 1]
     df['q_value'] = np.minimum.accumulate(fdr[::-1])[::-1]
     return df
 
@@ -4882,6 +4897,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         matches = [i for i, pred in enumerate(top1_preds) if pred == input_string]
         if not matches:
             raise ValueError(f"'{input_string}' not found as a top1 prediction in the prediction dataframe")
+        if intensities is None:
+            raise ValueError("intensities must be the peak_d list wrap_inference returns with spectra = True when spectrum is its dataframe")
         peak_d = intensities[matches[0]]
         charge = spectrum.iloc[matches[0]]['charge'] if charge is None else charge
         mz_values = np.array(sorted(peak_d.keys()), dtype = float)
@@ -4894,6 +4911,8 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         mz_values, peak_intensities = mz_values[order], peak_intensities[order]
         if charge is None:
             raise ValueError("charge must be given when passing raw m/z values")
+    if not len(mz_values):
+        raise ValueError("The spectrum has no peaks to plot")
     rel_intensities = peak_intensities / peak_intensities.max() * 100 if peak_intensities.max() > 0 else peak_intensities
     hit_dict = hit_dict if hit_dict is not None else CandyCrumbs(input_string, mz_values.tolist(), mass_threshold, max_cleavages = max_cleavages,
                            simplify = True, charge = charge, mass_tag = mass_tag, sample_prep = sample_prep, intensities = peak_intensities.tolist(),

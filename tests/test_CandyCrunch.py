@@ -127,7 +127,7 @@ UNTRACKED_DIR = BASE_DIR / "tests" / "untracked"
 if os.path.exists(UNTRACKED_DIR / 'df_mz_timsTOF_serum.csv'):
     TEST_DICTS.append({'name': 'timsTOF_serum', 'folder': '../untracked', 'args': {'glycan_class': 'N'},
                        'test_files': [x for x in os.listdir(UNTRACKED_DIR) if x.startswith('20260831_TIMS_SC_NG') and x.lower().endswith(('.d', '.xlsx'))]})
-# Pooled human urine N-glycans labelled with 2-aminopyridine (PA), DEAE fraction A1 sub-run 1, fraction 8 after aminolysis-SALSA (a2-6 isopropylamide, a2-3/8
+# Pooled human urine N-glycans labeled with 2-aminopyridine (PA), DEAE fraction A1 sub-run 1, fraction 8 after aminolysis-SALSA (a2-6 isopropylamide, a2-3/8
 # methylamide), Thermo LTQ (ion-trap MS1 and CID MS2, positive), one run (.raw with --input-format mzml, its .xlsx otherwise); in tests/untracked like timsTOF_serum
 if os.path.exists(UNTRACKED_DIR / 'GPST000750' / 'df_mz_GPST000750.csv'):
     TEST_DICTS.append({'name': 'GPST000750', 'folder': '../untracked/GPST000750',
@@ -705,7 +705,7 @@ def test_label_run_mapping_rules(monkeypatch):
     assert labelled['spec_id'].tolist() == [0, 1, 2, 3, 4, 5, 6] and len(unlabelled) == 2
     # The sialylated composition's two kept inputs, 1 min apart on PGC, split its two RT-less rows by elution order: a2-6 first
     assert labelled['glycan_candidates'].iloc[5:].tolist() == [[sia[1]], [sia[0]]] and labelled['glycan_match_status'].iloc[5] == 'unique'
-    # Where each label came from, and every mapping row labelled
+    # Where each label came from, and every mapping row labeled
     assert labelled.attrs['rt_alignment'] == 'median' and labelled.attrs['rt_anchors'] == 5
     assert labelled['label_source'].tolist() == ['rt_median'] * 5 + ['no_rt'] * 2 and np.allclose(labelled['rt_error'].iloc[:5], 0, atol = 1e-6)
     assert [r['status'] for r in labelled.attrs['map_rows']] == ['labelled'] * 7 and [r['labels'] for r in labelled.attrs['map_rows']][5:] == [2, 0]
@@ -725,7 +725,7 @@ def test_label_run_mapping_rules(monkeypatch):
 
 def test_label_inputs_accurate_ms1():
     # With accurate survey scans an input takes a mapping row only within ppm_tolerance of its Mass or of its first two 13C peaks at the input's charge, a Mass
-    # with fewer decimals within half its last one: 720.3207 (another ion, 655 ppm off N3H3 [M+2Na]2+ 719.8493) is only labelled at 0.5 m/z, the 13C pick
+    # with fewer decimals within half its last one: 720.3207 (another ion, 655 ppm off N3H3 [M+2Na]2+ 719.8493) is only labeled at 0.5 m/z, the 13C pick
     # of N4H5S2 [M+3Na]3+ is, and so is an input 29 ppm off a Mass given as 1031.5
     import training.pipeline_labels as pl
     comps = [{'Hex': 5, 'HexNAc': 2}, {'Hex': 3, 'HexNAc': 3}, {'Hex': 5, 'HexNAc': 4, 'Neu5Ac': 2}, {'Hex': 4, 'HexNAc': 4, 'dHex': 1}]
@@ -816,7 +816,7 @@ def test_label_inputs_drift_terms():
     assert labelled.attrs['rt_anchors'] == 25 and abs(labelled.attrs['rt_shift'] - np.median(offsets)) < 0.05
     run_rt = [r['run_rt'] for r in labelled.attrs['map_rows']]
     assert np.allclose(run_rt[:27], np.array(map_rts[:27]) + np.median(offsets), atol = 0.05) and run_rt[27] == 30.0
-    # (the Neu5Ac inputs 1.1 and 1.6 min after their rows are other peaks; the Neu5Gc isomer and the own row are labelled at their peaks)
+    # (the Neu5Ac inputs 1.1 and 1.6 min after their rows are other peaks; the Neu5Gc isomer and the own row are labeled at their peaks)
     assert sorted(labelled['spec_id']) == [k for k in range(len(glycans)) if k not in (22, 24)]
     assert (labelled.set_index('spec_id').loc[[25, 26, 27], 'rt_error'].abs() < 0.01).all()
 
@@ -849,7 +849,7 @@ def test_label_inputs_whole_map_check():
     # Five compositions the map lists once anchor the shift, but each one's strongest input is an isomer the map does not list, 2.4-2.6 min after the
     # mapped peak (a weak input sits on the row): their median moves the map 2.5 min, where the four compositions it lists as two isomers have no input
     # within 1 min. Without a shift 13 rows have a passing input of their composition within the window against 5 with it, so the map stays where it is
-    # and the rows are labelled on their peaks
+    # and the rows are labeled on their peaks
     import training.pipeline_labels as pl
     from glycowork.motif.tokenization import glycan_to_composition
     chain = lambda m, h, link: 'Gal(b1-4)GlcNAc(b1-3)' * m + f'Gal(b1-{link})' * h + 'Glc'
@@ -972,6 +972,26 @@ def test_hexose_ladder_candidates():
     assert not assign_candidate_structures(rung.copy(), maps[1], maps[0], maps[2], 0.5, 'negative', 0)['hexose_ladder'].any()
 
 
+def test_isotope_support_and_fragment_ratio():
+    disialyl = 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    monosialyl = 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    asialo = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    wrong_charge = 'Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-4)]Man(a1-3)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-6)]Man(a1-6)]Man(b1-4)GlcNAc'
+    on_13c = 'GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    ion = lambda g, z: (composition_to_mass(get_comp(g), modification = 'reduced') - z * PROTON_MASS) / z
+    rts = np.arange(10, 30, 0.05)
+    shape = lambda apex: np.exp(-0.5 * ((rts - apex) / 0.12) ** 2)
+    peaks = [(ion(disialyl, 2), 1e7 * shape(20)), (ion(monosialyl, 2), 2e6 * shape(20)), (ion(asialo, 2), 5e4 * shape(20)), (ion(wrong_charge, 3), 3e6 * shape(20.8)), (ion(on_13c, 2) - ISOTOPE_SPACING / 2, 4e6 * shape(21.6))]
+    scans = [sorted((mz + j * ISOTOPE_SPACING / 2, trace[i] * 0.5 ** j) for mz, trace in peaks for j in range(4)) for i in range(len(rts))]
+    ms1 = (rts, np.array([m for scan in scans for m, _ in scan], dtype = np.float32), np.array([x for scan in scans for _, x in scan], dtype = np.float32),
+           np.cumsum([0] + [len(scan) for scan in scans]).astype(np.int64))
+    row = lambda g, z, rt, n: {'m/z': ion(g, z), 'predictions': [(g, 0.9)], 'composition': get_comp(g), 'num_spectra': n, 'charge': -z, 'RT': rt, 'rel_abundance': 1e6, 'top_fragments': [731.0, 1113.0],
+                               'peak_d': {731.0: 100.0, 1113.0: 50.0}, 'annotation_score': 12.0, 'evidence': 'strong', 'adduct': None, 'top1_pred': g}
+    rows = pd.DataFrame([row(disialyl, 2, 20.0, 20), row(monosialyl, 2, 20.0, 15), row(asialo, 2, 20.0, 5), row(wrong_charge, 3, 20.8, 2), row(on_13c, 2, 21.6, 1)]).set_index('m/z')
+    out, _ = finalise_predictions(rows, False, 'negative', 'reduced', None, 300, 1.0, glycan_class = 'N', ms1 = ms1, accurate_ms1 = True, run_anion = False)
+    assert sorted(out['top1_pred']) == sorted([disialyl, monosialyl])
+
+
 def test_glucose_oligomer_notes():
     # A glucose oligomer gets its own note, whatever the run's class, instead of the other-class note; a sulfated core 2 O-glycan in an N+O run and
     # a galacto-oligosaccharide in a free-glycan run get none, and a galacto-oligosaccharide in an N run keeps the other-class note
@@ -1051,7 +1071,7 @@ def test_ion_trap_header_charge():
 
 def test_bruker_mzxml(tmp_path):
     # Bruker HCT profile scans (msconvert mzXML): a doubly charged envelope at 965.844 whose monoisotopic top dips in the middle, and a singly charged
-    # peak at 675.36 with a noise shoulder 0.6 m/z above it; MS2 headers give the isolation window centre (966.20 at charge 2, 675.81 and 675.42 at
+    # peak at 675.36 with a noise shoulder 0.6 m/z above it; MS2 headers give the isolation window center (966.20 at charge 2, 675.81 and 675.42 at
     # charge 1)
     grid = np.arange(600, 1000, 0.03125)
     def profile(peaks):
@@ -1100,7 +1120,7 @@ def test_mzxml_without_ms2_or_rt(tmp_path):
     df = process_mzXML_stack(path, intensity = True, extract_ms1 = True)
     assert df.empty and set(SPECTRUM_DETAILS) <= set(df.columns) and len(df.attrs['ms1'][0]) == 1
     with pytest.raises(ValueError, match = 'has no MS2 spectra'):
-        extract_spectra(path, str(tmp_path / 'ms1_ms3.cc'))
+        extract_spectra(path, str(tmp_path / 'ms1_ms3.xlsx'))
     path = write('maldi.mzXML', [(1, 2, '', '<precursorMz precursorIntensity="0">1288.6</precursorMz>')])
     with pytest.raises(ValueError, match = 'has no retentionTime'):
         process_mzXML_stack(path)
@@ -1123,7 +1143,7 @@ def test_exactive_mzxml(tmp_path):
 
 def test_bruker_ion_trap_mzml(tmp_path):
     # The scans of test_bruker_mzxml as msconvert writes a Bruker ion trap .d to mzML: profiles, the HCT series model with the amaZon named in a userParam,
-    # and the isolation window centre as selected ion m/z, also with a charge state; mzML and mzXML of one run give the same spectra and precursors
+    # and the isolation window center as selected ion m/z, also with a charge state; mzML and mzXML of one run give the same spectra and precursors
     grid = np.arange(600, 1000, 0.03125)
     def profile(peaks):
         ints = sum(h * np.exp(-0.5 * ((grid - mz) / 0.05) ** 2) for mz, h in peaks)
@@ -1862,7 +1882,7 @@ def test_mzdata(tmp_path):
     with pytest.raises(ValueError, match = 'not a complete mzData file'):
         load_spectra_filepath(str(tmp_path / 'cut.mzdata.xml'))
     (tmp_path / 'other.xml').write_text('<?xml version="1.0"?><config/>')
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ValueError):
         load_spectra_filepath(str(tmp_path / 'other.xml'))
 
 
@@ -2022,3 +2042,49 @@ def test_mass_spec_helpers_from_glycopeptide_search():
     paired = pair_spectra(df).set_index('scan')
     assert paired.index.tolist() == [1, 3] and paired.loc[1, 'paired_peak_d'] == {2.0: 2.0} and paired.loc[1, 'paired_activation'] == 'EThcD' and pd.isna(paired.loc[3, 'paired_peak_d'])
     assert paired.loc[1, 'paired_scan'] == 2 and pd.isna(paired.loc[3, 'paired_scan'])
+
+
+def test_cc_survey_scans(tmp_path, monkeypatch):
+    # A .cc leaves out the survey scans past the last MS2 and its margin, and keeps a run of survey scans alone, whose .cc reads back without spectra
+    ms1 = (np.arange(20.0), np.full(20, 500.0, dtype = np.float32), np.full(20, 1000.0, dtype = np.float32), np.arange(21, dtype = np.int64))
+    run = pd.DataFrame({'m/z': [500.0], 'peak_d': [{100.0: 1.0}], 'RT': [5.0], 'precursor_charge': [1.0], 'intensity': [1.0], 'scan': [1]})
+    run.attrs.update(ms1 = ms1, detected_mode = 'negative')
+    survey_only = run.iloc[:0].copy()
+    survey_only.attrs.update(ms1 = ms1, detected_mode = None)
+    source = tmp_path / 'run.mgf'
+    source.write_text('')
+    for loaded, scans, spectra in ((run, 9, 1), (survey_only, 20, 0)):
+        with monkeypatch.context() as patch:
+            patch.setattr('candycrunch.prediction.load_spectra_filepath', lambda *args, **kwargs: loaded)
+            cc = extract_spectra(str(source), str(tmp_path / 'run.cc'), 'cc')
+        back = load_spectra_filepath(cc, extract_ms1 = True)
+        assert len(back) == spectra and len(back.attrs['ms1'][0]) == scans and back.attrs['ms1'][3][-1] == scans
+
+
+def test_library_edge_cases(tmp_path):
+    from candycrunch.analysis import add_qvalues, intensity_share
+    # Tied scores share their decoys, an empty spectrum has no share, and the last survey scan counts
+    assert add_qvalues(pd.DataFrame({'score': [5, 5, 4], 'is_decoy': [False, True, False]}))['q_value'].tolist() == [0.5, 0.5, 0.5]
+    assert intensity_share({}, 1000.0, 2) == 0.0
+    ms1 = (np.array([1.0, 2.0]), np.array([500.0, 500.0]), np.array([10.0, 20.0], dtype = np.float32), np.array([0, 1, 2]))
+    assert ion_trace(ms1, 500.0, 1.5, 5.0).tolist() == [10.0, 20.0]
+    with pytest.raises(FileNotFoundError, match = 'does not exist'):
+        load_spectra_filepath(str(tmp_path / 'missing.d'))
+    (tmp_path / 'table.csv').write_text('a,b')
+    with pytest.raises(ValueError, match = 'not a file type'):
+        load_spectra_filepath(str(tmp_path / 'table.csv'))
+    with pytest.raises(ValueError, match = 'file_format'):
+        extract_spectra(str(tmp_path / 'table.csv'), file_format = 'csv')
+    with pytest.raises(ValueError, match = 'no files'):
+        wrap_inference_batch([], 'N', 3)
+    # Rows are told apart by position, also when they share an m/z label
+    rows = pd.DataFrame({'predictions': [[('Gal(b1-3)GalNAc', 0.9)], [('Gal(b1-3)GalNAc', 0.1)]], 'top1_pred': ['Gal(b1-3)GalNAc'] * 2, 'RT': [15.0, 30.0],
+                         'num_spectra': [1, 1], 'rel_abundance': [5.0, 1.0], 'charge': [-1, -1]}, index = pd.Index([1040.37, 1040.37], name = 'm/z'))
+    assert filter_delayed_rts(rows, 0.5)['RT'].tolist() == [15.0]
+    charges = pd.concat([rows.assign(RT = [15.0, 40.0], rel_abundance = [100.0, 5.0]),
+                         rows.iloc[[0]].assign(charge = -2, rel_abundance = 20.0).set_axis(pd.Index([520.0], name = 'm/z'))])
+    combined = combine_charge_states(charges)
+    assert combined.sort_values('RT')['rel_abundance'].tolist() == [120.0, 5.0] and combined.index.tolist() == sorted(combined.index)
+    pairs = pd.DataFrame({'predictions': [[('Neu5Gc(a2-3)Gal', 0.9)], [('Neu5Ac(a2-3)Gal', 0.9), ('X', 0.1)], [('Neu5Ac(a2-3)Gal', 0.9), ('X', 0.1)]], 'RT': [10.0, 10.5, 20.0]},
+                         index = pd.Index([600.0, 584.0, 584.0], name = 'm/z'))
+    assert [len(p) for p in Ac_follows_Gc(pairs)['predictions']] == [1, 2, 1]

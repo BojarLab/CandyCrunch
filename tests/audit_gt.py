@@ -228,7 +228,7 @@ class Run:
         gaps = np.diff(mzs.astype(np.float64))[scan_of[1:] == scan_of[:-1]]
         self.resolved = not self.accurate and len(gaps) > 0 and float((gaps < 0.45).mean()) > 0.02
         # Spray spikes raise every m/z at once (milk 26.22/30.61 min, 4-6x the baseline at m/z without glycans), so they show in the median centroid
-        # intensity and the TIC of the scan; their trace values are interpolated from the neighbouring scans, so they never make an apex
+        # intensity and the TIC of the scan; their trace values are interpolated from the neighboring scans, so they never make an apex
         med = np.array([np.median(ints[offsets[i]:offsets[i + 1]]) if offsets[i + 1] > offsets[i] else 0 for i in range(n)])
         tic = np.diff(self.cum[offsets])
         lo, hi = np.searchsorted(rts, rts - 1), np.searchsorted(rts, rts + 1, side = 'right')

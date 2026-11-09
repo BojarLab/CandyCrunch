@@ -30,7 +30,7 @@ false positive), which tests/harness_diff.py compares between two runs.
 Trace (stage where each ground-truth peak was lost, in pipeline order): no_ms2 (no MS2 spectrum within 0.5 m/z and 1 min), no_cluster, composition_not_candidate,
 model_no_composition (no structure of the composition in the model's raw top 25), below_pred_thresh (in the top 25, but no prediction survives
 pred_thresh / the class veto), domain_filter, other_composition_chosen (the spectrum is reported with another composition), crumbs_gate, deduplicated,
-finalise (ppm / RT / merge steps), matched_elsewhere (a reported row is near, but the one-to-one matching gave it to another peak or it lies just outside the
+finalize (ppm / RT / merge steps), matched_elsewhere (a reported row is near, but the one-to-one matching gave it to another peak or it lies just outside the
 metric's tolerance). Wrong structures: wrong_composition, not_in_vocabulary, not_in_top25, below_thresh (in the top 25, not among the row's predictions),
 ranked_lower (among the row's predictions, not first); a hedged ground truth counts as present wherever a more specific version of it is. False positives: fp_same_composition (the GT has the composition at another RT), fp_new_composition.
 """

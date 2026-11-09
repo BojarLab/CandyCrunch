@@ -446,7 +446,7 @@ def test_rank_glycopeptide_structures_published():
 
 
 def test_rank_glycopeptide_structures_hexnac_evidence():
-    # The HexNAc oxonium ions decide between O-glycan candidates with and without GlcNAc: a ratio (138 + 168) / (126 + 144) below 1 favours GalNAc-only
+    # The HexNAc oxonium ions decide between O-glycan candidates with and without GlcNAc: a ratio (138 + 168) / (126 + 144) below 1 favors GalNAc-only
     # ones, above 2 those with GlcNAc, and without these ions nothing is weighed; O-site candidates start with GalNAc unless o_glycan_root is None
     base = {204.0867: 100.0, 366.1395: 60.0, 274.0921: 30.0, 292.1027: 40.0}
     galnac = rank_glycopeptide_structures('TTNSATKI', 'T1(Hex(2)HexNAc(2)NeuAc(1))', base | {126.0550: 30.0, 144.0656: 40.0, 138.0550: 10.0, 168.0656: 5.0},

@@ -1,8 +1,8 @@
 """Training data from the .cc files of mapped projects: each run's model inputs as CandyCrunch builds them (pooled spectra of MS1-refined precursors, one per
-candidate composition), labelled from the project's map with pipeline_labels.label_run, one file per run, merged into a training and a pretraining table.
+candidate composition), labeled from the project's map with pipeline_labels.label_run, one file per run, merged into a training and a pretraining table.
 
 Usage (rerun whenever files arrive; finished runs are skipped unless their .cc, map, checklist row or this code changed; a run keeps its inputs, so a
-changed map, checklist label or labelling rule relabels it without running the pipeline again, while a change of the package's inference code, glycowork or
+changed map, checklist label or labeling rule relabels it without running the pipeline again, while a change of the package's inference code, glycowork or
 the run's settings recomputes them):
     python training/cc_training_data.py [--data_root DIR] [--cc_root DIR] [--maps DIR] [--checklist CSV] [--exclusion CSV] [--out DIR] [--projects ID1,ID2]
                                         [--n_jobs 2] [--watch 30]
@@ -18,7 +18,7 @@ glycan_type, reducing_end, sample_prep, sialic_derivatization, mass_tag).
 Per run: the project's maps of the class its name gives (NG/OG, N-/O-glycans, GSL, a sample number ending in N or O; map class from the suffix _N, _O, _GSL,
 ...), those with a sample column found in the run name (rows where it is > 0), else every row of a map that names no run; glycan class from the maps' suffixes,
 else the run name, else the map's structures, else the checklist; map masses 0.5-1 off their structure's ion take its m/z; candidate compositions from the
-species' kingdom for non-mammals; without a reducing end in the checklist, reduced and free are both tried and the one labelling more inputs is kept, and if
+species' kingdom for non-mammals; without a reducing end in the checklist, reduced and free are both tried and the one labeling more inputs is kept, and if
 the checklist's settings label nothing although the map has structures, underivatized/permethylated x reduced/free are tried. label_run shifts map RTs onto the
 run and labels RT-less map rows only on their composition's strongest inputs. Runs of test sets and held-out files (tests/data, the training exclusion list of
 the GlycoGauntlet audit), and their copies (<run>_2, ... or the same inputs), are written but never merged; the other runs of their projects are training
@@ -26,7 +26,7 @@ data like any. Of runs with the same spectra (one acquisition downloaded under s
 copy was converted with) only the first is merged (runs.csv: duplicate_of, as project/run; a hash of the .cc's MS2 precursors and RTs is kept beside each
 run as <run>.cckey). <out>/manifest.json records what the merged tables were made
 from (code, glycowork, checklist, maps, exclusions, .cc loaders) and what they hold.
-Outputs: <out>/runs/<project>/<run>.pkl (labelled and unlabelled inputs with settings, the inputs of every settings tried, and map_rows: what became of
+Outputs: <out>/runs/<project>/<run>.pkl (labeled and unlabelled inputs with settings, the inputs of every settings tried, and map_rows: what became of
 each map row, with its map file and row), <out>/runs.csv (one line per run; map_row_status counts the map rows' fates), <out>/train.pkl (labeled inputs:
 m/z, peak_d, RT, precursor_charge, glycan, glycan_candidates, glycan_match_status, composition, annotation_score, num_spectra, intensity, rt_range, spec_id,
 filename, GlycoPost_ID, mode, trap, lc_type, modification (as wrap_inference passes them), model_input, RT2, compositional_vector, glycan_type (the spectrum,
@@ -199,14 +199,14 @@ def stamp(path, mapping_names, maps_dir, row, code):
 
 
 def convert_run(task):
-    # One run in its own process: labelled and unlabelled inputs with settings, written to <out>/runs/<project>/<run>.pkl
+    # One run in its own process: labeled and unlabelled inputs with settings, written to <out>/runs/<project>/<run>.pkl
     os.environ.setdefault('OMP_NUM_THREADS', '1')
     from training.pipeline_labels import label_inputs, run_inputs
     path, out, maps_dir = pathlib.Path(task['path']), pathlib.Path(task['out']), pathlib.Path(task['maps'])
     start = time.time()
     info = dict(project = task['project'], run = path.stem, path = str(path), excluded = task['excluded'], maps = ', '.join(task['map_names']), glycan_class = str(task['glycan_class']))
     target = out / 'runs' / task['project'] / f'{path.stem}.pkl'
-    # The inputs of the last conversion, by what they depend on (inference code, glycowork, .cc, class and settings): a changed map or labelling rule
+    # The inputs of the last conversion, by what they depend on (inference code, glycowork, .cc, class and settings): a changed map or labeling rule
     # only relabels them
     cached, used, reused = {}, {}, 0
     if target.exists():
@@ -274,7 +274,7 @@ def convert_run(task):
                 used[key] = cached[key] if key in cached else run_inputs(str(path), task['glycan_class'], **s)
             return (*label_inputs(used[key], mapping, crumbs_thresh = s.get('crumbs_thresh', 3)), s, mapping, rescued)
 
-        # The first of the most labelling settings
+        # The first of the most labeling settings
         best, fitted = (None, False) if mixed else (max([attempt(s) for s in tries], key = lambda r: len(r[0])), False)
         if mixed:
             parts = []
@@ -299,7 +299,7 @@ def convert_run(task):
         map_rows = pd.DataFrame(labelled.attrs.pop('map_rows'))
         # A run without mapping rows (none of the project's maps names it) has no records, and its status counts are empty
         map_rows = map_rows if len(map_rows) else pd.DataFrame(columns = ['Mass', 'RT', 'glycan', 'status', 'inputs', 'labels'])
-        # Stepped-isolation runs without survey scans give each MS2 spectrum its isolation window's nominal centre as precursor (every precursor on a
+        # Stepped-isolation runs without survey scans give each MS2 spectrum its isolation window's nominal center as precursor (every precursor on a
         # whole m/z, as 814.000 / 816.000), so their inputs' compositions and labels would be wrong: such a run keeps no inputs
         precursors = np.concatenate([labelled.index.to_numpy(float), unlabelled.index.to_numpy(float)])
         on_grid = len(precursors) >= 20 and np.mean(np.abs(precursors - np.round(precursors)) < 0.002) >= 0.9
@@ -313,7 +313,7 @@ def convert_run(task):
                     sialic_derivatization = str(settings['sialic_derivatization']) if settings.get('sialic_derivatization') else None,
                     fragmentation = task['row'].get('fragmentation'), ion_source = task['row'].get('ionization'), lc_checklist = task['row'].get('LC_type'),
                     trap_checklist = task['row'].get('trap'), adducts = ' '.join(settings.get('adducts', ())) or None)
-        # glycan_type (labelled) and glycan_types (unlabelled) are label_run's: the class code the model got, the run's class
+        # glycan_type (labeled) and glycan_types (unlabelled) are label_run's: the class code the model got, the run's class
         labelled = labelled.assign(**meta)
         unlabelled = unlabelled.assign(**meta)
         if mixed:
@@ -365,7 +365,7 @@ def collect(args):
     wanted = set(args.projects.split(',')) if args.projects else None
     exclude = excluded_stems(args.exclusion)
     # What the inputs depend on: the package's inference code (not the GUI or CLI), glycowork's motif functions and glycan data (a dev install changes
-    # without a version bump) and run_inputs; the labels also on the rest of the labelling and the conversion functions (none of it imported here: the
+    # without a version bump) and run_inputs; the labels also on the rest of the labeling and the conversion functions (none of it imported here: the
     # main process stays small)
     labelling = (BASE_DIR / 'training' / 'pipeline_labels.py').read_text(encoding = 'utf-8')
     glycowork = pathlib.Path(importlib.util.find_spec('glycowork').origin).parent

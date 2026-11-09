@@ -1,5 +1,5 @@
 ; Inno Setup script for the CandyCrunch Windows installer. Build the app with packaging/candycrunch.spec first, then:
-;     iscc /DAppVersion=0.7.0 packaging\candycrunch.iss
+;     iscc /DAppVersion=1.0.0 packaging\candycrunch.iss
 ; which writes dist\CandyCrunch-<version>-Windows-Setup.exe
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -12,7 +12,7 @@ AppVersion={#AppVersion}
 AppPublisher=Bojar Lab, University of Gothenburg
 AppPublisherURL=https://github.com/BojarLab/CandyCrunch
 VersionInfoVersion={#AppVersion}
-VersionInfoCopyright=MIT License
+VersionInfoCopyright=Copyright (c) 2022 BojarLab
 DefaultDirName={autopf}\CandyCrunch
 DefaultGroupName=CandyCrunch
 DisableProgramGroupPage=yes

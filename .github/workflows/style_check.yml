@@ -3,14 +3,14 @@ name: Coding Standard
 # glycowork's coding standard (.github/scripts/check_style.py, a copy of glycowork's): only the lines a push or PR touches are checked
 on:
   pull_request:
-    branches: [main, dev]
+    branches: [main]
   push:
-    branches: [main, dev]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   style:
-    # Pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19 (GitHub notice on the CI runs)
+    # Pinned: ubuntu-latest moved to Ubuntu 26 on 2026-10-19 (GitHub notice on the CI runs)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

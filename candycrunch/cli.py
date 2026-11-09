@@ -13,37 +13,37 @@ def str_to_bool(value):
 def build_parser():
     # The CLI's options, also the settings form of the in-browser page (web.py)
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
-    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion traps) and Agilent MassHunter .d folders, Waters .raw folders, .mzML, .mzXML, mzData (.mzdata/.mzdata.xml), .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
-    parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g. N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
+    parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion traps) and Agilent MassHunter .d folders, Waters .raw folders, .mzML, .mzXML, mzData (.mzdata/.mzdata.xml), .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.wiff/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
+    parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g., N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
     parser.add_argument('--max_charge', help='Maximum absolute precursor charge to consider', type=int, required=False)
-    parser.add_argument('--modification', help='Reducing-end modification: reduced (alditol), reduced_D (NaBD4), unreduced (free reducing end), a label, benzyl (benzyl glycoside), glycolate or lactate (O-glycans released oxidatively, on the glycolic acid of their Ser or the lactic acid of their Thr), or custom: a label of --mass_tag Da; several for glycans of several reducing ends side by side (e.g. glycolate lactate), the first being the run\'s own', type=str, nargs='+', choices=['reduced', 'reduced_D', 'unreduced', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl', 'glycolate', 'lactate', 'custom'], required=False)
+    parser.add_argument('--modification', help='Reducing-end modification: reduced (alditol), reduced_D (NaBD4), unreduced (free reducing end), a label, benzyl (benzyl glycoside), glycolate or lactate (O-glycans released oxidatively, on the glycolic acid of their Ser or the lactic acid of their Thr), or custom: a label of --mass_tag Da; several for glycans of several reducing ends side by side (e.g., glycolate lactate), the first being the run\'s own', type=str, nargs='+', choices=['reduced', 'reduced_D', 'unreduced', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl', 'glycolate', 'lactate', 'custom'], required=False)
     parser.add_argument('--mass_tag', help='Mass in Da of a --modification custom label', type=float, required=False)
     parser.add_argument('--sample_prep', help='Sample preparation', type=str, choices=['underivatized', 'permethylated', 'deuteropermethylated', 'peracetylated'], required=False)
-    parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples (or of samples permethylated after it): EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA, GQ (glycoqueuing: aniline on every sialic acid, which tells no linkage), GQ-d5 (d5-aniline on a2-6, d0 on a2-3)', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5'], required=False)
-    parser.add_argument('--adducts', help='Ions that carry the charge of the precursors in place of protons, e.g. Li+ for lithium salts in the mobile phase; the usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered', type=str, nargs='+', required=False)
+    parser.add_argument('--sialic_derivatization', help='Linkage-specific sialic acid derivatization of underivatized samples (or of samples permethylated after it): EE (ethyl esterification), EEA (ethyl esterification + amidation), ME (methyl esterification), DMA (dimethylamidation), SALSA, GQ (glycoqueuing: aniline on every sialic acid, which tells no linkage; with GirardP), GQ-d5 (d5-aniline on a2-6, d0 on a2-3)', type=str, choices=['EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5'], required=False)
+    parser.add_argument('--adducts', help='Ions that carry the charge of the precursors in place of protons, e.g., Li+ for lithium salts in the mobile phase; the usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered', type=str, nargs='+', required=False)
     parser.add_argument('--run_anion', help='Anion of the mobile phase in negative mode: read before the other anion adducts, and its adduct ions count for abundances; default: all are considered, and with survey scans the anion neutral glycans show counts', type=str, choices=['HCO3-', 'Formate', 'Acetate'], required=False)
-    parser.add_argument('--reducing_end_variants', help='Other reducing ends the glycans may carry: free (glycans that escaped reduction or labelling, counted for their glycan), ethyl_glycoside (rows of their own), glycosylamine (PA glycans whose label was not reduced, counted for their glycan), glycosylaminitol (reduced N-glycans that were glycosylamines when reduced, counted for their glycan); default: free, plus ethyl_glycoside for lipid, glycosylamine for PA and glycosylaminitol for reduced N-glycans; give none of them to turn this off', type=str, nargs='*', choices=['free', 'ethyl_glycoside', 'glycosylamine', 'glycosylaminitol'], required=False)
+    parser.add_argument('--reducing_end_variants', help='Other reducing ends the glycans may carry: free (glycans that escaped reduction or labeling, counted for their glycan), ethyl_glycoside (rows of their own), glycosylamine (PA glycans whose label was not reduced, counted for their glycan), glycosylaminitol (reduced N-glycans that were glycosylamines when reduced, counted for their glycan); default: free, plus ethyl_glycoside for lipid, glycosylamine for PA, and glycosylaminitol for reduced N-glycans; give none of them to turn this off', type=str, nargs='*', choices=['free', 'ethyl_glycoside', 'glycosylamine', 'glycosylaminitol'], required=False)
     parser.add_argument('--lc', help='LC type', type=str, choices=['PGC', 'C18', 'other'], required=False)
     parser.add_argument('--trap', help='Mass analyzer of the MS2 spectra (the survey scan analyzer is read from the file); the instrument stored in the file overrides it', type=str, choices=['linear', 'orbitrap', 'amazon', 'other'], required=False)
-    parser.add_argument('--rt_min', help='Minimum relevant retention time', type=float, required=False)
-    parser.add_argument('--rt_max', help='Maximum relevant retention time', type=float, required=False)
+    parser.add_argument('--rt_min', help='Minimum retention time in minutes; default: 0 (runs longer than 20 min then skip their first 2 min)', type=float, required=False)
+    parser.add_argument('--rt_max', help='Maximum retention time in minutes; default: 0 (runs longer than 40 min then skip their last 10%%)', type=float, required=False)
     parser.add_argument('--rt_diff', help='Maximum retention time difference within one peak', type=float, required=False)
     parser.add_argument('--spectra', help='Whether to output representative spectra', type=str_to_bool, required=False)
     parser.add_argument('--get_missing', help='Whether to output peaks without prediction', type=str_to_bool, required=False)
-    parser.add_argument('--ppm_thresh', help='Mass tolerance in ppm for peak grouping, composition matching and ppm error filtering (precursors), and for fragments of ion-trap MS2', type=float, required=False)
-    parser.add_argument('--pred_thresh', help='Prediction confidence threshold', type=float, required=False)
+    parser.add_argument('--ppm_thresh', help='Mass tolerance in ppm for peak grouping, composition matching, and ppm error filtering (precursors), and for fragments of ion-trap MS2', type=float, required=False)
+    parser.add_argument('--pred_thresh', help='Minimum model probability of a structure among the isomers of its composition', type=float, required=False)
     parser.add_argument('--crumbs_thresh', help='CandyCrumbs annotation score a prediction has to exceed to be kept', type=float, required=False)
-    parser.add_argument('--extra_thresh', help='Confidence threshold to allow cross-class predictions', type=float, required=False)
+    parser.add_argument('--extra_thresh', help='Model probability from which structures of another glycan class are allowed', type=float, required=False)
     parser.add_argument('--frag_num', help='Number of top fragments to report per spectrum', type=int, required=False)
-    parser.add_argument('--filter_out', help='Composition elements to filter out/ignore, space-separated', type=str, nargs='*', required=False)
+    parser.add_argument('--filter_out', help='Composition elements to filter out/ignore, space-separated; the list replaces the default (HexA), and giving none filters nothing', type=str, nargs='*', required=False)
     parser.add_argument('--supplement', help='Whether to use biosynthetic modeling for zero-shot prediction', type=str_to_bool, required=False)
     parser.add_argument('--experimental', help='Whether to use database searches for zero-shot prediction', type=str_to_bool, required=False)
     parser.add_argument('--taxonomy_level', help='Taxonomic level to restrict database searches to', type=str, choices=['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain'], required=False)
     parser.add_argument('--taxonomy_filter', help='Taxon at taxonomy_level to restrict database searches to', type=str, required=False)
     parser.add_argument('--intra_cat_thresh', help='Several files only: minutes the RT of a structure can differ from the mean of its group', type=float, required=False)
     parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition in each file; default: 5', type=int, default=5)
-    parser.add_argument('--n_jobs', help='Number of processes: files processed in parallel, and fragment scoring within a file; default: 1', type=int, default=1)
+    parser.add_argument('--n_jobs', help='Number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default: 1', type=int, default=1)
     parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions', type=str_to_bool, required=False)
     parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)
     return parser
@@ -59,8 +59,11 @@ def main(argv=None):
     # A .d or Waters .raw folder is one run (a shell completes it with a trailing separator); any other folder gives its runs
     filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.wiff', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc'))]
                                                                               if os.path.isdir(p) and not p.lower().endswith(('.d', '.raw')) else [p])]
+    # A run's raw file and the .cc made from it are one run, read from its .cc
+    extracted = {os.path.splitext(f)[0].lower() for f in filepaths if f.lower().endswith('.cc')}
+    filepaths = [f for f in filepaths if f.lower().endswith('.cc') or os.path.splitext(f)[0].lower() not in extracted]
     if not filepaths:
-        parser.error('no .raw/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files found in --spectra_filepath')
+        parser.error('no .raw/.wiff/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files found in --spectra_filepath')
     missing = [f for f in filepaths if not os.path.exists(f)]
     if missing:
         parser.error(f"not found: {', '.join(missing)}")

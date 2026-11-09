@@ -75,7 +75,9 @@ class _WeightsUnpickler(pickle.Unpickler):
 def load_weights(path):
     """What a file saved by torch.save holds (a state dict, or e.g. {'state_dict': ..., 'glycans': [...]}), with its tensors as numpy arrays, without PyTorch"""
     with zipfile.ZipFile(path) as archive:
-        name = next(n for n in archive.namelist() if n.endswith('data.pkl'))
+        name = next((n for n in archive.namelist() if n.endswith('data.pkl')), None)
+        if name is None:
+            raise ValueError(f"{path} is no file saved by torch.save (no data.pkl in it)")
         with archive.open(name) as file:
             return _WeightsUnpickler(file, archive, name.rpartition('/')[0]).load()
 

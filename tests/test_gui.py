@@ -503,7 +503,7 @@ def test_gui_save_image(app, tmp_path, monkeypatch):
     monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'spectrum'), 'PNG image, 300 dpi (*.png)'))
     panel.save_image()
     assert gui.QImage(str(tmp_path / 'spectrum.png')).width() > 3000
-    # Its labels give the observed m/z of annotated peaks, and an unannotated peak gets its m/z in grey
+    # Its labels give the observed m/z of annotated peaks, and an unannotated peak gets its m/z in gray
     _, ax = plot_annotated_spectrum(g, mzs, ints, charge = -1, mass_tag = 2.0156, mz_labels = True)
     texts = [label['text'] for label in ax.peak_labels]
     assert any(t.startswith('510.19 ') for t in texts) and '990.00' in texts
@@ -736,3 +736,35 @@ def test_gui_progress_wrappers(monkeypatch):
             progress.append(payload[1])
     # Each get_topk call reports its start; only counted batches move it on
     assert df['top1_pred'].notna().any() and progress and max(progress) > progress[0]
+
+
+def test_gui_row_state_and_exclusion(app):
+    from candycrunch import gui
+    table = pd.DataFrame({'top1_pred': ['Fuc(a1-2)Gal(b1-3)GalNAc', 'Gal(b1-3)GalNAc'], 'predictions': [[('Fuc(a1-2)Gal(b1-3)GalNAc', 0.8)], [('Gal(b1-3)GalNAc', 0.8)]],
+                          'composition': [{'Hex': 1, 'HexNAc': 1, 'dHex': 1}, {'Hex': 1, 'HexNAc': 1}], 'num_spectra': [5, 3], 'charge': [-1, -1], 'RT': [12.0, 11.0],
+                          'rel_abundance': [70.0, 30.0], 'notes': ['', ''], 'ppm_error': [20.0, 10.0], 'GlyTouCan_ID': ['', ''], 'ms3': [[(384.15, {204.09: 10.0})], []]},
+                         index = pd.Index([530.2, 384.15], name = 'm/z'))
+    features = pd.DataFrame({'top1_pred': ['Fuc(a1-2)Gal(b1-3)GalNAc', 'Gal(b1-3)GalNAc'], 'm/z': [530.2, 700.0], 'RT': [12.0, 20.0], 'charge': [-1, -1],
+                             'composition': [{'Hex': 1, 'HexNAc': 1, 'dHex': 1}, {'Hex': 1, 'HexNAc': 1}], 'GlyTouCan_ID': ['', ''], 'n_files_ms2': [1, 0], 'a': [70.0, 30.0],
+                             'evidence_a': ['ms2', 'ms1_only']})
+    view = gui.ResultsView(gui.GlycanImages())
+    view.set_results({'files': ['a.mzML'], 'settings': dict(gui.DEFAULTS), 'tables': {'a': (table, [{384.15: 100.0}, {204.09: 50.0}])}, 'features': features})
+    view.select_row(0)
+    assert view.source == ('a', 0) and view.ms3_groups and view.tabs.isTabVisible(view.tabs.indexOf(view.ms3_tab))
+    # What the tolerance of the spectrum shown is goes with it to CandyCrumbs
+    sent = []
+    view.open_in_crumbs.connect(sent.append)
+    view.spectrum.set_tolerance(15.0, 'ppm')
+    view.send_to_crumbs()
+    assert sent[-1]['tolerance'] == (15.0, 'ppm')
+    # A feature's exclusion reaches the run's row it was matched to
+    view.toggle_excluded()
+    assert bool(features['excluded'].iat[0]) and bool(view.payload['tables']['a'][0]['excluded'].iat[0])
+    view.toggle_excluded()
+    assert not bool(view.payload['tables']['a'][0]['excluded'].iat[0])
+    # A feature with MS1 signal only leaves no MS3 of the row before it, and without a row Quantification lets go of its peak
+    view.select_row(1)
+    assert view.source is None and view.ms3_groups == [] and not view.tabs.isTabVisible(view.tabs.indexOf(view.ms3_tab))
+    view.select_row(0)
+    view.select_row(None)
+    assert view.quant_source is None and view.map.canvas.rings == []

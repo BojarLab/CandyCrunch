@@ -153,4 +153,3 @@ class CandyCrunch_CNN(torch.nn.Module):
 
 class CandyCrunch_CNN2(torch.nn.Module):
     """Will be added in future"""
-    pass

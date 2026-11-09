@@ -96,6 +96,6 @@ def calibrated_confidence(df):
                   'In-source fragment': 'possibly, of a co-eluting glycan' if x['note_insource'] else 'no',
                   'Known glycan': 'in GlyTouCan' if x['no_glytoucan'] == 0 else 'not in GlyTouCan',
                   'Size and charge': f"{np.exp(x['log_size']):.0f} residues, z = {abs(int(df['charge'].iat[i]))}",
-                  'Abundance': f"{ranks[i]:.0f}. most abundant of {abundance.notna().sum()} peaks" if not np.isnan(ranks[i]) else 'no abundances'}
+                  'Abundance': f"rank {ranks[i]:.0f} of {abundance.notna().sum()} peaks by abundance" if not np.isnan(ranks[i]) else 'no abundances'}
         terms.append([('Typical reported peak', f'confidence {1 / (1 + np.exp(-baseline)):.2f}', round(baseline, 3))] + [(label, values[label], round(float(groups[label][i]), 3)) for label, _ in CONFIDENCE_GROUPS])
     return confidence, terms

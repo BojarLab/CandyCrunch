@@ -1,5 +1,5 @@
 """Training data from runs with known glycans: the inputs CandyCrunch builds from a run (pooled spectra of MS1-refined precursors, one per candidate
-composition), labelled from a mapping of the run's glycans (e.g. a GlycoPOST map), so that the model is trained on what it gets at inference.
+composition), labeled from a mapping of the run's glycans (e.g. a GlycoPOST map), so that the model is trained on what it gets at inference.
 
 On 24 runs with audited ground truths (2026-10-20), these labels were as often right per spectrum as single scans matched to the same maps (90.7%), with 2
 instead of 105 wrong compositions and 9% instead of 26% of spectra away from any ground-truth peak; as candidate sets (every structure of the input's
@@ -133,7 +133,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    |     run's most frequent) and ms1_trap (survey scan analyzer), rival_compositions, rival_vectors, rival_scores and rival_mapped (the spectrum's other
    |     candidate compositions, their composition vectors and annotation scores, and whether the mapping lists them there too); attrs:
    |     rt_shift (the median shift applied to the mapping's RTs), rt_alignment ('none', 'median', 'model' or 'dropped'), rt_anchors (compositions
-   |     the shift rests on), map_rows (records, one per mapping row: Mass, RT, glycan, any map_file / map_row columns of the mapping, status (labelled, or why
+   |     the shift rests on), map_rows (records, one per mapping row: Mass, RT, glycan, any map_file / map_row columns of the mapping, status (labeled, or why
    |     not: no_structure, no_mass, unreadable, no_input_at_mass, other_composition, outside_rt, open_row_nearer (its inputs sit nearer a same-mass
    |     row without structure), not_strongest (a row without RT whose composition's
    |     strongest passing inputs were taken by its isomers or failed crumbs_thresh), spectrum_taken (its spectra kept another composition's label)),
@@ -384,7 +384,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                                'reduced' if settings['modification'] is None and not settings['mass_tag'] else settings['modification']),
                            order = np.arange(len(inputs)))
     labelled = inputs[[len(c) > 0 for c in candidates]]
-    # A pooled spectrum labelled under several compositions keeps the one its fragments support best
+    # A pooled spectrum labeled under several compositions keeps the one its fragments support best
     labelled = labelled.sort_values('annotation_score', ascending = False, kind = 'stable')
     labelled = labelled[~labelled['spec_id'].duplicated()].sort_values('order')
     labelled = labelled.assign(glycan = [c[0] for c in labelled['glycan_candidates']],
@@ -434,14 +434,14 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                                                                        compositions = ('composition', list), compositional_vectors = ('compositional_vector', list),
                                                                        glycan_types = ('glycan_type', list), charges = ('precursor_charge', list),
                                                                        annotation_scores = ('annotation_score', list))
-    # Each spectrum's best candidate (the highest annotation score; of equal ones the first input, as a labelled spectrum keeps the composition its fragments
+    # Each spectrum's best candidate (the highest annotation score; of equal ones the first input, as a labeled spectrum keeps the composition its fragments
     # support best above): its score, to select confident pretraining spectra by, and how many of the spectrum's 15 most intense fragments CandyCrumbs
     # annotates with it (annotated) and how many of them stand above the noise (fragments)
     best = rest.sort_values('annotation_score', ascending = False, kind = 'stable').drop_duplicates('spec_id').set_index('spec_id')
     unlabelled = unlabelled.assign(annotation_score = best['annotation_score'], **{c: best[c] if c in best.columns else np.nan for c in ['annotated', 'fragments']})
     unlabelled = unlabelled.reset_index().set_index('m/z')[SPECTRUM_COLUMNS + ['compositions', 'compositional_vectors', 'glycan_types', 'charges', 'annotation_scores',
                                                                                'annotation_score', 'annotated', 'fragments'] + settings_columns]
-    # Each row's RT on the run's time axis as the labels used it (the shift per row where the drift was modelled, the median shift for rows without
+    # Each row's RT on the run's time axis as the labels used it (the shift per row where the drift was modeled, the median shift for rows without
     # structure, none for rt_own rows), so a ground truth built from the mapping sits where the labels do: the median shift alone left late sialylated rows
     # of runs on a compressed gradient 1-3 min off their peaks
     own_rows = mapping['rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(mapping), bool)
