@@ -992,6 +992,23 @@ def test_isotope_support_and_fragment_ratio():
     assert sorted(out['top1_pred']) == sorted([disialyl, monosialyl])
 
 
+def test_glycosylaminitol_without_its_glycan():
+    sialylated = 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    fucosylated = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc'
+    weak = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    offset = calculate_adduct_mass('NH3-O')
+    mz = lambda g: (composition_to_mass(get_comp(g), modification = 'reduced') - 2 * PROTON_MASS) / 2
+    row = lambda g, rt, n, ab, side: {'m/z': mz(g), 'predictions': [(g, 0.9)], 'composition': get_comp(g), 'num_spectra': n, 'charge': -2, 'RT': rt, 'rel_abundance': ab, 'top_fragments': [731.0, 1113.0],
+                                      'peak_d': {731.0: 100.0, 1113.0: 50.0}, 'annotation_score': 12.0, 'evidence': 'side product' if side else 'strong', 'adduct': None, 'top1_pred': g,
+                                      're_offset': offset if side else 0.0, 'reducing_end': 'glycosylaminitol' if side else None}
+    rows = pd.DataFrame([row(sialylated, 20.0, 10, 4e6, False), row(sialylated, 21.0, 4, 1e6, True), row(fucosylated, 22.0, 8, 2e6, True), row(fucosylated, 23.0, 4, 1e6, True), row(weak, 24.0, 5, 3e6, True)]).set_index('m/z')
+    out, _ = finalise_predictions(rows, False, 'negative', 'reduced', None, 300, 1.0, glycan_class = 'N')
+    assert sorted(out['top1_pred']) == sorted([sialylated, fucosylated])
+    own, side = out[out['top1_pred'] == sialylated].iloc[0], out[out['top1_pred'] == fucosylated].iloc[0]
+    assert own['num_spectra'] == 14 and side['num_spectra'] == 12 and side['RT'] == 22.0 and side['reducing_end'] == 'glycosylaminitol'
+    assert abs(out.index[out['top1_pred'] == fucosylated][0] - (mz(fucosylated) + offset / 2)) < 1e-3
+
+
 def test_glucose_oligomer_notes():
     # A glucose oligomer gets its own note, whatever the run's class, instead of the other-class note; a sulfated core 2 O-glycan in an N+O run and
     # a galacto-oligosaccharide in a free-glycan run get none, and a galacto-oligosaccharide in an N run keeps the other-class note

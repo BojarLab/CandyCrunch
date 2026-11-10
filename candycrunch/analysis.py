@@ -3093,6 +3093,10 @@ def chance_fragment(name):
     return bool(cross and (glyco or mods or cross > 1)) or glyco > 2 or bool(mods and glyco > 1)
 
 
+# Whether the positive-mode A cross-ring warning was shown: Python's own once-per-location registry is reset whenever a library changes the warning filters
+_WARNED_A_CROSS_RINGS = False
+
+
 def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 max_cleavages = 3, simplify = True, charge = -1, mass_tag = None,
                 iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = None, chance_filter = None,
@@ -3194,7 +3198,9 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         # a metal cation opens the free reducing end of an unreduced glycan, so its A_R ions are the A cross-rings positive mode keeps
         disable_A_cross_rings = ('non_reducing' if mass_tag is not None and abs(mass_tag) < 1e-6 else True) if charge > 0 else False
         # a warning shows once per session, while a print repeated for every glycan CandyCrunch scores in positive mode
-        if disable_A_cross_rings:
+        global _WARNED_A_CROSS_RINGS
+        if disable_A_cross_rings and not _WARNED_A_CROSS_RINGS:
+            _WARNED_A_CROSS_RINGS = True
             warnings.warn(
                 "A-type cross-ring fragmentation auto-disabled for positive mode, except the A_R ions of metal-adducted unreduced glycans; reducing-end X-type cross-rings kept (Na+/CID diagnostic). Override A with disable_A_cross_rings=False")
     if disable_X_cross_rings is None:

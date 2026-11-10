@@ -1521,6 +1521,158 @@ def coeluting_lighter_ion(ms1, mz, charge, rt, mass_delta, min_height = 0.02, mi
     return bool(np.corrcoef(hit, partner)[0, 1] >= min_r)
 
 
+def isotope_distribution(atoms, peaks = 4):
+    """abundances of the first isotope peaks of a molecule, M, M+1, ..., from its atoms\n
+    | Arguments:
+    | :-
+    | atoms (dict or string): element counts ({'C': 62, ...}), or an elemental formula such as 'C62H104N4O46'
+    | peaks (int): how many peaks, from the monoisotopic one; default:4\n
+    | Returns:
+    | :-
+    | Returns an array of the abundances of M, M+1, ... (not normalized)
+    """
+    pairs = atoms.items() if isinstance(atoms, dict) else [(el, int(k or 1)) for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', atoms)]
+    dist = np.array([1.0])
+    for el, k in pairs:
+        for _ in range(k):
+            dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:peaks]
+    return dist
+
+
+def envelope_dotp(ms1, mz, charge, rt, distribution, mz_calibration = None, scans = 2, ppm = 10.0):
+    """how well an ion's isotope envelope in the survey scans matches the expected one: its peaks M, M+1, ... within ppm, summed over the survey scans within scans of rt, as a dot
+    product with distribution. Separates analytes transferred between runs from m/z-shifted decoys and from analytes absent from the run (MaillardMorsels: >= 0.9 kept
+    held-out glycopeptide recall at 0.946 and cut decoys 1.5% -> 0.1%, true absences 2.9% -> 0.4%)\n
+    | Arguments:
+    | :-
+    | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
+    | mz (float): monoisotopic m/z of the ion
+    | charge (int): its charge
+    | rt (float): retention time to read the envelope at (the apex)
+    | distribution (array-like): expected abundances of M, M+1, ... (isotope_distribution)
+    | mz_calibration (tuple): (m/z offset, half-width) from ms1_mz_calibration, of which the offset is applied; default:None
+    | scans (int): survey scans on either side summed with the nearest one; default:2
+    | ppm (float): half-width of each isotope window; default:10.0\n
+    | Returns:
+    | :-
+    | Returns the dot product, 0 without signal
+    """
+    ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
+    distribution = np.asarray(distribution, dtype = np.float64)
+    centers = mz + (mz_calibration[0] if mz_calibration is not None else 0.0) + np.arange(len(distribution)) * ISOTOPE_SPACING / abs(charge or 1)
+    found, i = np.zeros(len(distribution)), int(np.argmin(np.abs(ms1_rts - rt)))
+    for s in range(max(i - scans, 0), min(i + scans + 1, len(ms1_rts))):
+        scan_mzs, scan_ints = ms1_mzs[ms1_offsets[s]:ms1_offsets[s + 1]], ms1_ints[ms1_offsets[s]:ms1_offsets[s + 1]]
+        lo, hi = np.searchsorted(scan_mzs, centers * (1 - ppm * 1e-6)), np.searchsorted(scan_mzs, centers * (1 + ppm * 1e-6), side = 'right')
+        found += [scan_ints[a:b].sum() for a, b in zip(lo, hi)]
+    norm = np.linalg.norm(found) * np.linalg.norm(distribution)
+    return float(found @ distribution / norm) if norm > 0 else 0.0
+
+
+def fit_rt_drift(rts, diffs, acidic = None):
+    """how a run's retention times drift against another run's, from anchor analytes found once in both (as LaCyTools and GlycReSoft align runs on what they share). On PGC
+    it can grow with retention time and with every charged residue (sialic acids, sulfates, phosphates), so with at least 10 anchors it is a + b * RT + c * acidic residues
+    (robust least squares; each term only where the anchors span it), else the median difference over at least 3 anchors. Only a consistent drift is fitted: anchors of
+    replicate runs scatter by at most ~0.5 min around their median difference, those of runs from different LC set-ups by ~2 min (median absolute deviation)\n
+    | Arguments:
+    | :-
+    | rts (array-like): the anchors' retention times in this run
+    | diffs (array-like): the other run's minus this run's retention time, per anchor
+    | acidic (array-like): charged residues of each anchor (acidic_count); default:None (none)\n
+    | Returns:
+    | :-
+    | Returns (a, b, c, lowest and highest anchor RT, most acidic residues, median absolute residual) for rt_drift, or None with fewer than 3 anchors or a median absolute
+    | deviation above 1 min
+    """
+    rts, y = np.asarray(rts, dtype = float), np.asarray(diffs, dtype = float)
+    n_acid = np.zeros(len(y)) if acidic is None else np.asarray(acidic, dtype = float)
+    if len(y) < 3:
+        return None
+    use_rt = bool(len(y) >= 10 and np.percentile(rts, 90) - np.percentile(rts, 10) >= 5)
+    use_acid = bool(len(y) >= 10 and (n_acid == 0).sum() >= 3 and (n_acid > 0).sum() >= 3)
+    if np.median(np.abs(y - np.median(y))) > 1:
+        return None
+    beta, resid = np.array([np.median(y)]), y - np.median(y)
+    if use_rt or use_acid:
+        # Iteratively reweighted least squares from the median, Huber then Tukey's biweight, so a mismatched anchor (often at the end of the gradient, where it pulls
+        # hardest) ends up with no weight; the model replaces the median only if its anchors scatter less around it
+        X, r = np.column_stack([np.ones(len(y))] + [rts] * use_rt + [n_acid] * use_acid), resid
+        for it in range(30):
+            u = np.abs(r) / (1.4826 * np.median(np.abs(r)) + 0.01)
+            w = np.sqrt(np.clip(1.345 / np.maximum(u, 1e-9), 0, 1) if it < 20 else np.clip(1 - (u / 4.685) ** 2, 0, None) ** 2)
+            fit = np.linalg.lstsq(X * w[:, None], y * w, rcond = None)[0]
+            r = y - X @ fit
+        if np.median(np.abs(r)) < np.median(np.abs(resid)):
+            beta, resid = fit, r
+        else:
+            use_rt = use_acid = False
+    coefs = iter(beta[1:])
+    return (float(beta[0]), float(next(coefs)) if use_rt else 0.0, float(next(coefs)) if use_acid else 0.0, rts.min(), rts.max(), n_acid.max(),
+            float(np.median(np.abs(resid))))
+
+
+def rt_drift(model, rts, acidic = None):
+    """the drift of fit_rt_drift at retention times rts and acidic residues (each within the range of the anchors), to add to this run's RTs for the other run's\n
+    | Arguments:
+    | :-
+    | model (tuple): from fit_rt_drift
+    | rts (array-like): retention times in this run
+    | acidic (array-like): charged residues of each; default:None (none)\n
+    | Returns:
+    | :-
+    | Returns an array of drifts in minutes
+    """
+    a, b, c, lo, hi, n_max = model[:6]
+    rts = np.asarray(rts, dtype = float)
+    return a + b * np.clip(rts, lo, hi) + c * np.minimum(np.zeros(len(rts)) if acidic is None else acidic, n_max)
+
+
+def transfer_features(ms1, target_mzs, rt_centers, charges, formulas, apex_tolerance = 0.15, mz_calibration = None, min_dotp = 0.9, isotopes = 3, other_charges = None,
+                      mode = 'negative', decoys = 0, seed = 0):
+    """finds analytes identified in other runs in this run's survey scans (match between runs): a genuine peak (extract_xic_areas' search_window test) within twice
+    apex_tolerance of the predicted RT, its apex within apex_tolerance of it, and an isotope envelope at the apex with an envelope_dotp of at least min_dotp. Measured on
+    glycopeptides (MaillardMorsels, held out from runs that identified them, predicted RT from fit_rt_drift and apex_tolerance = 2 x its median absolute residual, between 0.15
+    and 0.5 min): injections of one digest recall 0.946, m/z-shifted decoys 0.04%; human serum samples recall 0.679, decoys 0.50%, and areas of transfers in curated peaks r 0.897
+    against the curators' Skyline areas\n
+    | Arguments:
+    | :-
+    | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
+    | target_mzs (array-like): monoisotopic m/z of each analyte
+    | rt_centers (array-like): its predicted retention time in this run
+    | charges (array-like): its charge
+    | formulas (list): its elemental formula (or anything extract_xic_areas' glycans takes as a whole molecule), for the expected envelope and the isotope share of the area
+    | apex_tolerance (float): largest distance of the apex from the prediction, in minutes; peaks are searched within twice this; default:0.15
+    | mz_calibration (tuple): (m/z offset, half-width) from ms1_mz_calibration; default:None
+    | min_dotp (float): lowest envelope_dotp at the apex; default:0.9
+    | isotopes (int): isotope peaks summed on top of the monoisotopic one, and compared beyond it; default:3
+    | other_charges (list): as in extract_xic_areas; default:None
+    | mode (string): ion mode; default:'negative'
+    | decoys (int): so many m/z-shifted decoys per analyte (+-3 to 12 Da, at its predicted RT) go through the same test; default:0
+    | seed (int): seed of the decoy shifts; default:0\n
+    | Returns:
+    | :-
+    | Returns a dict of arrays 'area', 'apex' (RT), 'dotp', and 'accepted', and with decoys the share of decoys accepted as 'decoy_rate'
+    """
+    target_mzs, rt_centers = np.asarray(target_mzs, dtype = np.float64), np.asarray(rt_centers, dtype = np.float64)
+    charges = np.maximum(np.abs(np.asarray(charges, dtype = np.float64)), 1)
+    expected = [isotope_distribution(f, isotopes + 1) for f in formulas]
+
+    def found(mzs):
+        areas, apex, _, genuine = extract_xic_areas(ms1, mzs, rt_centers, charges, search_window = 2 * apex_tolerance, isotopes = isotopes, mz_calibration = mz_calibration,
+                                                   glycans = list(formulas), other_charges = other_charges, mode = mode)
+        dotp = np.array([envelope_dotp(ms1, m, z, t, d, mz_calibration) if g and np.isfinite(t) else 0.0 for m, z, t, d, g in zip(mzs, charges, apex, expected, genuine)])
+        return areas, apex, dotp, genuine & (np.abs(apex - rt_centers) <= apex_tolerance) & (dotp >= min_dotp)
+
+    areas, apex, dotp, accepted = found(target_mzs)
+    out = {'area': np.where(accepted, areas, 0.0), 'apex': apex, 'dotp': dotp, 'accepted': accepted}
+    if decoys and len(target_mzs):
+        rng, passed = np.random.default_rng(seed), []
+        for _ in range(decoys):
+            passed.append(found(target_mzs + rng.uniform(3.0, 12.0, len(target_mzs)) * rng.choice([-1, 1], len(target_mzs)) / charges)[3])
+        out['decoy_rate'] = float(np.mean(passed))
+    return out
+
+
 def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1.0, mz_tolerance = 0.5, search_window = 0,
                       isotopes = 3, weights = None, mz_calibration = None, glycans = None, sample_prep = 'underivatized', other_charges = None, mode = 'negative',
                       details = None, adduct_ions = None):
@@ -1677,11 +1829,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
                 # a deuterated cap is CD3 for CH3: three H of each cap are D, which adds no heavier isotope worth counting
                 if sample_prep == 'deuteropermethylated':
                     counts['H'] -= 3 * n_units
-            dist = np.array([1.0])
-            for el, k in counts.items():
-                for _ in range(k):
-                    dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:isotopes[t] + 1]
-            share[t] = _ISOTOPE_SHARES[(g, sample_prep, int(isotopes[t]))] = dist.sum()
+            share[t] = _ISOTOPE_SHARES[(g, sample_prep, int(isotopes[t]))] = isotope_distribution(counts, isotopes[t] + 1).sum()
         known = ~np.isnan(share)
         if known.any():
             order = np.argsort(target_mzs[known] * charges[known])
@@ -4390,11 +4538,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                         formula = get_formula(comp, sample_prep = 'permethylated' if sample_prep == 'deuteropermethylated' else sample_prep)
                     except ValueError:
                         return None
-                    dist = np.array([1.0])
-                    for el, k in re.findall(r'([A-Z][a-z]?)(\d*)', formula):
-                        for _ in range(int(k or 1)):
-                            dist = np.convolve(dist, ISOTOPE_ABUNDANCES.get(el, [1.0]))[:12]
-                    return dist
+                    return isotope_distribution(formula, 12)
 
                 def peak_sum(mz, rt):
                     # summed survey intensity within 0.3 m/z of an ion over 0.15 min around rt
@@ -4601,8 +4745,9 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     if 're_offset' in df_out.columns:
         # An unreduced (unlabeled) glycan is a glycan of the run that escaped reduction (labeling), a glycosylamine one whose PA label was not reduced, a
         # glycosylaminitol a reduced N-glycan whose glycosylamine was reduced before it hydrolyzed: its abundance and spectra count for that glycan's row
-        # nearest in RT (below), and it is never a row of its own. Every other reducing end (e.g., ethyl glycosides) is a species of its own, reported at its
-        # observed m/z
+        # nearest in RT (below), and it is no row of its own, unless a glycan is in the run only as glycosylaminitols: at least 10 spectra (the signal of a real
+        # peak; chance readings of a composition hold 5-7) leave the strongest as the glycan's row, at its observed m/z and named in reducing_end. Every other
+        # reducing end (e.g., ethyl glycosides) is a species of its own, reported at its observed m/z
         unlabelled = df_out['unlabelled'].values
         # That row is the row of the side product's structure nearest in RT, within 5 min (side products lie within about 3 min of their glycan), or, where the
         # run reports its composition only as other isomers (the side product's isomer comes from its own fragments among the run's structures of the
@@ -4611,6 +4756,17 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         top1 = df_out['top1_pred'].values
         comps = [stringify_dict(get_comp(g)) if isinstance(g, str) else None for g in top1]
         rts, own = df_out['RT'].values, np.flatnonzero(df_out['re_offset'].values == 0)
+        own_comps = {comps[j] for j in own}
+        orphans = defaultdict(list)
+        for i in np.flatnonzero(unlabelled & np.array([isinstance(g, str) for g in top1], dtype = bool)):
+            if comps[i] not in own_comps:
+                orphans[comps[i]].append(i)
+        unlabelled = unlabelled.copy()
+        for rows in orphans.values():
+            top = max(rows, key = lambda i: df_out['rel_abundance'].iloc[i])
+            if df_out['reducing_end'].iloc[top] == 'glycosylaminitol' and sum(df_out['num_spectra'].iloc[i] for i in rows) >= 10:
+                unlabelled[top] = False
+                own = np.append(own, top)
         for i in np.flatnonzero(unlabelled & np.array([isinstance(g, str) for g in top1], dtype = bool)):
             same = [j for j in own if top1[j] == top1[i] and abs(rts[j] - rts[i]) <= 5] or [j for j in own if comps[j] == comps[i]]
             t = min(same, key = lambda j: abs(rts[j] - rts[i]), default = None)
@@ -4944,7 +5100,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
    |                               for; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid', as released
    |                               glycosphingolipid glycans form them, for 'PA' glycosylamines, the PA glycan 2 H lighter, and for reduced N-glycans
    |                               glycosylaminitols (1-amino-1-deoxy-alditols, from PNGase F's glycosylamines reduced before they hydrolyzed), the alditol
-   |                               0.984 Da lighter, whose abundance and spectra count for their glycan's row like those of unlabeled glycans)
+   |                               0.984 Da lighter, whose abundance and spectra count for their glycan's row like those of unlabeled glycans; these are also
+   |                               searched for at compositions whose alditol readings pass the annotation gate, and a glycan held only by them, at 10 spectra
+   |                               or more, is reported at its strongest one, named in reducing_end)
    | adducts (string or list): ions of glycowork's adduct table that carry the charge of the run's precursors in place of protons, e.g., 'Li+' for lithium salts in
    |                           the mobile phase ([M+Li]+, [M+2Li]2+, [M+Li+H]2+, ...): their compositions come before the protonated ones, and fragments of such
    |                           precursors carry them; the mode's usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered after protons;
@@ -5562,6 +5720,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         best = next((g for g in others if compared.get(g[0], 0) >= 2 and compared[g[0]] == max(compared.values())), None)
         reordered.append([(best[0], round(best[1], 4))] + [g for g in preds if g[0] != best[0]][:4] if best else preds)
     df_out['predictions'] = reordered
+    # The model's readings that the annotation gate backs: a glycan present mostly as its glycosylaminitol has few spectra at its alditol's mass, whose readings can
+    # leave below although its glycosylaminitol spectra carry its signal
+    gated_readings = [p[0] for p, s in zip(df_out['predictions'], df_out['annotation_score']) if p and s > crumbs_thresh]
     # Filter out wrong predictions via diagnostic ions etc.
     df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep,
                            mass_tag = mass_tag, max_charge = max_charge,
@@ -5766,6 +5927,11 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         known = defaultdict(dict)
         for g, conf in [p[0] for p in df_out['predictions'] if p]:
             known[stringify_dict(get_comp(g))][g] = max(conf, known[stringify_dict(get_comp(g))].get(g, 0))
+        gated = defaultdict(dict)
+        for g, conf in gated_readings:
+            if stringify_dict(get_comp(g)) not in known:
+                gated[stringify_dict(get_comp(g))][g] = max(conf, gated[stringify_dict(get_comp(g))].get(g, 0))
+        every = {**known, **gated}
         found = []
         for offset, name in re_names.items():
             cands = assign_candidate_structures(df_cond.copy(), df_use, common_structure_map, topo_struct_map, mass_tolerance, mode, (mass_tag or 0) + offset,
@@ -5773,9 +5939,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                                                 ms1_ppm = 20 if accurate_ms1 else None, sialic_derivatization = sialic_derivatization, adducts = adducts)
             # with a sialic derivatization the candidates carry their sialic linkages (Neu5Ac_a2-6), the run's structures their plain composition
             cands['comp_str'] = [stringify_dict(plain_composition(c)) if isinstance(c, dict) else None for c in cands['composition']]
-            cands = cands[cands['comp_str'].isin(list(known))].drop_duplicates(['spec_id', 'comp_str'])
+            pool = every if name == 'glycosylaminitol' else known
+            cands = cands[cands['comp_str'].isin(list(pool))].drop_duplicates(['spec_id', 'comp_str'])
             if len(cands):
-                cands = cands.assign(reported = [list(known[c]) for c in cands['comp_str']], re_offset = offset, reducing_end = name).explode('reported').reset_index(drop = True)
+                cands = cands.assign(reported = [list(pool[c]) for c in cands['comp_str']], re_offset = offset, reducing_end = name).explode('reported').reset_index(drop = True)
                 # scored with the sialic linkages the variant's precursor mass gives, reported as the run reports the structure
                 cands['candidate_structure'] = cands['reported'] if sialic_derivatization is None else [
                     fit_sialic_linkages(g, c, scoring = True) for g, c in zip(cands['reported'], cands['composition'])]
@@ -5784,7 +5951,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                                                              n_jobs = n_jobs, fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm,
                                                              deisotoped = condensed.setdefault('deisotoped', {})))
         df_var = pd.concat(found, ignore_index = True) if found else pd.DataFrame(columns = ['annotation_score'])
-        df_var['conf'] = [known[c][g] for c, g in zip(df_var.get('comp_str', []), df_var.get('reported', []))]
+        df_var['conf'] = [every[c][g] for c, g in zip(df_var.get('comp_str', []), df_var.get('reported', []))]
         if len(df_var):
             sparse = (df_var['fragments'] <= 6) & (df_var['annotated'] >= np.maximum(2, 0.6 * df_var['fragments'])) & (df_var['conf'] >= 0.5)
             own = df_out[df_out['predictions'].str.len() > 0]
@@ -6201,33 +6368,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         ref_rts = keyed.loc[keyed['condition_label'] == ref, 'RT']
         for file_label, file_rows in keyed[keyed['condition_label'] != ref].groupby('condition_label'):
             diffs = (ref_rts - file_rows['RT']).dropna()
-            if len(diffs) < 3:
-                continue
-            rts = file_rows.loc[diffs.index, 'RT'].values.astype(float)
-            n_acid = np.array([acidic_count(c) for c in file_rows.loc[diffs.index, 'composition']], dtype = float)
-            use_rt = bool(len(diffs) >= 10 and np.percentile(rts, 90) - np.percentile(rts, 10) >= 5)
-            use_acid = bool(len(diffs) >= 10 and (n_acid == 0).sum() >= 3 and (n_acid > 0).sum() >= 3)
-            y = diffs.values.astype(float)
-            # Only a consistent drift is corrected: anchors of replicate runs scatter by at most ~0.5 min around their median difference, those of runs from
-            # different LC set-ups by ~2 min (median absolute deviation)
-            if np.median(np.abs(y - np.median(y))) > 1:
-                continue
-            beta, resid = np.array([np.median(y)]), y - np.median(y)
-            if use_rt or use_acid:
-                # Iteratively reweighted least squares from the median, Huber then Tukey's biweight, so a mismatched anchor (often at the end of the
-                # gradient, where it pulls hardest) ends up with no weight; the model replaces the median only if its anchors scatter less around it
-                X, r = np.column_stack([np.ones(len(y))] + [rts] * use_rt + [n_acid] * use_acid), resid
-                for it in range(30):
-                    u = np.abs(r) / (1.4826 * np.median(np.abs(r)) + 0.01)
-                    w = np.sqrt(np.clip(1.345 / np.maximum(u, 1e-9), 0, 1) if it < 20 else np.clip(1 - (u / 4.685) ** 2, 0, None) ** 2)
-                    fit = np.linalg.lstsq(X * w[:, None], y * w, rcond = None)[0]
-                    r = y - X @ fit
-                if np.median(np.abs(r)) < np.median(np.abs(resid)):
-                    beta = fit
-                else:
-                    use_rt = use_acid = False
-            coefs = iter(beta[1:])
-            rt_shift[file_label] = (float(beta[0]), float(next(coefs)) if use_rt else 0.0, float(next(coefs)) if use_acid else 0.0, rts.min(), rts.max(), n_acid.max())
+            model = fit_rt_drift(file_rows.loc[diffs.index, 'RT'].values.astype(float), diffs.values.astype(float),
+                                 [acidic_count(c) for c in file_rows.loc[diffs.index, 'composition']])
+            if model is not None:
+                rt_shift[file_label] = model
         if rt_shift:
             mid = np.median(keyed['RT'])
             print(f"Retention times aligned to {ref}: " + ', '.join(f"{k} {a + b * mid:+.2f} min" + (f" ({b:+.3f}/min, {c:+.2f} per acidic residue)" if b or c else '')
@@ -6236,10 +6380,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     def drift(rts, labels, comps):
         # Each row's drift towards the reference at its own RT and number of acidic residues (within the ranges of its file's anchors; 0 for the reference)
         rts, labels, comps, out = np.asarray(rts, dtype = float), np.asarray(labels), np.asarray(comps, dtype = object), np.zeros(len(rts))
-        for k, (a, b, c, lo, hi, n_max) in rt_shift.items():
+        for k, model in rt_shift.items():
             m = labels == k
             if m.any():
-                out[m] = a + b * np.clip(rts[m], lo, hi) + c * np.minimum([acidic_count(x) for x in comps[m]], n_max)
+                out[m] = rt_drift(model, rts[m], [acidic_count(x) for x in comps[m]])
         return out
 
     def file_rt(rts, label, comps):
