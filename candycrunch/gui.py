@@ -2505,7 +2505,8 @@ class ResultsView(QWidget):
                     column.update(kind = 'bar', bar = [None if v is None else (v / top, e == 'ms1_only') for v, e in zip(column['raw'], evidence)],
                                   tips = [f'{t} ({e})' if isinstance(e, str) else t for t, e in zip(column['text'], evidence)])
                     columns.append(column)
-            notes = list(df['curation'])
+            notes = ['; '.join(x for x in (f'not compared: {f}' if isinstance(f, str) and f else '', c) if isinstance(x, str) and x)
+                     for f, c in zip(df.get('flag', [''] * len(df)), df['curation'])]
         else:
             abundance = 'rel_abundance' if 'rel_abundance' in df.columns else 'num_spectra'
             column = _number_column('Abundance' if abundance == 'rel_abundance' else 'Spectra', df[abundance], 2 if abundance == 'rel_abundance' else 0,
@@ -2998,7 +2999,7 @@ class ResultsView(QWidget):
             df.loc[df.index[row], ['top1_pred', 'curation']] = [structure, '; '.join([how] + (['area edited'] if 'area edited' in str(df['curation'].iat[row]).split('; ') else []))]
             # The pipeline's supporting peaks and confidence were those of the old structure; one assigned by hand has none (the spectrum panel shows its
             # supporting peaks)
-            for column in ('supported_by', 'confidence', 'confidence_terms'):
+            for column in ('supported_by', 'confidence', 'confidence_terms', 'flag'):
                 if column in df.columns:
                     df.loc[df.index[row], column] = np.nan
             if 'GlyTouCan_ID' in df.columns:
@@ -3375,6 +3376,10 @@ class CompareTab(QWidget):
         form.addRow('Transform', self.transform)
         form.addRow('Found in at least', self.min_samples)
         form.addRow('', self.impute)
+        self.flagged = QCheckBox('Include flagged features')
+        self.flagged.setToolTip('Features the pipeline flags as in-source fragments, peeling products, glucose oligomers, or glycans outside the run\'s glycan '
+                                'classes are left out of the comparison unless this is checked; they stay in the feature table')
+        form.addRow('', self.flagged)
         layout.addLayout(form)
         self.plan = _label('', 'hint')
         layout.addWidget(self.plan)
@@ -3491,7 +3496,7 @@ class CompareTab(QWidget):
 
     def show_experiment(self):
         self.experiment = experiment = self.current()
-        for widget in (self.runs, self.set_group, self.set_covariate, self.guess, self.level, self.transform, self.min_samples, self.impute):
+        for widget in (self.runs, self.set_group, self.set_covariate, self.guess, self.level, self.transform, self.min_samples, self.impute, self.flagged):
             widget.setEnabled(experiment is not None)
         self.runs.blockSignals(True)
         self.runs.setRowCount(0)
@@ -3521,6 +3526,7 @@ class CompareTab(QWidget):
         _set_combo(self.transform, options.get('transform'))
         self.min_samples.setValue(round(100 * options.get('min_samples', 0.1)))
         self.impute.setChecked(options.get('impute', True))
+        self.flagged.setChecked(options.get('include_flagged', False))
         self.update_plan()
         self.show_result(comparison['result'])
 
@@ -3572,7 +3578,7 @@ class CompareTab(QWidget):
 
     def options(self):
         return {'motifs': self.level.currentData(), 'transform': self.transform.currentData(), 'min_samples': self.min_samples.value() / 100,
-                'impute': self.impute.isChecked()}
+                'impute': self.impute.isChecked(), 'include_flagged': self.flagged.isChecked()}
 
     def update_plan(self):
         """Says which test the groups make for, or what they are missing"""
@@ -3609,7 +3615,7 @@ class CompareTab(QWidget):
         groups, pairs, covariates = self.groups()
         experiment['comparison']['options'] = options = self.options()
         runs = [run for run in self.run_names(experiment) if run in groups]
-        columns = [c for c in ('top1_pred', 'composition', 'excluded') if c in experiment['features'].columns] + runs
+        columns = [c for c in ('top1_pred', 'composition', 'excluded', 'flag') if c in experiment['features'].columns] + runs
         if self.pool is None or getattr(self.pool, '_broken', False):
             # One process for every comparison of the session, so glycowork is imported once; the window stays responsive while it runs
             self.pool = ProcessPoolExecutor(1, mp_context = mp.get_context('spawn'))
@@ -3653,7 +3659,8 @@ class CompareTab(QWidget):
         """Whether the feature table was curated (structures assigned, features excluded) since the comparison"""
         from candycrunch.differential import abundance_table
         with IMPORT_LOCK:
-            table, _ = abundance_table(self.experiment['features'], list(result['input'].columns[1:]), motifs = result['motifs'])
+            table, _ = abundance_table(self.experiment['features'], list(result['input'].columns[1:]), motifs = result['motifs'],
+                                      include_flagged = result.get('include_flagged', False))
         return not table.equals(result['input'])
 
     def showEvent(self, event):

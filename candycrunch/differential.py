@@ -16,19 +16,25 @@ def _row_label(structure, composition):
     return canonicalize_composition(composition, as_string = True) if any('_a2-' in k for k in composition) else stringify_dict(composition)
 
 
-def abundance_table(features, runs, motifs = False):
+def abundance_table(features, runs, motifs = False, include_flagged = False):
     """the feature table in glycowork's layout: glycans in the first column, then one column of abundances per run\n
    | Arguments:
    | :-
-   | features (dataframe): feature table of wrap_inference_batch (top1_pred, composition, one abundance column per run); rows whose 'excluded' column is True (curation in the app) are left out
+   | features (dataframe): feature table of wrap_inference_batch (top1_pred, composition, one abundance column per run); rows whose 'excluded' column is True (curation in the app) are left out, and so are rows with a 'flag' (in-source fragment, peeling product, other class, glucose oligomer; see wrap_inference_batch) unless include_flagged takes them in
    | runs (list): runs (columns of features) to take, in this order
-   | motifs (bool): only features with a structure, as motifs are found in structures; default:False\n
+   | motifs (bool): only features with a structure, as motifs are found in structures; default:False
+   | include_flagged (bool or list): True takes in all flagged rows, a list the rows all of whose flags it names (e.g., ['other class'] for the N-glycans of an O-glycan run); default:False\n
    | Returns:
    | :-
    | Returns the table (per row a structure, else the composition; features of the same one summed, as they are the same molecule as far as CandyCrunch can tell, where glycowork would average them; structures first, rows without signal dropped) and the number of features in each row
    """
     labels = pd.Series([_row_label(s, None if motifs else c) for s, c in zip(features['top1_pred'], features['composition'])], index = features.index)
-    keep = labels.notna() & ~features.get('excluded', pd.Series(False, index = features.index)).astype(bool)
+    # flagged rows are not glycans of the samples' glycoconjugates as released, or not of the class the runs were set up for, and would shift every other
+    # glycan's share with how much of them a run happens to hold
+    flags = features['flag'].fillna('').astype(str) if 'flag' in features.columns else pd.Series('', index = features.index)
+    taken = set() if isinstance(include_flagged, bool) else set(include_flagged)
+    keep = (labels.notna() & ~features.get('excluded', pd.Series(False, index = features.index)).astype(bool)
+            & flags.map(lambda f: include_flagged is True or not f or set(f.split('; ')) <= taken))
     values = features.loc[keep, runs].astype(float).fillna(0).groupby(labels[keep].values, sort = False)
     table, counts = values.sum(), values.size()
     table = table[(table > 0).any(axis = 1)]
@@ -37,7 +43,7 @@ def abundance_table(features, runs, motifs = False):
     return table.loc[order].rename_axis('glycan').reset_index(), counts.loc[order]
 
 
-def compare_groups(features, groups, pairs = None, motifs = False, transform = None, impute = True, min_samples = 0.1, covariates = None):
+def compare_groups(features, groups, pairs = None, motifs = False, transform = None, impute = True, min_samples = 0.1, covariates = None, include_flagged = False):
     """differential abundance between groups of runs of one batch: glycowork's get_differential_expression for two groups (moderated Welch's t-test,
     or paired, on log-ratio transformed abundances, with Benjamini-Hochberg correction at a sample-size adjusted alpha) and get_glycanova for three or
     more (moderated one-way ANOVA with Tukey's post-hoc test), or with covariates a linear model of group plus covariates (ANCOVA for three or more
@@ -51,10 +57,11 @@ def compare_groups(features, groups, pairs = None, motifs = False, transform = N
    | transform (string): 'CLR' or 'ALR'; default:None (glycowork chooses)
    | impute (bool): replace zeros by glycowork's biosynthetic imputation; default:True
    | min_samples (float): share of runs a glycan has to be found in to be tested; default:0.1
-   | covariates (dict): a nuisance variable of each run, {run: value}, or several as {name: {run: value}} (such as secretor status, sex, age or batch; values that are all numbers are a slope, anything else a factor); the groups are compared within them; every compared run needs a value; not with pairs; default:None\n
+   | covariates (dict): a nuisance variable of each run, {run: value}, or several as {name: {run: value}} (such as secretor status, sex, age or batch; values that are all numbers are a slope, anything else a factor); the groups are compared within them; every compared run needs a value; not with pairs; default:None
+      | include_flagged (bool or list): compare flagged features too (see abundance_table): True all of them, a list those all of whose flags it names; default:False\n
    | Returns:
    | :-
-   | Returns a dictionary: groups (in order), members ({group: runs}), left_out (runs without glycan signal, and their pairs), paired, covariates ({name: {run: value}}), motifs, table (glycowork's results, plus 'Mean in <group>' columns of measured abundance, 'Found in' (runs per group) and, for glycans, the number of features in each row), posthoc ({glycan: Tukey's table}, three or more groups), values (measured abundance in % per row and run, before imputation), input (the abundance table of the runs compared), test, alpha, transform, and log (what glycowork printed)
+   | Returns a dictionary: groups (in order), members ({group: runs}), left_out (runs without glycan signal, and their pairs), paired, covariates ({name: {run: value}}), motifs, include_flagged, table (glycowork's results, plus 'Mean in <group>' columns of measured abundance, 'Found in' (runs per group) and, for glycans, the number of features in each row), posthoc ({glycan: Tukey's table}, three or more groups), values (measured abundance in % per row and run, before imputation), input (the abundance table of the runs compared), test, alpha, transform, and log (what glycowork printed)
    """
     from glycowork.motif.analysis import get_differential_expression, get_glycanova
     from glycowork.motif.annotate import quantify_motifs
@@ -69,7 +76,7 @@ def compare_groups(features, groups, pairs = None, motifs = False, transform = N
         raise ValueError('Give the runs at least two groups to compare')
     # a run without glycan signal (nothing found, or only excluded features) has no composition to compare, as its shares would be 0/0: it is left
     # out, and with pairs its partner too
-    signal = abundance_table(features, [r for g in names for r in members[g]], motifs = motifs)[0]
+    signal = abundance_table(features, [r for g in names for r in members[g]], motifs = motifs, include_flagged = include_flagged)[0]
     empty = [r for g in names for r in members[g] if not (signal[r] > 0).any()]
     lost = {(pairs or {}).get(r) for r in empty} - {None, ''}
     empty += [r for g in names for r in members[g] if r not in empty and (pairs or {}).get(r) in lost]
@@ -101,10 +108,15 @@ def compare_groups(features, groups, pairs = None, motifs = False, transform = N
     # a covariate typed into a table arrives as text; one whose values are all numbers (an age) is a slope, anything else (a status, a batch) a factor
     cov = pd.DataFrame({name: (lambda v: v if v.notna().all() else pd.Series(values))(pd.to_numeric(pd.Series(values), errors = 'coerce'))
                         for name, values in covariates.items()}).loc[runs] if covariates else None
-    table, counts = abundance_table(features, runs, motifs = motifs)
+    table, counts = abundance_table(features, runs, motifs = motifs, include_flagged = include_flagged)
     log = io.StringIO()
     if empty:
         print(f'Left out, without glycan signal{" (or paired with such a run)" if lost else ""}: {", ".join(empty)}', file = log)
+    if 'flag' in features.columns and include_flagged is not True:
+        taken = set() if isinstance(include_flagged, bool) else set(include_flagged)
+        kinds = pd.Series([k for f in features['flag'].fillna('').astype(str) for k in f.split('; ') if k and k not in taken]).value_counts()
+        if len(kinds):
+            print(f'Features left out as flagged by the pipeline (include_flagged takes them in): {", ".join(f"{n} {k}" for k, n in kinds.items())}', file = log)
     with contextlib.redirect_stdout(log):
         if len(names) == 2:
             results = get_differential_expression(table, group1 = members[names[0]], group2 = members[names[1]], motifs = motifs, paired = bool(pairs),
@@ -128,7 +140,7 @@ def compare_groups(features, groups, pairs = None, motifs = False, transform = N
     table_out['Found in'] = [', '.join(f'{g} {present.iloc[i][members[g]].sum()}/{len(members[g])}' for g in names) for i in range(len(table_out))]
     if not motifs:
         table_out['Features'] = counts.reindex(table_out['Glycan']).values
-    return {'groups': names, 'members': members, 'left_out': empty, 'paired': bool(pairs), 'covariates': covariates, 'motifs': motifs, 'table': table_out,
+    return {'groups': names, 'members': members, 'left_out': empty, 'paired': bool(pairs), 'covariates': covariates, 'motifs': motifs, 'include_flagged': include_flagged, 'table': table_out,
             'posthoc': {k: pd.DataFrame(v).reset_index(drop = True) for k, v in posthoc.items()}, 'values': values.reindex(table_out['Glycan']),
             'input': table, 'test': attrs.get('test', ''), 'alpha': float(attrs.get('alpha', 0.05)), 'transform': attrs.get('transform', transform or ''),
             'log': log.getvalue()}

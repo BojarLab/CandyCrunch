@@ -45,6 +45,12 @@ def test_abundance_table():
     # motifs only count structures; excluded features are left out
     assert 'Hex2HexNAc2dHex1' not in abundance_table(df, runs, motifs = True)[0]['glycan'].tolist()
     assert GLYCANS[3] not in abundance_table(df.assign(excluded = df['top1_pred'] == GLYCANS[3]), runs)[0]['glycan'].tolist()
+    # flagged features (wrap_inference_batch) are left out unless taken in, all of them or those all of whose flags are named
+    flagged = df.assign(flag = ['other class' if g == GLYCANS[3] else 'peeling product; other class' if g == GLYCANS[4] else '' for g in df['top1_pred']])
+    assert not {GLYCANS[3], GLYCANS[4]} & set(abundance_table(flagged, runs)[0]['glycan'])
+    assert {GLYCANS[3], GLYCANS[4]} <= set(abundance_table(flagged, runs, include_flagged = True)[0]['glycan'])
+    taken = set(abundance_table(flagged, runs, include_flagged = ['other class'])[0]['glycan'])
+    assert GLYCANS[3] in taken and GLYCANS[4] not in taken
 
 
 def test_compare_two_groups():

@@ -4866,6 +4866,13 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     return df_out, spectra_out
 
 
+# Notes of flag_coeluting_substructures on rows that are not glycans of the samples' glycoconjugates as released (in-source fragments, peeling products,
+# glucose oligomers) or not of a class the run was set up for: wrap_inference_batch flags the features most of whose runs note them, and group
+# comparisons leave flagged features out (candycrunch.differential)
+FLAG_NOTES = {'in-source fragment': 'Possible in-source fragment of ', 'peeling product': 'Possible peeling product of ', 'other class': ' by structure, in ',
+              'glucose oligomer': 'Glucose oligomer ('}
+
+
 def flag_coeluting_substructures(df_out, glycan_class, sample_prep = 'underivatized', unreduced = False, ms1 = None, mz_tolerance = 0.5,
                                  rt_tolerance = 0.1, min_ratio = 3.0, fragment_ratio = 3.0):
     """Notes on rows to check before trusting them: possible in-source fragments and O-glycan peeling products, structures reported at more than one
@@ -6288,7 +6295,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | run_anion (string): the anion of the samples' mobile phase in negative mode, as in wrap_inference; default:None\n
    | Returns:
    | :-
-   | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file> ('ms2', or 'ms1_only' where the file has only MS1 signal of it); dict of per-file dataframes with the confidence of each structure (none for MS1-only rows) and the evidence of each row ('ms2' or 'ms1_only'), or of (dataframe, spectra) tuples if spectra=True, with the columns xic and confidence_terms, and ms3 for files with MS3 spectra, as in wrap_inference)
+   | Returns a tuple of (feature table with one row per isomer group with a structure (also those without one if get_missing; a glycan that files report at different charge states is one row): top1_pred, consensus m/z, RT, charge, composition, GlyTouCan_ID, number of files with MS2 evidence, flag (what most of its files with MS2 evidence note it as: in-source fragment, peeling product, other class, glucose oligomer, joined by '; '; empty for most; group comparisons leave flagged features out), then per file its rel_abundance (num_spectra if no file has intensities) and evidence_<file> ('ms2', or 'ms1_only' where the file has only MS1 signal of it); dict of per-file dataframes with the confidence of each structure (none for MS1-only rows) and the evidence of each row ('ms2' or 'ms1_only'), or of (dataframe, spectra) tuples if spectra=True, with the columns xic and confidence_terms, and ms3 for files with MS3 spectra, as in wrap_inference)
    """
     if not spectra_filepath_list:
         raise ValueError('spectra_filepath_list holds no files')
@@ -6735,6 +6742,13 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                                          GlyTouCan_ID = ('GlyTouCan_ID', 'first'))
     combined_batch['n_files_ms2'] = all_outputs[all_outputs['evidence'] != 'ms1_only'].groupby(group_keys)[
         'condition_label'].nunique().reindex(combined_batch.index, fill_value = 0)
+    # A feature that most of its runs with MS2 note as an in-source fragment, a peeling product, a glucose oligomer, or a structure outside the run's
+    # classes (FLAG_NOTES; structures of every class a run lists are not noted) is flagged: it stays in the table, and group comparisons leave it out
+    ms2_rows = all_outputs[all_outputs['evidence'] != 'ms1_only']
+    notes = ms2_rows['notes'].fillna('').astype(str) if 'notes' in ms2_rows.columns else pd.Series('', index = ms2_rows.index)
+    flagged = ms2_rows[group_keys].assign(**{k: notes.str.contains(text, regex = False) for k, text in FLAG_NOTES.items()}).groupby(group_keys).mean().reindex(
+        combined_batch.index, fill_value = 0) >= 0.5
+    combined_batch['flag'] = ['; '.join(k for k, f in zip(FLAG_NOTES, row) if f) for row in flagged[list(FLAG_NOTES)].values]
     if 'reducing_end' in all_outputs.columns:
         # an ethyl glycoside (or other reducing-end variant) is a feature of its own, at its own m/z
         combined_batch['reducing_end'] = all_outputs[rep].groupby(group_keys)['reducing_end'].first().reindex(combined_batch.index)

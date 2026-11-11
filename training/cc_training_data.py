@@ -150,10 +150,11 @@ def run_settings(row):
     return settings
 
 
-def taxonomy(species):
+def taxonomy(species, classes):
     # Candidate compositions from the glycans of the run's kingdom when its species are no mammals (wrap_inference's default Mammalia lacks many
-    # compositions of other animals); species unknown to glycowork count by their genus
-    from glycowork.glycan_data.loader import df_species
+    # compositions of other animals); species unknown to glycowork count by their genus. A kingdom without a glycan of the run's classes in df_glycan
+    # (the free oligosaccharides of a kelp) keeps the default
+    from glycowork.glycan_data.loader import df_glycan, df_species
     taxa = df_species.drop_duplicates('Species').set_index('Species')[['Genus', 'Class', 'Kingdom']]
     found = []
     for s in (species or '').split(';'):
@@ -161,7 +162,8 @@ def taxonomy(species):
         hit = taxa.loc[s] if s in taxa.index else taxa[taxa['Genus'] == s.split('_')[0]].head(1).squeeze(axis = 0) if (taxa['Genus'] == s.split('_')[0]).any() else None
         if hit is not None and len(hit):
             found.append((hit['Class'], hit['Kingdom']))
-    if not found or all(c == 'Mammalia' for c, _ in found) or len({k for _, k in found}) > 1:
+    if not found or all(c == 'Mammalia' for c, _ in found) or len({k for _, k in found}) > 1 or not df_glycan.loc[
+            df_glycan['glycan_type'].isin(classes), 'Kingdom'].map(lambda kingdoms: found[0][1] in kingdoms).any():
         return {}
     return dict(taxonomy_level = 'Kingdom', taxonomy_filter = found[0][1])
 
@@ -215,7 +217,8 @@ def convert_run(task):
         except Exception:
             pass
     try:
-        settings = dict(run_settings(task['row']), **taxonomy(task['row'].get('Species') if isinstance(task['row'].get('Species'), str) else None))
+        settings = dict(run_settings(task['row']), **taxonomy(task['row'].get('Species') if isinstance(task['row'].get('Species'), str) else None,
+                                                                [task['glycan_class']] if isinstance(task['glycan_class'], str) else list(task['glycan_class'])))
         # (one polarity of a file that switches it: wrap_inference keeps the spectra of the mode max_charge asks for)
         if task['mode']:
             settings['max_charge'] = abs(settings['max_charge']) * (1 if task['mode'] == 'positive' else -1)

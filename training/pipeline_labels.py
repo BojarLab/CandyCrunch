@@ -40,7 +40,7 @@ def run_inputs(spectra_filepath, glycan_class, **inference_kwargs):
         inputs = wrap_inference(spectra_filepath, glycan_class, return_inputs = True, _loaded = loaded, **inference_kwargs)
     else:
         # A run fragmenting its precursors by several activations (CID and HCD scans of each) would pool them into one input, so each activation's spectra
-        # are processed on their own (inference still pools them), with the analyzer that read them where the file records it (CID in the ion trap,
+        # are processed on their own (inference pools them in one analyzer and takes the spectra of one analyzer where two read them), with the analyzer that read them where the file records it (CID in the ion trap,
         # HCD in the orbitrap), their pooled spectra numbered apart
         parts = []
         for activation in sorted(set(activations)):
