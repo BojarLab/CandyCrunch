@@ -171,6 +171,10 @@ def unactivated(filter_string):
     return bool(stage) and not any(float(e) for e in re.findall(r'@[a-z]+([\d.]+)', stage[-1][1]))
 
 
+# The averagine envelope of averaged_precursor_mz per carbon count
+_AVERAGINE = {}
+
+
 def averaged_precursor_mz(ms1, rt, mz, charge, averaged = 6, isotope_spacing = ISOTOPE_SPACING):
     """the monoisotopic m/z of a peptide-like precursor from its survey scans, after Monocle (Rad et al. 2021): the scans around it summed, the offset of -3 to +1 isotope steps whose
     envelope best fits a peptide averagine (5% better than the lighter offsets before it), and the intensity-weighted m/z there\n
@@ -186,21 +190,26 @@ def averaged_precursor_mz(ms1, rt, mz, charge, averaged = 6, isotope_spacing = I
     | :-
     | Returns the refined m/z
     """
-    from scipy.stats import binom
     rts, mzs, ints, offsets = ms1
     center = max(int(np.searchsorted(rts, rt)) - 1, 0)
     steps = np.arange(-4, 8)
+    # every isotope step's window in a scan at once
+    targets = mz + steps * isotope_spacing / charge
+    lows, highs = targets * (1 - 1e-5), targets * (1 + 1e-5)
     total, weighted = np.zeros(len(steps)), np.zeros(len(steps))
     for scan in range(max(center - averaged, 0), min(center + averaged + 1, len(rts))):
         scan_mz, scan_int = mzs[offsets[scan]:offsets[scan + 1]], ints[offsets[scan]:offsets[scan + 1]]
-        for j, step in enumerate(steps):
-            target = mz + step * isotope_spacing / charge
-            lo, hi = np.searchsorted(scan_mz, target * (1 - 1e-5)), np.searchsorted(scan_mz, target * (1 + 1e-5), side = 'right')
-            if hi > lo:
-                k = lo + int(np.argmax(scan_int[lo:hi]))
-                total[j] += scan_int[k]
-                weighted[j] += scan_mz[k] * scan_int[k]
-    expected = np.concatenate([[0.0], binom.pmf(np.arange(6), int((mz - PROTON_MASS) * charge / 111 * 5.1), 0.011)])
+        lo, hi = np.searchsorted(scan_mz, lows), np.searchsorted(scan_mz, highs, side = 'right')
+        for j in np.flatnonzero(hi > lo):
+            k = lo[j] + int(np.argmax(scan_int[lo[j]:hi[j]]))
+            total[j] += scan_int[k]
+            weighted[j] += scan_mz[k] * scan_int[k]
+    # the averagine envelope of a precursor this heavy, kept per carbon count, as scipy's binom.pmf costs as much as the rest of the call
+    carbons = int((mz - PROTON_MASS) * charge / 111 * 5.1)
+    if carbons not in _AVERAGINE:
+        from scipy.stats import binom
+        _AVERAGINE[carbons] = np.concatenate([[0.0], binom.pmf(np.arange(6), carbons, 0.011)])
+    expected = _AVERAGINE[carbons]
     best, offset = -1.0, 0
     for step in (-3, -2, -1, 0, 1):
         j = step + 4
@@ -1716,11 +1725,30 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     scan_ends = np.searchsorted(ms1_rts, rt_centers + search_window + rt_window, side = 'right')
     areas, apex_rts, apex_ints = np.zeros(len(target_mzs)), np.full(len(target_mzs), np.nan), np.zeros(len(target_mzs))
     is_peak, apex_scans = np.zeros(len(target_mzs), dtype = bool), np.full(len(target_mzs), -1)
-    # Each survey scan as its m/z values and cumulative intensities, so the intensity within an m/z window is one difference; built once per scan, as the
-    # windows of the targets overlap (gap filling rebuilt each scan for hundreds of targets)
-    per_scan = {}
-    cumulated = lambda first, last: [per_scan[si] if si in per_scan else per_scan.setdefault(si, (ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]], np.concatenate(
-                                     [[0], np.cumsum(ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]], dtype = np.float64)]))) for si in range(first, last)]
+    # Each survey scan as its m/z values and cumulative intensities, so the intensity within an m/z window is one difference, and the scans as one array of
+    # (scan, m/z) in lexicographic order (complex numbers sort by real part, then imaginary part), so a target's windows in all its scans are found by one search:
+    # one search per scan took 1.1 million searchsorted calls for the 817 glycopeptide features of two LAMP-1 runs. Only the scans some target reaches are indexed, at 24 bytes per peak
+    finite = rt_centers[np.isfinite(rt_centers)]
+    lo_scan, hi_scan = (int(np.searchsorted(ms1_rts, finite.min() - search_window - 2 * rt_window)),
+                        int(np.searchsorted(ms1_rts, finite.max() + search_window + 2 * rt_window, side = 'right'))) if len(finite) else (0, 0)
+    o0, o1 = ms1_offsets[lo_scan], ms1_offsets[hi_scan]
+    scan_keys = np.empty(o1 - o0, dtype = np.complex128)
+    scan_keys.real = np.repeat(np.arange(hi_scan - lo_scan, dtype = np.float64), np.diff(ms1_offsets[lo_scan:hi_scan + 1]))
+    scan_keys.imag = ms1_mzs[o0:o1]
+    # each scan's cumulative intensities after a 0 of its own, so scan si's window at position p of scan_keys sums from cum[p + si - lo_scan]
+    cum = np.zeros(o1 - o0 + hi_scan - lo_scan, dtype = np.float64)
+    for si in range(lo_scan, hi_scan):
+        p0, p1 = ms1_offsets[si], ms1_offsets[si + 1]
+        cum[p0 - o0 + si - lo_scan + 1:p1 - o0 + si - lo_scan + 1] = np.cumsum(ms1_ints[p0:p1], dtype = np.float64)
+
+    def xic(centers, width, s0, s1):
+        # the summed intensity within width of each of the centers, in each survey scan from s0 to s1
+        scans = np.arange(s0 - lo_scan, s1 - lo_scan)[:, None]
+        query = np.empty((len(scans), 2 * len(centers)), dtype = np.complex128)
+        query.real, query.imag = scans, np.concatenate([centers + width, centers - width])[None, :]
+        pos = np.searchsorted(scan_keys, query) + scans
+        return (cum[pos[:, :len(centers)]] - cum[pos[:, len(centers):]]).sum(axis = 1)
+
     records = [{'mz': float(target_mzs[t]), 'charge': int(charges[t]), 'rt': float(rt_centers[t]), 'times': np.zeros(0, dtype = np.float32), 'trace': np.zeros(0, dtype = np.float32),
                 'left': -1, 'apex': -1, 'right': -1, 'baseline': 0.0, 'area': 0.0, 'windows': [], 'scan': None, 'others': []} for t in range(len(target_mzs))] if details is not None else None
     for t in range(len(target_mzs)):
@@ -1728,9 +1756,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
         if s1 - s0 < 3:
             continue
         rts = ms1_rts[s0:s1]
-        scans = cumulated(s0, s1)
-        xic = lambda centers, width, scans = scans: np.array([np.sum(cum[np.searchsorted(mzs, centers + width)] - cum[np.searchsorted(mzs, centers - width)]) for mzs, cum in scans])
-        ints_arr = xic(target_mzs[t] + shift + spacing[t] * np.arange(isotopes[t] + 1), widths[t])
+        ints_arr = xic(target_mzs[t] + shift + spacing[t] * np.arange(isotopes[t] + 1), widths[t], s0, s1)
         # Smoothing (sigma of 0.05 min, at least 0.7 scans) only steers apex and boundary finding; the area comes from the raw trace. Survey scans
         # sharing a retention time (one per ion mobility scan) gave a zero median step and an infinite sigma, so only real steps count
         steps = np.diff(rts)
@@ -1772,10 +1798,10 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             # The trace again from rt_window before to rt_window after the scans searched, which shows the neighboring peaks, and the survey scan at the
             # apex around the envelope; indices point into this view
             v0, v1 = np.searchsorted(ms1_rts, rts[0] - rt_window), np.searchsorted(ms1_rts, rts[-1] + rt_window, side = 'right')
-            centers, wide = target_mzs[t] + shift + spacing[t] * np.arange(isotopes[t] + 1), cumulated(v0, v1)
+            centers = target_mzs[t] + shift + spacing[t] * np.arange(isotopes[t] + 1)
             a0, a1 = ms1_offsets[s0 + apex], ms1_offsets[s0 + apex + 1]
             near = np.abs(ms1_mzs[a0:a1] - centers.mean()) <= (isotopes[t] / 2 + 2) * spacing[t]
-            records[t].update(times = ms1_rts[v0:v1].astype(np.float32), trace = xic(centers, widths[t], wide).astype(np.float32), left = int(s0 - v0 + left),
+            records[t].update(times = ms1_rts[v0:v1].astype(np.float32), trace = xic(centers, widths[t], v0, v1).astype(np.float32), left = int(s0 - v0 + left),
                               apex = int(s0 - v0 + apex), right = int(s0 - v0 + right), baseline = float(baseline), area = float(areas[t]),
                               windows = [(float(c - widths[t]), float(c + widths[t])) for c in centers], scan = (ms1_mzs[a0:a1][near], ms1_ints[a0:a1][near]))
         if (other_charges is not None or adduct_ions is not None) and right - left >= 2:
@@ -1786,14 +1812,14 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             for z, added, ion in [(z, 0.0, None) for z in (other_charges[t] if other_charges is not None else [])] + (adduct_ions[t] if adduct_ions is not None else []):
                 mz, sp = (neutral + added) / z + (-1 if mode == 'negative' else 1) * PROTON_MASS, ISOTOPE_SPACING / z
                 width = 0.5 * sp if half_width >= 0.2 * sp else max(half_width, 5e-6 * mz)
-                trace = xic(mz + shift + sp * np.arange(isotopes[t] + 1), width)
+                trace = xic(mz + shift + sp * np.arange(isotopes[t] + 1), width, s0, s1)
                 smooth_z = np.convolve(np.pad(trace, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
                 r = np.corrcoef(smooth_z[left:right + 1], smooth[left:right + 1])[0, 1] if np.ptp(smooth_z[left:right + 1]) > 0 and np.ptp(smooth[left:right + 1]) > 0 else None
                 area = _trapezoid(np.clip(trace[left:right + 1] - np.percentile(trace, 10), 0, None), rts[left:right + 1]) if r is not None and r >= 0.9 else 0.0
                 areas[t] += area
                 # (of the adduct ions only those added: most of a run's are not there at all)
                 if records is not None and (ion is None or area > 0):
-                    records[t]['others'].append({'charge': z, 'ion': ion, 'mz': float(mz), 'trace': xic(mz + shift + sp * np.arange(isotopes[t] + 1), width, wide).astype(np.float32),
+                    records[t]['others'].append({'charge': z, 'ion': ion, 'mz': float(mz), 'trace': xic(mz + shift + sp * np.arange(isotopes[t] + 1), width, v0, v1).astype(np.float32),
                                                  'baseline': float(np.percentile(trace, 10)), 'r': None if r is None else float(r), 'added': bool(r is not None and r >= 0.9),
                                                  'area': float(area)})
     # What each raw area is multiplied with: its share of a peak that several targets landed on, then 1 / its isotope share
@@ -5173,6 +5199,36 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     multiplier = -1 if mode == 'negative' else 1
     loaded_file = _loaded.copy() if _loaded is not None else load_spectra_filepath(spectra_filepath, extract_ms1 = spectra_filepath.lower().endswith(('.mzml', '.mzxml', '.mzdata', '.xml', '.raw', '.wiff', '.d', '.cc', '.zip')))
     ms1 = loaded_file.attrs.pop('ms1', None)
+    # A run that switches polarity is two runs in one file: this one is the spectra of the ion mode max_charge asks for and the survey scans that
+    # triggered them (a survey scan has the polarity of the MS2 scans that follow it), not all of it read in the mode of its first spectrum
+    if 'polarity' in loaded_file.columns and {'+', '-'} <= set(loaded_file['polarity']):
+        own = (loaded_file['polarity'] == ('-' if mode == 'negative' else '+')).to_numpy()
+        if ms1 is not None and len(ms1[0]):
+            triggered = np.searchsorted(ms1[0], loaded_file['RT'].to_numpy(float)[own], side = 'right') - 1
+            keep = np.zeros(len(ms1[0]), dtype = bool)
+            keep[triggered[triggered >= 0]] = True
+            peaks = np.repeat(keep, np.diff(ms1[3]))
+            ms1 = (ms1[0][keep], ms1[1][peaks], ms1[2][peaks], np.concatenate([[0], np.cumsum(np.diff(ms1[3])[keep])]))
+        loaded_file = loaded_file[own].reset_index(drop = True)
+        loaded_file.attrs['detected_mode'] = mode
+        if not _return_intermediate:
+            print(f"This run switches polarity: its {mode}-mode spectra are processed, as max_charge = {max_charge} asks; process it again with the other sign for the rest.")
+    # A run that fragments every precursor in two analyzers (ion-trap CID and orbitrap HCD) is processed with the spectra of one: the other's fragments
+    # miss its tolerances (a run read as orbitrap by its first MS2 lost every ion-trap spectrum, and with them all 47 rows), and a cluster would pool
+    # both kinds. The analyzer whose 100 most intense clusters give more rows with a structure is taken, the one with more spectra on a tie
+    if 'analyzer' in loaded_file.columns and loaded_file['analyzer'].nunique() > 1:
+        parts = {a: loaded_file[loaded_file['analyzer'] == a].reset_index(drop = True) for a in loaded_file['analyzer'].dropna().unique()}
+        found = {}
+        for a, part in parts.items():
+            part.attrs = {**loaded_file.attrs, 'detected_trap': a, 'ms1': ms1}
+            probe = wrap_inference(spectra_filepath, glycan_class, **{**run_args, 'trap': a}, _return_intermediate = True, _loaded = part, _top_clusters = 100)
+            found[a] = (sum(bool(x) for x in probe['predictions']), len(part))
+        best = max(found, key = found.get)
+        if not _return_intermediate:
+            print(f"{os.path.basename(spectra_filepath)} holds MS2 spectra of {len(parts)} analyzers ({', '.join(f'{a}: {len(v)}' for a, v in parts.items())}); "
+                  f"its {best} spectra are processed, which explain more of its largest peaks.")
+        loaded_file = parts[best]
+        loaded_file.attrs.pop('ms1')
     # The spectra as loaded, for processing the file again with another reducing end without reading it again
     loaded_spectra = None if _return_intermediate else loaded_file.copy()
     detected_mode = loaded_file.attrs.get('detected_mode')

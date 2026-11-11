@@ -231,6 +231,14 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     # RTs read in the run itself (rt_own, a map's RT_<run> column) are already on its time axis: they neither anchor the shift of the other rows nor move
     # (the drift fitted on the other rows moved a run's own rows by up to 14 min)
     own = mapping.loc[row_ids, 'rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(row_ids), bool)
+    # Unless they are not: RT_<run> columns copied from a publication's table can be on another clock than the deposited run (1-5 of ~105 rows of a run
+    # within 0.5 min of a peak of their ion, the others up to 6 min after it), so they count as the run's own only if at least half of the rows that have a
+    # passing input of their composition at their Mass have one within rt_window; else these rows anchor and move like any other
+    input_rts = inputs['RT'].to_numpy(dtype = float)
+    found = [np.abs(input_rts[passing & fits[:, k] & np.array([key == keys[k] for key in input_keys])] - map_rts[k]) for k in np.flatnonzero(own & ~np.isnan(map_rts))]
+    found = [d.min() <= rt_window for d in found if len(d)]
+    if len(found) >= 5 and np.mean(found) < 0.5:
+        own, open_own, mapping = np.zeros(len(row_ids), bool), np.zeros(len(open_rows), bool), mapping.assign(rt_own = False)
     files = mapping.loc[row_ids, 'map_file'].astype(str).to_numpy() if 'map_file' in mapping.columns else np.full(len(row_ids), '')
     offsets, anchor_rts, anchor_acid, anchor_rows, anchored = [], [], [], [], set()
     for k in range(len(keys)):

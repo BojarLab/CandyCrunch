@@ -204,8 +204,8 @@ def convert_run(task):
     from training.pipeline_labels import label_inputs, run_inputs
     path, out, maps_dir = pathlib.Path(task['path']), pathlib.Path(task['out']), pathlib.Path(task['maps'])
     start = time.time()
-    info = dict(project = task['project'], run = path.stem, path = str(path), excluded = task['excluded'], maps = ', '.join(task['map_names']), glycan_class = str(task['glycan_class']))
-    target = out / 'runs' / task['project'] / f'{path.stem}.pkl'
+    info = dict(project = task['project'], run = task['name'], path = str(path), excluded = task['excluded'], maps = ', '.join(task['map_names']), glycan_class = str(task['glycan_class']))
+    target = out / 'runs' / task['project'] / f"{task['name']}.pkl"
     # The inputs of the last conversion, by what they depend on (inference code, glycowork, .cc, class and settings): a changed map or labeling rule
     # only relabels them
     cached, used, reused = {}, {}, 0
@@ -216,6 +216,9 @@ def convert_run(task):
             pass
     try:
         settings = dict(run_settings(task['row']), **taxonomy(task['row'].get('Species') if isinstance(task['row'].get('Species'), str) else None))
+        # (one polarity of a file that switches it: wrap_inference keeps the spectra of the mode max_charge asks for)
+        if task['mode']:
+            settings['max_charge'] = abs(settings['max_charge']) * (1 if task['mode'] == 'positive' else -1)
         ends = task['mapping']['reducing_end'] if task['mapping'] is not None and 'reducing_end' in task['mapping'].columns else pd.Series(dtype = object)
         if len(ends) and ends.notna().all() and ends.nunique() == 1 and ends.iloc[0] in REDUCING_ENDS:
             settings['modification'] = ends.iloc[0]
@@ -309,7 +312,7 @@ def convert_run(task):
         info.update(rt_shift = labelled.attrs.get('rt_shift'), rt_alignment = labelled.attrs.get('rt_alignment'), rt_anchors = labelled.attrs.get('rt_anchors'),
                     masses_rescued = rescued, settings_fitted = fitted, inputs_cached = f'{reused}/{len(used)}')
         end = settings['modification'] if settings['modification'] != 'custom' else ('free' if settings.get('mass_tag') is None else f"custom {settings['mass_tag']}")
-        meta = dict(filename = path.stem, GlycoPost_ID = task['project'], reducing_end = end, sample_prep = settings['sample_prep'], mass_tag = settings.get('mass_tag'),
+        meta = dict(filename = task['name'], GlycoPost_ID = task['project'], reducing_end = end, sample_prep = settings['sample_prep'], mass_tag = settings.get('mass_tag'),
                     sialic_derivatization = str(settings['sialic_derivatization']) if settings.get('sialic_derivatization') else None,
                     fragmentation = task['row'].get('fragmentation'), ion_source = task['row'].get('ionization'), lc_checklist = task['row'].get('LC_type'),
                     trap_checklist = task['row'].get('trap'), adducts = ' '.join(settings.get('adducts', ())) or None)
@@ -383,23 +386,32 @@ def collect(args):
             # Files still being downloaded or copied wait for the next scan
             if time.time() - path.stat().st_mtime < 120 or (args.exclude_runs and re.search(args.exclude_runs, path.stem)):
                 continue
-            mapping, cls, names = maps_for_run(project, path, maps_dir)
-            if cls is None:
-                cls = (str(row.get('glycan_type', '')).split(';')[0].strip() or 'N') if isinstance(row.get('glycan_type'), str) else 'N'
-            target = out / 'runs' / project / f'{path.stem}.pkl'
-            st = stamp(path, names, maps_dir, row, code)
-            if target.exists():
-                try:
-                    side = target.with_suffix('.stamp')
-                    if (side.read_text() if side.exists() else pd.read_pickle(target)['stamp']) == st:
-                        skipped += 1
-                        continue
-                except Exception:
-                    pass
-            cc = path.stat()
-            tasks.append(dict(project = project, path = str(path), out = str(out), maps = str(maps_dir), mapping = mapping, glycan_class = cls, map_names = names,
-                              row = row, stamp = st, excluded = is_excluded(path.stem, exclude),
-                              inputs_stamp = hashlib.sha1(f'{inputs_code} {cc.st_size} {cc.st_mtime_ns} {cls}'.encode()).hexdigest()))
+            # A file that switches polarity (only looked for in projects whose checklist names both modes) is two runs, <run>_neg and <run>_pos, each with
+            # the map columns of that name and the spectra of its mode, as when each polarity came as a file of its own
+            modes = [None]
+            if ';' in str(row.get('mode', '')):
+                with np.load(path) as f:
+                    polarity = set(json.loads(f['meta'].tobytes()).get('json_columns', {}).get('polarity', ()))
+                modes = ['negative', 'positive'] if {'+', '-'} <= polarity else modes
+            for mode in modes:
+                name = f'{path.stem}_{mode[:3]}' if mode else path.stem
+                mapping, cls, names = maps_for_run(project, path.with_name(f'{name}.cc'), maps_dir)
+                if cls is None:
+                    cls = (str(row.get('glycan_type', '')).split(';')[0].strip() or 'N') if isinstance(row.get('glycan_type'), str) else 'N'
+                target = out / 'runs' / project / f'{name}.pkl'
+                st = stamp(path, names, maps_dir, row, code)
+                if target.exists():
+                    try:
+                        side = target.with_suffix('.stamp')
+                        if (side.read_text() if side.exists() else pd.read_pickle(target)['stamp']) == st:
+                            skipped += 1
+                            continue
+                    except Exception:
+                        pass
+                cc = path.stat()
+                tasks.append(dict(project = project, path = str(path), name = name, mode = mode, out = str(out), maps = str(maps_dir), mapping = mapping, glycan_class = cls,
+                                  map_names = names, row = row, stamp = st, excluded = is_excluded(path.stem, exclude),
+                                  inputs_stamp = hashlib.sha1(f'{inputs_code} {cc.st_size} {cc.st_mtime_ns} {cls}'.encode()).hexdigest()))
     return tasks, skipped
 
 
@@ -442,6 +454,8 @@ def merge(out, exclude, pretrain_peaks = False, exclude_runs = None, sources = N
             else:
                 inputs = pd.concat([d['labelled'].reset_index()[['m/z', 'RT', 'num_spectra']], d['unlabelled'].reset_index()[['m/z', 'RT', 'num_spectra']]])
                 keys[r] = hashlib.sha1(np.round(inputs.sort_values(['RT', 'm/z']).to_numpy(float), 3).tobytes()).hexdigest() if len(inputs) else r.stem
+            # (the two polarities of a file that switches it, <run>_neg and <run>_pos, are no copies of each other)
+            keys[r] += r.stem[len(pathlib.Path(d['info']['path']).stem):]
             side.write_text(keys[r])
     # A copy of an excluded run is excluded too, in any project, and of the others only the first is merged
     excluded_keys = {keys[r] for runs in projects.values() for r in runs if is_excluded(r.stem, exclude)}

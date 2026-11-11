@@ -4637,8 +4637,16 @@ def has_ion(peaks, ions, tolerance_ppm = 20.0, top_n_peaks = 100):
     """
     if not peaks:
         return False
-    top = sorted(peaks.items(), key = lambda x: -x[1])[:top_n_peaks]
-    return any(abs(m - t) <= t * tolerance_ppm * 1e-6 for m, _ in top for t in ions)
+    mz = np.fromiter(peaks.keys(), dtype = np.float64, count = len(peaks))
+    ions = np.asarray(ions, dtype = np.float64).ravel()
+    near = np.flatnonzero((np.abs(mz[:, None] - ions[None, :]) <= ions[None, :] * tolerance_ppm * 1e-6).any(axis = 1))
+    if not len(near) or len(mz) <= top_n_peaks:
+        return bool(len(near))
+    # the place of the most intense of those peaks (the first of them at equal intensity) among all, as a stable sort by intensity gives it: the more intense
+    # peaks, then the equally intense ones before it
+    intensity = np.fromiter(peaks.values(), dtype = np.float64, count = len(peaks))
+    i = near[np.argmax(intensity[near])]
+    return bool((intensity > intensity[i]).sum() + (intensity[:i] == intensity[i]).sum() < top_n_peaks)
 
 
 def intensity_share(peaks, neutral_mass, charge, tolerance_ppm = 20.0):
