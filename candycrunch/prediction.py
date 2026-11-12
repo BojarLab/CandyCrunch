@@ -1578,6 +1578,47 @@ def envelope_dotp(ms1, mz, charge, rt, distribution, mz_calibration = None, scan
     return float(found @ distribution / norm) if norm > 0 else 0.0
 
 
+def envelope_reading(ms1, mz, charge, rt, lighter, heavier, steps = 1, scans = 3, ppm = 10.0, margin = 0.05):
+    """which of two readings of one precursor, steps isotope steps apart, its survey-scan envelope supports (e.g. Neu5Ac against two dHex, Neu5Gc against Hex + dHex: 1.02 Da):
+    the observed peaks from one step below the lighter reading's monoisotopic m/z upwards, summed over the survey scan before rt and scans on either side, against each reading's
+    own isotope distribution placed at its monoisotopic peak, as cosines (MaillardMorsels: where 449 glycopeptide spectra held two readings one to three sialic acids apart, it
+    decided 289 and sided with the retention-time lane in 260 of 262; a reading 1.02 Da lighter that nobody made it rejected in 362 of 376)\n
+    | Arguments:
+    | :-
+    | ms1 (tuple): flat MS1 data from process_mzML_stack, (rts sorted ascending, mzs, intensities, scan offsets)
+    | mz (float): monoisotopic m/z of the lighter reading
+    | charge (int): the precursor's charge
+    | rt (float): retention time of the MS2 spectrum
+    | lighter (array-like): expected abundances of M, M+1, ... of the lighter reading (isotope_distribution); the envelope is read over one more peak than it has
+    | heavier (array-like): expected abundances of M, M+1, ... of the heavier reading, whose M lies steps above the lighter one's
+    | steps (int): isotope steps between the two readings; default:1
+    | scans (int): survey scans on either side of the one before rt; default:3
+    | ppm (float): half-width of each isotope window, whose most intense peak counts; default:10.0
+    | margin (float): how much better one cosine must be to decide; default:0.05\n
+    | Returns:
+    | :-
+    | Returns 'lighter' or 'heavier', 'tie' when neither is margin better, or None without signal at M to the last peak
+    """
+    ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
+    lighter, heavier = np.asarray(lighter, dtype = np.float64), np.asarray(heavier, dtype = np.float64)
+    width = len(lighter) + 1
+    targets = mz + np.arange(-1, width - 1) * ISOTOPE_SPACING / abs(charge or 1)
+    found, center = np.zeros(width), max(int(np.searchsorted(ms1_rts, rt)) - 1, 0)
+    for s in range(max(center - scans, 0), min(center + scans + 1, len(ms1_rts))):
+        scan_mzs, scan_ints = ms1_mzs[ms1_offsets[s]:ms1_offsets[s + 1]], ms1_ints[ms1_offsets[s]:ms1_offsets[s + 1]]
+        lo, hi = np.searchsorted(scan_mzs, targets * (1 - ppm * 1e-6)), np.searchsorted(scan_mzs, targets * (1 + ppm * 1e-6), side = 'right')
+        for j in np.flatnonzero(hi > lo):
+            found[j] += scan_ints[lo[j]:hi[j]].max()
+    if found[1:].sum() <= 0:
+        return None
+    expected_lighter = np.concatenate([[0.0], lighter])
+    expected_heavier = np.concatenate([np.zeros(1 + steps), heavier])[:width]
+    expected_heavier = np.pad(expected_heavier, (0, width - len(expected_heavier)))
+    cosine = lambda e: float(found @ e / (np.linalg.norm(found) * np.linalg.norm(e) + 1e-12))
+    a, b = cosine(expected_lighter), cosine(expected_heavier)
+    return 'lighter' if a > b + margin else 'heavier' if b > a + margin else 'tie'
+
+
 def fit_rt_drift(rts, diffs, acidic = None):
     """how a run's retention times drift against another run's, from anchor analytes found once in both (as LaCyTools and GlycReSoft align runs on what they share). On PGC
     it can grow with retention time and with every charged residue (sialic acids, sulfates, phosphates), so with at least 10 anchors it is a + b * RT + c * acidic residues
@@ -3176,13 +3217,18 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
             reps[(reps == k) | (np.arange(len(reps)) == k)] = reps[max(cos, key = cos.get)]
     # A predicted row one or two isotope spacings above a co-eluting, more abundant row of the same charge, whose composition is that row's with a Neu5Ac read as
     # two dHex or a Neu5Gc as Hex + dHex (1.02 Da heavier), is that row's 13C peak read as the heavier isobar, whatever its spectrum (ion-trap MS2 of such z = 2
-    # pairs had cosines of 0.65-0.79) or the lighter row's prediction; it joins that row
+    # pairs had cosines of 0.65-0.79) or the lighter row's prediction; it joins that row. Accurate survey scans (mz_ppm) tell the two apart by the precursor
+    # itself at z = 1: a 13C pick lies 1.0034 above the lighter row, the isobar 1.0204 (17 mDa), so only a singly charged row nearer the 13C position
+    # joins; a co-eluting difucosylated glycan beside its sialylated near-isobar (milk oligosaccharides: Hex3HexNAc1dHex2 [M+H]+ 1000.372 and
+    # Hex3HexNAc1Neu5Ac1 999.352, 0.4 min apart) is a glycan of its own, which finalise_predictions' isobar step judges by its peak. At z >= 2 the two
+    # positions (8.5 mDa at z = 2) lie within the error of a precursor blended with its neighbours, and the fold stays
     comps = df['composition'].values if 'composition' in df.columns else [None] * len(df)
     isobars = ({'dHex': 2, 'Neu5Ac': -1}, {'Hex': 1, 'dHex': 1, 'Neu5Gc': -1})
     for k in np.flatnonzero([p is not None and isinstance(c, dict) for p, c in zip(first_preds, comps)]):
         iso = [j for n in (1, 2) for j in np.flatnonzero(np.abs(idx_vals[k] - n * ISOTOPE_SPACING / abs(charges[k]) - idx_vals) <= 0.25)
                if isinstance(comps[j], dict) and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff and (abund is None or abund[j] > abund[k])
-               and any(all(comps[k].get(r, 0) - comps[j].get(r, 0) == d.get(r, 0) for r in set(comps[k]) | set(comps[j]) | set(d)) for d in isobars)]
+               and any(all(comps[k].get(r, 0) - comps[j].get(r, 0) == d.get(r, 0) for r in set(comps[k]) | set(comps[j]) | set(d)) for d in isobars)
+               and (not mz_ppm or abs(charges[k]) > 1 or abs(idx_vals[k] - idx_vals[j] - n * ISOTOPE_SPACING / abs(charges[k])) < abs(idx_vals[k] - idx_vals[j] - 1.0204 / abs(charges[k])))]
         if iso:
             # with the rows it represents (its other spectra), which would otherwise keep it as their representative
             reps[(reps == k) | (np.arange(len(reps)) == k)] = reps[iso[0]]
@@ -3443,8 +3489,11 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             if len(top_frags) < 2:
                 truth.append(False)
             # Check neutral loss of adduct for adducts
-            # An anion adduct (or NH4+, as NH3) leaves as a neutral and gives the (de)protonated ion; a metal cation stays on the fragments
-            if isinstance(adduct_name, str) and (mode == 'negative' or adduct_name == 'NH4+'):
+            # An anion adduct (or NH4+, as NH3) leaves as a neutral and gives the (de)protonated ion; a metal cation stays on the fragments. Not asked of
+            # an NH4+ the run carries (adducts), nor of permethylated glycans, whose ammonium adducts (95% of the signal of high-mannose N-glycans in
+            # ammonium-buffered C18 runs) fragment at low collision energy without an NH3-loss ion among their 10 most intense peaks: the check emptied
+            # 727 of 731 such rows of one orbitrap run, among them every high-mannose glycan
+            if isinstance(adduct_name, str) and (mode == 'negative' or (adduct_name == 'NH4+' and adduct_name not in RUN_ADDUCTS.get() and sample_prep not in ('permethylated', 'deuteropermethylated'))):
                 neutral_loss = mass_dict.get(adduct_name, 999) - (PROTON_MASS * multiplier)
                 expected_frag = precursor_mz - neutral_loss / c
                 truth.append(coeluting[k] or any(abs(expected_frag - j) < mass_tolerance for j in top_frags[:10]))
@@ -3651,13 +3700,16 @@ def pair_spectra(df, max_scans = 30, ppm = 10.0):
     | ppm (float): tolerance of the precursor m/z; default:10.0\n
     | Returns:
     | :-
-    | Returns the HCD scans of df, with their partners' peaks, activation, analyzer, and scan number in paired_peak_d, paired_activation, paired_analyzer, and paired_scan
+    | Returns the HCD scans of df (all scans but the electron-activated ones in a run without HCD), with their partners' peaks, activation, analyzer, and scan number in paired_peak_d,
+    | paired_activation, paired_analyzer, and paired_scan
     """
     df = df.dropna(subset = ['precursor_charge']).sort_values('scan')
     # Survey scans stay with the reader's table: pandas compares attrs when runs are concatenated, which raises on the arrays of different runs
     df.attrs = {k: v for k, v in df.attrs.items() if k != 'ms1'}
     electron = df[df['activation'].isin(['EThcD', 'ETD', 'ECD', 'ETciD'])]
-    hcd = df[~df.index.isin(electron.index)].copy()
+    hcd = df[~df.index.isin(electron.index)]
+    # CID scans that an HCD scan triggered (HCD-pd-CID) are not the run's HCD spectra; a run without HCD keeps its other scans
+    hcd = (hcd[hcd['activation'].eq('HCD')] if hcd['activation'].eq('HCD').any() else hcd).copy()
     e_scan, e_mz, e_z = electron['scan'].values, electron['m/z'].values, electron['precursor_charge'].values
     partner = {}
     for i, scan, mz, z in zip(hcd.index, hcd['scan'].values, hcd['m/z'].values, hcd['precursor_charge'].values):
@@ -3933,8 +3985,11 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
         arrays = {f'col{i}': df[c].to_numpy() for i, c in enumerate(columns) if c not in ('peak_d', 'ms3') and c not in meta['json_columns']}
         spectra = [('', df['peak_d'])] + ([('ms3_', [d for x in df['ms3'] for _, d in x])] if 'ms3' in columns else [])
         for prefix, dicts in spectra:
-            peaks = np.concatenate([np.zeros((0, 2))] + [np.array(list(d.items()), dtype = float).reshape(-1, 2) for d in dicts])
-            arrays.update({f'{prefix}peak_n': np.array([len(d) for d in dicts], dtype = np.uint32), f'{prefix}peak_mz': exact32(peaks[:, 0]), f'{prefix}peak_int': exact32(peaks[:, 1])})
+            # one pass over the peak dictionaries into flat arrays: half the time of an array per spectrum joined at the end, without holding a copy of every peak list
+            n = np.fromiter((len(d) for d in dicts), dtype = np.int64, count = len(dicts))
+            mzs = np.fromiter((m for d in dicts for m in d), dtype = float, count = int(n.sum()))
+            ints = np.fromiter((i for d in dicts for i in d.values()), dtype = float, count = int(n.sum()))
+            arrays.update({f'{prefix}peak_n': n.astype(np.uint32), f'{prefix}peak_mz': exact32(mzs), f'{prefix}peak_int': exact32(ints)})
         if 'ms3' in columns:
             arrays.update(ms3_n = np.array([len(x) for x in df['ms3']], dtype = np.uint32), ms3_precursor = np.array([p for x in df['ms3'] for p, _ in x], dtype = float))
         if df.attrs.get('ms1') is not None and len(df.attrs['ms1'][0]):
@@ -4732,8 +4787,29 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 df_out.iat[j, ab] += df_out.iat[i, ab]
                 df_out.iat[j, ns] += df_out.iat[i, ns]
                 df_out.iat[j, xc] = df_out.iat[j, xc] + df_out.iat[i, xc]
-            else:
-                plain[i] = df_out['adduct'].iat[i] in RUN_ADDUCTS.get()
+            # (and, permethylated, unless it is an NH4+ ion: it is read after protons, so only where no protonated composition fits, and permethylated
+            # glycans take the mobile phase's cations, so an ammonium-buffered run shows them as [M+H+NH4]2+ / [M+2NH4]2+ beside 1-5% [M+2H]2+)
+            elif df_out['adduct'].iat[i] in RUN_ADDUCTS.get() or (df_out['adduct'].iat[i] == 'NH4+' and sample_prep in ('permethylated', 'deuteropermethylated')):
+                # ... with accurate survey scans, unless under half of the survey signal within 1 m/z of its precursor (summed over 0.15 min around it) is
+                # its composition's (M to M+4 of its ions of that charge with protons and the run's and usual adducts; further 13C peaks, under 2% of
+                # a 2 kDa permethylated glycan's, fall on other molecules: Hex5HexNAc3dHex1 [M+H+NH4]2+ M+6 is Man7 [M+2NH4]2+): a quadrupole isolates
+                # that whole window, so the spectrum is mostly another molecule's, whose fragments the carrier reading then explained. Only the run's
+                # carriers are read before protons, so their readings take chance matches in the shadow of strong ions (permethylated N-glycans whose NH4+
+                # ions dominate: Hex5HexNAc3dHex1 [M+Na+H]2+ 1000.00 beside Man7 [M+2NH4]2+ 1000.53 at 11-44x, its spectra Man7's); its own other ions
+                # are the same glycan (Man7 [M+Na+H]2+ 994.49 among the 13C peaks of its [M+H+NH4]2+)
+                own = total = 0.0
+                if accurate_ms1 and ms1 is not None and isinstance(df_out['composition'].iat[i], dict):
+                    z = abs(int(df_out['charge'].iat[i]))
+                    mass = composition_to_mass(df_out['composition'].iat[i], sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization) + (
+                        mass_tag or 0) + (df_out['re_offset'].iat[i] if 're_offset' in df_out.columns else 0)
+                    ladders = (np.array([mass + sum(c) for c in combinations_with_replacement([PROTON_MASS] + [mass_dict[a] for a in get_adduct_list(mode) if a in mass_dict], z)])[:, None]
+                               + ISOTOPE_SPACING * np.arange(5)).ravel() / z
+                    for si in range(np.searchsorted(ms1[0], rts[i] - 0.15), np.searchsorted(ms1[0], rts[i] + 0.15, side = 'right')):
+                        scan_mzs, scan_ints = ms1[1][ms1[3][si]:ms1[3][si + 1]], ms1[2][ms1[3][si]:ms1[3][si + 1]]
+                        lo, hi = np.searchsorted(scan_mzs, df_out.index[i] - 1), np.searchsorted(scan_mzs, df_out.index[i] + 1)
+                        own += scan_ints[lo:hi][(np.abs(scan_mzs[lo:hi, None] - ladders[None, :]) <= 15e-6 * df_out.index[i]).any(axis = 1)].sum()
+                        total += scan_ints[lo:hi].sum()
+                plain[i] = not total or own >= 0.5 * total
         df_out = df_out[plain]
     if not accurate_ms1 and len(df_out):
         # Survey scans that do not resolve the isotopes of a multiply charged ion merge its envelope into one centroid a varying fraction of a spacing above
@@ -5016,6 +5092,9 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
     rng = (random.getstate(), np.random.get_state(), torch.get_rng_state() if torch else None)
     args = {k: v for k, v in run_args.items() if k != '_return_intermediate'}
     chosen = ('custom' if args['modification'] in (None, 'custom') else args['modification'], args['mass_tag'])
+    # A label the user gave (custom with its mass_tag) is a decision, not a forgotten reducing end: the model knows few tagged spectra, so few predictions do not make it wrong
+    if chosen[0] == 'custom' and chosen[1]:
+        return None, None
     ends = {'reduced': ('reduced', None), 'unreduced': ('custom', None), **{k: (k, None) for k in ('2AA', '2AB', 'procainamide', 'PA')}}
     names = {v: k for k, v in ends.items()}
     found, out = ({} if n_top is None else {chosen: n_top}), (None, None)
@@ -5157,6 +5236,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
    """
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
     run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate', '_loaded', '_top_clusters', '_condensed', '_pair')}
+    # Permethylated glycans carry no proton in positive mode: their sodium adducts are the run's own charge carrier (protonated ions are under 1% of the signal), so finalise_predictions keeps them without a protonated partner; adducts = [] opts out
+    if adducts is None and sample_prep in ('permethylated', 'deuteropermethylated') and max_charge > 0:
+        adducts = ['Na+']
     adducts = [adducts] if isinstance(adducts, str) else list(adducts or [])
     if unknown := [a for a in adducts if a not in mass_dict or not (a[-1] in '+-' or a in NEGATIVE_ADDUCTS) or a == 'H+']:
         raise ValueError(f"adducts {unknown} are not charge carriers in glycowork's adduct table (e.g., 'Li+', 'Na+', 'Cl-'; protons are always considered).")
@@ -5222,14 +5304,15 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             print(f"This run switches polarity: its {mode}-mode spectra are processed, as max_charge = {max_charge} asks; process it again with the other sign for the rest.")
     # A run that fragments every precursor in two analyzers (ion-trap CID and orbitrap HCD) is processed with the spectra of one: the other's fragments
     # miss its tolerances (a run read as orbitrap by its first MS2 lost every ion-trap spectrum, and with them all 47 rows), and a cluster would pool
-    # both kinds. The analyzer whose 100 most intense clusters give more rows with a structure is taken, the one with more spectra on a tie
+    # both kinds. The analyzer whose 100 most intense clusters give more rows with a structure is taken; on a tie (often none: the largest peaks of a
+    # run need not be glycans the model names) the one that keeps more rows of them, then the one with more spectra
     if 'analyzer' in loaded_file.columns and loaded_file['analyzer'].nunique() > 1:
         parts = {a: loaded_file[loaded_file['analyzer'] == a].reset_index(drop = True) for a in loaded_file['analyzer'].dropna().unique()}
         found = {}
         for a, part in parts.items():
             part.attrs = {**loaded_file.attrs, 'detected_trap': a, 'ms1': ms1}
             probe = wrap_inference(spectra_filepath, glycan_class, **{**run_args, 'trap': a}, _return_intermediate = True, _loaded = part, _top_clusters = 100)
-            found[a] = (sum(bool(x) for x in probe['predictions']), len(part))
+            found[a] = (sum(bool(x) for x in probe['predictions']), len(probe), len(part))
         best = max(found, key = found.get)
         if not _return_intermediate:
             print(f"{os.path.basename(spectra_filepath)} holds MS2 spectra of {len(parts)} analyzers ({', '.join(f'{a}: {len(v)}' for a, v in parts.items())}); "

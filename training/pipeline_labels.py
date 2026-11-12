@@ -211,6 +211,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                if settings.get('accurate_ms1') else mz_tolerance)
         other_charge |= np.abs(mz_values[:, None] - at_z) <= tol
     input_keys = [tuple(sorted(plain_composition(c).items())) if isinstance(c, dict) else None for c in inputs['composition']]
+    input_acid = [acidic_count(dict(k)) if k else 0 for k in input_keys]
     # Inputs from the most intense down (spectrum counts without precursor intensities); crumbs_thresh as the pipeline's gate
     by_intensity = np.lexsort((-inputs['num_spectra'].to_numpy(dtype = float), -inputs['intensity'].fillna(0).to_numpy(dtype = float)))
     passing = inputs['annotation_score'].to_numpy() > crumbs_thresh
@@ -240,7 +241,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     if len(found) >= 5 and np.mean(found) < 0.5:
         own, open_own, mapping = np.zeros(len(row_ids), bool), np.zeros(len(open_rows), bool), mapping.assign(rt_own = False)
     files = mapping.loc[row_ids, 'map_file'].astype(str).to_numpy() if 'map_file' in mapping.columns else np.full(len(row_ids), '')
-    offsets, anchor_rts, anchor_acid, anchor_rows, anchored = [], [], [], [], set()
+    open_files = open_rows['map_file'].astype(str).to_numpy() if 'map_file' in open_rows.columns else np.full(len(open_rows), '')
+    offsets, anchor_rts, anchor_acid, anchor_rows, anchored, drift, fixed = [], [], [], [], set(), None, {}
     for k in range(len(keys)):
         if not np.isnan(map_rts[k]) and not own[k] and single[keys[k]] == 1 and keys[k] not in anchored:
             hit = next((i for i in first.get(keys[k], []) if fits[i, k]), None)
@@ -295,6 +297,9 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                 b, c = float(next(coefs)) if keep_rt else 0.0, float(next(coefs)) if keep_acid else 0.0
                 # The RT term only within the anchors' RT range: beyond it the slope of a few minutes of anchors moved rows 15 min later by 1-3 min
                 row_shift = beta[0] + per_map @ beta[1:1 + len(extra)] + b * np.clip(map_rts, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
+                # (rows without structure take the same drift at their own RT, with the acidic residues of the composition an input gives them)
+                drift = lambda acid, beta = beta, b = b, c = c, lo = x.min(), hi = x.max(), amax = a.max(): (
+                    beta[0] + sum(beta[1 + j] * (open_files == f) for j, f in enumerate(extra)) + b * np.clip(open_rts, lo, hi) + c * np.minimum(acid, amax))
                 rt_shift = float(np.nanmedian(row_shift[~np.isnan(map_rts)]))
                 alignment = 'model'
                 scatter = float(np.median(np.abs(r - np.median(r))))
@@ -304,10 +309,11 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         o = np.array(offsets)
         agree = np.abs(o - o[np.argmax([np.sum(np.abs(o - x) <= 1.0) for x in o])]) <= 1.0
         if agree.sum() >= 5 and agree.mean() >= 0.4:
-            rt_shift, alignment = float(np.median(o[agree])), 'median'
+            rt_shift, alignment, drift = float(np.median(o[agree])), 'median', None
             row_shift = np.full(len(map_rts), rt_shift)
         else:
-            rt_shift, map_rts, row_shift, alignment = 0.0, np.where(own, map_rts, np.nan), np.zeros(len(map_rts)), 'dropped'
+            rt_shift, map_rts, row_shift, alignment, drift = 0.0, np.where(own, map_rts, np.nan), np.zeros(len(map_rts)), 'dropped', None
+    pre_switch = rt_shift
     if len(offsets) >= 5 and alignment != 'dropped':
         # The whole map then checks the shift: each anchor is one input per composition, and where those inputs are other isomers' peaks (offsets in two
         # clusters, or a minority mode the agreeing anchors picked: 8 of 17 at -2.5 min against a plain median of 0.0) the shift moves the map off its
@@ -325,20 +331,34 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             placed = lambda shift: int((at_row & (np.abs(input_rts[:, None] - (given_rts + np.where(own, 0.0, shift))[None, :]) <= rt_window)).any(axis = 0)[counted & (files == f)].sum())
             best, now = max([float(np.median(offsets)), 0.0], key = placed), placed(row_shift)
             if placed(best) >= max(1.1 * now, now + 1):
-                row_shift, switched = np.where(files == f, best, row_shift), True
+                row_shift, switched, fixed[f] = np.where(files == f, best, row_shift), True, best
         if switched:
             shifts = row_shift[~np.isnan(given_rts)]
             rt_shift = float(np.median(shifts))
             alignment = 'model' if np.ptp(shifts) > 0 else 'none' if rt_shift == 0.0 else 'median'
+
+    # Rows without structure move as the structured rows of their map file: by the drift (or the shift before a map file switched) with the acidic
+    # residues of a composition, by a switched map file's own shift; elsewhere by the run's shift. With the median instead, where the drift has a
+    # large RT or acid term, open rows sat minutes off their peaks (runs whose neutral rows moved 15-20 min, their disialylated ones 2-4 min, their
+    # median 10 min: 6 of 481 FP-added rows' run-row pairs within 0.5 min of their apex, 467 so)
+    def open_shift(acid):
+        if alignment != 'model':
+            return np.full(len(open_rows), rt_shift)
+        shift = drift(acid) if drift is not None else np.full(len(open_rows), pre_switch)
+        for f, v in fixed.items():
+            shift = np.where(open_files == f, v, shift)
+        return shift
     map_rts = map_rts + np.where(own, 0.0, row_shift)
     # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
     near = [[k for k in np.flatnonzero(fits[i] | (other_charge[i] & ~np.isnan(map_rts) & passing[i])) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
             for i, (rt, key) in enumerate(zip(inputs['RT'], input_keys))]
     windowed = {k for n in near for k in n}
-    # An input nearer a same-mass row without structure (moved by the run's median shift) than a structured row is the open row's peak, not the structured
-    # row's: an isomer's composition-level row 0.3-0.8 min from a structured one otherwise gives its peak the structured row's label
+    # An input nearer a same-mass row without structure (moved as above, with the acidic residues of the input's composition) than a structured row is the
+    # open row's peak, not the structured row's: an isomer's composition-level row 0.3-0.8 min from a structured one otherwise gives its peak the
+    # structured row's label
     if alignment != 'dropped' and len(open_masses):
-        open_dist = np.array([np.nanmin(np.abs(open_rts[f] + np.where(open_own[f], 0.0, rt_shift) - rt), initial = np.inf) for f, rt in zip(open_fits, inputs['RT'])])
+        open_run = {n: open_rts + np.where(open_own, 0.0, open_shift(n)) for n in set(input_acid)}
+        open_dist = np.array([np.nanmin(np.abs(open_run[n][f] - rt), initial = np.inf) for f, rt, n in zip(open_fits, inputs['RT'], input_acid)])
         near = [[k for k in n if not open_dist[i] < abs(map_rts[k] - rt)] for i, (n, rt) in enumerate(zip(near, inputs['RT']))]
     open_taken = windowed - {k for n in near for k in n}
     # A run holds about as many peaks of a composition as the mapping lists isomers of it, plus PGC tails, isotope picks and noise, so a row without RT only
@@ -450,12 +470,21 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     unlabelled = unlabelled.reset_index().set_index('m/z')[SPECTRUM_COLUMNS + ['compositions', 'compositional_vectors', 'glycan_types', 'charges', 'annotation_scores',
                                                                                'annotation_score', 'annotated', 'fragments'] + settings_columns]
     # Each row's RT on the run's time axis as the labels used it (the shift per row where the drift was modeled, the median shift for rows without
-    # structure, none for rt_own rows), so a ground truth built from the mapping sits where the labels do: the median shift alone left late sialylated rows
-    # of runs on a compressed gradient 1-3 min off their peaks
+    # structure elsewhere, none for rt_own rows), so a ground truth built from the mapping sits where the labels do: the median shift alone left late sialylated
+    # rows of runs on a compressed gradient 1-3 min off their peaks
     own_rows = mapping['rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(mapping), bool)
     map_rows['run_rt'] = (pd.to_numeric(mapping['RT'], errors = 'coerce').to_numpy(float) + np.where(own_rows, 0.0, np.nan if alignment == 'dropped' else rt_shift)
                           if 'RT' in mapping.columns else np.nan)
     map_rows.loc[row_ids, 'run_rt'] = map_rts
+    if alignment == 'model' and len(open_masses):
+        # A row without structure where the drift was modeled: moved with the acidic residues of the composition whose passing input at its Mass sits
+        # nearest it so (inputs of several compositions fit most such Masses; taking the most intense one's put 681 instead of 887 of 908 run-row pairs
+        # of FP-added rows within 0.5 min of their apex), or by the run's shift without such an input
+        run_open, gap = open_rts + np.where(open_own, 0.0, rt_shift), np.full(len(open_rows), np.inf)
+        for n in sorted(set(input_acid)):
+            d = np.where(open_fits & passing[:, None] & (np.array(input_acid) == n)[:, None], np.abs(open_run[n][None, :] - input_rts[:, None]), np.inf).min(axis = 0, initial = np.inf)
+            run_open, gap = np.where(d < gap, open_run[n], run_open), np.minimum(d, gap)
+        map_rows.loc[open_rows.index, 'run_rt'] = run_open
     # map_rows as records: pandas compares attrs when it concatenates frames, which a dataframe in them would break
     labelled.attrs.update(rt_shift = rt_shift, rt_alignment = alignment, rt_anchors = len(offsets), map_rows = map_rows.to_dict('records'))
     return labelled, unlabelled

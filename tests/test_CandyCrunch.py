@@ -2053,9 +2053,15 @@ def test_mass_spec_helpers_from_glycopeptide_search():
     assert len(trace) > 5 and trace.max() == 1000
     assert coeluting_lighter_ion(ms1, 500.0, 2, 1.0, 17.0) and not coeluting_lighter_ion(ms1, 500.0, 2, 1.0, 40.0)
     assert np.isclose(averaged_precursor_mz(ms1, 1.0, 500.0, 2), 500.0, atol = 0.01) and np.isclose(averaged_precursor_mz(ms1, 1.0, 500.5017, 2), 500.0, atol = 0.01)
+    # The envelope at 500.0 (2+) is a reading whose M sits there: one isotope step heavier (M at 500.5017) loses, and so does one a step lighter, whose M finds no peak
+    from candycrunch.prediction import envelope_reading
+    shape = [1.0, 0.6, 0.2, 0.05]
+    assert envelope_reading(ms1, 500.0, 2, 1.0, shape, shape) == 'lighter'
+    assert envelope_reading(ms1, 500.0 - 0.5017, 2, 1.0, shape, shape) == 'heavier'
+    assert envelope_reading(ms1, 900.0, 2, 1.0, shape, shape) is None
     # An EThcD scan pairs with the HCD scan that triggered it, not across charges or too many scans
-    df = pd.DataFrame({'scan': [1, 2, 3, 50], 'm/z': [500.0, 500.001, 700.0, 700.0], 'precursor_charge': [2, 2, 3, 3], 'activation': ['HCD', 'EThcD', 'HCD', 'EThcD'],
-                       'analyzer': ['orbitrap'] * 4, 'peak_d': [{1.0: 1.0}, {2.0: 2.0}, {3.0: 3.0}, {4.0: 4.0}]})
+    df = pd.DataFrame({'scan': [1, 2, 3, 4, 50], 'm/z': [500.0, 500.001, 700.0, 700.0, 700.0], 'precursor_charge': [2, 2, 3, 3, 3], 'activation': ['HCD', 'EThcD', 'HCD', 'CID', 'EThcD'],
+                       'analyzer': ['orbitrap'] * 5, 'peak_d': [{1.0: 1.0}, {2.0: 2.0}, {3.0: 3.0}, {3.5: 3.5}, {4.0: 4.0}]})
     paired = pair_spectra(df).set_index('scan')
     assert paired.index.tolist() == [1, 3] and paired.loc[1, 'paired_peak_d'] == {2.0: 2.0} and paired.loc[1, 'paired_activation'] == 'EThcD' and pd.isna(paired.loc[3, 'paired_peak_d'])
     assert paired.loc[1, 'paired_scan'] == 2 and pd.isna(paired.loc[3, 'paired_scan'])

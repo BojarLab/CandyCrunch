@@ -391,11 +391,13 @@ def collect(args):
                 continue
             # A file that switches polarity (only looked for in projects whose checklist names both modes) is two runs, <run>_neg and <run>_pos, each with
             # the map columns of that name and the spectra of its mode, as when each polarity came as a file of its own
-            modes = [None]
+            modes, own = [None], None
             if ';' in str(row.get('mode', '')):
                 with np.load(path) as f:
                     polarity = set(json.loads(f['meta'].tobytes()).get('json_columns', {}).get('polarity', ()))
                 modes = ['negative', 'positive'] if {'+', '-'} <= polarity else modes
+                # (a file of one polarity in such a project runs in its own mode, not in the checklist's first: its settings and the rescued masses' ions)
+                own = {'+': 'positive', '-': 'negative'}.get(''.join(polarity))
             for mode in modes:
                 name = f'{path.stem}_{mode[:3]}' if mode else path.stem
                 mapping, cls, names = maps_for_run(project, path.with_name(f'{name}.cc'), maps_dir)
@@ -412,7 +414,7 @@ def collect(args):
                     except Exception:
                         pass
                 cc = path.stat()
-                tasks.append(dict(project = project, path = str(path), name = name, mode = mode, out = str(out), maps = str(maps_dir), mapping = mapping, glycan_class = cls,
+                tasks.append(dict(project = project, path = str(path), name = name, mode = mode or own, out = str(out), maps = str(maps_dir), mapping = mapping, glycan_class = cls,
                                   map_names = names, row = row, stamp = st, excluded = is_excluded(path.stem, exclude),
                                   inputs_stamp = hashlib.sha1(f'{inputs_code} {cc.st_size} {cc.st_mtime_ns} {cls}'.encode()).hexdigest()))
     return tasks, skipped

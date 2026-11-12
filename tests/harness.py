@@ -871,7 +871,7 @@ def run_file(task):
         model.eval()
     for seed in task['seeds']:
         captured = {}
-        caches = install_caches(cp, pathlib.Path(task['cache']) / task['label'].replace('/', '__'), task['use_cache'], captured, model = model, vocab = vocab)
+        caches = install_caches(cp, pathlib.Path(task['cache']) / task['label'].replace('/', '__').rstrip(' .'), task['use_cache'], captured, model = model, vocab = vocab)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
