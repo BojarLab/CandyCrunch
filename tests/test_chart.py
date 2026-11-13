@@ -240,3 +240,191 @@ def test_package_imports_without_matplotlib():
             "_, ax = plot_annotated_spectrum('Gal(b1-3)GalNAc', [204.09, 366.14], [50.0, 100.0], charge = -1, mass_threshold = 0.5, draw_glycans = False)\n"
             "assert ax.peak_labels and ax.figure.to_png(72).startswith(b'\\x89PNG')\n")
     subprocess.run([sys.executable, '-c', code], check = True, env = {**os.environ, 'QT_QPA_PLATFORM': 'offscreen'}, stdin = subprocess.DEVNULL)
+
+
+def test_mirrored_spectrum():
+    # A second spectrum below the axis, annotated with the same glycopeptide at its own settings: its labels hang below its peaks in the lower half, the upper ones stay above
+    # the axis, and the peptide ladder counts the bonds either spectrum covers
+    from candycrunch.analysis import plot_annotated_spectrum, AA_masses
+    from glycowork.motif.tokenization import PROTON_MASS
+    seq = 'VQPFNVTQGK'
+    b = {i: sum(AA_masses[x] for x in seq[:i]) + PROTON_MASS for i in (2, 3, 4)}
+    hcd = {204.0867: 100.0, 366.1395: 60.0, **{m: 40.0 for m in b.values()}}
+    ethcd = {sum(AA_masses[x] for x in seq[:i]) + PROTON_MASS + 17.026549: 80.0 - 10 * i for i in (2, 3, 6)} | {204.0867: 30.0}
+    _, ax = plot_annotated_spectrum('VQPFN*H3N4F1*VTQGK', list(hcd), list(hcd.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', draw_glycans = False,
+                                    mirror = {'mzs': list(ethcd), 'intensities': list(ethcd.values()), 'kwargs': {'fragmentation_method': 'EThcD'}, 'title': 'EThcD scan 2'})
+    assert ax.get_ylim() == (-104, 104) and ax.peak_labels and ax.mirror_labels
+    zero = float(ax.page(0.0, 0.0)[1])
+    assert all(label['xy'][1] > 0 and float(ax.page(*label['xy'])[1]) + label['box'][1] >= zero - 0.5 for label in ax.peak_labels)
+    assert all(label['xy'][1] < 0 and float(ax.page(*label['xy'])[1]) + label['box'][3] <= zero + 0.5 for label in ax.mirror_labels)
+    assert len(ax.mirror_labels) >= 3
+    ladder = next(a for a in ax.figure.axes if a is not ax)
+    assert any(t.get('kind') == 'text' and t.get('s') == '4/9 backbone bonds' for t in ladder.artists)
+    # without a mirror, the figure is the one drawn before: upper half only
+    _, alone = plot_annotated_spectrum('VQPFN*H3N4F1*VTQGK', list(hcd), list(hcd.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', draw_glycans = False)
+    assert alone.get_ylim() == (0, 104) and alone.mirror_labels == []
+
+
+def test_colored_peaks_are_named():
+    # A peak carries its fragment's color only with its label or a cartoon's leader: an annotated peak below the label threshold that the peptide ladder does
+    # not count (here a Y ion) stays gray, while a backbone ion the ladder counts is labeled and colored whatever its intensity
+    from candycrunch.analysis import plot_annotated_spectrum, AA_masses
+    from glycowork.motif.tokenization import PROTON_MASS
+    seq = 'VQPFNVTQGK'
+    b = [sum(AA_masses[x] for x in seq[:i]) + PROTON_MASS for i in (2, 3, 4)]
+    y1 = sum(AA_masses[x] for x in seq) + 18.010565 + 203.079373 + PROTON_MASS
+    hcd = {204.0867: 100.0, 366.1395: 60.0, b[0]: 40.0, b[1]: 2.0, b[2]: 1.0, y1: 1.0}
+    hits, ax = plot_annotated_spectrum('VQPFN*H3N4F1*VTQGK', list(hcd), list(hcd.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', draw_glycans = False)
+    named = {label['xy'][0] for label in ax.peak_labels}
+    colored = {x for art in ax.artists if art['kind'] == 'vsegs' and art.get('lw') == 1.3 for x in art['x']}
+    assert hits[b[1]] and hits[y1] and colored and colored <= named and {b[0], b[1], b[2]} <= colored and y1 not in colored
+
+
+def test_ladder_labels_keep_apart():
+    # Labels of neighboring bonds that would run into each other take a row each, and the ladder grows by that row
+    import viscose as vc
+    from candycrunch.analysis import draw_peptide_ladder
+    hits = {1.0: {'Domon-Costello nomenclatures': [[['b_4', 'c_4', 'c-1_4']]]}, 2.0: {'Domon-Costello nomenclatures': [[['b_5', 'c_5', 'c-1_5']]]}}
+    ax = vc.Figure(5, 1.5).add_axes([0.05, 0.1, 0.9, 0.8])
+    draw_peptide_ladder('VQPFNVTQGK', hits, [4], ax = ax)
+    y = {art['s']: art['y'] for art in ax.artists if art['kind'] == 'text' and '/' in art['s']}
+    assert y['b4/c4/c4-1'] != y['b5/c5/c5-1'] and ax.get_ylim()[1] > 1.25
+
+
+def test_labels_keep_off_other_peaks():
+    # A label that would run across a taller neighbor's stick moves up or aside with a leader, in either half of a mirror, and keeps its text
+    from candycrunch.analysis import plot_annotated_spectrum, AA_masses
+    from glycowork.motif.tokenization import PROTON_MASS
+    seq = 'VQPFNVTQGK'
+    b2 = sum(AA_masses[x] for x in seq[:2]) + PROTON_MASS
+    peaks = {204.0867: 100.0, 1000.0: 50.0, b2: 30.0, b2 + 1.5: 100.0}
+    _, ax = plot_annotated_spectrum('VQPFN*H3N4F1*VTQGK', list(peaks), list(peaks.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', draw_glycans = False,
+                                    mirror = {'mzs': list(peaks), 'intensities': list(peaks.values()), 'kwargs': {'fragmentation_method': 'HCD'}})
+    tall = float(ax.page(b2 + 1.5, 0.0)[0])
+    for labels in (ax.peak_labels, ax.mirror_labels):
+        label = next(label for label in labels if abs(label['xy'][0] - b2) < 1e-6)
+        x = float(ax.page(*label['xy'])[0])
+        assert label['text'] == 'b_{2}' and not x + label['box'][0] < tall < x + label['box'][2]
+    leaders = [art for art in ax.artists if art['kind'] == 'line' and art.get('lw') == 0.4]
+    assert len(leaders) >= 2
+
+
+def test_labels_keep_their_peaks_on_real_spectra():
+    # On real glycopeptide HCD spectra, labels cross far fewer sticks of other peaks than where labels avoid only each other, every peak named there keeps its name, and
+    # no label runs past a side of the axes
+    import gzip
+    import json
+    import candycrunch.analysis as analysis
+    with gzip.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'glycopeptides', 'glycopeptide_benchmark.json.gz'), 'rt', encoding = 'utf-8') as f:
+        spectra = [s for s in json.load(f)['spectra'] if s['activation'] == 'HCD' and s['stratum'] == 'N']
+    legacy = analysis.place_peak_label
+
+    def labels_only(*args, sticks = None, xbounds = None, lines = None, home = None, reserved = (), **kwargs):
+        return legacy(*args, **kwargs)
+
+    counts = {}
+    for name, placer in (('alone', labels_only), ('sticks', legacy)):
+        analysis.place_peak_label, across, named, past = placer, 0, [], 0
+        try:
+            for s in spectra:
+                peaks = dict(sorted(map(tuple, s['peaks']), key = lambda x: -x[1])[:100])
+                _, ax = analysis.plot_annotated_spectrum({'peptide': s['peptide'], 'glycans': s['glycans'], 'glycosites': s['glycosites']}, list(peaks), list(peaks.values()),
+                                                         charge = s['charge'], mass_threshold_ppm = 10, fragmentation_method = 'HCD', draw_glycans = False)
+                x, y = ax.page(np.array(list(peaks)), np.array(list(peaks.values())) / max(peaks.values()) * 100)
+                for label in ax.peak_labels:
+                    px, py = (float(v) for v in ax.page(*label['xy']))
+                    box, other = label['box'], np.abs(x - px) > 0.5
+                    across += bool(np.any(other & (x > px + box[0]) & (x < px + box[2]) & (y > py + box[1])))
+                    past += px + box[0] < ax.rect[0] - 1.5 or px + box[2] > ax.rect[0] + ax.rect[2] + 1.5
+                named.append({label['xy'][0] for label in ax.peak_labels})
+        finally:
+            analysis.place_peak_label = legacy
+        counts[name] = (across, named, past)
+    assert counts['sticks'][0] <= counts['alone'][0] / 3 and counts['sticks'][2] == 0
+    assert all(alone <= now for alone, now in zip(counts['alone'][1], counts['sticks'][1]))
+
+
+def test_composition_cartoons_name_their_peaks():
+    # A glycan composition's cartoon is its peaks' name: they get no text label while it is drawn, a loss is written beside its symbols, and a cartoon switched off
+    # gives its peak its text label back
+    from candycrunch.analysis import plot_annotated_spectrum, AA_masses
+    from glycowork.motif.tokenization import PROTON_MASS
+    seq = 'VQPFNVTQGK'
+    b = [sum(AA_masses[x] for x in seq[:i]) + PROTON_MASS for i in (2, 3, 4)]
+    hcd = {204.0867: 100.0, 186.0761: 40.0, 366.1395: 60.0, b[0]: 40.0, b[1]: 30.0, b[2]: 20.0}
+    _, ax = plot_annotated_spectrum('VQPFN*H3N4F1*VTQGK', list(hcd), list(hcd.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD')
+    fragments = {box['fragment']: box['peaks'] for box in ax.cartoon_boxes}
+    assert fragments['N1'] == [204.0867] and fragments['N1 -H2O'] == [186.0761] and fragments['H1N1'] == [366.1395]
+    assert not {204.0867, 186.0761, 366.1395} & {label['xy'][0] for label in ax.peak_labels} and len(ax.peak_labels) == 3
+    assert any(art['kind'] == 'text' and art.get('s') == '-H_{2}O' for art in ax.artists)
+    _, ax = plot_annotated_spectrum('VQPFN*H3N4F1*VTQGK', list(hcd), list(hcd.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', cartoons = {'N1 -H2O': False})
+    assert 'N1 -H2O' not in {box['fragment'] for box in ax.cartoon_boxes} and 'HexNAc-H2O' in {label['text'] for label in ax.peak_labels}
+
+
+def test_z_ions_are_radicals():
+    # CandyCrunch's z is the radical (z-dot) and its z+1 is z-dot + H: labels, the fragment table, and the peptide ladder write them with the dot, every other ion type as before
+    import viscose as vc
+    from candycrunch.analysis import domon_costello_to_label, domon_costello_to_html, draw_peptide_ladder
+    assert domon_costello_to_label(['z_5']) == 'z\u2022_{5}' and domon_costello_to_label(['z+1_5']) == 'z\u2022+1_{5}'
+    assert domon_costello_to_label(['a_2', 'b_2', 'c_3', 'c-1_3', 'w_4', 'x_4', 'y_5', 'Z_2_Alpha']) == 'a_{2}/b_{2}/c_{3}/c-1_{3}/w_{4}/x_{4}/y_{5}/Z_{2α}'
+    assert domon_costello_to_html(['z_5', 'z+1_5', 'y_4', 'c-1_3']) == 'z&bull;<sub>5</sub>, z&bull;+1<sub>5</sub>, y<sub>4</sub>, c-1<sub>3</sub>'
+    ax = vc.Figure(5, 1.5).add_axes([0.05, 0.1, 0.9, 0.8])
+    draw_peptide_ladder('VQPFNVTQGK', {1.0: {'Domon-Costello nomenclatures': [[['y_3', 'z_3', 'z+1_3']]]}, 2.0: {'Domon-Costello nomenclatures': [[['c_2', 'c-1_2']]]}}, [4], ax = ax)
+    texts = {art['s'] for art in ax.artists if art['kind'] == 'text'}
+    assert 'y3/z\u20223/z\u20223+1' in texts and 'c2/c2-1' in texts
+
+
+def test_spectrum_names_what_the_ladder_shows_and_draws_compositions():
+    # Every backbone ion the peptide ladder counts is labeled whatever its intensity, a glycopeptide's Y ion is drawn as Pep + its glycan's symbols, and in a
+    # mirror the glycan-only ions are drawn too, hanging below their peaks; the mirror's title stays clear of labels
+    from candycrunch.analysis import plot_annotated_spectrum, AA_masses
+    from glycowork.motif.tokenization import PROTON_MASS
+    from viscose.text import width
+    seq = 'VQPFNVTQGK'
+    b = [sum(AA_masses[x] for x in seq[:i]) + PROTON_MASS for i in (2, 3)]
+    y1 = sum(AA_masses[x] for x in seq) + 18.010565 + 203.079373 + PROTON_MASS
+    hcd = {204.0867: 100.0, b[0]: 40.0, b[1]: 1.0, y1: 30.0}
+    ethcd = {204.0867: 50.0, 1000.0: 100.0}
+    _, ax = plot_annotated_spectrum('VQPFN*H3N4F1*VTQGK', list(hcd), list(hcd.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD',
+                                    mirror = {'mzs': list(ethcd), 'intensities': list(ethcd.values()), 'kwargs': {'fragmentation_method': 'EThcD'}, 'title': 'EThcD scan 2'})
+    labels = {label['xy'][0]: label['text'] for label in ax.peak_labels}
+    assert labels[b[1]] == 'b_{3}' and labels[y1] == 'Pep + N1' and [label['text'] for label in ax.mirror_labels] == ['N1']
+    assert any(art['kind'] == 'text' and art.get('s') == 'Pep +' for art in ax.artists)
+    corner = (ax.rect[0] + 0.99 * ax.rect[2] - width('EThcD scan 2', 8), ax.rect[1] + 0.02 * ax.rect[3] + 1.2 * 8)
+    assert all(float(ax.page(*label['xy'])[0]) + label['box'][2] < corner[0] or float(ax.page(*label['xy'])[1]) + label['box'][1] > corner[1] for label in ax.mirror_labels)
+
+
+def test_long_labels_lie_where_they_cannot_stand():
+    # In the half of a mirror, a long name over a small peak does not fit standing, so it lies across its peak rather than being left out
+    from candycrunch.analysis import place_peak_label
+    placed = []
+    spot = place_peak_label(100.0, 10.0, 'Peptide/Y Hex(1)/HexNAc(2) [+2]', placed, (0.0, 60.0), 7, 6)
+    assert spot is not None and spot[2] == 'center' and spot[4][2] - spot[4][0] > spot[4][3] - spot[4][1] and placed
+
+
+def test_composition_cartoons_stand_near_their_peaks():
+    # A dense run of oxonium ions left of empty axes steps up to the right of its peaks rather than running along the band in one row (the oxonium ions of
+    # KDNTTVTR H6N5F1A2 at m/z 126-366 had reached m/z 1,300): every cartoon names its peak near it, and no leader crosses another or runs through a cartoon
+    import viscose as vc
+    from candycrunch.analysis import plot_annotated_spectrum, AA_masses
+    from glycowork.motif.tokenization import PROTON_MASS
+    seq = 'VQPFNVTQGK'
+    b = [sum(AA_masses[x] for x in seq[:i]) + PROTON_MASS for i in (2, 3, 4)]
+    hcd = {126.0550: 15.0, 138.0550: 60.0, 144.0655: 20.0, 168.0655: 40.0, 186.0761: 30.0, 204.0867: 100.0, 274.0921: 50.0, 292.1027: 30.0, 366.1395: 70.0,
+           657.2349: 20.0, b[0]: 25.0, b[1]: 15.0, b[2]: 10.0}
+    figure = vc.Figure(10, 5.15)
+    ax, ladder = figure.add_axes([0.065, 0.107, 0.915, 0.42]), figure.add_axes([0.065, 0.62, 0.915, 0.17])
+    _, ax = plot_annotated_spectrum('VQPFN*H5N4F1A2*VTQGK', list(hcd), list(hcd.values()), charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', ax = ax,
+                                    ladder_ax = ladder)
+    x0, y0, w, h = ax.rect
+    page = lambda x, y: (float(ax.page(x, 0.0)[0]), y0 + y * h)
+    boxes = [(cx + c['box'][0], cy + c['box'][1], cx + c['box'][2], cy + c['box'][3]) for c in ax.cartoon_boxes for cx, cy in [page(*c['xy'])]]
+    assert len(boxes) == 10 and all(shown for _, shown in ax.cartoon_fragments.values())
+    distance = [max(box[0] - px, px - box[2], 0.0) for box, c in zip(boxes, ax.cartoon_boxes) for px in [page(c['peaks'][0], 0.0)[0]]]
+    assert max(distance) < 200 and np.mean(distance) < 60
+    segments = [(p, q) for a in ax.artists if a['kind'] == 'line' and a.get('dash') == (2.0, 1.0) for path in [[page(x, y) for x, y in zip(a['x'], a['y'])]]
+                for p, q in zip(path, path[1:])]
+    side = lambda p, q, r: (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    crosses = lambda s, t: side(*s, t[0]) * side(*s, t[1]) < 0 and side(*t, s[0]) * side(*t, s[1]) < 0
+    assert len(segments) >= 10 and not any(crosses(s, t) for i, s in enumerate(segments) for t in segments[i + 1:])
+    assert not any(crosses(s, d) for s in segments for box in boxes for d in (((box[0], box[1]), (box[2], box[3])), ((box[0], box[3]), (box[2], box[1]))))

@@ -113,8 +113,19 @@ AA_masses = {aa: calculate_adduct_mass(f) for aa, f in AMINO_ACID_FORMULAS.items
 # released N-glycosites), so that peptide_to_glycowork can write them as glycowork does
 TOKEN_MODIFICATIONS = {'k': ('K', 'TMT6plex'), 'c': ('C', 'Carbamidomethyl'), 'j': ('K', 'Guanidinyl'), 'm': ('M', 'Oxidation'), 'n': ('N', 'Deamidated'),
                        'q': ('Q', 'Deamidated')}
-AA_masses |= {token: AA_masses[aa] + (float(PEPTIDE_MODIFICATIONS[name]) if re.fullmatch(r'[+-]\d*\.?\d+', PEPTIDE_MODIFICATIONS[name]) else calculate_adduct_mass(PEPTIDE_MODIFICATIONS[name]))
-              for token, (aa, name) in TOKEN_MODIFICATIONS.items()}
+
+
+def peptide_modification_mass(modification):
+    """Mass of a peptide modification: a number, or its Unimod name in glycowork's PEPTIDE_MODIFICATIONS (e.g., 'Carbamidomethyl')"""
+    if isinstance(modification, (int, float)):
+        return float(modification)
+    if modification not in PEPTIDE_MODIFICATIONS:
+        raise ValueError(f"No peptide modification {modification!r}; give a mass or a Unimod name of glycowork's PEPTIDE_MODIFICATIONS, e.g., 'Carbamidomethyl'")
+    value = PEPTIDE_MODIFICATIONS[modification]
+    return float(value) if re.fullmatch(r'[+-]\d*\.?\d+', value) else calculate_adduct_mass(value)
+
+
+AA_masses |= {token: AA_masses[aa] + peptide_modification_mass(name) for token, (aa, name) in TOKEN_MODIFICATIONS.items()}
 MODIFICATION_TOKENS = {
     'Carbamidomethyl': {'C': 'c'},
     'Guanidinyl': {'K': 'j'},
@@ -2014,6 +2025,11 @@ def global_mod_terms(global_mod):
     return terms
 
 
+def radical_ion(series):
+    """A peptide ion series as written: CandyCrunch's z is the radical, z\u2022, and its z+1 is z\u2022+1 (z\u2022 + H); every other series as named"""
+    return series.replace('z', 'z\u2022', 1)
+
+
 def domon_costello_to_html(dc_name):
     """Converts a Domon-Costello fragment name to a prettified HTML string\n
     | Arguments:
@@ -2037,7 +2053,7 @@ def domon_costello_to_html(dc_name):
             if len(frag_type) > 1:
                 html_nom = html_nom.replace(f'{frag_type}', f"<sup>{frag_type[0]},{frag_type[1]}</sup>{frag_type[2]}")
         if len(html_nom_parts) == 2 and html_nom_parts[0] in N_TERM_IONS | C_TERM_IONS:
-            html_nom = f"{html_nom_parts[0]}<sub>{html_nom_parts[1]}</sub>"
+            html_nom = f"{radical_ion(html_nom_parts[0]).replace(chr(0x2022), '&bull;')}<sub>{html_nom_parts[1]}</sub>"
         elif len(html_nom_parts) == 2 and html_nom_parts[0] == 'I':
             html_nom = SMALL_IONS[html_nom_parts[1]][3]
         elif len(html_nom_parts) >= 2 and html_nom_parts[0] == 'M':
@@ -2794,7 +2810,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
                              charge = -1, mass_tag = None, simplify = True, disable_global_mods = False,
                              disable_X_cross_rings = None, sample_prep = 'underivatized',
                              peptide_seq = None, glycosites = None, glycan_class = None,
-                             fragmentation_method = None, max_global_mods = 1, mass_threshold_ppm = None, hydrogen_shifts = False, metal_cations = True):
+                             fragmentation_method = None, max_global_mods = 1, mass_threshold_ppm = None, hydrogen_shifts = False, metal_cations = True,
+                             n_term_modification = None):
     """Calculates all possible fragment masses from a monosaccharide composition, optionally on a peptide\n
     | Arguments:
     | :-
@@ -2816,7 +2833,9 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
     | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; default:None
     | hydrogen_shifts (bool): whether free-glycan fragments also come one or two hydrogen atoms off their mass (radical activation); default:False
     | metal_cations (bool or set): whether fragments can carry metal cations (positive mode; True: Na+ and K+), which those of a (de)protonated precursor
-    |                              cannot, or the ones they can carry (e.g., {'+Li'} for a lithiated precursor); default:True\n
+    |                              cannot, or the ones they can carry (e.g., {'+Li'} for a lithiated precursor); default:True
+    | n_term_modification (string or float): a modification of the peptide's N-terminal amine, by Unimod name (e.g., 'Carbamidomethyl', 'Acetyl') or mass, which every
+    |                                        N-terminal ion and the intact peptide carry; default:None\n
     | Returns:
     | :-
     | Returns a dict keyed by observed mass, each pointing to an annotation dict or None
@@ -2874,6 +2893,10 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         total_glycan = sum(glycan_totals)
         # Peptide masses
         pep_res = [AA_masses.get(aa, 0) for aa in peptide_seq]
+        # an N-terminal modification (e.g., the carbamidomethylated amine of an over-alkylated peptide) rides on the first residue, so every N-terminal ion and the intact
+        # peptide carry it and no C-terminal ion does
+        if n_term_modification is not None:
+            pep_res[0] += peptide_modification_mass(n_term_modification)
         n_aa = len(pep_res)
         full_pep = sum(pep_res) + WATER_MASS
         cum_n = list(np.cumsum(pep_res))
@@ -3102,7 +3125,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 iupac = False, intensities = None, disable_global_mods = False, disable_X_cross_rings = None, chance_filter = None,
                 disable_A_cross_rings = None, sample_prep = 'underivatized', prior_weight = 1.0, glycan_class = None,
                 fragmentation_method = None, allow_internal_peptide_fragments = False, mass_threshold_ppm = None,
-                max_global_mods = None, ms3_precursor = None, sialic_derivatization = None, metal_cations = True):
+                max_global_mods = None, ms3_precursor = None, sialic_derivatization = None, metal_cations = True, n_term_modification = None):
     """Basic wrapper for the annotation of observed masses with correct nomenclature given a glycan\n
     | Arguments:
     | :-
@@ -3147,7 +3170,10 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     |                        pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; every sialic acid then needs its linkage (a2-6 or a2-3/8/9 in a
     |                        structure, E/L in a composition), and fragments keeping its C1 carry the product; default:None
     | metal_cations (bool or set): whether fragments can carry metal cations (positive mode; True: Na+ and K+), which those of a (de)protonated precursor
-    |                              cannot, or the ones they can carry (e.g., {'+Li'} for a lithiated precursor); default:True\n
+    |                              cannot, or the ones they can carry (e.g., {'+Li'} for a lithiated precursor); default:True
+    | n_term_modification (string or float): a modification of a glycopeptide's N-terminal amine, by Unimod name (e.g., 'Carbamidomethyl' of an over-alkylated
+    |                                        peptide) or mass, which every N-terminal ion and the intact peptide carry; glycopeptides with glycan compositions;
+    |                                        default:None\n
     | Returns:
     | :-
     | Returns a dict keyed by observed mass, each pointing to None or a dict of 'Theoretical fragment masses', 'Domon-Costello nomenclatures' and
@@ -3177,6 +3203,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         input_string = input_string['glycans'][0]
     glycopeptide_input = (isinstance(input_string, dict) and bool(input_string.get('peptide'))) or (
             isinstance(input_string, str) and '*' in input_string)
+    if n_term_modification is not None and not glycopeptide_input:
+        raise ValueError(f"n_term_modification modifies a glycopeptide's N-terminus, and {input_string!r} has no peptide")
     if max_global_mods is None:
         # Glycopeptide oxonium series routinely lose two waters; free glycans rarely need a second modification
         max_global_mods = 2 if glycopeptide_input else 1
@@ -3229,7 +3257,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                     max_global_mods = max_global_mods, mass_threshold_ppm = mass_threshold_ppm,
                     peptide_seq = input_string['peptide'],
                     glycosites = list(input_string['glycosites']) if input_string.get('glycosites') is not None and len(input_string['glycosites']) else None,
-                    glycan_class = glycan_class, metal_cations = metal_cations)
+                    glycan_class = glycan_class, metal_cations = metal_cations, n_term_modification = n_term_modification)
             else:
                 glycans = input_string.get('glycans', [])
                 if not glycans:
@@ -3283,7 +3311,9 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                 sample_prep = sample_prep, fragmentation_method = fragmentation_method,
                 max_global_mods = max_global_mods, mass_threshold_ppm = mass_threshold_ppm,
                 peptide_seq = input_dict['peptide'],
-                glycosites = list(input_dict['glycosites']), glycan_class = glycan_class, metal_cations = metal_cations)
+                glycosites = list(input_dict['glycosites']), glycan_class = glycan_class, metal_cations = metal_cations, n_term_modification = n_term_modification)
+    if n_term_modification is not None:
+        raise ValueError(f"n_term_modification is read for glycopeptides with glycan compositions (e.g., 'PEPN*H5N4F1*TIDE'), not for {input_string!r}")
     if intensities is not None:
         fragment_masses, intensities = map(list, zip(*sorted(zip(fragment_masses, intensities))))
     else:
@@ -4390,7 +4420,7 @@ def domon_costello_to_label(dc_name):
             else:
                 label_parts.append(f"{frag_type}_{{{number}{chain_greek}}}")
         elif len(parts) == 2 and parts[0] in N_TERM_IONS | C_TERM_IONS:
-            label_parts.append(f"{parts[0]}_{{{parts[1]}}}")
+            label_parts.append(f"{radical_ion(parts[0])}_{{{parts[1]}}}")
         elif len(parts) == 2 and parts[0] == 'I':
             label_parts.append(SMALL_IONS[parts[1]][2])
         elif len(parts) >= 2 and parts[0] == 'M':
@@ -4538,53 +4568,128 @@ def fragment_to_fragIUPAC(glycan_string, dc_name):
     return _FRAG_IUPAC[key]
 
 
-_CARTOONS = {}
-
-
-def fragIUPAC_to_image(frag_iupac, padding = 4, scale = 1.0):
-    """Renders a glycan fragment as a cropped SNFG cartoon at scale pixels per point (padding in points), as an RGBA array of shape (rows, columns, 4), or None if it
-    cannot be drawn; cached, as spectra are drawn again for every candidate, panel size, and saved image"""
-    if (frag_iupac, padding, scale) in _CARTOONS:
-        return _CARTOONS[(frag_iupac, padding, scale)]
-    from glycowork.motif.draw import GlycoDraw
-    from glycorender.raster import render
-    from glycorender.render import convert_svg_to_pdf
-    try:
-        canvas = convert_svg_to_pdf(GlycoDraw(frag_iupac, suppress = True, compact = True, dim = 30).as_svg(), None, return_canvas = True)
-        image = render(canvas.ops, canvas.width, canvas.height, scale, scale)
-    except Exception:
-        return None
-    rows, columns, pad = np.flatnonzero(image[..., 3].any(axis = 1)), np.flatnonzero(image[..., 3].any(axis = 0)), round(padding * scale)
-    if len(rows):
-        image = image[max(0, rows[0] - pad):rows[-1] + 1 + pad, max(0, columns[0] - pad):columns[-1] + 1 + pad].copy()
-    if len(_CARTOONS) > 2000:
-        _CARTOONS.clear()
-    _CARTOONS[(frag_iupac, padding, scale)] = image
-    return image
-
-
-def place_peak_label(px, py, label, placed, bounds, fontsize, attempts, pad = 1.5, lift = 0.0):
+def place_peak_label(px, py, label, placed, bounds, fontsize, attempts, pad = 1.5, lift = 0.0, downward = False, sticks = None, xbounds = None, lines = None,
+                     home = None, reserved = (), extent = None, must = False):
     """Finds the place of a rotated label immediately above its peak's top (px, py), lifting it only as far as the neighbors require; if the
     axes run out of room above, the label is flipped to hang below the apex instead. All in page points; placed holds the boxes taken so far, and the
-    label's goes in with it, and lift leaves that much room over the peak. Returns (x offset, y offset, ha, va, box as (x0, y0, x1, y1)), or None where it does not fit"""
+    label's goes in with it, and lift leaves that much room over the peak. downward: the peak points down (the lower spectrum of a mirror), so its label
+    hangs below its tip, and is flipped to run up alongside it. sticks, given: (x, bottom, top) of the peaks of its spectrum, which the label does not run across
+    (its own, at px, aside): where it would, or where its leader would run through another label, it moves up or sideways within xbounds (left, right), whichever
+    is the shorter way with sideways counting double, its leader clear of other peaks and labels and no flatter than 45 degrees and, moved sideways, with no other
+    peak reaching within 12 points of it (where it would read as that peak's label); a label that has no such place stays where labels avoid only each other.
+    lines: segments ((x0, y0), (x1, y1)), such as cartoon leaders, that neither the label nor its leader crosses wherever there is room. home: what this
+    function returned for the label where labels avoid only each other, which it takes where nothing else is free (or, taken, the nearest place beside its peak
+    across other peaks), while a label without one is placed only where it is free; reserved: the boxes of such places of labels yet to come, kept clear. A label
+    too long to stand where there is room (in the half of a mirror, a long name over a small peak) lies across its peak, ha 'center', to be drawn unrotated;
+    extent: (width, height) of a box placed level over (under) its peak, or beside it from its top, in place of the label's text, such as a fragment's drawing.
+    must: a label without a home that has no free place takes the nearest beside its peak, across other peaks if need be, rather than none.
+    Returns (x offset, y offset, ha, va, box as (x0, y0, x1, y1)), or None where it does not fit"""
     from viscose.text import width
     length, thickness = width(label, fontsize), 1.2 * fontsize
-    for direction, alignment, vertical, x_offset in ((1, 'left', 'center', 0.0), (-1, 'right', 'top', 2.0)):
-        # A flipped label runs down alongside its peak, so it is pushed off the line rather than centered on it
-        y_offset = direction * 3.0 + (lift if direction > 0 else 0.0)
-        for _ in range(attempts):
-            x0, y0 = (px - thickness / 2, py + y_offset) if direction > 0 else (px + x_offset, py + y_offset - length)
-            box = (x0, y0, x0 + thickness, y0 + length)
-            if box[3] > bounds[1] or box[1] < bounds[0]:
-                break
+    # (direction, ha, va, x offset, the box's left edge from the peak, its width and height): standing over its peak (under it in a mirror), flipped to run
+    # alongside it, and lying across it
+    sign = -1 if downward else 1
+    level = lambda w, h: (sign, 'center', 'bottom' if sign > 0 else 'top', 0.0, -w / 2, w, h)
+    beside = lambda w, h: (-sign, 'right' if sign > 0 else 'left', 'top', 2.0, 2.0, w, h)
+    options = (level(*extent), beside(*extent)) if extent is not None else ((sign, 'left' if sign > 0 else 'right', 'center', 0.0, -thickness / 2, thickness, length),
+                                                                            beside(thickness, length), level(length, thickness))
+    moves = sticks is not None
+    sticks = np.empty((0, 3)) if sticks is None else np.asarray(sticks, dtype = float).reshape(-1, 3)
+    sticks = sticks[np.abs(sticks[:, 0] - px) > 0.5]
+    # lines and the diagonals of the boxes placed as rows of (x0, y0, x1, y1): through a box, a segment with both ends outside it crosses one of its diagonals
+    lines = np.asarray([(*a, *b) for a, b in lines or []], dtype = float).reshape(-1, 4)
+    boxes = np.asarray([other[:4] for other in placed], dtype = float).reshape(-1, 4)
+    diagonals = np.concatenate([boxes, boxes[:, [0, 3, 2, 1]]])
+    side = lambda x0, y0, x1, y1, x, y: (x1 - x0) * (y - y0) - (y1 - y0) * (x - x0)
+
+    def meets(segments, a, b):
+        # Whether any of the segments properly crosses the segment from a to b
+        return bool(np.any((side(*a, *b, segments[:, 0], segments[:, 1]) * side(*a, *b, segments[:, 2], segments[:, 3]) < 0) &
+                           (side(*segments.T, *a) * side(*segments.T, *b) < 0)))
+
+    def cut(box):
+        # Whether a line runs into the box
+        ends = lines.reshape(-1, 2)
+        return bool(np.any((ends[:, 0] > box[0]) & (ends[:, 0] < box[2]) & (ends[:, 1] > box[1]) & (ends[:, 1] < box[3]))) or meets(lines, box[:2], box[2:4]) or meets(
+            lines, (box[0], box[3]), (box[2], box[1]))
+
+    across = lambda box: bool(np.any((sticks[:, 0] > box[0]) & (sticks[:, 0] < box[2]) & (sticks[:, 1] < box[3]) & (sticks[:, 2] > box[1]))) or cut(box)
+
+    def leader_clear(box, y_offset, shift):
+        # A label moved off its peak, sideways or far enough up for a leader, needs that leader, from the peak's top to the middle of the label's near end, to pass
+        # no other peak, no label, and no line
+        if not shift and abs(y_offset) <= 8 + lift:
+            return True
+        end = ((box[0] + box[2]) / 2, box[1] if y_offset > 0 else box[3])
+        t = (sticks[:, 0] - px) / (end[0] - px) if end[0] != px else np.full(len(sticks), np.inf)
+        level = py + t * (end[1] - py)
+        return not (np.any((t > 0) & (t < 1) & (sticks[:, 1] < level) & (sticks[:, 2] > level)) or meets(diagonals, (px, py), end) or meets(lines, (px, py), end))
+
+    def find(option, shift, avoid):
+        # The first place of an option, shift points sideways, clear of the labels placed and, with avoid, of the lines with its leader clear of labels and lines,
+        # and with avoid 2 also of the sticks, as (x offset, y offset, box, padded)
+        direction, _, _, x_offset, left, w, h = option
+        # A flipped label runs alongside its peak, so it is pushed off the line rather than centered on it; one moved sideways rises at least as far as it moved
+        # beyond its width, so that its leader runs no flatter than 45 degrees and not along the axis
+        y_offset = direction * max(3.0 + (lift if option is options[0] else 0.0), abs(shift) - thickness)
+        for _ in range(2 * attempts if avoid else attempts):
+            x0 = px + left + shift
+            if not shift and left < 0 and xbounds is not None:
+                # a label over (under) its peak that would run more than its padding past a side of the axes slides in, as far as it still stands over its peak
+                x0 = min(max(x0, xbounds[0] - pad, px - w), xbounds[1] + pad - w, px)
+            y0 = py + y_offset if direction > 0 else py + y_offset - h
+            box = (x0, y0, x0 + w, y0 + h)
+            if box[3] > bounds[1] or box[1] < bounds[0] or (xbounds is not None and (box[0] < xbounds[0] - pad - 1e-6 or box[2] > xbounds[1] + pad + 1e-6)):
+                return None
             padded = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
-            clashes = [other for other in placed if padded[0] < other[2] and other[0] < padded[2] and padded[1] < other[3] and other[1] < padded[3]]
+            clashes = [other for other in placed + list(reserved) if padded[0] < other[2] and other[0] < padded[2] and padded[1] < other[3] and other[1] < padded[3]]
+            if avoid > 1 and shift:
+                column = sticks[(sticks[:, 0] > padded[0]) & (sticks[:, 0] < padded[2])]
+                if np.any(column[:, 1] < box[3] + 12.0 if downward else column[:, 2] > box[1] - 12.0):
+                    return None
+            if avoid and cut(padded):
+                return None
+            if avoid > 1:
+                clashes += [(x, bottom, x, top) for x, bottom, top in sticks[(sticks[:, 0] > padded[0]) & (sticks[:, 0] < padded[2]) & (sticks[:, 1] < padded[3]) &
+                                                                             (sticks[:, 2] > padded[1])]]
             if not clashes:
-                placed.append(padded)
-                return x_offset, y_offset, alignment, vertical, box
+                return None if avoid and not leader_clear(box, y_offset, shift) else (x_offset + x0 - px - left, y_offset, box, padded)
             y_offset += (max(other[3] for other in clashes) - box[1] + pad if direction > 0 else
                          min(other[1] for other in clashes) - box[3] - pad)
-    return None
+        return None
+
+    def nearest(avoid):
+        # The nearest place, upright before flipped before lying, nearer shifts first until a shift alone costs more than the best place found
+        for option in options:
+            best, home = None, option[0] * (3.0 + (lift if option is options[0] else 0.0))
+            for shift in [0.0] + [sign * k * thickness / 2 for k in range(1, 17) for sign in (1, -1)]:
+                if best is not None and 2 * abs(shift) >= best[0]:
+                    break
+                spot = find(option, shift, avoid)
+                if spot is not None and (best is None or 2 * abs(shift) + abs(spot[1] - home) < best[0]):
+                    best = (2 * abs(shift) + abs(spot[1] - home), option, spot)
+            if best is not None:
+                return best[1:]
+        return None
+
+    found = next(((option, spot) for option in options if (spot := find(option, 0.0, 0)) is not None), None)
+    # Across another peak or a line, or with its leader through one or through a label, it moves; a label without a home is only worth a free place
+    if moves and (found is None or across(found[1][3]) or not leader_clear(found[1][2], found[1][1], 0.0)):
+        found = nearest(2) or (found if home is not None else None)
+    if found is None and home is not None:
+        padded = (home[4][0] - pad, home[4][1] - pad, home[4][2] + pad, home[4][3] + pad)
+        if not any(padded[0] < other[2] and other[0] < padded[2] and padded[1] < other[3] and other[1] < padded[3] for other in placed) and not cut(padded):
+            placed.append(padded)
+            return home
+    if found is None and (home is not None or must):
+        # its own place taken after all (by a label placed before it or a cartoon's leader), or none where it must be named: the nearest beside its peak,
+        # across other peaks if need be, but never across a leader or a label
+        found = nearest(1)
+    if found is None:
+        return None
+    (_, alignment, vertical, *_), (x_offset, y_offset, box, padded) = found
+    placed.append(padded)
+    return x_offset, y_offset, alignment, vertical, box
 
 
 def draw_peptide_ladder(peptide, hit_dict, glycosites = (), *, ax, fontsize = 9):
@@ -4602,14 +4707,26 @@ def draw_peptide_ladder(peptide, hit_dict, glycosites = (), *, ax, fontsize = 9)
                 continue
             series, index = match.group(1), int(match.group(2))
             target = n_cuts if series in N_TERM_IONS else c_cuts
-            target.setdefault(index if series in N_TERM_IONS else len(peptide) - index, set()).add(f'{series[0]}{index}{series[1:]}')
+            target.setdefault(index if series in N_TERM_IONS else len(peptide) - index, set()).add(f'{radical_ion(series[0])}{index}{series[1:]}')
+    # A label that would run into the one before it moves a row further out, and the ladder gets as many rows as that takes: the labels of EThcD and mirrored spectra name
+    # two or three ion types per bond and ran into each other
+    from viscose.text import width as text_width
+    # axes not yet placed are laid out (plot_annotated_spectrum laid its figure out before it draws the ladder; a second layout took 8 ms a spectrum)
+    if ax.rect == (0.0, 0.0, 1.0, 1.0):
+        ax.figure.layout()
+    per_point, rows = (len(peptide) + 1) / max(ax.rect[2], 1.0), 1
     for cuts, sign, align in ((n_cuts, 1, 'right'), (c_cuts, -1, 'left')):
-        for bond, tokens in cuts.items():
-            x = bond - 0.5
+        ends = []
+        for bond in sorted(cuts):
+            x, label = bond - 0.5, '/'.join(sorted(cuts[bond]))
             color = PEAK_COLORS['backbone_n' if sign > 0 else 'backbone_c']
             ax.plot([x, x, x - sign * 0.35], [sign * 0.22, sign * 0.55, sign * 0.55], color = color, lw = 1.1)
-            ax.text(x - sign * 0.4, sign * 0.62, '/'.join(sorted(tokens)), ha = align,
-                    va = 'bottom' if sign > 0 else 'top', size = fontsize - 3, color = color)
+            span = text_width(label, fontsize - 3) * per_point
+            left, right = (x - 0.4 - span, x - 0.4) if align == 'right' else (x + 0.4, x + 0.4 + span)
+            row = next((r for r, end in enumerate(ends) if left > end + 0.1), len(ends))
+            ends[row:row + 1] = [right]
+            rows = max(rows, row + 1)
+            ax.text(x - sign * 0.4, sign * (0.62 + 0.4 * row), label, ha = align, va = 'bottom' if sign > 0 else 'top', size = fontsize - 3, color = color)
     for i, aa in enumerate(peptide):
         ax.text(i, 0, aa, ha = 'center', va = 'center', size = fontsize, bold = i in glycosites,
                 color = 'b0' if i in glycosites else 'ink')
@@ -4618,7 +4735,7 @@ def draw_peptide_ladder(peptide, hit_dict, glycosites = (), *, ax, fontsize = 9)
     ax.text(0.0, 1.0, f'{len(set(n_cuts) | set(c_cuts))}/{len(peptide) - 1} backbone bonds',
             axes_fraction = True, ha = 'left', va = 'top', size = fontsize - 2, color = 'muted')
     ax.set_xlim(-1, len(peptide))
-    ax.set_ylim(-1.25, 1.25)
+    ax.set_ylim(-1.25 - 0.4 * (rows - 1), 1.25 + 0.4 * (rows - 1))
     ax.off()
     return ax
 
@@ -4860,7 +4977,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                             annotate_top_n = None, annotation_threshold = 0.05, figsize = None,
                             draw_glycans = True, glycan_zoom = 0.25, max_glycan_cartoons = None,
                             label_fontsize = 6, max_label_levels = 6, filepath = '', hit_dict = None, mz_labels = False, diagnostic = None, cartoons = None,
-                            cartoon_dpi = None, palette = None, **kwargs):
+                            palette = None, mirror = None, ladder_ax = None, **kwargs):
     """Plots an MS2 spectrum annotated with CandyCrumbs fragment assignments\n
     | Arguments:
     | :-
@@ -4876,12 +4993,12 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     | charge (int): charge state of the precursor ion; taken from the dataframe when available; default:None
     | ax (viscose axes): axes at a fixed place (Figure.add_axes) to plot on, creates a new figure if None; default:None
     | annotate_top_n (int): only label the N most intense annotated peaks; default:None (label all)
-    | annotation_threshold (float): minimum relative intensity (0-1) to annotate a peak; default:0.05
+    | annotation_threshold (float): minimum relative intensity (0-1) to label a peak, but diagnostic peaks and a glycopeptide's backbone ions (each ion its
+    |                               peptide ladder counts, at its most intense peak) are labeled whatever their intensity; default:0.05
     | figsize (tuple): figure size if creating a new figure; default:None (chosen for the input type)
-    | draw_glycans (bool): whether to add SNFG cartoons for glycan fragments; default:True
-    | glycan_zoom (float): scale of the SNFG cartoons; default:0.25
-    | cartoon_dpi (float): resolution the figure will be shown or saved at, which the cartoons are rendered for, as an image shrunk or enlarged on
-    |                      drawing turns grainy or blurry; default:None (1 px per point, as for about 300 dpi)
+    | draw_glycans (bool): whether to add SNFG cartoons for glycan fragments, drawn as vector glyphs that stay sharp at any size and resolution; a composition's
+    |                      cartoon, with any loss or charge written beside its symbols, names its peaks in place of a text label; default:True
+    | glycan_zoom (float): scale of the SNFG cartoons, as a share of GlycoDraw's 30 points per symbol; default:0.25
     | max_glycan_cartoons (int): the most cartoons to draw; they are placed in this order wherever they fit without overlapping each other, the
     |                            title, or another cartoon's leader, near their peak: fragments of diagnostic peaks first, then single glycosidic
     |                            cleavages, then the rest, most intense first within each; default:None (as many as fit)
@@ -4893,14 +5010,21 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     |                   there is room; default:False
     | diagnostic (list): m/z (to 2 decimals or better) of peaks that tell this structure apart from its alternatives (e.g., the supporting peaks of
     |                    supporting_ions); they are labeled whatever their intensity, in lilac, and their fragments are drawn as cartoons first; default:None
-    | cartoons (dict): fragment IUPAC -> True to draw that fragment's cartoon before all others, the last one in the dict first (beyond max_glycan_cartoons and
-    |                  max shift, across other leaders if need be, and smaller if it is too tall for the room above the axes), its 'xy' from cartoon_boxes to draw it
-    |                  there as long as the spot is free, else as with True, False to leave it out; the axes'
+    | cartoons (dict): fragment IUPAC (of a composition, followed by the loss or charge it shows, e.g., 'N1 -H2O') -> True to draw that fragment's cartoon
+    |                  before all others, the last one in the dict first (beyond max_glycan_cartoons and max shift, across other leaders if need be, and smaller if
+    |                  it is too tall for the room above the axes), its 'xy' from cartoon_boxes to draw it there as long as the spot is free, else as with True,
+    |                  False to leave it out; the axes'
     |                  cartoon_fragments maps every peak with a cartoon fragment to (fragment IUPAC, drawn), their peak_labels list every label as a dict of
     |                  'xy' (peak in data coordinates), 'text', and 'box' (its extent in points from its peak), and their cartoon_boxes every cartoon drawn as a dict
     |                  of 'xy' (m/z and fraction of the axes' height of its center), 'box' (its extent in points from there), 'fragment', and 'peaks'; default:None
     | palette (string): viscose palette of a new figure; default:None (one chosen with viscose.set_palette, else CandyCrunch's)
-    | **kwargs: passed straight to CandyCrumbs, e.g., mass_threshold_ppm, fragmentation_method, max_global_mods\n
+    | mirror (dict): a second spectrum of the same precursor drawn below the axis, annotated with the same input, e.g., the EThcD or ETD scan an HCD scan
+    |                triggered: 'mzs' and 'intensities', and optionally 'charge' (default: charge), 'mass_threshold', 'hit_dict' (its CandyCrumbs output), 'title'
+    |                (named at its lower right), and 'kwargs' for its CandyCrumbs (e.g., {'fragmentation_method': 'EThcD', 'mass_threshold_ppm': 20}), which
+    |                replace this spectrum's; its labels hang below its peaks, the peptide ladder shows the bonds either spectrum covers, and the axes' mirror_labels list its
+    |                labels as peak_labels do; default:None
+    | ladder_ax (viscose axes): axes for a glycopeptide's peptide ladder when ax is given, e.g., a band above it; default:None (an inset in ax)
+    | **kwargs: passed straight to CandyCrumbs, e.g., mass_threshold_ppm, fragmentation_method, max_global_mods, n_term_modification\n
     | Returns:
     | :-
     | (1) the CandyCrumbs hit_dict for downstream use
@@ -4931,12 +5055,24 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
     hit_dict = hit_dict if hit_dict is not None else CandyCrumbs(input_string, mz_values.tolist(), mass_threshold, max_cleavages = max_cleavages,
                            simplify = True, charge = charge, mass_tag = mass_tag, sample_prep = sample_prep, intensities = peak_intensities.tolist(),
                            disable_global_mods = disable_global_mods, prior_weight = prior_weight, **kwargs)
+    if mirror is not None:
+        # the mirrored spectrum, scaled to its own base peak and annotated with the same input, its own CandyCrumbs settings in place of this one's
+        mirror_mz = np.asarray(mirror['mzs'], dtype = float)
+        order = np.argsort(mirror_mz)
+        mirror_mz, mirror_int = mirror_mz[order], np.asarray(mirror['intensities'], dtype = float)[order]
+        mirror_rel = mirror_int / mirror_int.max() * 100 if len(mirror_int) and mirror_int.max() > 0 else mirror_int
+        mirror_charge = mirror.get('charge', charge)
+        mirror_hits = mirror['hit_dict'] if mirror.get('hit_dict') is not None else CandyCrumbs(input_string, mirror_mz.tolist(), mirror.get('mass_threshold', mass_threshold),
+                                                                                            max_cleavages = max_cleavages, simplify = True, charge = mirror_charge, mass_tag = mass_tag,
+                                                                                            sample_prep = sample_prep, intensities = mirror_int.tolist(),
+                                                                                            disable_global_mods = disable_global_mods, prior_weight = prior_weight,
+                                                                                            **(kwargs | mirror.get('kwargs', {})))
     peptide, glycans, glycosites = resolve_spectrum_input(input_string)
     # every glycan as given, a composition dict written out (HexNAc(1)Hex(1)), joined in site order
     glycan_string = ' + '.join(g if isinstance(g, str) else ''.join(f'{k}({v})' for k, v in g.items()) for g in glycans)
     from candycrunch.utils import figure as new_figure
-    from viscose.text import width as text_width
-    ladder_ax, own_figure = None, ax is None
+    from viscose.text import GLYPH_SYMBOL, glyph, width as text_width
+    own_figure = ax is None
     if ax is None:
         page_width, page_height = figsize or ((13, 5.6) if peptide else (12, 4.6))
         figure = new_figure(page_width, page_height, palette)
@@ -4945,103 +5081,502 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         ax = figure.add_axes([left, bottom, wide, (room - ladder - (0.04 if peptide else 0)) / (1.4 if draw_glycans and glycans else 1.0)])
         if peptide:
             ladder_ax = figure.add_axes([left, bottom + room - ladder, wide, ladder])
-    elif peptide:
+    elif peptide and ladder_ax is None:
         ax.figure.layout()
         ladder_ax = ax.figure.add_axes([(ax.rect[0] + 0.28 * ax.rect[2]) / ax.figure.width, (ax.rect[1] + 0.58 * ax.rect[3]) / ax.figure.height,
                                         0.70 * ax.rect[2] / ax.figure.width, 0.30 * ax.rect[3] / ax.figure.height])
     ax.vlines(mz_values, 0, rel_intensities, color = 'muted', lw = 0.8, alpha = 0.4)
     # Final limits before anything is placed in points: labels and cartoons are laid out for this data-to-page mapping
-    ax.set_xlim(mz_values.min() - 20, mz_values.max() + 20)
-    ax.set_ylim(0, 104)
-    peaks = []
-    for mz, rel_int in zip(mz_values, rel_intensities):
-        hit = hit_dict.get(mz)
-        if not hit:
-            continue
-        dc_name = hit['Domon-Costello nomenclatures'][0]
-        kind = classify_fragment(dc_name)
-        oxonium = identify_oxonium(hit['Theoretical fragment masses'][0]) if kind in ('oxonium', 'glycan') and charge > 0 else None
-        flat = [y for sub in dc_name for y in sub] if dc_name and isinstance(dc_name[0], list) else list(dc_name)
-        shown = [x for x in flat if x != 'No Peptide' and not str(x).startswith('loss of')]
-        label = oxonium if oxonium else domon_costello_to_label(shown or ['M'])
-        z = hit['Fragment charges'][0]
-        if abs(z) > 1:
-            label += f" [{'+' if z > 0 else ''}{z}]"
-        rank = 0 if diagnostic is not None and np.any(np.isclose(np.asarray(diagnostic, dtype = float), mz, rtol = 0, atol = 0.0051)) else 1 if len(shown) == 1 and re.match(r'[BCYZ]_\d', str(shown[0])) else 2
-        peaks.append((mz, rel_int, label, kind, dc_name, rank))
-    if annotate_top_n is not None:
-        keep = {id(p) for p in sorted(peaks, key = lambda x: -x[1])[:annotate_top_n]}
-        peaks = [p for p in peaks if id(p) in keep]
-    # one collection for all annotated peaks (a vlines call per peak took ~80 ms of every spectrum the app draws), drawn in the same order
-    if peaks:
-        ax.vlines([p[0] for p in peaks], 0, [p[1] for p in peaks], color = [DIAGNOSTIC_COLOR if p[5] == 0 else PEAK_COLORS.get(p[3], 'b1') for p in peaks],
-                  lw = 1.3, z = 4)
-    # Each label sits directly above its peak, lifted only as far as its neighbors require, with a dotted
+    if mirror is None:
+        ax.set_xlim(mz_values.min() - 20, mz_values.max() + 20)
+        ax.set_ylim(0, 104)
+    else:
+        ax.vlines(mirror_mz, 0, -mirror_rel, color = 'muted', lw = 0.8, alpha = 0.4)
+        ax.axhline(0.0, color = 'muted', lw = 0.6, dash = None)
+        ax.set_xlim(min(mz_values.min(), mirror_mz.min(initial = np.inf)) - 20, max(mz_values.max(), mirror_mz.max(initial = -np.inf)) + 20)
+        ax.set_ylim(-104, 104)
+
+    def annotated(mzs, rels, hits, z_precursor):
+        """(m/z, relative intensity, label, kind, Domon-Costello name, rank) of a spectrum's annotated peaks"""
+        found = []
+        for mz, rel_int in zip(mzs, rels):
+            hit = hits.get(mz)
+            if not hit:
+                continue
+            dc_name = hit['Domon-Costello nomenclatures'][0]
+            kind = classify_fragment(dc_name)
+            oxonium = identify_oxonium(hit['Theoretical fragment masses'][0]) if kind in ('oxonium', 'glycan') and z_precursor > 0 else None
+            flat = [y for sub in dc_name for y in sub] if dc_name and isinstance(dc_name[0], list) else list(dc_name)
+            shown = [x for x in flat if x != 'No Peptide' and not str(x).startswith('loss of')]
+            label = oxonium if oxonium else domon_costello_to_label(shown or ['M'])
+            z = hit['Fragment charges'][0]
+            if abs(z) > 1:
+                label += f" [{'+' if z > 0 else ''}{z}]"
+            rank = 0 if diagnostic is not None and np.any(np.isclose(np.asarray(diagnostic, dtype = float), mz, rtol = 0, atol = 0.0051)) else 1 if len(shown) == 1 and re.match(r'[BCYZ]_\d', str(shown[0])) else 2
+            found.append((mz, rel_int, label, kind, dc_name, rank))
+        if annotate_top_n is not None:
+            keep = {id(p) for p in sorted(found, key = lambda x: -abs(x[1]))[:annotate_top_n]}
+            found = [p for p in found if id(p) in keep]
+        return found
+
+    peaks = annotated(mz_values, rel_intensities, hit_dict, charge)
+    mirror_peaks = annotated(mirror_mz, -mirror_rel, mirror_hits, mirror_charge) if mirror is not None else []
+    # Each label sits directly above its peak (below it in a mirror), lifted only as far as its neighbors require, with a dotted
     # leader whenever it had to move; anything that cannot be placed at all is dropped rather than overlaid
     figure = ax.figure.layout()
     frame_x, frame_y, frame_width, frame_height = ax.rect
-    placed, label_tops, ax.peak_labels, ax.cartoon_boxes = [], {}, [], []
-    # Annotated peaks are labeled first, most intense first; with mz_labels, unannotated peaks then get their m/z in gray wherever room is left
-    labels = [(mz, rel_int, f'{mz:.2f}  {label}' if mz_labels else label, DIAGNOSTIC_COLOR if rank == 0 else PEAK_COLORS.get(kind, 'b1'))
-              for mz, rel_int, label, kind, _, rank in sorted(peaks, key = lambda x: (x[5] > 0, -x[1]))]
-    if mz_labels:
-        labels += [(mz, rel_int, f'{mz:.2f}', 'grey') for mz, rel_int in sorted(zip(mz_values, rel_intensities), key = lambda x: -x[1]) if not hit_dict.get(mz)]
-    for mz, rel_int, label, color in labels:
-        if rel_int < annotation_threshold * 100 and color != DIAGNOSTIC_COLOR:
-            continue
-        px, py = (float(v) for v in ax.page(mz, rel_int))
-        # The app marks diagnostic peaks right above their top
-        lift = 7.0 if color == DIAGNOSTIC_COLOR else 0.0
-        spot = place_peak_label(px, py, label, placed, (frame_y, frame_y + frame_height), label_fontsize, max_label_levels, lift = lift)
-        if spot is None:
-            continue
-        x_offset, y_offset, alignment, vertical, box = spot
-        if color == 'grey':
-            # A bare m/z is only worth it where no taller peak runs through it
-            (x0, x1), y0 = ax.data(np.array(box[0::2]), box[1])[0], ax.data(box[0], box[1])[1]
-            if np.any((mz_values >= x0) & (mz_values <= x1) & (rel_intensities > y0) & (mz_values != mz)):
-                placed.pop()
+    placed, label_tops, ax.peak_labels, ax.cartoon_boxes, ax.mirror_labels, label_leaders, leaders = [], {}, [], [], [], [], []
+    zero = float(ax.page(mz_values[0], 0.0)[1])
+    # A structure's glycan-only ions get a cartoon; on a peptide-bearing fragment the picture would just repeat the intact glycan. One cartoon per distinct
+    # structure, anchored on its most intense member with a leader from every peak it explains: an oxonium series shares a structure and differs only by a
+    # neutral loss, so a box per loss repeats the same picture and drags them away from their peaks. A composition's cartoon is its peak's name instead of
+    # text, with each loss or charge written beside its symbols (HexNAc - H2O: the HexNAc symbol with -H2O), and so is that of every ion keeping a whole
+    # composition of the glycan, with its peptide written before it (Pep + the symbols of a Y ion): glycan-only ions in the band above the axes, and the
+    # others, those the band has no room for, and a mirror's as their peaks' labels; text only where no drawing fits
+    groups, pictures, cartoons = {}, {}, cartoons or {}
+    # cartoons come from the glycans as CandyCrumbs named their fragments: derivatized (heavier sialic acids, or lighter lactones, can reorder the chains)
+    drawn = [derivatize_carboxyls(g, kwargs['sialic_derivatization']) if kwargs.get('sialic_derivatization') is not None and isinstance(g, str) and
+             not is_composition(g) else g for g in glycans] if draw_glycans else []
+    composition = bool(drawn) and all(not isinstance(g, str) or is_composition(g) for g in drawn)
+
+    drawings = {}
+
+    def picture(peak, hits):
+        """(key, fragment IUPAC, loss or charge written after it, peptide part written before it) of an ion's cartoon, or None: a glycan-only ion's, and with
+        compositions that of every ion keeping a whole composition of the glycan, written 'Pep +' (Y and Z ions) or as its backbone ion and + before the
+        symbols"""
+        if id(peak) not in drawings:
+            drawings[id(peak)] = make_picture(peak, hits)
+        return drawings[id(peak)]
+
+    def make_picture(peak, hits):
+        mz, _, _, kind, dc_name, _ = peak
+        glycan_only = kind in ('oxonium', 'glycan')
+        frag_iupac = fragment_cartoon(drawn, dc_name) if drawn and (glycan_only or composition) else None
+        if frag_iupac is None or glyph('fragment', frag_iupac) is None:
+            return None
+        extra, prefix = '', ''
+        if composition:
+            # a Z ion is Y - H2O and a C ion B + H2O; then its losses as the label names them, but a sulfate or phosphate lost, which fragment_cartoon takes off
+            # the composition, and a charge above one
+            flat = [y for sub in dc_name for y in (sub if isinstance(sub, list) else [sub])]
+            ions = {str(cut)[0] for cut in flat if re.fullmatch(r'[BCYZ] \S+', str(cut))}
+            extra = ('-H2O' if 'Z' in ions else '+H2O' if 'C' in ions else '') + ''.join(f'{sign}{term}' for cut in flat if str(cut).startswith('M_')
+                                                                                          for sign, term in global_mod_terms(str(cut)[2:]) if term not in ('SO4', 'PO4'))
+            z = hits[mz]['Fragment charges'][0]
+            extra += f" [{'+' if z > 0 else ''}{z}]" if abs(z) > 1 else ''
+            if not glycan_only:
+                part = [str(t) for t in dc_name[0] if not str(t).startswith('M_')] if isinstance(dc_name[0], list) else []
+                prefix = ('Pep' if part == ['Peptide'] else domon_costello_to_label(part)) + ' +' if part else ''
+        return ' '.join(x for x in (prefix, frag_iupac, extra) if x), frag_iupac, extra, prefix
+
+    # A peak is labeled at the label threshold, and a diagnostic peak and each backbone ion the peptide ladder counts whatever its intensity: the spectrum
+    # names every ion the ladder shows, at its most intense peak of either spectrum (as a share of its own base peak)
+    ions = {}
+    for peak in peaks + mirror_peaks:
+        for token in (peak[4][0] if peak[4] and isinstance(peak[4][0], list) else []):
+            if re.fullmatch(r'[abcwxyz](?:-1|\+1)?_\d+', str(token)) and abs(peak[1]) > ions.get(str(token), (-1.0, None))[0]:
+                ions[str(token)] = (abs(peak[1]), id(peak))
+    ladder_ion = lambda peak, named = {i for _, i in ions.values()}: id(peak) in named
+    worth = lambda peak: abs(peak[1]) >= annotation_threshold * 100 or peak[5] == 0 or ladder_ion(peak)
+    for peak in peaks:
+        # A leader to a noise-level peak is a line across the plot for nothing, so a cartoon only claims the peaks that were worth labeling in the first place
+        if worth(peak) and (shown := picture(peak, hit_dict)) is not None and not shown[3]:
+            groups.setdefault(shown[0], []).append((peak[1], peak[0], peak[5]))
+            pictures[shown[0]] = shown[1:]
+
+    def peak_labels(found, hits = None):
+        """(m/z, relative intensity, label, color, drawing) of a spectrum's annotated peaks worth a label, diagnostic peaks and then the ions the peptide ladder
+        counts first, each group most intense first; with hits, the drawing (key,
+        fragment IUPAC, loss or charge, peptide part) of each composition's peak whose cartoon is not switched off, drawn in place of its text where it fits"""
+        return [(mz, rel_int, f'{mz:.2f}  {label}' if mz_labels else label, DIAGNOSTIC_COLOR if rank == 0 else PEAK_COLORS.get(kind, 'b1'),
+                 shown if hits is not None and composition and (shown := picture(peak, hits)) is not None and cartoons.get(shown[0]) is not False else None)
+                for peak in sorted(found, key = lambda x: (x[5] > 0, not ladder_ion(x), -abs(x[1]))) if worth(peak) for mz, rel_int, label, kind, _, rank in [peak]]
+
+    # Vector glyphs (utils.fragment_glyph), in points per symbol, whose box includes the die-cut halo they are drawn on
+    pts = 30 * glycan_zoom
+
+    def extent(frag_iupac, extra, prefix, size):
+        """(width, height, symbols' extent (left, bottom, right, top), loss or charge as drawn, its width with the gap before it, the peptide part's width with
+        the gap after it) of a cartoon"""
+        left, bottom, right, top = glyph('fragment', frag_iupac).extent(size, True)
+        # a composition's loss or charge is written right of its symbols, and a peptide part left of them, as part of the cartoon
+        extra = re.sub(r'(?<=[A-Za-z])(\d+)', r'_{\1}', extra).replace('\u2022', '^{\u2022}')
+        beside = text_width(extra, label_fontsize) + 1.5 if extra else 0.0
+        before = text_width(prefix, label_fontsize) + 1.5 if prefix else 0.0
+        return right - left + beside + before, max(top - bottom, 1.2 * label_fontsize if extra or prefix else 0.0), (left, bottom, right, top), extra, beside, before
+
+    def homes(found, downward, bounds, hits = None):
+        """{m/z: (place, drawn)} of the labels that have a place where labels avoid only each other, with hits a composition's peak as its drawing where that fits:
+        each keeps that place for itself, so that none loses its name to labels moved off other peaks"""
+        taken, spots, xbounds = [], {}, (frame_x, frame_x + frame_width)
+        for mz, rel_int, label, color, drawing in peak_labels(found, hits):
+            px, py = (float(v) for v in ax.page(mz, rel_int))
+            lift = 7.0 if color == DIAGNOSTIC_COLOR else 0.0
+            spot = place_peak_label(px, py, label, taken, bounds, label_fontsize, max_label_levels, lift = lift, downward = downward, xbounds = xbounds,
+                                    extent = extent(*drawing[1:], pts)[:2]) if drawing else None
+            spot, drawn = (spot, True) if spot is not None else (place_peak_label(px, py, label, taken, bounds, label_fontsize, max_label_levels, lift = lift,
+                                                                                    downward = downward, xbounds = xbounds), False)
+            if spot is not None:
+                spots[mz] = (spot, drawn)
+        return spots
+
+    def place_labels(found, mzs, rels, hits, downward, bounds, record, lines = None, keep = {}, pictured = False):
+        """Places the labels of a spectrum's annotated peaks, most intense first; with mz_labels, unannotated peaks then get their m/z in gray wherever room is left.
+        lines: the leaders of the cartoons drawn before, which the labels keep clear of, as of the labels' own leaders; keep: {m/z: (place, drawn)} of the labels
+        that keep a place (homes), placed first; pictured: a composition's peak is labeled with its cartoon where that fits"""
+        # the ions the peptide ladder counts, each at one peak, and the peaks of a composition's ions are named wherever a label fits at all
+        required = {p[0] for p in found if ladder_ion(p) or (composition and picture(p, hits) is not None)}
+        # the peaks that keep their label first, so that the labels found room for anew only take the room left
+        labels = sorted(peak_labels(found, hits if pictured else None), key = lambda label: label[0] not in keep)
+        reserved = [(spot[4][0] - 1.5, spot[4][1] - 1.5, spot[4][2] + 1.5, spot[4][3] + 1.5) for mz, *_ in labels if (spot := keep.get(mz, (None,))[0]) is not None]
+        if mz_labels:
+            labels += [(mz, rel_int, f'{mz:.2f}', 'grey', None) for mz, rel_int in sorted(zip(mzs, rels), key = lambda x: -abs(x[1]))
+                       if not hits.get(mz) and abs(rel_int) >= annotation_threshold * 100]
+        # Every stick of the spectrum as (x, bottom, top) in points: a label moves off the sticks of other peaks wherever there is room
+        x, y = ax.page(mzs, rels)
+        sticks = np.column_stack([x, np.minimum(y, zero), np.maximum(y, zero)])
+        for mz, rel_int, label, color, drawing in labels:
+            px, py = (float(v) for v in ax.page(mz, rel_int))
+            # The app marks diagnostic peaks right above their top
+            lift = 7.0 if color == DIAGNOSTIC_COLOR else 0.0
+            others = reserved[1:] if mz in keep else []
+            # a composition's cartoon where it is free, else its name
+            home, drawn = keep.get(mz, (None, False))
+            spot = place_peak_label(px, py, label, placed, bounds, label_fontsize, max_label_levels, lift = lift, downward = downward, sticks = sticks,
+                                    xbounds = (frame_x, frame_x + frame_width), lines = list(lines or []) + label_leaders, reserved = others,
+                                    extent = extent(*drawing[1:], pts)[:2], home = home if drawn else None, must = mz in required) if drawing else None
+            if spot is None:
+                drawing = None
+                spot = place_peak_label(px, py, label, placed, bounds, label_fontsize, max_label_levels, lift = lift, downward = downward,
+                                        sticks = None if color == 'grey' else sticks, xbounds = (frame_x, frame_x + frame_width),
+                                        lines = None if color == 'grey' else list(lines or []) + label_leaders,
+                                        home = None if drawn else home, reserved = others, must = mz in required)
+            if mz in keep:
+                reserved.pop(0)
+            if spot is None:
                 continue
-        ax.annotate(label, (mz, rel_int), offset = (x_offset, y_offset), size = label_fontsize, color = color, ha = alignment, va = vertical, rotation = 90.0,
-                    halo = 0.0, clip = True)
-        ax.peak_labels.append({'xy': (mz, rel_int), 'text': label, 'box': (box[0] - px, box[1] - py, box[2] - px, box[3] - py)})
-        label_tops[mz] = box[3]
-        if abs(y_offset) > 8 + lift:
-            ax.plot([mz, mz], [rel_int, rel_int], color = color, lw = 0.4, dash = (0.4, 0.7), offset = [(0.0, 0.0), (x_offset, y_offset - np.sign(y_offset))], z = 2)
-    cartoons_drawn = False
-    if draw_glycans and glycans:
-        # Only glycan-only ions get a cartoon; on a peptide-bearing fragment the picture would just repeat
-        # the intact glycan. One cartoon per distinct structure, anchored on its most intense member with a
-        # leader from every peak it explains: an oxonium series shares a structure and differs only by a
-        # neutral loss, so a box per loss repeats the same picture and drags them away from their peaks
-        # cartoons come from the glycans as CandyCrumbs named their fragments: derivatized (heavier sialic acids, or lighter lactones, can reorder the chains)
-        drawn = [derivatize_carboxyls(g, kwargs['sialic_derivatization']) if kwargs.get('sialic_derivatization') is not None and isinstance(g, str) and
-                 not is_composition(g) else g for g in glycans]
-        groups, cartoons, shown = {}, cartoons or {}, set()
-        for mz, rel_int, _, kind, dc_name, rank in peaks:
-            # A leader to a noise-level peak is a line across the plot for nothing, so a cartoon only
-            # claims the peaks that were worth labeling in the first place
-            if kind not in ('oxonium', 'glycan') or (rel_int < annotation_threshold * 100 and rank > 0):
-                continue
-            frag_iupac = fragment_cartoon(drawn, dc_name)
-            if frag_iupac is not None:
-                groups.setdefault(frag_iupac, []).append((rel_int, mz, rank))
+            x_offset, y_offset, alignment, vertical, box = spot
+            if color == 'grey':
+                # A bare m/z is only worth it where no taller peak runs through it
+                (x0, x1), edge = ax.data(np.array(box[0::2]), box[1])[0], ax.data(box[0], box[3 if downward else 1])[1]
+                if np.any((mzs >= x0) & (mzs <= x1) & ((rels < edge) if downward else (rels > edge)) & (mzs != mz)):
+                    placed.pop()
+                    continue
+            if drawing:
+                # the peptide part, the symbols, centered in height, and the loss or charge right of them
+                _, height, (left, bottom, right, top), extra, beside, before = extent(*drawing[1:], pts)
+                ax.annotate(drawing[1], (mz, rel_int), offset = ((box[0] + box[2] - beside + before) / 2 - px, box[1] + (height - top + bottom) / 2 - py),
+                            size = pts / GLYPH_SYMBOL, glyph = 'fragment', ha = 'center', va = 'bottom', clip = True)
+                for text, at, side in ((drawing[3], box[0] + before - 1.5, 'right'), (extra, box[2] - beside + 1.5, 'left')):
+                    if text:
+                        ax.annotate(text, (mz, rel_int), offset = (at - px, (box[1] + box[3]) / 2 - py), size = label_fontsize, color = 'ink', ha = side, va = 'center',
+                                    halo = 0.0, clip = True)
+            else:
+                ax.annotate(label, (mz, rel_int), offset = (x_offset, y_offset), size = label_fontsize, color = color, ha = alignment, va = vertical,
+                            rotation = 0.0 if alignment == 'center' else 90.0, halo = 0.0, clip = True)
+            record.append({'xy': (mz, rel_int), 'text': drawing[0] if drawing else label, 'box': (box[0] - px, box[1] - py, box[2] - px, box[3] - py)})
+            if not downward:
+                label_tops[mz] = ((box[0] + box[2]) / 2, box[3])
+            # A label moved off its peak, up or sideways, gets a leader from the peak's top to the middle of its near end
+            # a label slid in from a side of the axes still stands over its peak
+            shifted = x_offset != (2.0 if vertical == 'top' and alignment != 'center' else 0.0) and not (box[0] <= px <= box[2] and (box[0] <= frame_x - 1.5 + 1e-3 or
+                                                                                                                     box[2] >= frame_x + frame_width + 1.5 - 1e-3))
+            if abs(y_offset) > 8 + lift or shifted:
+                end = ((box[0] + box[2]) / 2 - px if shifted else x_offset, (box[1] if y_offset > 0 else box[3]) - py - np.sign(y_offset))
+                ax.plot([mz, mz], [rel_int, rel_int], color = color, lw = 0.4, dash = (0.4, 0.7), offset = [(0.0, 0.0), end], z = 2)
+                label_leaders.append(((px, py), (px + end[0], py + end[1])))
+
+    above, below = (frame_y if mirror is None else zero, frame_y + frame_height), (frame_y, zero)
+    cartoons_drawn, led, shown = False, set(), set()
+    sticks_up = np.column_stack([ax.page(mz_values, rel_intensities)[0], np.full(len(mz_values), zero), ax.page(mz_values, rel_intensities)[1]])
+    # In page points: cartoons fill the band between the axes and the title (which sits at 1.4 axes heights) or the peptide ladder
+    gap = 5
+    band = (frame_y + frame_height + gap, min(frame_y + 1.4 * frame_height, figure.height) - gap)
+    if ladder_ax is not None and ladder_ax.rect[1] > frame_y + frame_height:
+        band = (band[0], min(band[1], ladder_ax.rect[1] - gap))
+    to_mz = lambda px: float(ax.data(px, frame_y)[0])
+
+    def draw_cartoon(key, frag_iupac, x, y, width, height, size, symbols, extra, beside, members, ends):
+        """Draws a cartoon centered at x on y (page points) with its loss or charge beside its symbols and its leaders, from below the symbols to ends, the tops of
+        its members' peaks or labels, or along an end given as a path of points from the cartoon, and records it; returns the leaders' segments"""
+        nonlocal cartoons_drawn
+        left, bottom, right, top = symbols
+        ax.annotate(frag_iupac, (to_mz(x - beside / 2), (y + (height - top + bottom) / 2 - frame_y) / frame_height), size = size / GLYPH_SYMBOL, glyph = 'fragment',
+                    ha = 'center', va = 'bottom', y_fraction = True)
+        if extra:
+            ax.annotate(extra, (to_mz(x + width / 2 - beside + 1.5), (y + height / 2 - frame_y) / frame_height), size = label_fontsize, color = 'ink', ha = 'left',
+                        va = 'center', y_fraction = True)
+        ax.cartoon_boxes.append({'xy': (to_mz(x), (y + height / 2 - frame_y) / frame_height), 'box': (-width / 2, -height / 2, width / 2, height / 2), 'y_fraction': True,
+                                 'fragment': key, 'peaks': [m[1] for m in members]})
+        drawn_leaders = []
+        for end, (_, mz, _) in zip(ends, members):
+            if end is not None:
+                path = list(end) if isinstance(end, list) else [(x - beside / 2, y), end]
+                ax.plot([to_mz(px) for px, _ in path], [(py - frame_y) / frame_height for _, py in path], color = 'muted', alpha = 0.5, lw = 0.5, dash = (2.0, 1.0),
+                        clip = False, y_fraction = True, z = 2)
+                drawn_leaders += list(zip(path, path[1:]))
+                led.add(mz)
+        cartoons_drawn = True
+        shown.add(key)
+        return drawn_leaders
+
+    # A composition's cartoons are its peaks' names, so they come before the labels: one row along the band in the order of their peaks, each as near its
+    # peak as the others leave room for (the nondecreasing centers nearest the peaks, by pooling adjacent violators). Their leaders rise straight from the
+    # peaks to one knee above the tallest peak under the row, but no higher than 60% of the way to the band, so that they fan out rather than run along
+    # it, and from there to the symbols; the labels then keep clear of them, and a cartoon the row has no room for, least intense first, becomes its peak's
+    # label. Where all of them can stand nearer their peaks, as below, they do
+    layout = {}
+    if composition and groups:
+        row = []
+        for key, members in groups.items():
+            if cartoons.get(key) is not False:
+                members = sorted(members, reverse = True)
+                ends = [tuple(float(v) for v in ax.page(mz, rel_int)) for rel_int, mz, _ in members]
+                row.append((ends[0][0], key, members, ends, *extent(*pictures[key], pts)))
+        row = sorted(row, key = lambda c: -c[2][0][0])[:max_glycan_cartoons]
+        while row and (sum(c[4] for c in row) + gap * (len(row) - 1) > frame_width or max(c[5] for c in row) > band[1] - band[0]):
+            row.remove(min(row, key = lambda c: c[2][0][0]))
+        row.sort(key = lambda c: c[0])
+        offsets = np.cumsum([0.0] + [(a[4] + b[4]) / 2 + gap for a, b in zip(row, row[1:])])
+        pools = []
+        for target in (c[0] - o for c, o in zip(row, offsets)):
+            pools.append([target, 1])
+            while len(pools) > 1 and pools[-2][0] > pools[-1][0]:
+                (mean, n), (other, m) = pools[-2], pools.pop()
+                pools[-1] = [(mean * n + other * m) / (n + m), n + m]
+        fitted = [mean for mean, n in pools for _ in range(n)]
+        centers = [min(max(t, frame_x + row[0][4] / 2), frame_x + frame_width - row[-1][4] / 2 - offsets[-1]) + o for o, t in zip(offsets, fitted)]
+        if row:
+            # the knee: 6 points over the tallest stick from the row's first peak or cartoon to its last, at most 60% of the way from the axis to the band
+            reach = (min(centers[0] - row[0][4] / 2, *(e[0] for c in row for e in c[3])), max(centers[-1] + row[-1][4] / 2, *(e[0] for c in row for e in c[3])))
+            under = (sticks_up[:, 0] >= reach[0]) & (sticks_up[:, 0] <= reach[1])
+            knee = min(max([e[1] for c in row for e in c[3]] + list(sticks_up[under, 2])) + 6.0, zero + 0.6 * (band[0] - zero))
+        for c, x in zip(row, centers):
+            layout[c[1]] = ((x - c[4] / 2, band[0], x + c[4] / 2, band[0] + c[5]), [[(x - c[8] / 2, band[0])] + ([(e[0], knee)] if e[1] < knee else []) + [e] for e in c[3]], c)
+            led.update(mz for _, mz, _ in c[2])
+        leaders += [segment for _, paths, _ in layout.values() for path in paths for segment in zip(path, path[1:])]
+    named_alone = homes([p for p in peaks if p[0] not in led], False, above, hit_dict)
+    stair = None
+    if layout:
+        # Nearer their peaks, each cartoon stands in the free place nearest its peak: beside or above it in the axes, or in the band, on no stick and with no
+        # other peak within 12 points below it (where it would read as that peak's name), off the peaks of the other cartoons (whose way up it would bar),
+        # clear of the labels, the other cartoons, and every leader, its leader running from the peak's top straight to the nearest point of its box, or
+        # straight up and across to the middle of its near side, past no other peak, cartoon, label, or leader. All are placed anew first: a dense run of
+        # oxonium ions then steps up to the right of its peaks, those of its right peaks lowest, where the row had taken the oxonium ions of KDNTTVTR
+        # H6N5F1A2 at m/z 126-366 out to m/z 1,300. Where that leaves a cartoon without a place, or names fewer peaks than the row, the row stays, and each
+        # of its cartoons moves on its own where it can once the labels are placed
+
+        def crossing(a, b):
+            # For each segment of a (rows of x0, y0, x1, y1, in any shape), whether it properly crosses any segment of b
+            a, b = np.asarray(a, dtype = float)[..., None, :], np.asarray(b, dtype = float).reshape(-1, 4)
+            side = lambda s, x, y: (s[..., 2] - s[..., 0]) * (y - s[..., 1]) - (s[..., 3] - s[..., 1]) * (x - s[..., 0])
+            return np.any((side(a, b[:, 0], b[:, 1]) * side(a, b[:, 2], b[:, 3]) < 0) & (side(b, a[..., 0], a[..., 1]) * side(b, a[..., 2], a[..., 3]) < 0), axis = -1)
+
+        def through(segments, found):
+            # For each segment (in any shape), whether it ends inside or runs through any of the boxes (x0, y0, x1, y1)
+            segments, found = np.asarray(segments, dtype = float), np.asarray(found, dtype = float).reshape(-1, 4)
+            inside = lambda x, y: np.any((found[:, 0] < x[..., None]) & (x[..., None] < found[:, 2]) & (found[:, 1] < y[..., None]) & (y[..., None] < found[:, 3]), axis = -1)
+            return inside(segments[..., 0], segments[..., 1]) | inside(segments[..., 2], segments[..., 3]) | crossing(segments, np.concatenate([found, found[:, [0, 3, 2, 1]]]))
+
+        # boxes stacked above one another keep 2 points apart, beside one another a gap
+        stack = 2.0
+
+        def place(px, py, width, height, boxes, drawn, keep_off = (), alone = False, rise = 2.0, waiting = (), walls = None, limit = np.inf):
+            # The nearest place of a cartoon of width and height for the peak whose top is (px, py), clear of the boxes and the leaders drawn (rows of x0, y0, x1,
+            # y1), off the x of keep_off, as (box, leader length, leader path from the box to the peak), or None; with alone, only the box boxes[0], clear of the rest;
+            # rise: what a point of a leader's rise counts for against a point across; waiting: the x of peaks of cartoons yet to be placed, a place over one of which,
+            # or with a leader past one, counts 30 points farther for each, as it would bar their way up; walls: the boxes its leader runs through none of (default:
+            # boxes); limit: only places nearer than this count
+            # The sticks on either side of the peak, nearest first: a straight leader passes over them where it is as steep as the steepest line from the peak's top
+            # over one of them on its way, and a leader up and across where it crosses higher than the tallest of them
+            other = sticks_up[np.abs(sticks_up[:, 0] - px) > 0.5]
+            sides = []
+            for keep in (other[:, 0] > px, other[:, 0] < px):
+                near = other[keep][np.argsort(np.abs(other[keep, 0] - px))]
+                distance = np.abs(near[:, 0] - px)
+                sides.append((distance, np.r_[-np.inf, np.maximum.accumulate((near[:, 2] + 1.0 - py) / distance)], np.r_[-np.inf, np.maximum.accumulate(near[:, 2] + 1.0)]))
+            if alone:
+                (x0, y0, x1, y1), boxes = (np.array([v]) for v in boxes[0]), boxes[1:]
+            else:
+                lo, hi = frame_x + width / 2, frame_x + frame_width - width / 2
+                if hi < lo or height > band[1] - zero - 3.0:
+                    return None
+                # every 6 points, over the peak, and flush beside the boxes and beside the peaks it keeps off
+                xs = np.unique(np.clip(np.r_[np.arange(lo, hi, 6.0), hi, px, [v for b in boxes for v in (b[2] + gap + width / 2, b[0] - gap - width / 2)],
+                                             [v for k in keep_off for v in (k - width / 2 - gap / 2 - 0.01, k + width / 2 + gap / 2 + 0.01)]], lo, hi))
+                # the lowest a box centered at each x may sit: 3 points over its own peak, 12 over any other within a gap of it
+                near = np.abs(sticks_up[None, :, 0] - xs[:, None]) <= width / 2 + gap
+                floor = np.max(np.where(near, sticks_up[None, :, 2] + np.where(np.abs(sticks_up[:, 0] - px) <= 0.5, 3.0, 12.0), zero + 3.0), axis = 1)
+                # at each x the height nearest the peak and those whose middle (where a leader up and across meets it) passes just over the sticks on either side;
+                # stacked just over and under each box where it would stand beside it, and with its middle just over or under the box beyond it
+                levels = np.unique(np.r_[py - height / 2, [t - height / 2 for side in sides for t in side[2][1:]]])
+                x, y0 = [np.repeat(xs, len(levels))], [np.tile(levels, len(xs))]
+                for b in boxes:
+                    beside = np.abs(xs - (b[0] + b[2]) / 2) < (b[2] - b[0] + width) / 2 + gap + 6.0
+                    beyond = xs > b[0] if b[0] > px else xs < b[2]
+                    for keep, v in ((beside, b[3] + stack), (beside, b[1] - stack - height), (beyond, b[3] + 1.0 - height / 2), (beyond, b[1] - 1.0 - height / 2)):
+                        x.append(xs[keep])
+                        y0.append(np.full(keep.sum(), v))
+                x = np.concatenate(x)
+                y0 = np.maximum(np.concatenate(y0), floor[np.searchsorted(xs, x)])
+                fits = (y0 + height <= band[1]) & ~np.any(np.abs(np.asarray(keep_off, dtype = float)[None, :] - x[:, None]) < width / 2 + gap / 2, axis = 1)
+                for b in boxes:
+                    fits &= ~((x - width / 2 - gap < b[2]) & (b[0] < x + width / 2 + gap) & (y0 - stack < b[3]) & (b[1] < y0 + height + stack))
+                x, y0 = x[fits], y0[fits]
+                x0, x1, y1 = x - width / 2, x + width / 2, y0 + height
+
+            def passed(at, i):
+                # (distance of each stick passed on the way to x at, steepest climb, tallest top) of the sticks between the peak and at
+                right = at > px
+                k = np.where(right, np.searchsorted(sides[0][0], at - px), np.searchsorted(sides[1][0], px - at))
+                return np.where(right, sides[0][i][np.minimum(k, len(sides[0][i]) - 1)], sides[1][i][np.minimum(k, len(sides[1][i]) - 1)])
+
+            ex, ey = np.clip(px, x0, x1), np.clip(py, y0, y1)
+            straight = np.where((ex == px) | (ey - py >= passed(ex, 1) * np.maximum(np.abs(ex - px), 1e-9)), np.hypot(ex - px, rise * (ey - py)), np.inf)
+            # or straight up and across to the middle of its near side, over the sticks on its way
+            middle, edge = (y0 + y1) / 2, np.where(x0 > px, x0, x1)
+            across = np.where(((x0 > px) | (x1 < px)) & (middle > py) & (middle >= passed(edge, 2)), rise * (middle - py) + np.abs(edge - px), np.inf)
+            length = np.minimum(straight, across)
+            waiting, reach = np.asarray(waiting, dtype = float), np.where(across < straight, edge, ex)
+            cost = length + 30.0 * (((waiting[None, :] > x0[:, None] - gap) & (waiting[None, :] < x1[:, None] + gap)) |
+                                    ((waiting[None, :] - px) * (waiting[None, :] - reach[:, None]) < 0)).sum(axis = 1)
+            ranked = np.argsort(cost, kind = 'stable')
+            ranked = ranked[cost[ranked] < limit]
+            # the nearest places first, a few, then more at a time: a box no leader drawn runs into, with a leader of either shape (two segments, the second of a
+            # straight one a point) through no box and across no leader, the shorter where both are
+            for start, stop in ((0, 16), (16, 80), (80, 336), (336, 1360)):
+                j = ranked[start:stop]
+                if not len(j):
+                    break
+                padded = np.column_stack([x0[j] - gap / 2, y0[j] - stack / 2, x1[j] + gap / 2, y1[j] + stack / 2])
+                hit = crossing(np.stack([padded, padded[:, [0, 3, 2, 1]]], axis = 1), drawn).any(axis = 1)
+                if len(drawn):
+                    ends = drawn.reshape(-1, 2)
+                    hit |= np.any((padded[:, None, 0] < ends[:, 0]) & (ends[:, 0] < padded[:, None, 2]) & (padded[:, None, 1] < ends[:, 1]) & (ends[:, 1] < padded[:, None, 3]), axis = 1)
+                paths = []
+                for size, begin, corner in ((straight[j], np.column_stack([ex[j], ey[j]]), np.column_stack([ex[j], ey[j]])),
+                                            (across[j], np.column_stack([edge[j], middle[j]]), np.column_stack([np.full(len(j), px), middle[j]]))):
+                    segments = np.stack([np.column_stack([begin, corner]), np.column_stack([corner, np.broadcast_to((px, py), corner.shape)])], axis = 1)
+                    clear = np.isfinite(size) & ~hit & ~(through(segments, boxes if walls is None else walls).any(axis = 1) | crossing(segments, drawn).any(axis = 1))
+                    paths.append((np.where(clear, size, np.inf), begin, corner))
+                if np.isfinite(np.minimum(paths[0][0], paths[1][0])).any():
+                    first = int(np.argmax(np.isfinite(np.minimum(paths[0][0], paths[1][0]))))
+                    size, begin, corner = paths[0] if paths[0][0][first] <= paths[1][0][first] else paths[1]
+                    i = j[first]
+                    path = [tuple(begin[first]), (px, py)] if paths[0][0][first] <= paths[1][0][first] else [tuple(begin[first]), tuple(corner[first]), (px, py)]
+                    return (x0[i], y0[i], x1[i], y1[i]), float(size[first]), path
+            return None
+
+        segments = lambda paths: [(*a, *b) for path in paths if path is not None for a, b in zip(path, path[1:])]
+        weigh = lambda path: sum(np.hypot(b[0] - a[0], 2.0 * (b[1] - a[1])) for a, b in zip(path, path[1:]))
+        keys = list(layout)
+        # the places of the labels sure of them: those that stand there clear of other peaks' sticks (the others move)
+        crowded = lambda mz, b: bool(np.any((sticks_up[:, 0] > b[0]) & (sticks_up[:, 0] < b[2]) & (sticks_up[:, 2] > b[1]) &
+                                            (np.abs(sticks_up[:, 0] - float(ax.page(mz, 0.0)[0])) > 0.5)))
+        sure = [spot[4] for mz, (spot, _) in named_alone.items() if not crowded(mz, spot[4])]
+
+        def lay_out(order, rise):
+            # Every cartoon placed anew in this order, off the places of the labels sure of them, as {key: (box, leader paths, row entry)}, or None where one has
+            # no place; its leaders may run through those, as a label keeps clear of the leaders
+            found, boxes, crossed = {}, [], []
+            for n, key in enumerate(order):
+                c = layout[key][2]
+                # off the peaks of the other cartoons where it can, else over them
+                spot = next((spot for off in ([e[0] for k in keys if k != key for e in layout[k][2][3]], ()) if (spot := place(
+                    *c[3][0], c[4], c[5], sure + boxes, np.reshape(crossed, (-1, 4)), keep_off = off, rise = rise, waiting = [layout[k][2][0] for k in order[n + 1:]],
+                    walls = boxes)) is not None), None)
+                if spot is None:
+                    return None
+                rest = [place(*e, c[4], c[5], [spot[0]] + boxes, np.reshape(crossed, (-1, 4)), alone = True) for e in c[3][1:]]
+                found[key] = (spot[0], [spot[2]] + [r[2] if r is not None else None for r in rest], c)
+                boxes.append(spot[0])
+                crossed += segments(found[key][1])
+            return found
+
+        # From the right, as a cluster's cartoons then step up to the right of it, with a point of a leader's rise counting fifteen times a point across: height is
+        # what the axes are short of, so each cartoon stands beside the one before, half its height higher, rather than over it (with the rise counting double,
+        # which stacks them, 47 of 60 LAMP-1 spectra had a cartoon without a place); where every cartoon has a place, it is taken if its leaders are shorter
+        # than the row's
+        found, total = lay_out(sorted(keys, key = lambda k: -layout[k][2][0]), 15.0), lambda found: sum(weigh(v[1][0]) for v in found.values())
+        if found is not None and total(found) < total(layout):
+            stair = found
+    # A composition's peak without a cartoon is labeled with its cartoon where that fits, else its name: around the cartoons placed anew, which are kept where
+    # the labels name every peak worth it around them, or as many as around the row (those that must be named first), else around the row
+    mark = (len(ax.artists), len(ax.peak_labels), len(placed), len(label_leaders))
+    unnamed = [p for p in peaks if p[0] not in led]
+    if stair is not None:
+        required = {p[0] for p in peaks if ladder_ion(p) or picture(p, hit_dict) is not None}
+        score = lambda: (sum(label['xy'][0] in required for label in ax.peak_labels[mark[1]:]), len(ax.peak_labels) - mark[1])
+
+        def take():
+            # What the labels added since mark, taken off the axes
+            parts = (ax.artists[mark[0]:], ax.peak_labels[mark[1]:], placed[mark[2]:], label_leaders[mark[3]:])
+            for found, start in zip((ax.artists, ax.peak_labels, placed, label_leaders), mark):
+                del found[start:]
+            return parts
+
+        placed.extend((b[0] - 1.5, b[1] - 1.5, b[2] + 1.5, b[3] + 1.5) for b, _, _ in stair.values())
+        place_labels(unnamed, mz_values, rel_intensities, hit_dict, False, above, ax.peak_labels, keep = named_alone, pictured = True,
+                     lines = [((s[0], s[1]), (s[2], s[3])) for s in segments([p for v in stair.values() for p in v[1]])])
+        if {mz for mz, *_ in peak_labels(unnamed, hit_dict)} - {label['xy'][0] for label in ax.peak_labels[mark[1]:]}:
+            named, parts = score(), take()
+            place_labels(unnamed, mz_values, rel_intensities, hit_dict, False, above, ax.peak_labels, lines = leaders, keep = named_alone, pictured = True)
+            if score() <= named:
+                take()
+                for found, part in zip((ax.artists, ax.peak_labels, placed, label_leaders), parts):
+                    found.extend(part)
+            else:
+                stair = None
+        if stair is not None:
+            layout = stair
+    else:
+        place_labels(unnamed, mz_values, rel_intensities, hit_dict, False, above, ax.peak_labels, lines = leaders, keep = named_alone, pictured = True)
+    if layout and stair is None:
+        labels_placed, label_lines = list(placed), [(*a, *b) for a, b in label_leaders]
+        for _ in range(2):
+            moved = False
+            for key in sorted(layout, key = lambda k: -layout[k][2][0]):
+                box, paths, c = layout[key]
+                others = [v for k, v in layout.items() if k != key]
+                boxes, crossed = labels_placed + [v[0] for v in others], np.reshape(label_lines + segments([p for v in others for p in v[1]]), (-1, 4))
+                spot = place(*c[3][0], c[4], c[5], boxes, crossed, keep_off = [e[0] for v in others for e in v[2][3]], limit = weigh(paths[0]) - 1.0)
+                if spot is None:
+                    continue
+                # the leaders to the cartoon's other peaks (neutral losses, other charges) must stay clear too
+                rest = [place(*e, c[4], c[5], [spot[0]] + boxes, crossed, alone = True) if path is not None else None for e, path in zip(c[3][1:], paths[1:])]
+                if any(path is not None and r is None for path, r in zip(paths[1:], rest)):
+                    continue
+                layout[key] = (spot[0], [spot[2]] + [r[2] if r is not None else None for r in rest], c)
+                moved = True
+            if not moved:
+                break
+    if layout:
+        leaders = []
+        for key, (box, paths, c) in layout.items():
+            leaders += draw_cartoon(key, pictures[key][0], (box[0] + box[2]) / 2, box[1], c[4], c[5], pts, c[6], c[7], c[8], c[2], paths)
+    if composition and groups:
+        ax.cartoon_fragments = {mz: (key, key in shown) for key, members in groups.items() for _, mz, _ in members}
+    if mirror is not None:
+        if mirror.get('title'):
+            # its lower right corner, where the mirror's title goes, is kept free of labels
+            corner = (frame_x + 0.99 * frame_width, frame_y + 0.02 * frame_height)
+            placed.append((corner[0] - text_width(mirror['title'], 8) - 2.0, corner[1] - 2.0, corner[0] + 2.0, corner[1] + 1.2 * 8 + 2.0))
+        place_labels(mirror_peaks, mirror_mz, -mirror_rel, mirror_hits, True, below, ax.mirror_labels, keep = homes(mirror_peaks, True, below, mirror_hits),
+                     pictured = True)
+        if mirror.get('title'):
+            ax.text(0.99, 0.02, mirror['title'], axes_fraction = True, ha = 'right', va = 'bottom', size = 8, color = 'muted')
+    if draw_glycans and glycans and not composition:
         # Cartoons the caller switched on first, then diagnostic fragments, then single glycosidic cleavages (the cartoons that say something), then
         # cross-rings and multiple cleavages; switched off ones never
         ranked = sorted([g for g in groups.items() if cartoons.get(g[0]) is not False], key = lambda group: (min(m[2] for m in group[1]), -max(group[1])[0]))
         ranked = [(f, groups[f]) for f, on in reversed(cartoons.items()) if on and f in groups] + [g for g in ranked if not cartoons.get(g[0])][:max_glycan_cartoons]
-        # In page points: cartoons fill the band between the axes and the title (which sits at 1.4 axes heights) or the peptide ladder, each at
-        # the free spot closest to its peak, lower rows preferred; a cartoon is left out rather than drawn more than max_shift from its peak, over
-        # another one, or where a leader (box to the top of its peak's label) would cross a box, a label, or another leader
-        gap = 5
-        band = (frame_y + frame_height + gap, min(frame_y + 1.4 * frame_height, figure.height) - gap)
-        if ladder_ax is not None and ladder_ax.rect[1] > frame_y + frame_height:
-            band = (band[0], min(band[1], ladder_ax.rect[1] - gap))
+        # Each at the free spot of the band closest to its peak, lower rows preferred; a cartoon is left out rather than drawn more than max_shift from its
+        # peak, over another one, or where a leader (box to the top of its peak's label) would cross a box, a label, or another leader
         max_shift = 0.08 * frame_width
-        boxes, leaders = [], []
+        boxes = []
         # Boxes and labels block leaders through their diagonals, which any segment passing through a box with both ends outside it crosses
-        blocking = [segment for b in placed for segment in (((b[0], b[1]), (b[2], b[3])), ((b[0], b[3]), (b[2], b[1])))]
-        to_mz = lambda px: float(ax.data(px, frame_y)[0])
+        blocking = [segment for b in placed for segment in (((b[0], b[1]), (b[2], b[3])), ((b[0], b[3]), (b[2], b[1])))] + label_leaders
 
         def crosses(a, b):
             # Whether any segment of a properly intersects any segment of b
@@ -5052,26 +5587,22 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
             return bool(np.any((side(b[..., 0, :], b[..., 1, :], a[..., 0, :]) * side(b[..., 0, :], b[..., 1, :], a[..., 1, :]) < 0) &
                                (side(a[..., 0, :], a[..., 1, :], b[..., 0, :]) * side(a[..., 0, :], a[..., 1, :], b[..., 1, :]) < 0)))
 
-        # Rendered at the pixels per point of the shown or saved figure, so that they are drawn one to one
-        scale = glycan_zoom * cartoon_dpi / 72 if cartoon_dpi else 1.0
-        for frag_iupac, members in ranked:
-            image = fragIUPAC_to_image(frag_iupac, scale = scale)
-            if image is None:
+        for key, members in ranked:
+            frag_iupac, extra, _ = pictures[key]
+            drawing = glyph('fragment', frag_iupac)
+            if drawing is None:
                 continue
-            forced = bool(cartoons.get(frag_iupac))
-            width, height = image.shape[1] * glycan_zoom / scale, image.shape[0] * glycan_zoom / scale
-            # One asked for that is too tall for the band fits it, rendered smaller, as shrinking it on drawing would turn it grainy
-            fit = np.floor(20 * (band[1] - band[0]) / height) / 20
-            if forced and 0 < fit < 1:
-                image = fragIUPAC_to_image(frag_iupac, scale = scale * fit)
-                if image is None:
-                    continue
-                width, height = image.shape[1] * glycan_zoom / scale, image.shape[0] * glycan_zoom / scale
+            forced = bool(cartoons.get(key))
+            left, bottom, right, top = drawing.extent(pts, True)
+            # One asked for that is too tall for the band fits it, drawn smaller
+            fit = np.floor(20 * (band[1] - band[0]) / (top - bottom)) / 20
+            size = pts * fit if forced and 0 < fit < 1 else pts
+            width, height, (left, bottom, right, top), extra, beside, _ = extent(frag_iupac, extra, '', size)
             # Leaders end at the top of a peak's label (or of the peak), most intense peak first
             tops = []
             for rel_int, mz, _ in sorted(members, reverse = True):
                 px, py = (float(v) for v in ax.page(mz, rel_int))
-                tops.append((px, max(py, label_tops.get(mz, -np.inf))))
+                tops.append(label_tops[mz] if label_tops.get(mz, (0.0, -np.inf))[1] > py else (px, py))
             anchor, lo, hi = tops[0][0], frame_x + width / 2, frame_x + frame_width - width / 2
             candidates = []
             for y in sorted({band[0]} | {b[3] + gap for b in boxes}):
@@ -5083,7 +5614,7 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                     if (forced or abs(x - anchor) <= max_shift) and not any(a < x < b for a, b in blocked):
                         candidates.append((abs(x - anchor) + 0.5 * (y - band[0]), x, y))
             # One that was placed before stays there while nothing placed ahead of it took the spot
-            kept = cartoons.get(frag_iupac)
+            kept = cartoons.get(key)
             if isinstance(kept, tuple):
                 x, y = float(ax.page(kept[0], 0.0)[0]), frame_y + kept[1] * frame_height - height / 2
                 # A point of slack, as neighbors placed exactly one gap apart may not count as closer after the trip through m/z
@@ -5092,30 +5623,33 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
             # The leader to the cartoon's most intense peak must be clear; those to its other peaks (neutral losses, other charges) are drawn where clear. One asked
             # for prefers a clear leader near its peak, and without one takes the closest spot there is, as a click must draw it
             cross = lambda x, y: [((x - width / 2 - gap, y - gap), (x + width / 2 + gap, y + height + gap)), ((x - width / 2 - gap, y + height + gap), (x + width / 2 + gap, y - gap))]
-            spot = next((c for c in sorted(candidates) if (not forced or abs(c[1] - anchor) <= max_shift) and not crosses([((c[1], c[2]), tops[0])], blocking)
+            # leaders leave from below the symbols, left of any loss written beside them
+            spot = next((c for c in sorted(candidates) if (not forced or abs(c[1] - anchor) <= max_shift) and not crosses([((c[1] - beside / 2, c[2]), tops[0])], blocking)
                          and not crosses(leaders, cross(c[1], c[2]))), min(candidates, default = None) if forced else None)
             if spot is None:
                 continue
             _, x, y = spot
-            diagonals = cross(x, y)
-            ax.image(image, to_mz(x), (y + height / 2 - frame_y) / frame_height, width, height, y_fraction = True)
-            ax.cartoon_boxes.append({'xy': (to_mz(x), (y + height / 2 - frame_y) / frame_height), 'box': (-width / 2, -height / 2, width / 2, height / 2), 'y_fraction': True,
-                                     'fragment': frag_iupac, 'peaks': [m[1] for m in sorted(members, reverse = True)]})
-            for top in tops:
-                if top is tops[0] or not crosses([((x, y), top)], blocking):
-                    ax.plot([to_mz(x), to_mz(top[0])], [(y - frame_y) / frame_height, (top[1] - frame_y) / frame_height], color = 'muted', alpha = 0.5, lw = 0.5,
-                            dash = (2.0, 1.0), clip = False, y_fraction = True, z = 2)
-                    leaders.append(((x, y), top))
-                    blocking.append(((x, y), top))
+            # the leaders to the cartoon's other peaks where clear
+            ends = [top if top is tops[0] or not crosses([((x - beside / 2, y), top)], blocking + leaders) else None for top in tops]
+            drawn_leaders = draw_cartoon(key, frag_iupac, x, y, width, height, size, (left, bottom, right, top), extra, beside, sorted(members, reverse = True), ends)
+            leaders += drawn_leaders
+            blocking += drawn_leaders
             boxes.append((x - width / 2, y, x + width / 2, y + height))
-            blocking += diagonals
-            cartoons_drawn = True
-            shown.add(frag_iupac)
-        ax.cartoon_fragments = {mz: (frag_iupac, frag_iupac in shown) for frag_iupac, members in groups.items() for _, mz, _ in members}
+            blocking += cross(x, y)
+        ax.cartoon_fragments = {mz: (key, key in shown) for key, members in groups.items() for _, mz, _ in members}
+    # A peak carries its fragment's color where it is named, by its label or a cartoon's leader, and stays gray like an unannotated one where it is not: in glycopeptide HCD
+    # spectra 70% of the annotated peaks lie below the label threshold and 10% find no room, and colored without a name they read as missing labels; the fragment table and the
+    # summary list them all. One collection per spectrum, in the same order (a vlines call per peak took ~80 ms of every spectrum the app draws)
+    named = {label['xy'][0] for label in ax.peak_labels} | led
+    for found, names in ((peaks, named), (mirror_peaks, {label['xy'][0] for label in ax.mirror_labels})):
+        found = [p for p in found if p[0] in names or p[5] == 0]
+        if found:
+            ax.vlines([p[0] for p in found], 0, [p[1] for p in found], color = [DIAGNOSTIC_COLOR if p[5] == 0 else PEAK_COLORS.get(p[3], 'b1') for p in found],
+                      lw = 1.3, z = 4)
     ax.set_xlabel('m/z')
     ax.set_ylabel('Relative Intensity (%)')
     stage = f'MS\u00b3 spectrum of m/z {kwargs["ms3_precursor"]:.2f}' if kwargs.get('ms3_precursor') is not None else 'MS\u00b2 spectrum'
-    title = f'Annotated {stage}: {peptide + "*" + glycan_string if peptide else input_string}'
+    title = f'Annotated {stage}: {peptide + "*" + glycan_string if peptide else input_string}' + (f' (N-terminal {kwargs["n_term_modification"]})' if kwargs.get('n_term_modification') is not None else '')
     title_size = 9 if len(title) > 90 else 12
     title_ax, title_y = (ladder_ax, 1.0) if ladder_ax is not None else (ax, 1.40 if cartoons_drawn else 1.0)
     # A long structure made the title (centered on its axes, which may be an inset) wider than the figure, which cut it off at both ends, so it breaks
@@ -5130,9 +5664,13 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         title = '\n'.join(lines if len(lines) < 3 else [lines[0], '\u2026' + title[1 - chars:]])
     # Several lines run downward from the first, so the title's last line ends up where a single line would be
     title_ax.text(0.5, title_y + (6.0 + title.count('\n') * 1.25 * title_size) / title_ax.rect[3], title, size = title_size, ha = 'center', va = 'baseline', axes_fraction = True)
-    ax.set_yticks([0, 25, 50, 75, 100])
+    if mirror is None:
+        ax.set_yticks([0, 25, 50, 75, 100])
+    else:
+        ax.set_yticks([-100, -50, 0, 50, 100], ['100', '50', '0', '50', '100'])
     if ladder_ax is not None:
-        draw_peptide_ladder(peptide, hit_dict, glycosites, ax = ladder_ax)
+        # with a mirror, the bonds either spectrum covers
+        draw_peptide_ladder(peptide, hit_dict if mirror is None else dict(enumerate([*hit_dict.values(), *mirror_hits.values()])), glycosites, ax = ladder_ax)
     if filepath:
         figure.save(filepath)
     # As before in a notebook, and without a window per spectrum in a script

@@ -768,3 +768,18 @@ def test_gui_row_state_and_exclusion(app):
     view.select_row(0)
     view.select_row(None)
     assert view.quant_source is None and view.map.canvas.rings == []
+
+
+def test_gui_spectrum_palette(app):
+    # A panel draws its spectra in the palette it is given, as an app with a palette of its own shows them, and CandyCrunch's own panels in candy
+    import time
+    from candycrunch import gui
+    g, mzs, ints = 'Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc', [510.19, 715.27, 990.0], [30.0, 100.0, 20.0]
+    for palette in ('lumen', None):
+        panel = gui.SpectrumPanel(palette = palette) if palette else gui.SpectrumPanel()
+        panel.annotate(g, mzs, ints, -1, 2.0156, 'underivatized')
+        end = time.time() + 120
+        while panel.drawn is None and time.time() < end:
+            app.processEvents()
+            time.sleep(0.05)
+        assert panel.drawn is not None and panel.canvas.figure.pal.name == (palette or gui.PALETTE)

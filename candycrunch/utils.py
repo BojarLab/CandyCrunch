@@ -49,6 +49,19 @@ def finish(fig, filepath = ''):
     fig.show(viewer = not filepath)
 
 
+def fragment_glyph(label, vertical = False):
+    """The compact SNFG drawing of a glycan, fragment, or named motif, which spectra and the comparison's volcano draw as viscose glyphs ('fragment'), at
+    GlycoDraw's 30 points per symbol before scaling; None where GlycoDraw cannot draw it"""
+    from glycowork.motif.draw import GlycoDraw
+    try:
+        return GlycoDraw(label, suppress = True, compact = True, dim = 30, vertical = vertical)
+    except Exception:
+        return None
+
+
+vc.register_glyphs('fragment', fragment_glyph)
+
+
 def centroid_ion_trap(mzs, ints, min_gap = 0.5, bin_shift = True):
     """centroids a Thermo ion-trap profile spectrum as Thermo's centroider does (it made the centroids of the mzML files CandyCrunch was validated on)\n
    | Arguments:

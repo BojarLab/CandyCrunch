@@ -656,3 +656,21 @@ def test_candycrumbs_speed(request):
         if cache and (best is None or min(times) < best):
             cache.set(f'candycrumbs/speed/{name}', min(times))
         assert best is None or min(times) < 4 * best, f"CandyCrumbs ({name}) is {min(times) / best:.1f}x slower than this machine's fastest run"
+
+
+def test_n_terminal_modification():
+    # An over-alkylated peptide's carbamidomethylated N-terminus rides on every N-terminal ion and on no C-terminal one; a mass works as a name does, and a glycan without a peptide has no N-terminus
+    from candycrunch.analysis import AA_masses, WATER_MASS, peptide_modification_mass
+    from glycowork.motif.tokenization import PROTON_MASS
+    seq, cam = 'VQPFNVTQGK', peptide_modification_mass('Carbamidomethyl')
+    b3, y3 = sum(AA_masses[x] for x in seq[:3]) + PROTON_MASS, sum(AA_masses[x] for x in seq[-3:]) + WATER_MASS + PROTON_MASS
+    plain = CandyCrumbs('VQPFN*H3N4F1*VTQGK', [b3, b3 + cam, y3], None, charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD')
+    modified = CandyCrumbs('VQPFN*H3N4F1*VTQGK', [b3, b3 + cam, y3], None, charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', n_term_modification = 'Carbamidomethyl')
+    assert plain[b3] and not plain[b3 + cam] and not modified[b3] and modified[b3 + cam]['Domon-Costello nomenclatures'][0][0] == ['b_3']
+    assert plain[y3]['Domon-Costello nomenclatures'][0] == modified[y3]['Domon-Costello nomenclatures'][0]
+    acetyl = CandyCrumbs('VQPFN*H3N4F1*VTQGK', [b3 + 42.010565], None, charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', n_term_modification = 42.010565)
+    assert acetyl[b3 + 42.010565]['Domon-Costello nomenclatures'][0][0] == ['b_3']
+    with pytest.raises(ValueError):
+        CandyCrumbs('Gal(b1-4)GlcNAc', [204.08], None, charge = 1, n_term_modification = 'Carbamidomethyl')
+    with pytest.raises(ValueError):
+        CandyCrumbs('VQPFN*H3N4F1*VTQGK', [b3], None, charge = 2, n_term_modification = 'Pepsinated')

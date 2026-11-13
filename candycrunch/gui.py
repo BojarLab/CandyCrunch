@@ -739,11 +739,16 @@ def _support_markers(ax, structure, support, ion_trap):
     return markers
 
 
-def _spectrum_axes(figure, cartoons):
-    """Axes for plot_annotated_spectrum, with margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it"""
+def _spectrum_axes(figure, cartoons, peptide = False, mirror = False):
+    """Axes for plot_annotated_spectrum, with margins in inches; with cartoons, the title sits at 1.4 axes heights above the bottom, so the axes top leaves room for it.
+    A glycopeptide's peptide ladder gets a band of its own above them, as plot_annotated_spectrum lays out a figure of its own (inset, it covered the tallest peaks).
+    With a mirror the axes hold two spectra, so the cartoons get a band of the 0.8 inch they take rather than 0.4 axes heights. Gives (axes, ladder axes or None)"""
     width, height = figure.width / 72, figure.height / 72
     room = 1 - 0.95 / height
-    return figure.add_axes([0.65 / width, 0.55 / height, 1 - 0.85 / width, room / 1.4 if cartoons else room])
+    ladder = 0.22 * room if peptide else 0
+    left = room - ladder - (0.04 if peptide else 0)
+    ax = figure.add_axes([0.65 / width, 0.55 / height, 1 - 0.85 / width, (left - 0.8 / height if mirror else left / 1.4) if cartoons else left])
+    return ax, figure.add_axes([0.65 / width, 0.55 / height + room - ladder, 1 - 0.85 / width, ladder]) if peptide else None
 
 
 class Annotator(QObject):
@@ -790,10 +795,9 @@ class Annotator(QObject):
                 stale = lambda: self.request[0] != request_id
                 try:
                     with IMPORT_LOCK:
-                        from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, classify_fragment, \
-                            fragment_cartoon, fragIUPAC_to_image, is_composition, derivatize_carboxyls, deisotope_ms2
-                        # fragIUPAC_to_image imports these itself
-                        import glycowork.motif.draw, glycorender.raster, glycorender.render
+                        from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, deisotope_ms2
+                        # the fragment glyphs import these themselves
+                        import glycowork.motif.draw, glycorender.render
                     # CandyCrumbs can take long, so its results (and those of supporting_ions) are kept for the last spectra, which are drawn again at another
                     # panel size, or after a prefetch was cut short
                     key = repr([request[k] for k in ('structure', 'mzs', 'intensities', 'charge', 'mass_tag', 'sample_prep', 'tolerance', 'ppm')] + sorted(request['kwargs'].items()))
@@ -836,33 +840,30 @@ class Annotator(QObject):
                             continue
                     diagnostic = sorted({s[0] for e in support['residues'] for s in e['support']} | {s[0] for c in support['candidates'] for s in c['support']} |
                                         {e['linkage'][0] for e in support['residues'] if request['ion_trap'] and e.get('linkage') and e['linkage'][2] == 'a2-3'}) if support else None
-                    # The fragment cartoons plot_annotated_spectrum will place (glycan and oxonium ions of labeled or diagnostic peaks, ~30-50 ms each) are
-                    # rendered into its cache here, one by one, so a newer request cuts it short
-                    glycans = resolve_spectrum_input(request['structure'])[1] if request['cartoons'] else []
-                    if glycans:
-                        sialic = request['kwargs'].get('sialic_derivatization')
-                        glycans = [derivatize_carboxyls(g, sialic) if sialic is not None and isinstance(g, str) and not is_composition(g) else g for g in glycans]
-                        top = max(request['intensities'], default = 0)
-                        for mz, intensity in zip(request['mzs'], request['intensities']):
-                            hit = hit_dict.get(mz)
-                            if hit and classify_fragment(hit['Domon-Costello nomenclatures'][0]) in ('oxonium', 'glycan') and (
-                                    (top > 0 and intensity / top >= 0.05) or (diagnostic and np.isclose(diagnostic, mz, rtol = 0, atol = 0.0051).any())):
-                                frag_iupac = fragment_cartoon(glycans, hit['Domon-Costello nomenclatures'][0])
-                                if frag_iupac is not None and request['toggles'].get(frag_iupac) is not False:
-                                    # At the resolution plot_annotated_spectrum renders them for: its glycan_zoom at the figure's 100 dpi on this screen
-                                    fragIUPAC_to_image(frag_iupac, scale = 0.25 * (100 * request['ratio']) / 72)
-                                if stale():
-                                    break
+                    # The mirrored spectrum (e.g., the EThcD scan an HCD scan triggered) annotated as the spectrum is, deisotoped, at its own tolerance and with its own settings
+                    mirror, m = None, request.get('mirror')
+                    if m:
+                        mirror_key = key + repr(sorted((k, v) for k, v in m.items() if k != 'title'))
+                        if mirror_key not in self.results:
+                            mirror_peaks = dict(zip(m['mzs'], m['intensities']))
+                            mirror_mono = sorted({x for relabel in (False, True) for x in deisotope_ms2(mirror_peaks, max(abs(m['charge']), 1), min(m['tolerance'], 0.05), relabel = relabel,
+                                                                                                      bound_isotope_ratio = bool(resolve_spectrum_input(request['structure'])[0]))})
+                            self.results[mirror_key] = CandyCrumbs(request['structure'], mirror_mono, m['tolerance'] if m['ppm'] is None else None, mass_threshold_ppm = m['ppm'],
+                                                                   max_cleavages = request['kwargs'].get('max_cleavages', 3), simplify = True, charge = m['charge'],
+                                                                   mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], intensities = [mirror_peaks[x] for x in mirror_mono],
+                                                                   **({k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'} | m['kwargs']))
+                        mirror = {'mzs': m['mzs'], 'intensities': m['intensities'], 'charge': m['charge'], 'hit_dict': self.results[mirror_key], 'title': m.get('title')}
                         if stale():
                             continue
-                    figure = vc.Figure(*request['figsize'], PALETTE)
+                    figure = vc.Figure(*request['figsize'], request['palette'])
+                    ax, ladder = _spectrum_axes(figure, request['cartoons'], bool(resolve_spectrum_input(request['structure'])[0]), mirror is not None)
                     hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
                                                            charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                           ax = _spectrum_axes(figure, request['cartoons']), draw_glycans = request['cartoons'], hit_dict = hit_dict,
-                                                           diagnostic = diagnostic, cartoons = request['toggles'], cartoon_dpi = DPI * request['ratio'], label_fontsize = 7,
-                                                           **request['kwargs'])
-                    # Save image… draws the spectrum again with the same diagnostic peaks
-                    figure.diagnostic = diagnostic
+                                                           ax = ax, ladder_ax = ladder, draw_glycans = request['cartoons'], hit_dict = hit_dict,
+                                                           diagnostic = diagnostic, cartoons = request['toggles'], label_fontsize = 7,
+                                                           mirror = mirror, **request['kwargs'])
+                    # Save image… draws the spectrum again with the same diagnostic peaks and mirror
+                    figure.diagnostic, figure.mirror = diagnostic, mirror
                     if request['ms3']:
                         # A triangle under every peak that was isolated for MS3, clickable like the stick of that peak
                         mzs, ints = np.array(request['mzs']), np.array(request['intensities'])
@@ -1148,9 +1149,10 @@ class SpectrumPanel(QWidget):
     # (structure, fragment residues, residue of the cleaved linkage) while the mouse is on a supporting peak's marker, None when it leaves it
     support_hovered = Signal(object)
 
-    def __init__(self):
+    def __init__(self, palette = PALETTE):
         super().__init__()
         self.annotator, self.request, self.latest, self.canvas, self.toolbar, self.drawn = Annotator(), None, 0, None, None, None
+        self.palette = palette
         self.spec, self.ahead, self.cache = None, [], {}
         self.annotator.done.connect(self.show_figure)
         self.annotator.prefetched.connect(self.store)
@@ -1239,10 +1241,13 @@ class SpectrumPanel(QWidget):
         self.spec, self.ahead, self.toggles = (args, kwargs), list(prefetch), {}
         self.resubmit()
 
-    def make_request(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), toggles = None, ion_trap = False, **kwargs):
+    def make_request(self, structure, mzs, intensities, charge, mass_tag, sample_prep, ms3 = (), candidates = (), toggles = None, ion_trap = False, mirror = None, **kwargs):
         """ms3: (m/z, number of MS3 spectra) of the peaks isolated for MS3, which get a clickable marker that emits ms3_clicked with their index;
         candidates: competing structures whose distinguishing peaks are listed; ion_trap: whether the MS2 spectra are ion-trap CID, the only data the linkage
-        reading of a lone Neu5Ac (supporting_ions) was measured on; the request is drawn for the panel's current size and settings"""
+        reading of a lone Neu5Ac (supporting_ions) was measured on; mirror: a second spectrum of the same precursor drawn below the axis and annotated with the same
+        structure, e.g., the EThcD or ETD scan an HCD scan triggered, as a dict of 'mzs', 'intensities', and optionally 'charge', 'tolerance' and 'unit' ('Da' or
+        'ppm'; default: the panel's), 'kwargs' (its CandyCrumbs settings, e.g., {'fragmentation_method': 'EThcD'}), and 'title'; the request is drawn for the
+        panel's current size and settings"""
         size = self.stack.size()
         choice = self.fragment_types.currentData()
         if choice == 'glycosidic' or (choice is None and sample_prep in ('permethylated', 'deuteropermethylated')):
@@ -1255,7 +1260,13 @@ class SpectrumPanel(QWidget):
                    'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
                    'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value() if ppm is None else ppm * 1e-3, 'ppm': ppm,
                    'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}), 'ion_trap': bool(ion_trap),
-                   'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100), 'ratio': self.devicePixelRatioF()}
+                   'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100), 'mirror': None, 'palette': self.palette}
+        if mirror is not None:
+            # its tolerance as the spectrum's: a Da window, or ppm with its Da value at m/z 1000 for deisotoping
+            unit, value = mirror.get('unit', self.unit.currentData()), mirror.get('tolerance', self.tolerance.value())
+            request['mirror'] = {'mzs': [float(x) for x in mirror['mzs']], 'intensities': [float(x) for x in mirror['intensities']], 'charge': int(mirror.get('charge', charge)),
+                                 'tolerance': value * 1e-3 if unit == 'ppm' else value, 'ppm': value if unit == 'ppm' else None, 'kwargs': dict(mirror.get('kwargs', {})),
+                                 'title': mirror.get('title')}
         request['key'] = repr(sorted((k, list(v.items()) if k == 'toggles' else sorted(v.items()) if isinstance(v, dict) else v) for k, v in request.items()))
         return request
 
@@ -1356,7 +1367,7 @@ class SpectrumPanel(QWidget):
                 self.toolbar.views = list(kept.views)
                 self.toolbar.apply(kept.position)
         self.clear_highlight()
-        self.drawn = (dict(self.request), hit_dict, getattr(figure, 'diagnostic', None))
+        self.drawn = (dict(self.request), hit_dict, getattr(figure, 'diagnostic', None), getattr(figure, 'mirror', None))
         self.save.setEnabled(True)
         self.summary_row.insertWidget(0, self.toolbar)
         self.holder_layout.addWidget(self.canvas)
@@ -1364,12 +1375,18 @@ class SpectrumPanel(QWidget):
         self.canvas.show()
         self.stack.setCurrentWidget(self.holder)
         peaks = dict(zip(self.request['mzs'], self.request['intensities']))
-        total, top = sum(peaks.values()) or 1, max(peaks.values()) or 1
+        total = sum(peaks.values()) or 1
         hits = {mz: hit for mz, hit in hit_dict.items() if hit}
         self.summary.setText(f'{len(hits)} of {len(peaks)} peaks annotated, {sum(peaks.get(mz, 0) for mz in hits) / total:.0%} of the ion current' + (
             f'; \u25b2 marks the {len(self.request["ms3"])} peak{"s" if len(self.request["ms3"]) != 1 else ""} with MS3 spectra, click one to annotate them' if self.request['ms3'] else ''))
         if self.request['kwargs'].get('ms3_precursor') is not None and not hits:
             self.summary.setText(f'm/z {self.request["kwargs"]["ms3_precursor"]:.2f} is no fragment of {self.request["structure"]}, so none of its MS3 peaks can be annotated')
+        mirror = getattr(figure, 'mirror', None)
+        if mirror is not None:
+            mirror_peaks = dict(zip(mirror['mzs'], mirror['intensities']))
+            mirror_hits = {mz: hit for mz, hit in mirror['hit_dict'].items() if hit}
+            self.summary.setText(self.summary.text() + f'; mirrored {mirror.get("title") or "spectrum"}: {len(mirror_hits)} of {len(mirror_peaks)} peaks annotated, '
+                                 f'{sum(mirror_peaks.get(mz, 0) for mz in mirror_hits) / (sum(mirror_peaks.values()) or 1):.0%} of the ion current')
         self.summary.setToolTip(self.summary.text())
         # The row may be too narrow for all of it next to the toolbar
         self.summary.setToolTip(self.summary.text())
@@ -1384,16 +1401,26 @@ class SpectrumPanel(QWidget):
                              f'<br>Click to show {"it" if n == 1 else "them"}, pooled and annotated as fragments of this fragment, in the MS3 tab', k))
             self.hover_targets.append((figure.ms3_artists[0], tips))
             self.stick_targets.append((figure.ms3_artists[1], tips))
-        rows, tips = [], {}
-        for mz in sorted(hits):
-            hit = hits[mz]
-            for n, (names, theo, z) in enumerate(zip(hit['Domon-Costello nomenclatures'], hit['Theoretical fragment masses'], hit['Fragment charges'])):
-                # CandyCrumbs gives a multiply charged fragment as its singly charged mass, so it is turned into the m/z it is observed at
-                theo = (theo + np.sign(z) * (abs(z) - 1) * PROTON_MASS) / abs(z)
-                flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
-                first = f'<td>{mz:.4f}</td><td align="right">{peaks.get(mz, 0) / top * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
-                rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{mz - theo:+.3f}</td><td align="right">{(mz - theo) / theo * 1e6:+.1f}</td><td align="right">{z}</td></tr>')
-                tips[mz] = tips.get(mz, f'Observed m/z <b>{mz:.4f}</b>') + f'<br>{domon_costello_to_html(flat)}: theoretical m/z <b>{theo:.4f}</b> (error {mz - theo:+.4f} Da' + (f', z = {z}' if abs(z) > 1 else '') + ')'
+
+        def fragment_rows(found, peak_d):
+            """The fragment table's rows of a spectrum's annotated peaks, and the tooltip of each peak"""
+            rows, tips, base = [], {}, max(peak_d.values()) or 1
+            for mz in sorted(found):
+                hit = found[mz]
+                for n, (names, theo, z) in enumerate(zip(hit['Domon-Costello nomenclatures'], hit['Theoretical fragment masses'], hit['Fragment charges'])):
+                    # CandyCrumbs gives a multiply charged fragment as its singly charged mass, so it is turned into the m/z it is observed at
+                    theo = (theo + np.sign(z) * (abs(z) - 1) * PROTON_MASS) / abs(z)
+                    flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
+                    first = f'<td>{mz:.4f}</td><td align="right">{peak_d.get(mz, 0) / base * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
+                    rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{mz - theo:+.3f}</td><td align="right">{(mz - theo) / theo * 1e6:+.1f}</td><td align="right">{z}</td></tr>')
+                    tips[mz] = tips.get(mz, f'Observed m/z <b>{mz:.4f}</b>') + f'<br>{domon_costello_to_html(flat)}: theoretical m/z <b>{theo:.4f}</b> (error {mz - theo:+.4f} Da' + (f', z = {z}' if abs(z) > 1 else '') + ')'
+            return rows, tips
+
+        rows, tips = fragment_rows(hits, peaks)
+        # a mirrored spectrum's rows follow under a row naming it
+        mirror_rows, mirror_tips = fragment_rows(mirror_hits, mirror_peaks) if mirror is not None else ([], {})
+        if mirror is not None:
+            rows += [f'<tr style="background:{WASH}"><td colspan="7"><b>Mirrored: {html.escape(mirror.get("title") or "second spectrum")}</b></td></tr>'] + mirror_rows
         self.fragment_html = (f'<table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Observed m/z</th>'
                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
                               f'<th align="right">Error (ppm)</th><th align="right">z</th></tr>{"".join(rows)}</table>')
@@ -1403,6 +1430,8 @@ class SpectrumPanel(QWidget):
         self.label_targets = [(LabelTarget(figure.axes[0], label), [(None, tips[label['xy'][0]] + (f'<br>Click to {"hide" if fragments[label["xy"][0]][1] else "draw"} its cartoon' if label['xy'][0] in fragments else ''),
                                                                      fragments[label['xy'][0]][0] if label['xy'][0] in fragments else None)])
                               for label in figure.axes[0].peak_labels if label['xy'][0] in tips]
+        self.label_targets += [(LabelTarget(figure.axes[0], label), [(None, mirror_tips[label['xy'][0]], None)])
+                               for label in getattr(figure.axes[0], 'mirror_labels', []) if label['xy'][0] in mirror_tips]
         self.label_targets += [(LabelTarget(figure.axes[0], box), [(None, '<br>'.join([tips[mz] for mz in box['peaks'] if mz in tips] + ['Click to hide this cartoon']), box['fragment'])])
                                for box in figure.axes[0].cartoon_boxes]
         self.show_support(support)
@@ -1422,16 +1451,18 @@ class SpectrumPanel(QWidget):
                 return
             if not os.path.splitext(path)[1]:
                 path += re.search(r'\*(\.\w+)', chosen).group(1)
-        request, hit_dict, diagnostic = self.drawn
-        figure = vc.Figure(12.0, 6.0 if request['cartoons'] else 4.6, PALETTE)
+        request, hit_dict, diagnostic, mirror = self.drawn
+        # a mirror takes the room of a second spectrum below the axis
+        figure = vc.Figure(12.0, (6.0 if request['cartoons'] else 4.6) + (2.6 if mirror is not None else 0.0), request['palette'])
         with IMPORT_LOCK:
-            from candycrunch.analysis import plot_annotated_spectrum
+            from candycrunch.analysis import plot_annotated_spectrum, resolve_spectrum_input
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            ax, ladder = _spectrum_axes(figure, request['cartoons'], bool(resolve_spectrum_input(request['structure'])[0]), mirror is not None)
             plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
-                                    mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = _spectrum_axes(figure, request['cartoons']), draw_glycans = request['cartoons'],
+                                    mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = ax, ladder_ax = ladder, draw_glycans = request['cartoons'],
                                     hit_dict = hit_dict, mz_labels = True, label_fontsize = 7, diagnostic = diagnostic, cartoons = request['toggles'],
-                                    cartoon_dpi = 300, **request['kwargs'])
+                                    mirror = mirror, **request['kwargs'])
             if clipboard:
                 QApplication.clipboard().setImage(QImage.fromData(figure.to_png(300)))
                 QToolTip.showText(QCursor.pos(), 'Spectrum copied as an image', self.canvas)
@@ -3322,8 +3353,8 @@ class CompareTab(QWidget):
 
     def __init__(self, images):
         super().__init__()
-        self.images, self.session, self.experiment, self.result, self.pool, self.row, self.busy = images, None, None, None, None, None, None
-        self.absent, self.volcano_rows, self.cartoon_wanted = np.zeros(0, bool), {}, set()
+        self.session, self.experiment, self.result, self.pool, self.row, self.busy = None, None, None, None, None, None
+        self.absent, self.volcano_rows = np.zeros(0, bool), {}
         form_widget = QWidget()
         form_widget.setObjectName('settings')
         form_widget.setMinimumWidth(330)
@@ -3463,7 +3494,6 @@ class CompareTab(QWidget):
         self.redraw.setSingleShot(True)
         self.redraw.setInterval(250)
         self.redraw.timeout.connect(lambda: self.result is not None and (self.draw_volcano(self.volcano.new_figure()), self.draw_selection()))
-        images.ready.connect(lambda key: key[1] is True and key[0] in self.cartoon_wanted and self.redraw.start())
         self.volcano.canvas.resized.connect(lambda: self.result is not None and self.redraw.start())
         self.tabs.currentChanged.connect(lambda: self.row is not None and self.draw_selection())
         self.set_session(None)
@@ -3791,59 +3821,25 @@ class CompareTab(QWidget):
         else:
             ax.set_xlabel('Effect size (omega squared)')
         ax.set_ylabel('-log10 corrected p-value')
-        self.add_cartoons(ax, x, y, DPI * self.devicePixelRatioF() if small else 300)
+        self.add_cartoons(ax, x, y)
         if small:
             # The selection marker is a ring the canvas paints over the plot, as on the glycan map
             self.volcano_ax = ax
             self.volcano_rows = rows_at
             self.volcano.canvas.draw_idle()
 
-    def add_cartoons(self, ax, x, y, dpi):
-        """SNFG drawings of the most significant glycans or motifs (up to 15; GlycoDraw draws named motifs, not those defined by a glyco-regex), each next to its point where it covers no other point or drawing and stays within the
-        plot, outward first (one without such a place is left out); one still being rendered is added when it is ready (cartoon_wanted)"""
+    def add_cartoons(self, ax, x, y):
+        """SNFG drawings of the most significant glycans or motifs (up to 15; GlycoDraw draws named motifs, not those defined by a glyco-regex) as vector glyphs,
+        which viscose places each at the free spot nearest its point, clear of the points and of each other, with a leader where it stands apart, as glycowork's
+        volcano does; one GlycoDraw cannot draw is left out"""
         df = self.result['table']
         bottom, top = ax.get_ylim()
         # room above the most significant points
         ax.set_ylim(bottom, top + 0.25 * (top - bottom))
-        ax.figure.layout()
-        placed, self.cartoon_wanted = [], set()
-        gap = 6
-        points = np.column_stack(ax.page(x, y))
         for i in [i for i in np.argsort(-y, kind = 'stable') if df['significant'].iat[i]][:15]:
-            image = self.images.get(df['Glycan'].iat[i])
-            if image is None:
-                self.cartoon_wanted.add(df['Glycan'].iat[i])
-                continue
-            if image.isNull():
-                continue
-            # 0.18 pt per pixel of the compact drawings (0.8 px per SVG unit), so their sizes compare as the glycans do: an N-glycan is about 60 x 22 pt
-            scale = min(0.18, 90 / image.width())
-            w, h = image.width() * scale, image.height() * scale
-            px, py = (float(v) for v in ax.page(x[i], y[i]))
-            side = -1 if x[i] < 0 and len(self.result['groups']) == 2 else 1
-            for dx, dy in ((w / 2 + gap, h / 2 + gap), (w / 2 + gap, 0), (0, h / 2 + 2 * gap), (w / 2 + gap, -h / 2 - gap), (-w / 2 - gap, h / 2 + gap),
-                           (w / 2 + gap, 1.5 * h + 2 * gap), (0, -h / 2 - 2 * gap), (-w / 2 - gap, 0), (w + 3 * gap, h + 3 * gap), (0, 1.5 * h + 4 * gap),
-                           (w + 3 * gap, 0), (-w - 3 * gap, h + 3 * gap)):
-                cx, cy = px + side * dx, py + dy
-                box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-                if box[0] >= ax.rect[0] and box[2] <= ax.rect[0] + ax.rect[2] and box[1] >= ax.rect[1] and box[3] <= ax.rect[1] + ax.rect[3] and not any(
-                        box[0] < b[2] + gap and b[0] < box[2] + gap and box[1] < b[3] + gap and b[1] < box[3] + gap for b in placed) and not (
-                        (points[:, 0] > box[0] - gap / 2) & (points[:, 0] < box[2] + gap / 2) & (points[:, 1] > box[1] - gap / 2) & (points[:, 1] < box[3] + gap / 2)).any():
-                    break
-            else:
-                continue
-            placed.append(box)
-            # Shrunk to its pixels at this figure's dpi by Qt's area-averaging scaler, which keeps those pixels 1:1 on screen and in a 300 dpi export, and their
-            # size in points in SVG and PDF
-            small = image.scaled(QSize(max(1, round(w * dpi / 72)), max(1, round(h * dpi / 72))), Qt.IgnoreAspectRatio, Qt.SmoothTransformation).convertToFormat(QImage.Format_RGBA8888)
-            pixels = np.frombuffer(small.constBits(), np.uint8).reshape(small.height(), small.bytesPerLine())[:, :4 * small.width()].reshape(small.height(), small.width(), 4)
-            # a connector only where the drawing is not right next to its point (there it was a stray dash)
-            far = np.hypot(max(box[0] - px, px - box[2], 0), max(box[1] - py, py - box[3], 0)) > 3 * gap
-            ax.image(pixels, x[i], y[i], w, h, offset = (cx - px, cy - py), z = 1)
-            if far:
-                # Up to the drawing's edge, whose inside the line would show through
-                edge = 1 - min(w / 2 / abs(cx - px) if cx != px else np.inf, h / 2 / abs(cy - py) if cy != py else np.inf)
-                ax.plot([x[i], x[i]], [y[i], y[i]], color = '#c8c0d0', lw = 0.6, offset = [(0.0, 0.0), ((cx - px) * edge, (cy - py) * edge)], z = 1)
+            # 7.2 pt per symbol, the size the compact drawings had here, so that they compare as the glycans do
+            if vc.text.glyph('fragment', df['Glycan'].iat[i]) is not None:
+                ax.annotate(df['Glycan'].iat[i], (x[i], y[i]), size = 7.2, glyph = 'fragment', spread = True)
 
     def draw_selection(self):
         if self.row is None or self.result is None:
@@ -3856,14 +3852,14 @@ class CompareTab(QWidget):
             figure = self.by_group.new_figure()
             ax = figure.add_axes([0.1, 0.14, 0.86, 0.78])
             values = self.result['values'].loc[label] if label in self.result['values'].index else None
-            for k, g in enumerate(self.result['groups']):
-                runs = self.result['members'][g]
-                v = np.array([0.0 if values is None or pd.isna(values.get(run)) else float(values.get(run)) for run in runs])
-                offsets = np.linspace(-0.12, 0.12, len(v)) if len(v) > 1 else np.zeros(1)
-                ax.scatter(k + offsets, v, s = 30, color = LILAC, edge = ('white', 0.5), z = 3)
-                ax.hlines(v.mean(), k - 0.25, k + 0.25, color = INK, lw = 1.2)
-            ax.set_xticks(range(len(self.result['groups'])), self.result['groups'])
-            ax.set_xlim(-0.6, len(self.result['groups']) - 0.4)
+            # Every run over its group's box, spread so that close values lie apart, and named by its run
+            ax.boxplot({g: [0.0 if values is None or pd.isna(values.get(run)) else float(values.get(run)) for run in self.result['members'][g]]
+                        for g in self.result['groups']}, names = [list(self.result['members'][g]) for g in self.result['groups']], points = True)
+            # Tukey's significant pairs over their groups, as the table under the plot lists them
+            posthoc = self.result['posthoc'].get(label) if len(self.result['groups']) > 2 else None
+            if posthoc is not None:
+                for a, b, p in posthoc.loc[posthoc['reject'].astype(bool), ['group1', 'group2', 'p-adj']].itertuples(index = False):
+                    ax.bracket(str(a), str(b), float(p))
             ax.set_ylabel(f'{"Motif" if self.result["motifs"] else "Relative"} abundance (%), as measured')
             ax.set_title(label if len(label) < 90 else label[:87] + '…', size = 8)
             self.by_group.canvas.draw_idle()
