@@ -448,7 +448,8 @@ def test_search_options_keep_the_checks(tmp_path):
     with_search, without = wrap_inference(example, 'O'), wrap_inference(example, 'O', **off)
     assert 'adduct' in without.columns
     assert {stringify_dict(c) for c in without['composition']} <= {stringify_dict(c) for c in with_search['composition']}
-    single = without[without['charge'] == -1]
+    # (glucose oligomers are read as such only at their [M-H]-)
+    single = without[(without['charge'] == -1) & ~without['top1_pred'].str.startswith('Glc(a1-4)Glc', na = False)]
     mz, rt = single['num_spectra'].idxmax(), single.loc[single['num_spectra'].idxmax(), 'RT']
     spectra = pd.read_excel(example)
     plain = spectra[(np.abs(spectra['m/z'] - mz) < 0.3) & (np.abs(spectra['RT'] - rt) < 1)]
