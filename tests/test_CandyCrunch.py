@@ -2086,6 +2086,26 @@ def test_cc_survey_scans(tmp_path, monkeypatch):
         assert len(back) == spectra and len(back.attrs['ms1'][0]) == scans and back.attrs['ms1'][3][-1] == scans
 
 
+def test_rescore_psms():
+    from candycrunch.analysis import _qvalues_of, add_qvalues, rescore_psms
+    rng = np.random.default_rng(0)
+    # q-values in the order given, as add_qvalues gives them, tied scores included
+    scores, decoy = np.round(rng.normal(size = 300), 1), rng.random(300) < 0.3
+    q = add_qvalues(pd.DataFrame({'score': scores, 'is_decoy': decoy, 'row': np.arange(300)})).sort_values('row')['q_value'].to_numpy()
+    assert np.array_equal(_qvalues_of(scores, decoy), q)
+    # 1,500 true targets, 1,500 false targets, and 1,500 decoys: two features carry the signal, the third is noise; the model finds what neither feature finds alone
+    X = np.vstack([rng.normal([2.0, 2.0, 0.0], 1.0, (1500, 3)), rng.normal(0.0, 1.0, (3000, 3))])
+    decoy = np.r_[np.zeros(3000, dtype = bool), np.ones(1500, dtype = bool)]
+    targets = lambda v: int(((_qvalues_of(v, decoy) <= 0.01) & ~decoy).sum())
+    details = []
+    learned = rescore_psms(X, decoy, details = details)
+    assert targets(learned) > 1.5 * max(targets(X[:, 0]), targets(X[:, 1])) and len(details) == 3 and all(d['kept'] for d in details)
+    assert all(abs(d['weights'][2]) < 0.25 * min(d['weights'][:2]) for d in details)
+    # too few decoys to learn from
+    assert rescore_psms(X[:3050], decoy[:3050]) is None
+
+
+
 def test_library_edge_cases(tmp_path):
     from candycrunch.analysis import add_qvalues, intensity_share
     # Tied scores share their decoys, an empty spectrum has no share, and the last survey scan counts

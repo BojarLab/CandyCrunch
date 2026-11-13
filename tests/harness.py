@@ -554,7 +554,8 @@ def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None)
     for n in STAGES:
         setattr(cp, n, inner[n])
     def first(name, value):
-        if name not in captured:
+        # (the model's top-k only of the run, not of the analyzer probes before it; see capture)
+        if name not in captured and (name == 'loaded' or captured.get('_run', False)):
             captured[name] = value
     def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
         p = pathlib.Path(spectra_filepath)
@@ -606,8 +607,12 @@ def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None)
         return out
     def capture(name, out_index = None, copy_input = False):
         def wrapped(*args, **kwargs):
-            # the input before the call, as some steps change it in place; copies only for the first call, the one captured
-            fresh = name not in captured
+            # the input before the call, as some steps change it in place; copies only for the first call, the one captured. A run with MS2 of two
+            # analyzers first processes each analyzer's 100 most intense clusters (condense_dataframe with top_n) to choose one: those passes are not the
+            # run, so nothing is captured before the run's own condense_dataframe call (top_n None), or every stage of such a run traced a probe
+            if name == 'condense_dataframe' and kwargs.get('top_n') is None:
+                captured['_run'] = True
+            fresh = name not in captured and captured.get('_run', False)
             with timed('capture'):
                 snapshot = args[0].copy() if fresh and (copy_input or name == 'domain_filter') else None
             out = inner.get(name, orig[name])(*args, **kwargs)
@@ -808,7 +813,9 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
         # A missed peak: the first step after which nothing near it is left
         if not near(lmz, loaded['RT'].values, lz, gmz, grt, gzz, sign = sign).any():
             stage = 'no_ms2'
-        elif not near(cmz, cond['RT'].values, np.full(len(cond), np.nan), gmz, grt, gzz, sign = sign).any():
+        # (clusters with their charge, as the spectra above: a row whose ion was fragmented at another charge has its cluster there)
+        elif not near(cmz, cond['RT'].values, pd.to_numeric(cond['precursor_charge'], errors = 'coerce').values if 'precursor_charge' in cond.columns else np.full(len(cond), np.nan),
+                      gmz, grt, gzz, sign = sign).any():
             stage = 'no_cluster'
         else:
             hit = near(cand_mz, cand['RT'].values, cand_z, gmz, grt, gzz, sign = sign) if len(cand) else np.zeros(0, dtype = bool)

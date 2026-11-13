@@ -2201,7 +2201,7 @@ def ms2_vector(peak_ds, max_mz):
 
 
 def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None, merged = None, ms1 = None, top_n = None,
-                       peak_tol = None, regroup_span = None):
+                       peak_tol = None, regroup_span = None, single_spectrum_peaks = False):
     """groups spectra and combines the clusters into averaged and binned spectra\n
     | Arguments:
     | :-
@@ -2219,7 +2219,9 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     |              clusters; default:None (all)
     | peak_tol (float): width (m/z) of the groups in which a cluster's fragment peaks are pooled into one peak; default:None (mz_diff / 2)
     | regroup_span (float): with ms1, only the precursor m/z whose clusters include one spanning more than regroup_span re-trigger intervals are split
-    |                       along their MS1 traces, and only in files that fragment a precursor again a minute or more later; default:None (all)\n
+    |                       along their MS1 traces, and only in files that fragment a precursor again a minute or more later; default:None (all)
+    | single_spectrum_peaks (bool): with ms1, a single spectrum on an MS1 maximum of its precursor that is a peak above the background is a cluster of its
+    |                               own (DDA that fragments most peaks once or twice); default:False (near another maximum, a cluster needs 2 spectra)\n
     | Returns:
     | :-
     | Returns a dataframe that has one row per RT-Mass cluster
@@ -2546,9 +2548,21 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             # GPST000134, whose high-mannose glycans fly as [M+K+H]2+ with in-source fragments at every apex, single spectra on small maxima were rows the
             # ground truth does not hold. Only within rt_diff of that apex, as a group holds every cluster of its m/z over the whole run, and on long
             # gradients whose DDA fragments each precursor again and again, joining at any distance pooled spectra hours apart. Further away, a single
-            # spectrum on a maximum of at least 1% (a peak fragmented once) is a part of its own, and the rest (tails and background) is left out
+            # spectrum on a maximum of at least 1% (a peak fragmented once) is a part of its own, and the rest (tails and background) is left out.
+            # With single_spectrum_peaks, a single spectrum within rt_diff is a part of its own too, as DDA with dynamic exclusion on TOF and orbitrap MS2
+            # fragments most peaks once or twice (requiring 2 spectra joined isomers and anomers 0.3-0.7 min apart into their neighbor's row), if its maximum
+            # is a peak above the background of its m/z, as the ground-truth audit takes peaks: twice the median of the raw trace within 2 min, or above it
+            # with a valley below half its height towards the nearest higher point (without that test, permethylated runs lost a third of their rows to
+            # single spectra on noise maxima)
             min_apex = 0.01 * max(sm[tops[j]] for j in parts)
-            keep = [k for k in parts if len(parts[k]['RT']) >= 2 and sm[tops[k]] >= min_apex] or [max(parts, key = lambda k: sm[tops[k]])]
+
+            def is_peak(a):
+                med = np.median(trace[np.abs(t - t[a]) <= 2])
+                higher = [h for h in (np.flatnonzero(sm[:a] > sm[a])[-1:], a + 1 + np.flatnonzero(sm[a + 1:] > sm[a])[:1]) if len(h)]
+                valley = max((sm[min(a, h[0]):max(a, h[0]) + 1].min() / sm[a] for h in higher), default = 0)
+                return sm[a] >= 2 * med or (sm[a] >= med and valley < 0.5)
+
+            keep = [k for k in parts if sm[tops[k]] >= min_apex and (len(parts[k]['RT']) >= 2 or (single_spectrum_peaks and is_peak(tops[k])))] or [max(parts, key = lambda k: sm[tops[k]])]
             dist = {k: min(abs(rts1[lo + tops[j]] - rts1[lo + tops[k]]) for j in keep) for k in parts if k not in keep}
             for k in [k for k in dist if dist[k] <= rt_diff]:
                 into = parts[min(keep, key = lambda j: abs(rts1[lo + tops[j]] - rts1[lo + tops[k]]))]
@@ -4047,11 +4061,16 @@ def combine_charge_states(df_out):
         # top1_pred) stand for a reported one, and a z = 1 row cannot match a peak curated at its z = 2 m/z while a z = 2 row matches both; of those a
         # (de)protonated ion before an adduct one, which finalise_predictions drops later unless a (de)protonated row of its composition co-elutes (a Man5
         # [M+H]+ taken by its stronger [M+2Na]2+ went with it)
-        absorbed = set()
-        for idx, row in pred_rows[pred_rows['charge'].abs() == lowest].iterrows():
-            partners = pred_rows[(pred_rows['charge'].abs() > lowest) & ((pred_rows['RT'] - row['RT']).abs() < 1) & ~pred_rows.index.isin(absorbed)]
-            absorbed.update(partners.index)
-            group = pd.concat([pred_rows.loc[[idx]], partners])
+        # A glycan's charge states co-elute, one ion per charge: each higher-charge row joins the lowest-charge row nearest in RT (within 1 min) that has no
+        # row of its charge yet, nearest pairs first. Taking every higher-charge row within 1 min joined isomers that elute apart at that charge (three
+        # Hex5HexNAc4 [M+2H]2+ peaks 0.5 min apart became one row with a co-eluting [M+H]+)
+        lows, highs = pred_rows.index[pred_rows['charge'].abs() == lowest], pred_rows.index[pred_rows['charge'].abs() > lowest]
+        partner_of = {}
+        for d, i, j in sorted((abs(pred_rows.at[j, 'RT'] - pred_rows.at[i, 'RT']), i, j) for i in lows for j in highs):
+            if d < 1 and j not in partner_of and all(abs(pred_rows.at[k, 'charge']) != abs(pred_rows.at[j, 'charge']) for k, m in partner_of.items() if m == i):
+                partner_of[j] = i
+        for idx in lows:
+            group = pred_rows.loc[[idx] + [j for j in highs if partner_of.get(j) == idx]]
             rep = group.assign(_weak = group['top1_pred'].isna(), _adduct = group['adduct'].apply(lambda a: isinstance(a, str)) if 'adduct' in group.columns else False).sort_values(
                 ['_weak', '_adduct', 'rel_abundance'], ascending = [True, True, False], kind = 'stable').index[0]
             df_filtered.at[rep, 'rel_abundance'] = group['rel_abundance'].sum()
@@ -5543,17 +5562,22 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # the precursor intensities cannot show the valleys between isomers, tails and background, which chain into one cluster reported at one RT (an A3G3S3
     # alditol from 81 to 141 min, re-fragmented every 1.0 min; at 5 min, permethylated C18 tails re-fragmented every 1.2 min split into extra rows)
     regroup_span = None if regroup else 10
+    # A peak fragmented once is a peak (condense_dataframe's single_spectrum_peaks), but not with ion-trap MS2, which samples a peak every few seconds and,
+    # with its low thresholds, a precursor m/z in background and on tails (single spectra on small maxima of ion-trap runs were rows the ground truth does
+    # not hold), nor for permethylated glycans, whose long C18 tails are rows of noise maxima
+    single_spectrum_peaks = trap not in ('linear', 'amazon') and 'permethylated' not in sample_prep
     # (and whether survey scans came with the spectra: the reducing end and glycan class checks get the file without them, and clusters regrouped along
     # MS1 traces are no clusters of theirs)
     key = (loaded_file[idx_col].values.tobytes(), loaded_file['RT'].values.tobytes(), mass_tolerance, rt_diff, bin_num, regroup, fragment_tolerance,
-           accurate_ms1 and ms1 is not None)
+           accurate_ms1 and ms1 is not None, single_spectrum_peaks)
     # (the reducing end check's runs on the most intense clusters only pool those, unless the whole file was condensed with the same precursors)
     if key not in condensed and _top_clusters:
         key = key + (_top_clusters,)
     if key not in condensed:
         condensed[key] = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num, mz_ppm = mz_ppm,
                                             merged = condensed.setdefault('merged', {}), ms1 = ms1 if accurate_ms1 else None, top_n = _top_clusters,
-                                            peak_tol = fragment_tolerance if trap == 'orbitrap' else None, regroup_span = regroup_span)
+                                            peak_tol = fragment_tolerance if trap == 'orbitrap' else None, regroup_span = regroup_span,
+                                            single_spectrum_peaks = single_spectrum_peaks)
     df_out = condensed[key].copy()
     # The most intense clusters, which the reducing end check below looks at
     top_clusters = (df_out if rt_cap is None else df_out[df_out['RT'].values < rt_cap]).sort_values(['intensity', 'num_spectra'], ascending = False, kind = 'stable').iloc[:_top_clusters or 100]

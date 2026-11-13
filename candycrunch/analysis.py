@@ -4864,6 +4864,109 @@ def add_qvalues(df, score = 'score', decoy = 'is_decoy'):
     return df
 
 
+def _qvalues_of(scores, decoy):
+    """target-decoy q-values of scores (higher is better), as add_qvalues gives them (tied scores one FDR), in the order given"""
+    scores, decoy = np.asarray(scores, dtype = float), np.asarray(decoy, dtype = bool)
+    order = np.argsort(-scores, kind = 'stable')
+    s, d = scores[order], decoy[order]
+    fdr = (np.cumsum(d) / np.maximum(np.cumsum(~d), 1))[np.searchsorted(-s, -s, side = 'right') - 1]
+    q = np.empty(len(s))
+    q[order] = np.minimum.accumulate(fdr[::-1])[::-1]
+    return q
+
+
+def _targets_at(scores, decoy, fdr):
+    return int(((_qvalues_of(scores, decoy) <= fdr) & ~np.asarray(decoy, dtype = bool)).sum())
+
+
+def _linear_svm(X, positive, c_pos, c_ratio):
+    """weights and intercept of an L2-regularized linear SVM with squared hinge loss (liblinear's primal, the intercept regularized as a feature of value 1), each positive
+    weighted c_pos and each negative c_pos x c_ratio"""
+    from scipy.optimize import minimize
+    sign = np.where(positive, 1.0, -1.0)
+    c = np.where(positive, c_pos, c_pos * c_ratio)
+    A = np.hstack([X, np.ones((len(X), 1))]) * sign[:, None]
+
+    def loss(v):
+        margin = np.maximum(0.0, 1.0 - A @ v)
+        return 0.5 * v @ v + (c * margin * margin).sum(), v - 2.0 * A.T @ (c * margin)
+    v = minimize(loss, np.zeros(A.shape[1]), jac = True, method = 'L-BFGS-B', options = {'maxiter': 2000, 'gtol': 1e-8}).x
+    return v[:-1], v[-1]
+
+
+def _semi_supervised_svm(Z, decoy, fdr, iterations, c_pos, c_ratios, seed):
+    """Percolator's model on standardized features Z: from the single feature that finds the most targets at fdr, SVMs of the targets at fdr against all decoys, each
+    iteration's class weights chosen by an inner 3-fold cross-validation counting the targets found at fdr"""
+    inner = np.random.default_rng(seed).integers(0, 3, len(Z))
+    _, j, sign = max((_targets_at(sign * Z[:, j], decoy, fdr), j, sign) for j in range(Z.shape[1]) for sign in (1, -1))
+    scores, w, b = sign * Z[:, j], np.eye(Z.shape[1])[j] * sign, 0.0
+    for iteration in range(iterations):
+        positive = ~decoy & (_qvalues_of(scores, decoy) <= fdr)
+        train = positive | decoy
+        best = (-1, None)
+        for c in c_pos:
+            for r in c_ratios:
+                found = 0
+                for k in range(3):
+                    fit = train & (inner != k)
+                    wk, bk = _linear_svm(Z[fit], positive[fit], c, r)
+                    found += _targets_at(Z[inner == k] @ wk + bk, decoy[inner == k], fdr)
+                best = max(best, (found, (c, r)), key = lambda x: x[0])
+        w_new, b_new = _linear_svm(Z[train], positive[train], *best[1])
+        new = Z @ w_new + b_new
+        # an iteration that loses a tenth of the targets ends the training with the model before it
+        if iteration and _targets_at(new, decoy, fdr) < 0.9 * _targets_at(scores, decoy, fdr):
+            break
+        scores, w, b = new, w_new, b_new
+    return w, b
+
+
+def rescore_psms(features, decoy, fdr = 0.01, fallback = 0, folds = 3, iterations = 10, c_pos = (0.1, 1.0, 10.0), c_ratios = (1.0, 3.0, 10.0), min_decoys = 100, seed = 1,
+                 details = None):
+    """Percolator-style semi-supervised rescoring of top hits (one per spectrum; Kall et al., Nat Methods 2007): a linear SVM learns from the targets at fdr and all decoys
+    which combination of features separates them, cross-validated so that no hit is scored by a model that saw it\n
+    | Arguments:
+    | :-
+    | features (array or dataframe): hits x features, higher-is-better or not, any scale (standardized here)
+    | decoy (array): whether each hit is a decoy
+    | fdr (float): q-value of the targets each model learns from and is judged by; default:0.01
+    | fallback (int): column of the search's own score; a fold whose model finds fewer targets at fdr on its training hits than this column keeps it; default:0
+    | folds (int): hits are split at random into this many folds, each scored by a model trained on the others; default:3
+    | iterations (int): training rounds per model; default:10
+    | c_pos (tuple): SVM costs of positives tried; default:(0.1, 1.0, 10.0)
+    | c_ratios (tuple): ratios of the cost of negatives to that of positives tried; default:(1.0, 3.0, 10.0)
+    | min_decoys (int): with fewer decoys the hits are too few to learn from and None is returned; default:100
+    | seed (int): seed of the fold assignment; default:1
+    | details (list): if a list, receives one dict per fold: 'weights' (on standardized features), 'intercept', 'kept' (False where the fallback column was kept)\n
+    | Returns:
+    | :-
+    | Returns an array of scores on one scale across folds (each fold's fdr cut at 0, its decoys' median at -1), or None with fewer than min_decoys decoys
+    """
+    X = np.asarray(features, dtype = float)
+    decoy = np.asarray(decoy, dtype = bool)
+    if decoy.sum() < min_decoys or (~decoy).sum() < min_decoys:
+        return None
+    X = np.where(np.isfinite(X), X, np.nanmedian(np.where(np.isfinite(X), X, np.nan), axis = 0))
+    sd = X.std(axis = 0)
+    Z = (X - X.mean(axis = 0)) / np.where(sd > 0, sd, 1.0)
+    fold = np.random.default_rng(seed).integers(0, folds, len(Z))
+    out = np.empty(len(Z))
+    for k in range(folds):
+        train, test = fold != k, fold == k
+        w, b = _semi_supervised_svm(Z[train], decoy[train], fdr, iterations, c_pos, c_ratios, seed + k)
+        kept = _targets_at(Z[train] @ w + b, decoy[train], fdr) >= _targets_at(Z[train, fallback], decoy[train], fdr)
+        if not kept:
+            w, b = np.eye(Z.shape[1])[fallback], 0.0
+        trained = Z[train] @ w + b
+        q = _qvalues_of(trained, decoy[train])
+        found = (q <= fdr) & ~decoy[train]
+        cut = trained[found].min() if found.any() else np.median(trained[~decoy[train]])
+        out[test] = (Z[test] @ w + b - cut) / max(cut - np.median(trained[decoy[train]]), 1e-9)
+        if details is not None:
+            details.append({'weights': w, 'intercept': b, 'kept': bool(kept)})
+    return out
+
+
 def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities = True, min_intensity = 0.0, min_isotope_count = 2,
                   validate_pattern = False, relabel = False, bound_isotope_ratio = False):
     """collapses isotope patterns of an MS2 spectrum onto their monoisotopic peak\n
