@@ -162,12 +162,8 @@ def test_gui_compare_groups():
         time.sleep(0.05)
     result = session['experiments'][0]['comparison']['result']
     assert result is not None and tab.model.rowCount() == len(result['table']) and 'differ significantly' in tab.summary.text()
-    start = time.time()
-    cartoons = lambda: [a for a in tab.volcano.figure.axes[0].artists if a['kind'] == 'image']
-    while not cartoons() and time.time() - start < 60:
-        app.processEvents()
-        time.sleep(0.05)
-    assert cartoons() and not tab.cartoon_wanted
+    # the most significant glycans are drawn as SNFG glyphs beside their points
+    assert [a for a in tab.volcano.figure.axes[0].artists if a['kind'] == 'text' and a.get('glyph')]
     tab.tabs.setCurrentWidget(tab.by_group)
     tab.select_row(0)
     assert not tab.tabs.isTabVisible(2) and tab.row == 0

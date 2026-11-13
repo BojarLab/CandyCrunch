@@ -981,8 +981,10 @@ def test_isotope_support_and_fragment_ratio():
     ion = lambda g, z: (composition_to_mass(get_comp(g), modification = 'reduced') - z * PROTON_MASS) / z
     rts = np.arange(10, 30, 0.05)
     shape = lambda apex: np.exp(-0.5 * ((rts - apex) / 0.12) ** 2)
-    peaks = [(ion(disialyl, 2), 1e7 * shape(20)), (ion(monosialyl, 2), 2e6 * shape(20)), (ion(asialo, 2), 5e4 * shape(20)), (ion(wrong_charge, 3), 3e6 * shape(20.8)), (ion(on_13c, 2) - ISOTOPE_SPACING / 2, 4e6 * shape(21.6))]
-    scans = [sorted((mz + j * ISOTOPE_SPACING / 2, trace[i] * 0.5 ** j) for mz, trace in peaks for j in range(4)) for i in range(len(rts))]
+    envelope = lambda g: isotope_distribution(get_formula(get_comp(g)))
+    peaks = [(ion(disialyl, 2), 1e7 * shape(20), envelope(disialyl)), (ion(monosialyl, 2), 2e6 * shape(20), envelope(monosialyl)), (ion(asialo, 2), 5e4 * shape(20), envelope(asialo)),
+             (ion(wrong_charge, 3), 3e6 * shape(20.8), envelope(wrong_charge)), (ion(on_13c, 2) - ISOTOPE_SPACING / 2, 4e6 * shape(21.6), envelope(on_13c))]
+    scans = [sorted((mz + j * ISOTOPE_SPACING / 2, trace[i] * dist[j] / dist[0]) for mz, trace, dist in peaks for j in range(4)) for i in range(len(rts))]
     ms1 = (rts, np.array([m for scan in scans for m, _ in scan], dtype = np.float32), np.array([x for scan in scans for _, x in scan], dtype = np.float32),
            np.cumsum([0] + [len(scan) for scan in scans]).astype(np.int64))
     row = lambda g, z, rt, n: {'m/z': ion(g, z), 'predictions': [(g, 0.9)], 'composition': get_comp(g), 'num_spectra': n, 'charge': -z, 'RT': rt, 'rel_abundance': 1e6, 'top_fragments': [731.0, 1113.0],
