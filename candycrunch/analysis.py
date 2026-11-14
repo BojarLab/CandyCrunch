@@ -109,10 +109,10 @@ ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', '
 # Residue masses from glycowork's formulas (the old 4-decimal table was up to 0.1 mDa off), plus the modified residues CandyCrumbs encodes
 AA_masses = {aa: calculate_adduct_mass(f) for aa, f in AMINO_ACID_FORMULAS.items()}
 # the tokens of the modified residues, by residue and the modification's Unimod name in glycowork's PEPTIDE_MODIFICATIONS (TMT-labeled Lys, Carbamidomethyl Cys,
-# Guanidinyl Lys, Met sulfoxide, the variable modification of nearly every glycoproteomics search, and deamidated Asn and Gln, which PNGase F leaves at
-# released N-glycosites), so that peptide_to_glycowork can write them as glycowork does
+# Guanidinyl Lys, Met sulfoxide, the variable modification of nearly every glycoproteomics search, deamidated Asn and Gln, which PNGase F leaves at
+# released N-glycosites, and carbamidomethylated Met, the sulfonium iodoacetamide makes beside every Cys), so that peptide_to_glycowork can write them as glycowork does
 TOKEN_MODIFICATIONS = {'k': ('K', 'TMT6plex'), 'c': ('C', 'Carbamidomethyl'), 'j': ('K', 'Guanidinyl'), 'm': ('M', 'Oxidation'), 'n': ('N', 'Deamidated'),
-                       'q': ('Q', 'Deamidated')}
+                       'q': ('Q', 'Deamidated'), 'x': ('M', 'Carbamidomethyl')}
 
 
 def peptide_modification_mass(modification):
@@ -127,7 +127,7 @@ def peptide_modification_mass(modification):
 
 AA_masses |= {token: AA_masses[aa] + peptide_modification_mass(name) for token, (aa, name) in TOKEN_MODIFICATIONS.items()}
 MODIFICATION_TOKENS = {
-    'Carbamidomethyl': {'C': 'c'},
+    'Carbamidomethyl': {'C': 'c', 'M': 'x'},
     'Guanidinyl': {'K': 'j'},
     'Oxidation': {'M': 'm'},
     'Deamidated': {'N': 'n', 'Q': 'q'},
@@ -143,7 +143,25 @@ C_TERM_IONS = {'w', 'x', 'y', 'z', 'z+1'}
 PEPTIDE_ION_TYPES = {'CID': {'b', 'y'}, 'HCD': {'a', 'b', 'y'}, 'ETD': {'c', 'c-1', 'z', 'z+1'}, 'ECD': {'c', 'c-1', 'z', 'z+1'},
                      'EThcD': {'b', 'c', 'c-1', 'w', 'y', 'z', 'z+1'}, 'ETciD': {'b', 'c', 'c-1', 'w', 'y', 'z', 'z+1'},
                      None: (N_TERM_IONS | C_TERM_IONS) - {'c-1', 'z+1'}} | dict.fromkeys(('EED', 'EDD', 'NETD', 'UVPD'), (N_TERM_IONS | C_TERM_IONS) - {'c-1', 'z+1'})
-tester_ma_addition = {k: {'mass': {k: v}, 'atoms': {k: [1, 2, 3, 4, 5, 6]}} for k, v in AA_masses.items()}
+# Side chains that collisional activation strips from every fragment: the S-carbamidomethyl sulfonium of an alkylated Met leaves as 2-(methylthio)acetamide (C3H7NOS),
+# so the residue's backbone and Y ions sit 48.003 Da below an unmodified Met's (the residue becomes homoserine lactone), while the precursor carries the whole residue. On
+# two LAMP-2 runs (MaillardMorsels) the HCD spectra of WQxNFTVR glycoforms held Y0 at the peptide - 105.025 in 37 of 40, and their EThcD partners c3 and z ions at the same loss
+LABILE_SIDE_CHAINS = {'x': calculate_adduct_mass('C3H7NOS')}
+
+
+def fragment_residue_mass(token):
+    """Mass of a residue token in a fragment ion: its residue mass less a side chain that collisional activation strips (LABILE_SIDE_CHAINS)\n
+   | Arguments:
+   | :-
+   | token (string): one-letter residue or CandyCrunch token, e.g., 'M', 'c', 'x'\n
+   | Returns:
+   | :-
+   | Returns the mass of the residue as backbone and Y ions carry it
+   """
+    return AA_masses[token] - LABILE_SIDE_CHAINS.get(token, 0.0)
+
+
+tester_ma_addition = {k: {'mass': {k: fragment_residue_mass(k)}, 'atoms': {k: [1, 2, 3, 4, 5, 6]}} for k in AA_masses}
 mono_attributes = mono_attributes | tester_ma_addition
 bond_masses = {'red_bond': WATER_MASS, 'no_bond': -WATER_MASS, 'peptide_b': -WATER_MASS,
                'peptide_c': -(WATER_MASS - 17.026549),
@@ -2892,7 +2910,9 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         glycan_totals = [next((m for m, _, nc in gf if nc == 0), 0) for gf in all_glycan_frags]
         total_glycan = sum(glycan_totals)
         # Peptide masses
-        pep_res = [AA_masses.get(aa, 0) for aa in peptide_seq]
+        pep_res = [fragment_residue_mass(aa) if aa in AA_masses else 0 for aa in peptide_seq]
+        # what the precursor carries beyond its fragments: the side chains collisional activation strips (LABILE_SIDE_CHAINS)
+        labile = sum(LABILE_SIDE_CHAINS.get(aa, 0.0) for aa in peptide_seq)
         # an N-terminal modification (e.g., the carbamidomethylated amine of an over-alkylated peptide) rides on the first residue, so every N-terminal ion and the intact
         # peptide carry it and no C-terminal ion does
         if n_term_modification is not None:
@@ -2918,8 +2938,8 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         def add(mass, label, nc):
             frag_dict.setdefault(round(mass, 5), []).append((label, nc))
 
-        # Full molecule
-        add(full_pep + total_glycan + mode_mass, [['Peptide']] + [['M'] for _ in range(n_glycans)], 0)
+        # Full molecule, the precursor itself, with every side chain
+        add(full_pep + labile + total_glycan + mode_mass, [['Peptide']] + [['M'] for _ in range(n_glycans)], 0)
         # Per-glycan states: intact, fully cleaved off, or sub-fragmented; a glycan still on the peptide keeps its reducing end, so
         # only Y/Z ions and X cross-rings of the reducing-end residue qualify (B/C/A ones put, e.g., '35A Hex' on a peptide at the mass of
         # y8 + HexNAc). On an N-site that residue is HexNAc, so the piece has to contain one ('02X Hex' and 'Y Hex(2)/dHex(1)' were
@@ -3102,7 +3122,7 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
         else:
             hit_dict[observed_mass] = None
     if is_glycopeptide and isinstance(fragmentation_method, str) and fragmentation_method in CHARGE_REDUCING_METHODS:
-        add_charge_reduced_ions(hit_dict, full_pep + total_glycan, n_glycans, charge, mass_threshold, mass_threshold_ppm = mass_threshold_ppm)
+        add_charge_reduced_ions(hit_dict, full_pep + labile + total_glycan, n_glycans, charge, mass_threshold, mass_threshold_ppm = mass_threshold_ppm)
     return hit_dict
 
 
@@ -3828,7 +3848,8 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
     if math.prod(len(x) for x in structures) > max_candidates:
         raise ValueError(f"{' x '.join(str(len(x)) for x in structures)} candidate combinations exceed max_candidates = {max_candidates}; pass "
                          f"fewer structures per glycan or raise max_candidates")
-    pep_mass = sum(AA_masses[aa] for aa in input_dict['peptide']) + WATER_MASS
+    # the peptide as its fragments carry it (fragment_residue_mass)
+    pep_mass = sum(fragment_residue_mass(aa) for aa in input_dict['peptide']) + WATER_MASS
     rows = []
     for combo in product(*structures):
         graphs = [mono_graph_to_nx(glycan_to_graph_monos(g)) for g in combo]

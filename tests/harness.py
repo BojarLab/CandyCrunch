@@ -726,7 +726,7 @@ def peak_outcomes(preds, gt, rt_col):
 def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
     # Where each ground-truth peak was lost, what is wrong about each wrong structure, and what each false positive is
     # the test module's glycowork functions, which run_file memoizes
-    from tests.test_CandyCrunch import match_spectra, MASS_TOLERANCE, RT_TOLERANCE, compare_glycans, canonicalize_iupac, floating_topologies
+    from tests.test_CandyCrunch import match_spectra, MASS_TOLERANCE, RT_TOLERANCE, compare_glycans, canonicalize_iupac, floating_match
     from candycrunch.prediction import get_comp, glycans, ISOTOPE_SPACING, PROTON_MASS
     vocabulary = glycans if vocabulary is None else vocabulary
     comp_key = lambda c: tuple(sorted(sum((Counter({k.split('_a2-')[0]: v}) for k, v in c.items() if v), Counter()).items())) if isinstance(c, dict) else None
@@ -798,8 +798,7 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
         if i in matched:
             p = out.iloc[matched[i]]['top1_pred']
             # as the metric scores it: a ground truth with floating parts is right through any of its placements, and the prediction is canonicalized
-            placed = floating_topologies(glycan) if glycan else []
-            if glycan is None or compare_glycans(glycan, canonicalize_iupac(p)) or any(compare_glycans(x, canonicalize_iupac(p)) for x in placed):
+            if glycan is None or compare_glycans(glycan, canonicalize_iupac(p)) or ('{' in glycan and floating_match(glycan, canonicalize_iupac(p))):
                 continue
             # A wrong structure: which step put the true one out of reach
             if gt_comp(p) != comp:

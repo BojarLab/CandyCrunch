@@ -9,16 +9,17 @@ import zlib
 import hashlib
 import inspect
 import json
+import re
 from tabulate import tabulate
 import numpy as np
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from candycrunch.prediction import *
 import candycrunch.utils
 from glycowork.glycan_data.loader import df_glycan
-from glycowork.motif.graph import compare_glycans, get_possible_topologies, graph_to_string
-from glycowork.motif.annotate import get_glycan_similarity, annotate_dataset
-from itertools import product
+from glycowork.motif.graph import compare_glycans, get_possible_topologies, graph_to_string, categorical_node_match_wildcard, build_wildcard_cache, PTM_REGEX, IS_LINKAGE, _glycan_graph, _component, _components, _roots, _sl, _tree_embeddings
+from glycowork.motif.annotate import get_glycan_similarity, annotate_dataset, LINKAGE_NODE_PATTERN
+from itertools import permutations, product
 from functools import lru_cache
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cosine
@@ -190,35 +191,277 @@ def add_pred_column(df_in, col_name, matches, pred_df, rt_col):
   return df_in
 
 
+# A ground truth with floating parts is scored against every placement of its parts up to this many placements, past it against those a beam keeps
+FLOATING_LIMIT = 100000
+FLOATING_BEAM = 16
+FLOATING_PART = re.compile(r'\{[^{}]*\}')
+
+
+@lru_cache(maxsize = 4096)
+def labels_fit(a, b):
+    # Whether compare_glycans could match two node labels, as written or PTM-wildcarded (never stricter than its own match, so it only prunes)
+    wa, wb = (x if IS_LINKAGE(x) else PTM_REGEX.sub('O', x) for x in (a, b))
+    match = categorical_node_match_wildcard('string_labels', 'unknown', build_wildcard_cache({a, b, wa, wb}), 'termini', 'flexible')
+    return any(match({'string_labels': x}, {'string_labels': y}) or match({'string_labels': y}, {'string_labels': x}) for x, y in ((a, b), (wa, wb)))
+
+
+def place_next(placed, limit = None):
+    # One more floating part placed in every way, as get_possible_topologies places it (placements without one left are kept as they are); None as soon
+    # as there are more than limit
+    out = {}
+    for p in placed:
+        out.update(dict.fromkeys([graph_to_string(x) for x in get_possible_topologies(p, exhaustive = True)] if '{' in p else [p]))
+        if limit is not None and len(out) > limit:
+            return None
+    return list(out)
+
+
 @lru_cache(maxsize = 64)
-def floating_topologies(glycan):
+def floating_topologies(glycan, limit = None):
     # Every placement of a glycan's floating parts: get_possible_topologies places one part per call, so it runs until none is left (a GT with two placed
-    # none of them before, and no prediction could match it exactly); a glycan without floating parts is its own only placement
+    # none of them before, and no prediction could match it exactly); a glycan without floating parts is its own only placement. None once a step holds
+    # more than limit placements
     placed = [glycan]
-    while any('{' in p for p in placed):
-        placed = list(dict.fromkeys(q for p in placed for q in ([graph_to_string(x) for x in get_possible_topologies(p, exhaustive = True)] if '{' in p else [p])))
+    while placed is not None and any('{' in p for p in placed):
+        placed = place_next(placed, limit)
     return placed
 
 
-@lru_cache(maxsize = 16)
-def floating_known_counts(glycan):
-    # The 'known' motif counts of every placement, the costliest part of get_glycan_similarity, annotated at once: they are counts of each glycan alone
-    # ('exhaustive' and 'terminal' columns merge the linkage variants of both glycans of a pair, so those are counted per pair)
-    counts = annotate_dataset(floating_topologies(glycan), feature_set = ['known'])
-    return counts.columns, counts.values.astype(np.int16)
+@lru_cache(maxsize = 1)
+def parts_take_parts():
+    # Whether get_possible_topologies also places a floating part on another floating part (glycowork from 2026-11-14 on), not only on the main part
+    return any(t.startswith('{Fuc') for t in get_possible_topologies('{Fuc(a1-3)}{Gal(b1-4)GlcNAc(b1-2)}Man(a1-3)Man', exhaustive = True))
+
+
+@lru_cache(maxsize = 4096)
+def modified_labels(label, taken, modification):
+    # The labels get_possible_topologies gives a residue labelled label, whose children take the positions taken, when it places the floating modification
+    # there (none if it may not; None if the question cannot be asked): asked on a residue with such children, so the positions they take count as they do
+    # on the glycan
+    children = [f'Glc(b1-{x})' for x in sorted(taken)]
+    probe = (children[0] if children else '') + ''.join(f'[{c}]' for c in children[1:]) + label
+    out = set()
+    try:
+        for t in get_possible_topologies('{' + modification + '}' + probe, exhaustive = True):
+            g = _glycan_graph(t)
+            out.add(dict(zip(g, _sl(g)))[next(n for n in g if not g.pred[n])])
+    except Exception:
+        return None
+    return tuple(sorted(out - {label}))
+
+
+@lru_cache(maxsize = 64)
+def placements_over(glycan, limit):
+    # Whether a step of floating_topologies(glycan) holds more than limit placements, decided without writing them out (False: not shown, they have to be
+    # counted). The first floating part is placed, as get_possible_topologies places it, on every residue of the main part (and, with parts_take_parts, of
+    # every other floating part, whose place in the order the merged part keeps) but those whose children take every position the part may take, a
+    # modification on every residue with the labels modified_labels gives it, on light copies of the glycan whose residues carry a hash of the subtree
+    # below them (label, and the sum over children of a hash of child and linkage); a placement is keyed by its main part's hash and its floating parts' in
+    # order, as its string is, so the number of keys a step reaches is never above its number of placements (a collision only merges two). Not for anchored
+    # parts
+    if '^' in glycan:
+        return False
+    g = _glycan_graph(glycan)
+    label = dict(zip(g, _sl(g)))
+    parts = [c for c in sorted(_components(g), key = min) if 0 not in c]
+    mask, ids = 0xFFFFFFFFFFFFFFFF, {}
+    ident = lambda s: ids[s] if s in ids else ids.setdefault(s, int.from_bytes(hashlib.blake2b(s.encode(), digest_size = 8).digest(), 'little'))
+    # splitmix64's finalizer: Python's tuple hash summed over siblings let two children swap their linkages unnoticed
+
+    def mix(z):
+        z = (z + 0x9E3779B97F4A7C15) & mask
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & mask
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & mask
+        return z ^ (z >> 31)
+
+    edge = lambda h, link: mix(mix(h) ^ link)
+    node = lambda label, total: mix(label ^ mix(total))
+
+    def key(h, part_hashes):
+        # a placement's key: its main part's hash, then each floating part's in order (a modification by its label)
+        for x in part_hashes:
+            h = mix(h ^ x)
+        return h
+
+    def tree(n, parent, link, out):
+        # residues at and below residue n into out, each as (label, linkage to its parent, parent's index, positions its children take, sum of its children's
+        # edge hashes, hash, written label); returns n's hash
+        i = len(out)
+        out.append(None)
+        total = sum(edge(tree(c, i, l, out), ident(label[l])) for l in g.succ[n] for c in g.succ[l]) & mask
+        out[i] = (ident(label[n]), 0 if link is None else ident(label[link]), parent, frozenset(label[l].split('-')[-1] for l in g.succ[n]), total, node(ident(label[n]), total), label[n])
+        return out[i][5]
+
+    def change(residues, i, bit, position, new_label):
+        # the root hash of residues (a tree, its root first) with the floating part bit hung on residue i, or residue i relabelled new_label, and a function
+        # that builds the new residues
+        r = residues[i]
+        total = (r[4] + edge(bit[0][5], bit[0][1])) & mask if new_label is None else r[4]
+        h = node(r[0] if new_label is None else ident(new_label), total)
+        chain, j = [(i, total, h)], i
+        while residues[j][2] != -1:
+            p = residues[j][2]
+            total = (residues[p][4] - edge(residues[j][5], residues[j][1]) + edge(h, residues[j][1])) & mask
+            h = node(residues[p][0], total)
+            chain.append((p, total, h))
+            j = p
+
+        def build():
+            out = list(residues)
+            for j, total, hj in chain:
+                x = out[j]
+                out[j] = (x[0], x[1], x[2], x[3] | {position} if j == i and new_label is None else x[3], total, hj, x[6])
+            if new_label is not None:
+                out[i] = (ident(new_label),) + out[i][1:6] + (new_label,)
+                return tuple(out)
+            return tuple(out) + tuple((x[0], x[1], i if x[2] == -1 else len(residues) + x[2], x[3], x[4], x[5], x[6]) for x in bit)
+
+        return h, build
+
+    core, floating = [], []
+    tree(next(n for n in g if 0 in _component(g, n) and not g.pred[n]), -1, None, core)
+    for part in parts:
+        top = next(n for n in part if not g.pred[n])
+        residues = []
+        if len(part) > 1:
+            tree(g.succ[top][0], -1, top, residues)
+        floating.append((label[top] if len(part) == 1 else label[top].split('-')[-1], tuple(residues)))
+    part_hash = lambda x: edge(x[1][0][5], x[1][0][1]) if x[1] else ident(x[0])
+    states = {key(core[0][5], [part_hash(x) for x in floating]): (tuple(core), tuple(floating))}
+    for _ in parts:
+        new = {}
+        for main, floating in states.values():
+            (position, bit), rest = floating[0], list(floating[1:])
+            options = set(position.split('/'))
+            digits = all(o.isdigit() for o in options)
+            rest_hashes = [part_hash(x) for x in rest]
+            for q, residues in [(None, main)] + ([(q, x[1]) for q, x in enumerate(rest) if x[1]] if parts_take_parts() else []):
+                for i, r in enumerate(residues):
+                    labels = [None] if bit else modified_labels(r[6], r[3], position)
+                    if labels is None:
+                        return False
+                    for new_label in labels:
+                        if bit and digits and options <= r[3]:
+                            continue
+                        h, build = change(residues, i, bit, position, new_label)
+                        k = key(h, rest_hashes) if q is None else key(main[0][5], rest_hashes[:q] + [edge(h, residues[0][1])] + rest_hashes[q + 1:])
+                        if k not in new:
+                            new[k] = (build(), tuple(rest)) if q is None else (main, tuple(rest[:q] + [(rest[q][0], build())] + rest[q + 1:]))
+                            if len(new) > limit:
+                                return True
+        states = new
+    return False
+
+
+@lru_cache(maxsize = 16384)
+def label_could_fit(label, target, mods):
+    # labels_fit for a residue that may still take some of the floating modifications mods (get_possible_topologies appends one to the residue's label)
+    return any(labels_fit(label + m, target) for m in {''.join(m) for k in range(len(mods) + 1) for m in permutations(mods, k)})
+
+
+@lru_cache(maxsize = 4096)
+def floating_match(glycan, pred):
+    # Whether a placement of the floating parts is the prediction (compare_glycans), without listing every placement: the parts are placed one at a time as
+    # floating_topologies places them, and a placement is kept only while its main part still embeds into the prediction at its root, and each of its
+    # floating parts somewhere in it (a part placed on another floating part leaves the main part as it was), under a label match looser than
+    # compare_glycans' (as compare_glycans(subsumes = True) prunes), which every part of a placement that is the prediction does; a residue matches as it is
+    # or with the floating modifications not yet placed
+    if '{' in pred or '^' in pred:
+        return any(compare_glycans(p, pred) for p in floating_topologies(glycan))
+    target = _glycan_graph(pred)
+    root = _roots(target)[0]
+    placed = [glycan]
+    while placed and any('{' in p for p in placed):
+        kept = []
+        for p in place_next(placed):
+            g = _glycan_graph(p)
+            mods = tuple(sorted(label for n, label in zip(g, _sl(g)) if n and not g.pred[n] and not g.succ[n]))
+            fits = lambda d1, d2: label_could_fit(d2['string_labels'], d1['string_labels'], mods)
+            hits = _tree_embeddings(target, g.subgraph(_component(g, 0)), fits)
+            if (hits is None or any(e for v, e in zip(target, hits) if v == root)) and all((h := _tree_embeddings(target, g.subgraph(c), fits)) is None or any(h)
+                                                                                           for c in _components(g) if 0 not in c and len(c) > 1):
+                kept.append(p)
+        placed = kept
+    return any(compare_glycans(p, pred) for p in placed)
+
+
+def common_size(glycan, target):
+    # Nodes of the largest subtree of a placement's main part that sits on the prediction root on root, children on distinct children, labels as labels_fit
+    g = _glycan_graph(glycan)
+    part, memo = g.subgraph(_component(g, 0)), {}
+
+    def size(u, v):
+        if (u, v) not in memo:
+            memo[u, v] = 0
+            if labels_fit(part.nodes[u]['string_labels'], target.nodes[v]['string_labels']):
+                kids, tkids = list(part.succ[u]), list(target.succ[v])
+                w = np.array([[size(a, b) for b in tkids] for a in kids]) if kids and tkids else np.zeros((0, 0))
+                memo[u, v] = 1 + (int(w[linear_sum_assignment(-w)].sum()) if w.size else 0)
+        return memo[u, v]
+
+    return size(_roots(part)[0], _roots(target)[0])
+
+
+def beam_topologies(glycan, pred, width):
+    # Placements of the floating parts, when there are too many to score them all, kept a few at a time: after each part, the width placements whose main
+    # part shares the largest subtree with the prediction and the width whose main part alone is most similar to it among the 8 * width of the largest
+    # subtrees (first placed first on ties); every placement of the last part is kept
+    target = _glycan_graph(pred)
+    placed = [glycan]
+    while any('{' in p for p in placed):
+        placed = place_next(placed)
+        if len(placed) > width and any('{' in p for p in placed):
+            common = [common_size(p, target) for p in placed]
+            order = sorted(range(len(placed)), key = lambda i: -common[i])
+            sims = {i: best_similarity([FLOATING_PART.sub('', placed[i])], pred) for i in order[:8 * width]}
+            placed = [placed[i] for i in sorted(set(sorted(sims, key = lambda i: -sims[i])[:width]) | set(order[:width]))]
+    return placed
+
+
+def best_similarity(placed, pred):
+    # get_glycan_similarity of the prediction to its best placement. The pair's 'exhaustive' and 'terminal' columns merge the linkage variants seen in both
+    # glycans but read nothing of a placement beyond its signature, so they are annotated once per signature; with them fixed, Cauchy-Schwarz bounds the
+    # cosine whatever the 'known' counts k (k . k_pred <= |k| |k_pred|), and the 'known' counts (of each glycan alone) are annotated only for the signatures
+    # whose bound beats the best placement so far. The counts are integers, so their cosine over the same columns is get_glycan_similarity's to the last bit
+    pred_known = annotate_dataset([pred], feature_set = ['known'])
+    known2 = float((pred_known.values[0].astype(float) ** 2).sum())
+    groups = {}
+    for p in placed:
+        # a placement's signature, all that those columns read of it: its labels, its disaccharides (as residue, linkage, and parent labels), and its
+        # terminal residues with their linkages (every leaf with its parent's label)
+        g = _glycan_graph(p)
+        label = dict(zip(g, _sl(g)))
+        paths = Counter((label[c], label[n], label[u]) for n in g if LINKAGE_NODE_PATTERN.match(label[n]) for u in g.pred[n] for c in g.succ[n])
+        leaves = Counter((label[n], label[u]) for n in g if not g.succ[n] for u in g.pred[n])
+        groups.setdefault((tuple(sorted(Counter(label.values()).items())), tuple(sorted(paths.items())), tuple(sorted(leaves.items()))), []).append(p)
+    bounded = []
+    for ps in groups.values():
+        pair = annotate_dataset([ps[0], pred], feature_set = ['exhaustive', 'terminal']).values.astype(float)
+        e1, e2, norm2 = float(pair[0] @ pair[1]), float(pair[0] @ pair[0]), known2 + float(pair[1] @ pair[1])
+        bounded.append((np.sqrt((known2 + (e1 * e1 / e2 if e2 else 0)) / norm2) if norm2 else 1.0, pair, ps))
+    best = None
+    for bound, pair, ps in sorted(bounded, key = lambda x: -x[0]):
+        if best is not None and bound + 1e-9 < best:
+            break
+        counts = annotate_dataset(ps, feature_set = ['known'])
+        pred_counts = pred_known.reindex(columns = counts.columns, fill_value = 0).values[0]
+        for c in counts.values.astype(np.int16):
+            sim = 1 - cosine(np.concatenate([c, pair[0]]), np.concatenate([pred_counts, pair[1]]))
+            best = sim if best is None or sim > best else best
+    return best
 
 
 @lru_cache(maxsize = 4096)
 def floating_similarity(glycan, pred):
-    # get_glycan_similarity of the prediction to the best placement of a ground truth with floating parts, 1.0 for a placement that is the prediction; the
-    # counts are integers, so their cosine over the same columns is the same to the last bit as get_glycan_similarity's
-    placed = floating_topologies(glycan)
-    if any(compare_glycans(p, pred) for p in placed):
+    # get_glycan_similarity of the prediction to the best placement of a ground truth with floating parts, 1.0 for a placement that is the prediction. Up to
+    # FLOATING_LIMIT placements the best of all of them; past it (the count grows as positions ** parts) the best of those beam_topologies keeps, a lower
+    # bound of it. placements_over tells most glycans past the limit without counting their placements
+    if floating_match(glycan, pred):
         return 1.0
-    columns, counts = floating_known_counts(glycan)
-    pred_counts = annotate_dataset([pred], feature_set = ['known']).reindex(columns = columns, fill_value = 0).values[0]
-    pairs = (annotate_dataset([p, pred], feature_set = ['exhaustive', 'terminal']).values for p in placed)
-    return max(1 - cosine(np.concatenate([c, pair[0]]), np.concatenate([pred_counts, pair[1]])) for c, pair in zip(counts, pairs))
+    placed = None if placements_over(glycan, FLOATING_LIMIT) else floating_topologies(glycan, FLOATING_LIMIT)
+    if placed == []:
+        raise ValueError(f'{glycan}: no placement of its floating parts')
+    return best_similarity(placed if placed is not None else beam_topologies(glycan, pred, FLOATING_BEAM), pred)
 
 
 def evaluate_predictions(predictions, gt, rt_col, mass_thresh, RT_thresh, verbose = False):
@@ -1062,6 +1305,11 @@ def test_ms1_peak_regrouping():
     assert np.allclose(out['RT'], [10.0, 11.0, 15.0, 30.0], atol = 0.02) and out['num_spectra'].tolist() == [2, 2, 5, 1]
     # Without survey scans the anomers stay one cluster, the broad peak five, and the small peaks one each
     assert len(condense_dataframe(df.copy(), mz_ppm = 20)) == 8
+    # Where the clusters are not regrouped (regroup_span), the cluster that chained both anomers is still split at the valley of their MS1 trace, each part at
+    # its MS1 apex; the broad peak (five clusters) and the small peaks stay as they were
+    out = condense_dataframe(df.copy(), mz_ppm = 20, ms1 = ms1, regroup_span = 10).sort_values('RT')
+    low = out[out['m/z'] < 1000]
+    assert np.allclose(low['RT'], [10.0, 11.0, 30.0, 50.0], atol = 0.02) and low['num_spectra'].tolist() == [2, 2, 1, 3] and (out['m/z'] > 1000).sum() == 5
 
 
 def test_condense_isotope_apex():

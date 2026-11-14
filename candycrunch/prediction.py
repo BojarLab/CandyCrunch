@@ -2219,7 +2219,8 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     |              clusters; default:None (all)
     | peak_tol (float): width (m/z) of the groups in which a cluster's fragment peaks are pooled into one peak; default:None (mz_diff / 2)
     | regroup_span (float): with ms1, only the precursor m/z whose clusters include one spanning more than regroup_span re-trigger intervals are split
-    |                       along their MS1 traces, and only in files that fragment a precursor again a minute or more later; default:None (all)
+    |                       along their MS1 traces, and only in files that fragment a precursor again a minute or more later; the clusters of the other
+    |                       precursor m/z are only split where their MS1 trace shows two peaks, each with its own MS2; default:None (all)
     | single_spectrum_peaks (bool): with ms1, a single spectrum on an MS1 maximum of its precursor that is a peak above the background is a cluster of its
     |                               own (DDA that fragments most peaks once or twice); default:False (near another maximum, a cluster needs 2 spectra)
     | survey (tuple): survey scans not used for regrouping (rts, mzs, intensities, scan offsets), e.g., an ion trap's: two clusters at one m/z with a
@@ -2521,9 +2522,10 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         for group in groups:
             # (where DDA re-fragments faster, the precursor intensities sample each peak densely enough for the valley split above: permethylated glycans on
             # C18 tail for minutes, and their tails split along the MS1 trace became rows of their own)
-            if regroup_span is not None and (retrigger < 1.0 or max(max(c['RT']) - min(c['RT']) for c in group) <= regroup_span * retrigger):
-                placed += group
-                continue
+            # Such groups are not regrouped, but a cluster of theirs spanning two MS1 peaks of its precursor with a valley below half the lower one between
+            # them is split there, if each part holds its own MS2 (two spectra, or one on a peak above the background) and its peak reaches a tenth of the
+            # cluster's highest: isomers 0.2-0.5 min apart, which DDA fragments on their flanks so that the precursor intensities of the spectra show no valley
+            split_only = regroup_span is not None and (retrigger < 1.0 or max(max(c['RT']) - min(c['RT']) for c in group) <= regroup_span * retrigger)
             rts_g = np.concatenate([c['RT'] for c in group])
             lo, hi = np.searchsorted(rts1, rts_g.min() - 2), np.searchsorted(rts1, rts_g.max() + 2, side = 'right')
             mz0 = float(max(group, key = lambda c: c['apex_int'])['apex_mz'])
@@ -2553,7 +2555,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
             # on from there instead of from the first pair (the same merges, in the same order; restarting made noisy traces of long windows quadratic)
             k = 0
             while k < len(tops) - 1:
-                if sm[tops[k]:tops[k + 1] + 1].min() >= 0.7 * min(sm[tops[k]], sm[tops[k + 1]]):
+                if sm[tops[k]:tops[k + 1] + 1].min() >= (0.5 if split_only else 0.7) * min(sm[tops[k]], sm[tops[k + 1]]):
                     tops.pop(k if sm[tops[k]] < sm[tops[k + 1]] else k + 1)
                     k = max(k - 1, 0)
                 else:
@@ -2586,6 +2588,39 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 valley = max((sm[min(a, h[0]):max(a, h[0]) + 1].min() / sm[a] for h in higher), default = 0)
                 return sm[a] >= 2 * med or (sm[a] >= med and valley < 0.5)
 
+            if split_only:
+                for c in group:
+                    part = np.searchsorted(bounds, c['RT'])
+                    own = sorted(set(part.tolist()))
+
+                    def on_peak(k):
+                        # a spectrum within the half-height width of the part's MS1 peak, not only on its far flank
+                        a = tops[k]
+                        left = np.flatnonzero(sm[:a] < sm[a] / 2)[-1:]
+                        right = a + 1 + np.flatnonzero(sm[a + 1:] < sm[a] / 2)[:1]
+                        t0, t1 = t[left[0]] if len(left) else t[0], t[right[0]] if len(right) else t[-1]
+                        return any(t0 <= r <= t1 for r, q in zip(c['RT'], part) if q == k)
+
+                    # (a part's peak stands three times over the median of its trace within 2 min, the ground-truth audit's bar for adding a peak: below it, back-to-back maxima of
+                    # one broad PGC peak split into rows)
+                    keep = [k for k in own if sm[tops[k]] >= 0.1 * max(sm[tops[j]] for j in own) and sm[tops[k]] >= 3 * np.median(trace[np.abs(t - t[tops[k]]) <= 2])
+                            and ((part == k).sum() >= 2 or (single_spectrum_peaks and is_peak(tops[k]))) and on_peak(k)]
+                    if len(keep) < 2:
+                        placed.append(c)
+                        continue
+                    # (spectra of the other parts join the kept part whose peak is nearest)
+                    halves = {k: {key: [] for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge', 'ms3')} for k in keep}
+                    for x, k in enumerate(part):
+                        h = halves[min(keep, key = lambda j: abs(rts1[lo + tops[j]] - rts1[lo + tops[k]]))]
+                        for key in ('m/z', 'RT', 'intensity', 'peak_d', 'precursor_charge'):
+                            h[key].append(c[key][x])
+                        if c['RT'][x] == c['apex_rt']:
+                            h['ms3'] += c['ms3']
+                    for k, h in halves.items():
+                        j = int(np.argmax(h['intensity']))
+                        h['apex_int'], h['apex_mz'], h['apex_rt'], h['xic_rt'] = h['intensity'][j], h['m/z'][j], h['RT'][j], float(rts1[lo + tops[k]])
+                        placed.append(h)
+                continue
             keep = [k for k in parts if sm[tops[k]] >= min_apex and (len(parts[k]['RT']) >= 2 or (single_spectrum_peaks and is_peak(tops[k])))] or [max(parts, key = lambda k: sm[tops[k]])]
             dist = {k: min(abs(rts1[lo + tops[j]] - rts1[lo + tops[k]]) for j in keep) for k in parts if k not in keep}
             for k in [k for k in dist if dist[k] <= rt_diff]:
@@ -6023,6 +6058,17 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                        sialic_derivatization = sialic_derivatization) if preds and (accurate_ms1 or abs(charge) > 1) else None
             for mz, preds, charge in zip(df_out['m/z'], df_out['predictions'], df_out['charge'])]
     df_out['doomed'] = [t is not None and (not t or abs(t[0] - mz) / t[0] * 1e6 >= ppm_thresh) for t, mz in zip(theo, df_out['m/z'])]
+    # With accurate survey scans the precursor tells a composition from the near-isobars the mass tolerance holds (three Hex for two HexNAc and a sulfate,
+    # 0.04 Da; a Neu5Ac for two dHex, 1.02 Da): a composition without a structure whose (de)protonated ion lies outside twice the run's calibration window
+    # (the width finalise_predictions keeps the run's most intense ions within) is no reading of the precursor, so it comes after every other row of its
+    # spectrum, as the rows the run cannot report do. Its chance fragments had out-explained the composition the model named and emptied the spectrum
+    # (high-mannose [M+2H]2+ read as Hex(n-3)HexNAc4S1 30 ppm off, Hex6HexNAc5Neu5Ac3dHex2 [M+3H]3+ as Hex6HexNAc5Neu5Ac4)
+    if accurate_ms1 and window is not None:
+        ion_mz = np.array([(composition_to_mass(c, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization) + (mass_tag or 0)
+                            + multiplier * abs(z) * PROTON_MASS) / abs(z) if isinstance(c, dict) and z else np.nan for c, z in zip(df_out['composition'], df_out['charge'])])
+        ion_ppm = (df_out['m/z'].values.astype(float) - ion_mz) / ion_mz * 1e6
+        df_out['doomed'] |= np.array([not p and not isinstance(a, str) for p, a in zip(df_out['predictions'], df_out['adduct'])], dtype = bool) & (
+            np.abs(ion_ppm - window[0]) > 2 * np.maximum(window[1], 3000 / df_out['m/z'].values.astype(float)))
     # A multiply charged composition, with a model structure or without, whose ion lies further above the precursor than the run's floor (see above) comes
     # after every other row of its spectrum, also after rows off by ppm_thresh: finalise_predictions keeps a fragment-backed row whose merged centroid reads
     # high, never one below the floor (at z = 2 a sialylated glycan read 0.35 m/z high lost its spectrum to its two-dHex isobar 0.16 m/z under it)

@@ -8,7 +8,7 @@ from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
     build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
     CHAIN_IONS, domon_costello_to_label, deisotope_ms2, \
-    peptide_to_glycowork, infer_glycosites, AA_masses, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
+    peptide_to_glycowork, infer_glycosites, AA_masses, fragment_residue_mass, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
     subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge, chance_fragment, relabel_graph
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
 
@@ -271,6 +271,14 @@ def test_build_glycopeptide_input_modifications():
     gp = build_glycopeptide_input('ITANTTDEP', 'N4(Deamidated);T5(HexNAc(1)Hex(1))')
     assert gp['peptide'] == 'ITAnTTDEP' and peptide_to_glycowork('nq') == 'N[Deamidated]Q[Deamidated]' and infer_glycosites('GLnSTK', 'N') == []
     assert abs(AA_masses['n'] - AA_masses['D']) < 1e-9 and abs(AA_masses['q'] - AA_masses['E']) < 1e-9
+    # iodoacetamide's Met sulfonium (x) leaves every fragment as C3H7NOS: Y0 and b3 of WQxNFTVR sit 48.003 Da below WQMNFTVR's, the precursor carries the whole residue
+    assert peptide_to_glycowork('WQxNFTVR') == 'WQM[Carbamidomethyl]NFTVR' and abs(AA_masses['x'] - AA_masses['M'] - calculate_adduct_mass('C2H3NO')) < 1e-9
+    assert abs(AA_masses['M'] - fragment_residue_mass('x') - 48.003371) < 1e-5 and build_glycopeptide_input('WQMNFTVR', 'M3(Carbamidomethyl);N4(HexNAc(3)Hex(3))')['peptide'] == 'WQxNFTVR'
+    pep = mass.calculate_mass(sequence = 'WQMNFTVR') - 48.003371
+    y0, b3 = round(pep + PROTON_MASS, 4), round(mass.fast_mass('WQM', ion_type = 'b', charge = 1) - 48.003371, 4)
+    precursor = round((pep + calculate_adduct_mass('C3H7NOS') + composition_to_mass({'Hex': 3, 'HexNAc': 3}) - composition_to_mass({}) + 2 * PROTON_MASS) / 2, 4)
+    hits = CandyCrumbs({'peptide': 'WQxNFTVR', 'glycans': [{'Hex': 3, 'HexNAc': 3}], 'glycosites': [3]}, [y0, b3, precursor], 0.01, charge = 2, fragmentation_method = 'HCD')
+    assert [hits[m]['Domon-Costello nomenclatures'][0] for m in (y0, b3, precursor)] == [[['Peptide'], ['loss of glycan 1']], [['b_3'], ['loss of glycan 1']], [['Peptide'], ['M']]]
 
 
 def test_rank_glycopeptide_structures():
