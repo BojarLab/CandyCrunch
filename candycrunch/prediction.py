@@ -2201,7 +2201,7 @@ def ms2_vector(peak_ds, max_mz):
 
 
 def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz = 3000, bin_num = 2048, mz_ppm = None, merged = None, ms1 = None, top_n = None,
-                       peak_tol = None, regroup_span = None, single_spectrum_peaks = False):
+                       peak_tol = None, regroup_span = None, single_spectrum_peaks = False, survey = None):
     """groups spectra and combines the clusters into averaged and binned spectra\n
     | Arguments:
     | :-
@@ -2221,7 +2221,10 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     | regroup_span (float): with ms1, only the precursor m/z whose clusters include one spanning more than regroup_span re-trigger intervals are split
     |                       along their MS1 traces, and only in files that fragment a precursor again a minute or more later; default:None (all)
     | single_spectrum_peaks (bool): with ms1, a single spectrum on an MS1 maximum of its precursor that is a peak above the background is a cluster of its
-    |                               own (DDA that fragments most peaks once or twice); default:False (near another maximum, a cluster needs 2 spectra)\n
+    |                               own (DDA that fragments most peaks once or twice); default:False (near another maximum, a cluster needs 2 spectra)
+    | survey (tuple): survey scans not used for regrouping (rts, mzs, intensities, scan offsets), e.g., an ion trap's: two clusters at one m/z with a
+    |                 stretch without spectra between them that the re-trigger interval excuses are not joined into one peak where their
+    |                 precursor's trace falls below a fifth of the smaller apex there; default:None\n
     | Returns:
     | :-
     | Returns a dataframe that has one row per RT-Mass cluster
@@ -2411,6 +2414,27 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 a, b = sorted([np.flatnonzero(own)[np.argmax(sm[own])], np.flatnonzero(~own)[np.argmax(sm[~own])]])
                 gap = np.diff(rts[a:b + 1]).max() if b > a else 0.0
                 depth = (ints[a + 1:b].min() if b > a + 1 else np.inf) / min(sm[a], sm[b])
+            if survey is not None and 0.25 < gap <= max_gap and depth >= 0.5:
+                # A stretch without spectra that the run's re-trigger interval excuses (2.5 min in a run re-fragmenting a precursor every 2 min) joins with
+                # no test at all, as it hides the valley between two peaks from the precursor intensities, so there the valley is read from the survey
+                # scans: ion-trap DDA with long dynamic exclusion fragments isomers 1-2 min apart on their flanks only, and their spectra joined across a
+                # gap in which the precursor's trace fell to a few percent. The trace is the signal within mz_diff of the weaker apex's m/z (an ion trap
+                # reads a precursor up to 0.3 m/z off its survey centroid), averaged over 7 scans (ion-trap survey traces of weak ions drop out from scan
+                # to scan: with 3 scans, or below half instead of a fifth, a weak z = 2 precursor re-fragmented for 30 min fell apart into 30 rows); its
+                # apexes are its highest points within 0.25 min of the clusters' apex spectra, its valley the lowest point between the spectra on either
+                # side of the gap
+                k = max(range(a, b), key = lambda q: rts[q + 1] - rts[q])
+                levels = []
+                for lo, hi, top in ((np.searchsorted(survey[0], rts[a] - 0.25), np.searchsorted(survey[0], rts[a] + 0.25, side = 'right'), True),
+                                    (np.searchsorted(survey[0], rts[b] - 0.25), np.searchsorted(survey[0], rts[b] + 0.25, side = 'right'), True),
+                                    (np.searchsorted(survey[0], rts[k], side = 'right'), np.searchsorted(survey[0], rts[k + 1]), False)):
+                    # (averaged with 3 scans more on either side, so that the window's edges see their neighbors)
+                    q0, q1 = max(lo - 3, 0), min(hi + 3, len(survey[0]))
+                    trace = np.convolve([survey[2][survey[3][q]:survey[3][q + 1]][np.abs(survey[1][survey[3][q]:survey[3][q + 1]] - apex_mzs[i]) <= mz_diff].sum()
+                                         for q in range(q0, q1)], np.ones(7) / 7, mode = 'same')[lo - q0:hi - q0] if hi > lo else []
+                    levels.append((max(trace) if top else min(trace)) if len(trace) else None)
+                if None not in levels and levels[2] < 0.2 * min(levels[:2]):
+                    continue
             if gap > max(2, max_gap) or depth < 0.5 or (gap > max_gap and depth < 0.7):
                 continue
             if depth < 0.7 or gap > max_gap:
@@ -5461,6 +5485,22 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # Prepare file for processing
     loaded_file = loaded_file.dropna(subset = ['peak_d'])
     idx_col = 'm/z' if 'm/z' in loaded_file.columns else 'reducing_mass'
+    if trap in ('linear', 'amazon') and len(loaded_file):
+        # An ion trap scans fragments only up to its upper m/z limit; the singly charged fragments of a multiply charged precursor heavier than that limit
+        # leave a smear just below it: a hundred centroids about one per m/z, none much stronger than the rest, which in positive-mode CID of large labelled
+        # N-glycans at z = 2 held 50-90% of a spectrum's signal in the last 6% of its range and outweighed the real fragments for the model and CandyCrumbs
+        # alike. Such a band (above 0.94x the spectrum's highest centroid and the precursor m/z) is dropped where it holds most of the signal, has at least
+        # 50 centroids and its 3 strongest hold less than half of it; real fragments there are a few peaks with their isotopes (5-25 centroids, the 3
+        # strongest holding 80-99%)
+        z_known = pd.to_numeric(loaded_file['precursor_charge'], errors = 'coerce').abs().fillna(2).values if 'precursor_charge' in loaded_file.columns else np.full(len(loaded_file), 2.0)
+        peaks = []
+        for d, z, mz in zip(loaded_file['peak_d'], z_known, loaded_file[idx_col]):
+            top = max(d) if d else 0
+            band = sorted((y for m, y in d.items() if m > 0.94 * top), reverse = True) if d and z > 1 and mz < 0.94 * top < top < z * mz - (z - 1) * PROTON_MASS else []
+            smear = len(band) >= 50 and sum(band) > 0.5 * sum(d.values()) and sum(band[:3]) < 0.5 * sum(band)
+            peaks.append({m: y for m, y in d.items() if m <= 0.94 * top} if smear else d)
+        loaded_file['peak_d'] = peaks
+        loaded_file = loaded_file[[bool(d) for d in loaded_file['peak_d']]]
     # A targeted run (PRM, tMS2) isolates a list of precursor m/z over and over, without survey scans and so without precursor intensities; there each
     # MS2's own signal (PRM quantifies by fragments) traces its target's elution, so it finds the peaks and abundances that precursor intensities give
     targeted = not intensity and len(loaded_file) >= 100 and (loaded_file[idx_col].round(4).map(loaded_file[idx_col].round(4).value_counts()) >= 20).mean() >= 0.9
@@ -5569,7 +5609,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # (and whether survey scans came with the spectra: the reducing end and glycan class checks get the file without them, and clusters regrouped along
     # MS1 traces are no clusters of theirs)
     key = (loaded_file[idx_col].values.tobytes(), loaded_file['RT'].values.tobytes(), mass_tolerance, rt_diff, bin_num, regroup, fragment_tolerance,
-           accurate_ms1 and ms1 is not None, single_spectrum_peaks)
+           accurate_ms1 and ms1 is not None, single_spectrum_peaks, ms1 is not None)
     # (the reducing end check's runs on the most intense clusters only pool those, unless the whole file was condensed with the same precursors)
     if key not in condensed and _top_clusters:
         key = key + (_top_clusters,)
@@ -5577,7 +5617,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         condensed[key] = condense_dataframe(loaded_file, mz_diff = mass_tolerance, rt_diff = rt_diff, bin_num = bin_num, mz_ppm = mz_ppm,
                                             merged = condensed.setdefault('merged', {}), ms1 = ms1 if accurate_ms1 else None, top_n = _top_clusters,
                                             peak_tol = fragment_tolerance if trap == 'orbitrap' else None, regroup_span = regroup_span,
-                                            single_spectrum_peaks = single_spectrum_peaks)
+                                            single_spectrum_peaks = single_spectrum_peaks, survey = None if accurate_ms1 else ms1)
     df_out = condensed[key].copy()
     # The most intense clusters, which the reducing end check below looks at
     top_clusters = (df_out if rt_cap is None else df_out[df_out['RT'].values < rt_cap]).sort_values(['intensity', 'num_spectra'], ascending = False, kind = 'stable').iloc[:_top_clusters or 100]

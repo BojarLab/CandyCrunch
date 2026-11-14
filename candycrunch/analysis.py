@@ -4585,7 +4585,7 @@ def place_peak_label(px, py, label, placed, bounds, fontsize, attempts, pad = 1.
     must: a label without a home that has no free place takes the nearest beside its peak, across other peaks if need be, rather than none.
     Returns (x offset, y offset, ha, va, box as (x0, y0, x1, y1)), or None where it does not fit"""
     from viscose.text import width
-    length, thickness = width(label, fontsize), 1.2 * fontsize
+    length, thickness = width(label, fontsize) if extent is None else 0.0, 1.2 * fontsize
     # (direction, ha, va, x offset, the box's left edge from the peak, its width and height): standing over its peak (under it in a mirror), flipped to run
     # alongside it, and lying across it
     sign = -1 if downward else 1
@@ -4596,46 +4596,49 @@ def place_peak_label(px, py, label, placed, bounds, fontsize, attempts, pad = 1.
     moves = sticks is not None
     sticks = np.empty((0, 3)) if sticks is None else np.asarray(sticks, dtype = float).reshape(-1, 3)
     sticks = sticks[np.abs(sticks[:, 0] - px) > 0.5]
-    # lines and the diagonals of the boxes placed as rows of (x0, y0, x1, y1): through a box, a segment with both ends outside it crosses one of its diagonals
-    lines = np.asarray([(*a, *b) for a, b in lines or []], dtype = float).reshape(-1, 4)
-    boxes = np.asarray([other[:4] for other in placed], dtype = float).reshape(-1, 4)
-    diagonals = np.concatenate([boxes, boxes[:, [0, 3, 2, 1]]])
-    side = lambda x0, y0, x1, y1, x, y: (x1 - x0) * (y - y0) - (y1 - y0) * (x - x0)
 
-    def meets(segments, a, b):
-        # Whether any of the segments properly crosses the segment from a to b
-        return bool(np.any((side(*a, *b, segments[:, 0], segments[:, 1]) * side(*a, *b, segments[:, 2], segments[:, 3]) < 0) &
-                           (side(*segments.T, *a) * side(*segments.T, *b) < 0)))
+    def meets(segments, ax, ay, bx, by):
+        # For each segment from (ax, ay) to (bx, by), arrays of one value per segment, whether any of the segments properly crosses it: each has the ends of the
+        # other on either side of its line
+        x0, y0, x1, y1, dx, dy = segments
+        ax, ay, bx, by = (np.asarray(v, dtype = float)[..., None] for v in (ax, ay, bx, by))
+        if not len(x0):
+            return np.zeros(np.broadcast_shapes(ax.shape, bx.shape)[:-1], dtype = bool)
+        run, rise = bx - ax, by - ay
+        return np.any(((run * (y0 - ay) - rise * (x0 - ax)) * (run * (y1 - ay) - rise * (x1 - ax)) < 0) &
+                      ((dx * (ay - y0) - dy * (ax - x0)) * (dx * (by - y0) - dy * (bx - x0)) < 0), axis = -1)
 
-    def cut(box):
-        # Whether a line runs into the box
-        ends = lines.reshape(-1, 2)
-        return bool(np.any((ends[:, 0] > box[0]) & (ends[:, 0] < box[2]) & (ends[:, 1] > box[1]) & (ends[:, 1] < box[3]))) or meets(lines, box[:2], box[2:4]) or meets(
-            lines, (box[0], box[3]), (box[2], box[1]))
+    def cut(x0, y0, x1, y1):
+        # For each box, columns of arrays, whether a line runs into it: ends inside it, or across either diagonal
+        if not len(lines):
+            return np.zeros(len(x0), dtype = bool)
+        return np.any((ends[:, 0] > x0[:, None]) & (ends[:, 0] < x1[:, None]) & (ends[:, 1] > y0[:, None]) & (ends[:, 1] < y1[:, None]), axis = 1) | meets(
+            walls, *(np.concatenate(pair) for pair in ((x0, x0), (y0, y1), (x1, x1), (y1, y0)))).reshape(2, -1).any(axis = 0)
 
-    across = lambda box: bool(np.any((sticks[:, 0] > box[0]) & (sticks[:, 0] < box[2]) & (sticks[:, 1] < box[3]) & (sticks[:, 2] > box[1]))) or cut(box)
+    across = lambda box: bool(np.any((sticks[:, 0] > box[0]) & (sticks[:, 0] < box[2]) & (sticks[:, 1] < box[3]) & (sticks[:, 2] > box[1]))) or bool(cut(
+        *np.asarray(box[:4], dtype = float)[:, None])[0])
 
-    def leader_clear(box, y_offset, shift):
-        # A label moved off its peak, sideways or far enough up for a leader, needs that leader, from the peak's top to the middle of the label's near end, to pass
-        # no other peak, no label, and no line
-        if not shift and abs(y_offset) <= 8 + lift:
-            return True
-        end = ((box[0] + box[2]) / 2, box[1] if y_offset > 0 else box[3])
-        t = (sticks[:, 0] - px) / (end[0] - px) if end[0] != px else np.full(len(sticks), np.inf)
-        level = py + t * (end[1] - py)
-        return not (np.any((t > 0) & (t < 1) & (sticks[:, 1] < level) & (sticks[:, 2] > level)) or meets(diagonals, (px, py), end) or meets(lines, (px, py), end))
+    def leader_clear(x0, y0, x1, y1, y_offset, shift):
+        # For each box, columns of arrays, with its y offset and shift: a label moved off its peak, sideways or far enough up for a leader, needs that leader,
+        # from the peak's top to the middle of the label's near end, to pass no other peak, no label, and no line
+        clear = (shift == 0) & (np.abs(y_offset) <= 8 + lift)
+        if clear.all():
+            return clear
+        x0, y0, x1, y1, y_offset = (v[~clear] for v in (x0, y0, x1, y1, y_offset))
+        end_x, end_y = (x0 + x1) / 2, np.where(y_offset > 0, y0, y1)
+        with np.errstate(divide = 'ignore', invalid = 'ignore'):
+            t = np.where((end_x != px)[:, None], (sticks[:, 0] - px) / (end_x - px)[:, None], np.inf)
+            level = py + t * (end_y - py)[:, None]
+        clear[~clear] = ~(np.any((t > 0) & (t < 1) & (sticks[:, 1] < level) & (sticks[:, 2] > level), axis = 1) | meets(blocks, px, py, end_x, end_y))
+        return clear
 
-    def find(option, shift, avoid):
-        # The first place of an option, shift points sideways, clear of the labels placed and, with avoid, of the lines with its leader clear of labels and lines,
-        # and with avoid 2 also of the sticks, as (x offset, y offset, box, padded)
+    def stand(option):
+        # find for one option without a shift or anything to avoid but the labels placed, in plain Python, as it runs for every label
         direction, _, _, x_offset, left, w, h = option
-        # A flipped label runs alongside its peak, so it is pushed off the line rather than centered on it; one moved sideways rises at least as far as it moved
-        # beyond its width, so that its leader runs no flatter than 45 degrees and not along the axis
-        y_offset = direction * max(3.0 + (lift if option is options[0] else 0.0), abs(shift) - thickness)
-        for _ in range(2 * attempts if avoid else attempts):
-            x0 = px + left + shift
-            if not shift and left < 0 and xbounds is not None:
-                # a label over (under) its peak that would run more than its padding past a side of the axes slides in, as far as it still stands over its peak
+        y_offset = direction * max(3.0 + (lift if option is options[0] else 0.0), -thickness)
+        for _ in range(attempts):
+            x0 = px + left
+            if left < 0 and xbounds is not None:
                 x0 = min(max(x0, xbounds[0] - pad, px - w), xbounds[1] + pad - w, px)
             y0 = py + y_offset if direction > 0 else py + y_offset - h
             box = (x0, y0, x0 + w, y0 + h)
@@ -4643,42 +4646,90 @@ def place_peak_label(px, py, label, placed, bounds, fontsize, attempts, pad = 1.
                 return None
             padded = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
             clashes = [other for other in placed + list(reserved) if padded[0] < other[2] and other[0] < padded[2] and padded[1] < other[3] and other[1] < padded[3]]
-            if avoid > 1 and shift:
-                column = sticks[(sticks[:, 0] > padded[0]) & (sticks[:, 0] < padded[2])]
-                if np.any(column[:, 1] < box[3] + 12.0 if downward else column[:, 2] > box[1] - 12.0):
-                    return None
-            if avoid and cut(padded):
-                return None
-            if avoid > 1:
-                clashes += [(x, bottom, x, top) for x, bottom, top in sticks[(sticks[:, 0] > padded[0]) & (sticks[:, 0] < padded[2]) & (sticks[:, 1] < padded[3]) &
-                                                                             (sticks[:, 2] > padded[1])]]
             if not clashes:
-                return None if avoid and not leader_clear(box, y_offset, shift) else (x_offset + x0 - px - left, y_offset, box, padded)
-            y_offset += (max(other[3] for other in clashes) - box[1] + pad if direction > 0 else
-                         min(other[1] for other in clashes) - box[3] - pad)
+                return x_offset + x0 - px - left, y_offset, box, padded
+            y_offset += max(other[3] for other in clashes) - box[1] + pad if direction > 0 else min(other[1] for other in clashes) - box[3] - pad
         return None
+
+    def find(shifts, avoid):
+        # The first place of every option at each of the shifts, points sideways, clear of the labels placed and, with avoid, of the lines with its leader clear of
+        # labels and lines, and with avoid 2 also of the sticks, as (x offset, y offset, box, padded) or None, option by option; all at once, each lifted on its own
+        n = len(shifts)
+        shifts = np.tile(np.asarray(shifts, dtype = float), len(options))
+        direction, x_offsets, lefts, widths, heights = (np.repeat([option[k] for option in options], n).astype(float) for k in (0, 3, 4, 5, 6))
+        # A flipped label runs alongside its peak, so it is pushed off the line rather than centered on it; one moved sideways rises at least as far as it moved
+        # beyond its width, so that its leader runs no flatter than 45 degrees and not along the axis
+        y_offsets = direction * np.maximum(3.0 + np.repeat([lift] + [0.0] * (len(options) - 1), n), np.abs(shifts) - thickness)
+        spots, rows = [None] * len(shifts), np.arange(len(shifts))
+        for _ in range(2 * attempts if avoid else attempts):
+            shift, y_offset, up, w, h, left = shifts[rows], y_offsets[rows], direction[rows] > 0, widths[rows], heights[rows], lefts[rows]
+            x0 = px + left + shift
+            if xbounds is not None:
+                # a label over (under) its peak that would run more than its padding past a side of the axes slides in, as far as it still stands over its peak
+                x0 = np.where((shift == 0) & (left < 0), np.minimum(np.minimum(np.maximum(np.maximum(x0, xbounds[0] - pad), px - w), xbounds[1] + pad - w), px), x0)
+            y0 = np.where(up, py + y_offset, py + y_offset - h)
+            x1, y1 = x0 + w, y0 + h
+            keep = ~((y1 > bounds[1]) | (y0 < bounds[0]))
+            if xbounds is not None:
+                keep &= ~((x0 < xbounds[0] - pad - 1e-6) | (x1 > xbounds[1] + pad + 1e-6))
+            if avoid > 1:
+                column = (sticks[:, 0] > (x0 - pad)[:, None]) & (sticks[:, 0] < (x1 + pad)[:, None])
+                keep &= ~((shift != 0) & np.any(column & ((sticks[:, 1] < (y1 + 12.0)[:, None]) if downward else (sticks[:, 2] > (y0 - 12.0)[:, None])), axis = 1))
+            if avoid:
+                keep[keep] = ~cut(x0[keep] - pad, y0[keep] - pad, x1[keep] + pad, y1[keep] + pad)
+            rows, shift, y_offset, up, x0, y0, x1, y1 = (v[keep] for v in (rows, shift, y_offset, up, x0, y0, x1, y1))
+            if avoid > 1:
+                column = column[keep]
+            if not len(rows):
+                break
+            padded = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+            clashes = (padded[0][:, None] < others[:, 2]) & (others[:, 0] < padded[2][:, None]) & (padded[1][:, None] < others[:, 3]) & (others[:, 1] < padded[3][:, None])
+            stuck = column & (sticks[:, 1] < padded[3][:, None]) & (sticks[:, 2] > padded[1][:, None]) if avoid > 1 else np.zeros((len(rows), len(sticks)), dtype = bool)
+            free = ~np.any(clashes, axis = 1) & ~np.any(stuck, axis = 1)
+            done = free.copy()
+            if avoid:
+                done[free] = leader_clear(x0[free], y0[free], x1[free], y1[free], y_offset[free], shift[free])
+            for k in np.flatnonzero(done):
+                box = (float(x0[k]), float(y0[k]), float(x1[k]), float(y1[k]))
+                spots[rows[k]] = (float(x_offsets[rows[k]]) + box[0] - px - float(lefts[rows[k]]), float(y_offset[k]), box, tuple(float(v[k]) for v in padded))
+            # the others lift it past the highest of them (lower it past the lowest)
+            top = np.maximum(np.max(np.where(clashes, others[:, 3], -np.inf), axis = 1, initial = -np.inf), np.max(np.where(stuck, sticks[:, 2], -np.inf), axis = 1, initial = -np.inf))
+            bottom = np.minimum(np.min(np.where(clashes, others[:, 1], np.inf), axis = 1, initial = np.inf), np.min(np.where(stuck, sticks[:, 1], np.inf), axis = 1, initial = np.inf))
+            y_offsets[rows] = np.where(up, y_offset + (top - y0 + pad), y_offset + (bottom - y1 - pad))
+            rows = rows[~free]
+        return [spots[k:k + n] for k in range(0, len(spots), n)]
 
     def nearest(avoid):
         # The nearest place, upright before flipped before lying, nearer shifts first until a shift alone costs more than the best place found
-        for option in options:
+        shifts = [0.0] + [sign * k * thickness / 2 for k in range(1, 17) for sign in (1, -1)]
+        for option, spots in zip(options, find(shifts, avoid)):
             best, home = None, option[0] * (3.0 + (lift if option is options[0] else 0.0))
-            for shift in [0.0] + [sign * k * thickness / 2 for k in range(1, 17) for sign in (1, -1)]:
+            for shift, spot in zip(shifts, spots):
                 if best is not None and 2 * abs(shift) >= best[0]:
                     break
-                spot = find(option, shift, avoid)
                 if spot is not None and (best is None or 2 * abs(shift) + abs(spot[1] - home) < best[0]):
                     best = (2 * abs(shift) + abs(spot[1] - home), option, spot)
             if best is not None:
                 return best[1:]
         return None
 
-    found = next(((option, spot) for option in options if (spot := find(option, 0.0, 0)) is not None), None)
+    found = next(((option, spot) for option in options if (spot := stand(option)) is not None), None)
+    if moves or home is not None or must:
+        # lines and the diagonals of the boxes placed as rows of (x0, y0, x1, y1): through a box, a segment with both ends outside it crosses one of its diagonals;
+        # the boxes a place keeps clear of, and the segments a label or leader crosses none of, as columns with each segment's extent in x and y, which stay as
+        # they are while the label is placed (a label that only avoids the labels placed needs none of them)
+        lines = np.asarray([(*a, *b) for a, b in lines or []], dtype = float).reshape(-1, 4)
+        boxes = np.asarray([other[:4] for other in placed], dtype = float).reshape(-1, 4)
+        columns = lambda rows: (*rows.T, rows[:, 2] - rows[:, 0], rows[:, 3] - rows[:, 1])
+        walls, blocks = columns(lines), columns(np.concatenate([boxes, boxes[:, [0, 3, 2, 1]], lines]))
+        others, ends = np.asarray([other[:4] for other in placed + list(reserved)], dtype = float).reshape(-1, 4), lines.reshape(-1, 2)
     # Across another peak or a line, or with its leader through one or through a label, it moves; a label without a home is only worth a free place
-    if moves and (found is None or across(found[1][3]) or not leader_clear(found[1][2], found[1][1], 0.0)):
+    if moves and (found is None or across(found[1][3]) or not leader_clear(*np.asarray(found[1][2], dtype = float)[:, None], np.array([found[1][1]]), np.zeros(1))[0]):
         found = nearest(2) or (found if home is not None else None)
     if found is None and home is not None:
         padded = (home[4][0] - pad, home[4][1] - pad, home[4][2] + pad, home[4][3] + pad)
-        if not any(padded[0] < other[2] and other[0] < padded[2] and padded[1] < other[3] and other[1] < padded[3] for other in placed) and not cut(padded):
+        if not any(padded[0] < other[2] and other[0] < padded[2] and padded[1] < other[3] and other[1] < padded[3] for other in placed) and not cut(
+                *np.asarray(padded, dtype = float)[:, None])[0]:
             placed.append(padded)
             return home
     if found is None and (home is not None or must):
@@ -4879,9 +4930,9 @@ def _targets_at(scores, decoy, fdr):
     return int(((_qvalues_of(scores, decoy) <= fdr) & ~np.asarray(decoy, dtype = bool)).sum())
 
 
-def _linear_svm(X, positive, c_pos, c_ratio):
+def _linear_svm(X, positive, c_pos, c_ratio, signs = None):
     """weights and intercept of an L2-regularized linear SVM with squared hinge loss (liblinear's primal, the intercept regularized as a feature of value 1), each positive
-    weighted c_pos and each negative c_pos x c_ratio"""
+    weighted c_pos and each negative c_pos x c_ratio; with signs, the weight of a feature with sign 1 is at least 0, with -1 at most 0, with 0 free"""
     from scipy.optimize import minimize
     sign = np.where(positive, 1.0, -1.0)
     c = np.where(positive, c_pos, c_pos * c_ratio)
@@ -4890,15 +4941,17 @@ def _linear_svm(X, positive, c_pos, c_ratio):
     def loss(v):
         margin = np.maximum(0.0, 1.0 - A @ v)
         return 0.5 * v @ v + (c * margin * margin).sum(), v - 2.0 * A.T @ (c * margin)
-    v = minimize(loss, np.zeros(A.shape[1]), jac = True, method = 'L-BFGS-B', options = {'maxiter': 2000, 'gtol': 1e-8}).x
+    bounds = None if signs is None else [(0.0, None) if s > 0 else (None, 0.0) if s < 0 else (None, None) for s in signs] + [(None, None)]
+    v = minimize(loss, np.zeros(A.shape[1]), jac = True, method = 'L-BFGS-B', bounds = bounds, options = {'maxiter': 2000, 'gtol': 1e-8}).x
     return v[:-1], v[-1]
 
 
-def _semi_supervised_svm(Z, decoy, fdr, iterations, c_pos, c_ratios, seed):
+def _semi_supervised_svm(Z, decoy, fdr, iterations, c_pos, c_ratios, seed, signs = None):
     """Percolator's model on standardized features Z: from the single feature that finds the most targets at fdr, SVMs of the targets at fdr against all decoys, each
-    iteration's class weights chosen by an inner 3-fold cross-validation counting the targets found at fdr"""
+    iteration's class weights chosen by an inner 3-fold cross-validation counting the targets found at fdr; signs as in _linear_svm, the starting feature taken with its sign"""
     inner = np.random.default_rng(seed).integers(0, 3, len(Z))
-    _, j, sign = max((_targets_at(sign * Z[:, j], decoy, fdr), j, sign) for j in range(Z.shape[1]) for sign in (1, -1))
+    allowed = [0] * Z.shape[1] if signs is None else list(signs)
+    _, j, sign = max((_targets_at(sign * Z[:, j], decoy, fdr), j, sign) for j in range(Z.shape[1]) for sign in (1, -1) if allowed[j] in (0, sign))
     scores, w, b = sign * Z[:, j], np.eye(Z.shape[1])[j] * sign, 0.0
     for iteration in range(iterations):
         positive = ~decoy & (_qvalues_of(scores, decoy) <= fdr)
@@ -4909,10 +4962,10 @@ def _semi_supervised_svm(Z, decoy, fdr, iterations, c_pos, c_ratios, seed):
                 found = 0
                 for k in range(3):
                     fit = train & (inner != k)
-                    wk, bk = _linear_svm(Z[fit], positive[fit], c, r)
+                    wk, bk = _linear_svm(Z[fit], positive[fit], c, r, signs)
                     found += _targets_at(Z[inner == k] @ wk + bk, decoy[inner == k], fdr)
                 best = max(best, (found, (c, r)), key = lambda x: x[0])
-        w_new, b_new = _linear_svm(Z[train], positive[train], *best[1])
+        w_new, b_new = _linear_svm(Z[train], positive[train], *best[1], signs)
         new = Z @ w_new + b_new
         # an iteration that loses a tenth of the targets ends the training with the model before it
         if iteration and _targets_at(new, decoy, fdr) < 0.9 * _targets_at(scores, decoy, fdr):
@@ -4922,7 +4975,7 @@ def _semi_supervised_svm(Z, decoy, fdr, iterations, c_pos, c_ratios, seed):
 
 
 def rescore_psms(features, decoy, fdr = 0.01, fallback = 0, folds = 3, iterations = 10, c_pos = (0.1, 1.0, 10.0), c_ratios = (1.0, 3.0, 10.0), min_decoys = 100, seed = 1,
-                 details = None):
+                 details = None, signs = None):
     """Percolator-style semi-supervised rescoring of top hits (one per spectrum; Kall et al., Nat Methods 2007): a linear SVM learns from the targets at fdr and all decoys
     which combination of features separates them, cross-validated so that no hit is scored by a model that saw it\n
     | Arguments:
@@ -4937,7 +4990,9 @@ def rescore_psms(features, decoy, fdr = 0.01, fallback = 0, folds = 3, iteration
     | c_ratios (tuple): ratios of the cost of negatives to that of positives tried; default:(1.0, 3.0, 10.0)
     | min_decoys (int): with fewer decoys the hits are too few to learn from and None is returned; default:100
     | seed (int): seed of the fold assignment; default:1
-    | details (list): if a list, receives one dict per fold: 'weights' (on standardized features), 'intercept', 'kept' (False where the fallback column was kept)\n
+    | details (list): if a list, receives one dict per fold: 'weights' (on standardized features), 'intercept', 'kept' (False where the fallback column was kept)
+    | signs (list): per feature, 1 if it may only raise a score (evidence), -1 if it may only lower it (e.g., a mass error), 0 if free; without it every weight is free. A free
+    |             feature that overlaps others (a count the score already holds) can take an inverted weight and reward a hit for missing evidence; default:None\n
     | Returns:
     | :-
     | Returns an array of scores on one scale across folds (each fold's fdr cut at 0, its decoys' median at -1), or None with fewer than min_decoys decoys
@@ -4953,7 +5008,7 @@ def rescore_psms(features, decoy, fdr = 0.01, fallback = 0, folds = 3, iteration
     out = np.empty(len(Z))
     for k in range(folds):
         train, test = fold != k, fold == k
-        w, b = _semi_supervised_svm(Z[train], decoy[train], fdr, iterations, c_pos, c_ratios, seed + k)
+        w, b = _semi_supervised_svm(Z[train], decoy[train], fdr, iterations, c_pos, c_ratios, seed + k, signs)
         kept = _targets_at(Z[train] @ w + b, decoy[train], fdr) >= _targets_at(Z[train, fallback], decoy[train], fdr)
         if not kept:
             w, b = np.eye(Z.shape[1])[fallback], 0.0
@@ -5473,14 +5528,12 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
         def crossing(a, b):
             # For each segment of a (rows of x0, y0, x1, y1, in any shape), whether it properly crosses any segment of b
             a, b = np.asarray(a, dtype = float)[..., None, :], np.asarray(b, dtype = float).reshape(-1, 4)
-            side = lambda s, x, y: (s[..., 2] - s[..., 0]) * (y - s[..., 1]) - (s[..., 3] - s[..., 1]) * (x - s[..., 0])
-            return np.any((side(a, b[:, 0], b[:, 1]) * side(a, b[:, 2], b[:, 3]) < 0) & (side(b, a[..., 0], a[..., 1]) * side(b, a[..., 2], a[..., 3]) < 0), axis = -1)
-
-        def through(segments, found):
-            # For each segment (in any shape), whether it ends inside or runs through any of the boxes (x0, y0, x1, y1)
-            segments, found = np.asarray(segments, dtype = float), np.asarray(found, dtype = float).reshape(-1, 4)
-            inside = lambda x, y: np.any((found[:, 0] < x[..., None]) & (x[..., None] < found[:, 2]) & (found[:, 1] < y[..., None]) & (y[..., None] < found[:, 3]), axis = -1)
-            return inside(segments[..., 0], segments[..., 1]) | inside(segments[..., 2], segments[..., 3]) | crossing(segments, np.concatenate([found, found[:, [0, 3, 2, 1]]]))
+            if not len(b):
+                return np.zeros(a.shape[:-2], dtype = bool)
+            # each has the ends of the other on either side of its line
+            run, rise, b_run, b_rise = a[..., 2] - a[..., 0], a[..., 3] - a[..., 1], b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]
+            return np.any(((run * (b[:, 1] - a[..., 1]) - rise * (b[:, 0] - a[..., 0])) * (run * (b[:, 3] - a[..., 1]) - rise * (b[:, 2] - a[..., 0])) < 0) &
+                          ((b_run * (a[..., 1] - b[:, 1]) - b_rise * (a[..., 0] - b[:, 0])) * (b_run * (a[..., 3] - b[:, 1]) - b_rise * (a[..., 2] - b[:, 0])) < 0), axis = -1)
 
         # boxes stacked above one another keep 2 points apart, beside one another a gap
         stack = 2.0
@@ -5505,27 +5558,30 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                 lo, hi = frame_x + width / 2, frame_x + frame_width - width / 2
                 if hi < lo or height > band[1] - zero - 3.0:
                     return None
+                taken = np.asarray(boxes, dtype = float).reshape(-1, 4)
                 # every 6 points, over the peak, and flush beside the boxes and beside the peaks it keeps off
-                xs = np.unique(np.clip(np.r_[np.arange(lo, hi, 6.0), hi, px, [v for b in boxes for v in (b[2] + gap + width / 2, b[0] - gap - width / 2)],
+                xs = np.unique(np.clip(np.r_[np.arange(lo, hi, 6.0), hi, px, np.column_stack([taken[:, 2] + gap + width / 2, taken[:, 0] - gap - width / 2]).ravel(),
                                              [v for k in keep_off for v in (k - width / 2 - gap / 2 - 0.01, k + width / 2 + gap / 2 + 0.01)]], lo, hi))
                 # the lowest a box centered at each x may sit: 3 points over its own peak, 12 over any other within a gap of it
                 near = np.abs(sticks_up[None, :, 0] - xs[:, None]) <= width / 2 + gap
                 floor = np.max(np.where(near, sticks_up[None, :, 2] + np.where(np.abs(sticks_up[:, 0] - px) <= 0.5, 3.0, 12.0), zero + 3.0), axis = 1)
                 # at each x the height nearest the peak and those whose middle (where a leader up and across meets it) passes just over the sticks on either side;
-                # stacked just over and under each box where it would stand beside it, and with its middle just over or under the box beyond it
-                levels = np.unique(np.r_[py - height / 2, [t - height / 2 for side in sides for t in side[2][1:]]])
-                x, y0 = [np.repeat(xs, len(levels))], [np.tile(levels, len(xs))]
-                for b in boxes:
-                    beside = np.abs(xs - (b[0] + b[2]) / 2) < (b[2] - b[0] + width) / 2 + gap + 6.0
-                    beyond = xs > b[0] if b[0] > px else xs < b[2]
-                    for keep, v in ((beside, b[3] + stack), (beside, b[1] - stack - height), (beyond, b[3] + 1.0 - height / 2), (beyond, b[1] - 1.0 - height / 2)):
-                        x.append(xs[keep])
-                        y0.append(np.full(keep.sum(), v))
-                x = np.concatenate(x)
-                y0 = np.maximum(np.concatenate(y0), floor[np.searchsorted(xs, x)])
-                fits = (y0 + height <= band[1]) & ~np.any(np.abs(np.asarray(keep_off, dtype = float)[None, :] - x[:, None]) < width / 2 + gap / 2, axis = 1)
-                for b in boxes:
-                    fits &= ~((x - width / 2 - gap < b[2]) & (b[0] < x + width / 2 + gap) & (y0 - stack < b[3]) & (b[1] < y0 + height + stack))
+                # stacked just over and under each box where it would stand beside it, and with its middle just over or under the box beyond it (box by box, in
+                # this order)
+                levels = np.unique(np.r_[py - height / 2, np.concatenate([side[2][1:] for side in sides]) - height / 2])
+                beside = np.abs(xs - (taken[:, [0]] + taken[:, [2]]) / 2) < (taken[:, [2]] - taken[:, [0]] + width) / 2 + gap + 6.0
+                beyond = np.where(taken[:, [0]] > px, xs > taken[:, [0]], xs < taken[:, [2]])
+                n, k, i = np.nonzero(np.stack([beside, beside, beyond, beyond], axis = 1))
+                # each place's x as its index in xs, where what depends on x alone is computed once
+                at = np.concatenate([np.repeat(np.arange(len(xs)), len(levels)), i])
+                x = xs[at]
+                y0 = np.maximum(np.concatenate([np.tile(levels, len(xs)), np.column_stack([taken[:, 3] + stack, taken[:, 1] - stack - height, taken[:, 3] + 1.0 - height / 2,
+                                                                                           taken[:, 1] - 1.0 - height / 2])[n, k]]), floor[at])
+                fits = (y0 + height <= band[1]) & ~np.any(np.abs(np.asarray(keep_off, dtype = float)[None, :] - xs[:, None]) < width / 2 + gap / 2, axis = 1)[at]
+                # off the boxes: of those beside it in x (pairs of a place and a box), the ones it meets in y
+                place_of, box = np.nonzero(((xs[:, None] - width / 2 - gap < taken[:, 2]) & (taken[:, 0] < xs[:, None] + width / 2 + gap))[at[fits]])
+                place_of = np.flatnonzero(fits)[place_of]
+                fits[place_of[(y0[place_of] - stack < taken[box, 3]) & (taken[box, 1] < y0[place_of] + height + stack)]] = False
                 x, y0 = x[fits], y0[fits]
                 x0, x1, y1 = x - width / 2, x + width / 2, y0 + height
 
@@ -5546,29 +5602,50 @@ def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_thr
                                     ((waiting[None, :] - px) * (waiting[None, :] - reach[:, None]) < 0)).sum(axis = 1)
             ranked = np.argsort(cost, kind = 'stable')
             ranked = ranked[cost[ranked] < limit]
-            # the nearest places first, a few, then more at a time: a box no leader drawn runs into, with a leader of either shape (two segments, the second of a
-            # straight one a point) through no box and across no leader, the shorter where both are
+            # a leader ends at the peak, so a peak inside a wall has none; it runs through none of the walls (ends in none, crosses no diagonal) and across no
+            # leader drawn
+            walls = np.asarray(boxes if walls is None else walls, dtype = float).reshape(-1, 4)
+            inside = lambda x, y: np.any((walls[:, 0] < x[:, None]) & (x[:, None] < walls[:, 2]) & (walls[:, 1] < y[:, None]) & (y[:, None] < walls[:, 3]), axis = 1)
+            if inside(np.array([px]), np.array([py]))[0]:
+                return None
+            blocking = np.concatenate([walls, walls[:, [0, 3, 2, 1]], drawn.reshape(-1, 4)])
+            # the nearest places first, a few, then more at a time: a box no leader drawn runs into, with a leader of either shape (straight from the box, or up and
+            # across, then down to the peak) clear, the shorter where both are; each test only for the places still in the running
             for start, stop in ((0, 16), (16, 80), (80, 336), (336, 1360)):
                 j = ranked[start:stop]
                 if not len(j):
                     break
+                j = j[np.isfinite(straight[j]) | np.isfinite(across[j])]
                 padded = np.column_stack([x0[j] - gap / 2, y0[j] - stack / 2, x1[j] + gap / 2, y1[j] + stack / 2])
                 hit = crossing(np.stack([padded, padded[:, [0, 3, 2, 1]]], axis = 1), drawn).any(axis = 1)
                 if len(drawn):
                     ends = drawn.reshape(-1, 2)
                     hit |= np.any((padded[:, None, 0] < ends[:, 0]) & (ends[:, 0] < padded[:, None, 2]) & (padded[:, None, 1] < ends[:, 1]) & (ends[:, 1] < padded[:, None, 3]), axis = 1)
-                paths = []
-                for size, begin, corner in ((straight[j], np.column_stack([ex[j], ey[j]]), np.column_stack([ex[j], ey[j]])),
-                                            (across[j], np.column_stack([edge[j], middle[j]]), np.column_stack([np.full(len(j), px), middle[j]]))):
-                    segments = np.stack([np.column_stack([begin, corner]), np.column_stack([corner, np.broadcast_to((px, py), corner.shape)])], axis = 1)
-                    clear = np.isfinite(size) & ~hit & ~(through(segments, boxes if walls is None else walls).any(axis = 1) | crossing(segments, drawn).any(axis = 1))
-                    paths.append((np.where(clear, size, np.inf), begin, corner))
-                if np.isfinite(np.minimum(paths[0][0], paths[1][0])).any():
-                    first = int(np.argmax(np.isfinite(np.minimum(paths[0][0], paths[1][0]))))
-                    size, begin, corner = paths[0] if paths[0][0][first] <= paths[1][0][first] else paths[1]
+                j = j[~hit]
+                sizes = np.full((2, len(j)), np.inf)
+                go = np.flatnonzero(np.isfinite(straight[j]))
+                if len(go):
+                    m = j[go]
+                    # from its box to the peak
+                    leader = np.empty((len(m), 4))
+                    leader[:, 0], leader[:, 1], leader[:, 2], leader[:, 3] = ex[m], ey[m], px, py
+                    sizes[0, go] = np.where(inside(ex[m], ey[m]) | crossing(leader, blocking), np.inf, straight[m])
+                go = np.flatnonzero(np.isfinite(across[j]))
+                if len(go):
+                    m = j[go]
+                    # across to over the peak, then down to it
+                    leader = np.empty((2, len(m), 4))
+                    leader[0, :, 0], leader[0, :, 1], leader[0, :, 2], leader[0, :, 3] = edge[m], middle[m], px, middle[m]
+                    leader[1, :, 0], leader[1, :, 1], leader[1, :, 2], leader[1, :, 3] = px, middle[m], px, py
+                    sizes[1, go] = np.where(inside(leader[:, :, 0].ravel(), leader[:, :, 1].ravel()).reshape(2, -1).any(axis = 0) | crossing(leader, blocking).any(axis = 0),
+                                            np.inf, across[m])
+                clear = np.flatnonzero(np.isfinite(sizes.min(axis = 0)))
+                if len(clear):
+                    first = clear[0]
                     i = j[first]
-                    path = [tuple(begin[first]), (px, py)] if paths[0][0][first] <= paths[1][0][first] else [tuple(begin[first]), tuple(corner[first]), (px, py)]
-                    return (x0[i], y0[i], x1[i], y1[i]), float(size[first]), path
+                    if sizes[0, first] <= sizes[1, first]:
+                        return (x0[i], y0[i], x1[i], y1[i]), float(sizes[0, first]), [(ex[i], ey[i]), (px, py)]
+                    return (x0[i], y0[i], x1[i], y1[i]), float(sizes[1, first]), [(edge[i], middle[i]), (px, middle[i]), (px, py)]
             return None
 
         segments = lambda paths: [(*a, *b) for path in paths if path is not None for a, b in zip(path, path[1:])]

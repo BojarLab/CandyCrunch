@@ -2102,6 +2102,12 @@ def test_rescore_psms():
     learned = rescore_psms(X, decoy, details = details)
     assert targets(learned) > 1.5 * max(targets(X[:, 0]), targets(X[:, 1])) and len(details) == 3 and all(d['kept'] for d in details)
     assert all(abs(d['weights'][2]) < 0.25 * min(d['weights'][:2]) for d in details)
+    # a feature true targets carry less of (missing evidence): without signs the model rewards its absence, with signs its weight stays at 0 and the targets found are those without it
+    missing = np.r_[rng.normal(-1.0, 1.0, 1500), rng.normal(0.0, 1.0, 3000)]
+    free, signed = [], []
+    rescore_psms(np.c_[X, missing], decoy, details = free)
+    assert targets(rescore_psms(np.c_[X, missing], decoy, details = signed, signs = [1, 1, 0, 1])) == targets(learned)
+    assert all(d['weights'][3] < 0 for d in free) and all(d['weights'][3] == 0 for d in signed)
     # too few decoys to learn from
     assert rescore_psms(X[:3050], decoy[:3050]) is None
 
