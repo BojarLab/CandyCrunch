@@ -256,7 +256,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     alignment = 'median' if len(offsets) >= 5 else 'none'
     given_rts = map_rts.copy()
     n_acid = np.array([acidic_count(dict(k)) for k in keys], dtype = float)
-    row_shift = np.full(len(map_rts), rt_shift)
+    row_shift, past = np.full(len(map_rts), rt_shift), np.zeros(len(map_rts), bool)
     # Anchors that disagree mean the mapping's RTs come from another gradient or LC than the run, so its rows count as RT-less; with >= 10 anchors that is
     # judged after fitting the drift, as a gradient of another slope scatters the plain offsets as well
     scatter = float(np.median(np.abs(np.array(offsets) - np.median(offsets)))) if len(offsets) >= 5 else 0.0
@@ -300,6 +300,9 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                 # (rows without structure take the same drift at their own RT, with the acidic residues of the composition an input gives them)
                 drift = lambda acid, beta = beta, b = b, c = c, lo = x.min(), hi = x.max(), amax = a.max(): (
                     beta[0] + sum(beta[1 + j] * (open_files == f) for j, f in enumerate(extra)) + b * np.clip(open_rts, lo, hi) + c * np.minimum(acid, amax))
+                # Past that range the drift is not known (on PGC it went on at 0 to 0.6 times the slope: rows 15 min past it 0.5-1.5 min off the held RT,
+                # 1.5-2 min off the line), so a row there takes the RT its labels found (below)
+                past = ~own & ((map_rts < x.min()) | (map_rts > x.max())) & (b != 0)
                 rt_shift = float(np.nanmedian(row_shift[~np.isnan(map_rts)]))
                 alignment = 'model'
                 scatter = float(np.median(np.abs(r - np.median(r))))
@@ -310,9 +313,9 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         agree = np.abs(o - o[np.argmax([np.sum(np.abs(o - x) <= 1.0) for x in o])]) <= 1.0
         if agree.sum() >= 5 and agree.mean() >= 0.4:
             rt_shift, alignment, drift = float(np.median(o[agree])), 'median', None
-            row_shift = np.full(len(map_rts), rt_shift)
+            row_shift, past = np.full(len(map_rts), rt_shift), np.zeros(len(map_rts), bool)
         else:
-            rt_shift, map_rts, row_shift, alignment, drift = 0.0, np.where(own, map_rts, np.nan), np.zeros(len(map_rts)), 'dropped', None
+            rt_shift, map_rts, row_shift, past, alignment, drift = 0.0, np.where(own, map_rts, np.nan), np.zeros(len(map_rts)), np.zeros(len(map_rts), bool), 'dropped', None
     pre_switch = rt_shift
     if len(offsets) >= 5 and alignment != 'dropped':
         # The whole map then checks the shift: each anchor is one input per composition, and where those inputs are other isomers' peaks (offsets in two
@@ -331,7 +334,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             placed = lambda shift: int((at_row & (np.abs(input_rts[:, None] - (given_rts + np.where(own, 0.0, shift))[None, :]) <= rt_window)).any(axis = 0)[counted & (files == f)].sum())
             best, now = max([float(np.median(offsets)), 0.0], key = placed), placed(row_shift)
             if placed(best) >= max(1.1 * now, now + 1):
-                row_shift, switched, fixed[f] = np.where(files == f, best, row_shift), True, best
+                row_shift, past, switched, fixed[f] = np.where(files == f, best, row_shift), past & (files != f), True, best
         if switched:
             shifts = row_shift[~np.isnan(given_rts)]
             rt_shift = float(np.median(shifts))
@@ -475,7 +478,12 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     own_rows = mapping['rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(mapping), bool)
     map_rows['run_rt'] = (pd.to_numeric(mapping['RT'], errors = 'coerce').to_numpy(float) + np.where(own_rows, 0.0, np.nan if alignment == 'dropped' else rt_shift)
                           if 'RT' in mapping.columns else np.nan)
-    map_rows.loc[row_ids, 'run_rt'] = map_rts
+    # (a row past the drift's RT range sits at its most intense labelled input, where its labels found its peak: the held RT left such rows 0.5-1.5 min off)
+    found = {}
+    for i in by_intensity:
+        if first_row[i] is not None and past[first_row[i]] and i in kept_orders:
+            found.setdefault(first_row[i], inputs['RT'].iloc[i])
+    map_rows.loc[row_ids, 'run_rt'] = [found.get(k, v) for k, v in enumerate(map_rts)]
     if alignment == 'model' and len(open_masses):
         # A row without structure where the drift was modeled: moved with the acidic residues of the composition whose passing input at its Mass sits
         # nearest it so (inputs of several compositions fit most such Masses; taking the most intense one's put 681 instead of 887 of 908 run-row pairs

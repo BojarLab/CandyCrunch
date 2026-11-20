@@ -117,11 +117,13 @@ def set_num_threads(n):
 
 
 class CandyCrunchCNN:
-    """The CandyCrunch CNN of model.py run by ONNX Runtime, for where PyTorch is not installed (the built app); made from its weights (a state dict of arrays or tensors) and
-    called with a batch of inputs (binned intensities and m/z remainders as two channels, composition vector, glycan type, RT, mode, LC, modification and
-    trap), it returns the logits"""
+    """The CandyCrunch CNN of model.py (CandyCrunch_CNN, or CandyCrunch_CNN2 with layer norms, leaky ReLUs and a classifier of linear experts) run by ONNX
+    Runtime, for where PyTorch is not installed (the built app); made from its weights (a state dict of arrays or tensors; top_k: the experts a CNN2
+    classifier routes each spectrum to, which its weights do not tell) and called with a batch of inputs (binned intensities and m/z remainders as two
+    channels, composition vector, glycan type, RT, mode, LC, modification and trap), it returns the logits. It is two graphs, as model.py's encode and
+    the rest: the encoder makes each spectrum's features from the spectrum alone, the head the logits from those and the other inputs"""
 
-    def __init__(self, state_dict):
+    def __init__(self, state_dict, top_k = 4):
         used = set()
         # The weights, noting which ones the graph reads
         class Weights(dict):
@@ -131,17 +133,18 @@ class CandyCrunchCNN:
         p = Weights({k.replace('module.', ''): np.asarray(v.detach().cpu() if hasattr(v, 'detach') else v, dtype = np.float32) for k, v in state_dict.items()})
         nodes, weights = [], {}
         # ONNX messages (onnx.proto), written here so that inference needs neither PyTorch nor the onnx package
-        def const(name, value):
-            weights[name] = _proto(*[(1, d) for d in value.shape], (2, 1), (8, name), (9, np.ascontiguousarray(value, dtype = np.float32).tobytes()))
+        def const(name, value, kind = 1):
+            # kind: the element type, 1 float, 7 int64
+            weights[name] = _proto(*[(1, d) for d in value.shape], (2, kind), (8, name), (9, np.ascontiguousarray(value, dtype = {1: np.float32, 7: np.int64}[kind]).tobytes()))
             return name
-        def node(op, inputs, domain = '', **attrs):
+        def node(op, inputs, domain = '', outputs = 1, **attrs):
             # An attribute is its name, its value in the field of its type and that type: float 2/1, int 3/2, string 4/3, floats 7/6, ints 8/7
-            out = f'{op}_{len(nodes)}'
+            out = [f'{op}_{len(nodes)}'] + [f'{op}_{len(nodes)}_{i}' for i in range(1, outputs)]
             kind = lambda v: {float: (2, 1), int: (3, 2), str: (4, 3)}[type(v)]
             attrs = [_proto((1, k), *[(kind(x)[0] + 5, x) for x in v], (20, kind(v[0])[1] + 5)) if isinstance(v, list) else
                      _proto((1, k), (kind(v)[0], v), (20, kind(v)[1])) for k, v in attrs.items()]
-            nodes.append(_proto(*[(1, x) for x in inputs], (2, out), (4, op), (7, domain), *[(5, a) for a in attrs]))
-            return out
+            nodes.append(_proto(*[(1, x) for x in inputs], *[(2, o) for o in out], (4, op), (7, domain), *[(5, a) for a in attrs]))
+            return out[0] if outputs == 1 else out
         act = lambda x: node('LeakyRelu', [x], alpha = 0.01)
         lin = lambda x, k: node('Gemm', [x, const(f'{k}.weight', p[f'{k}.weight']), const(f'{k}.bias', p[f'{k}.bias'])], transB = 1)
         norm = lambda x, k: act(node('LayerNormalization', [x, const(f'{k}.weight', p[f'{k}.weight']), const(f'{k}.bias', p[f'{k}.bias'])], axis = 1, epsilon = 1e-5))
@@ -161,63 +164,120 @@ class CandyCrunchCNN:
             # The residual sum is the fused convolution's fourth input (its activation, a leaky ReLU of slope 1, leaves it as it is)
             return node('Conv', inputs, **attrs) if residual is None else node('FusedConv', inputs + [residual], 'com.microsoft', activation = 'LeakyRelu',
                                                                               activation_params = [1.0])
-        x = act(node('Conv', ['mz', const('conv1.weight', p['conv1.weight']), const('conv1.bias', p['conv1.bias'])]))
-        for i in range(1, 7):
+        emb = lambda k, x: node('Gather', [const(f'{k}_emb.weight', p[f'{k}_emb.weight']), x])
+        cnn2 = 'prec_block.0.weight' in p
+        # CandyCrunch_CNN2's residual blocks keep the norm, activation and convolution order, with dilated convolutions of size 3 padded on both sides
+        conv1, blocks = ('res_block.0', [f'res_block.{i + 2}' for i in range(6)]) if cnn2 else ('conv1', [f'res{i}' for i in range(1, 7)])
+        x = act(node('Conv', ['mz', const(f'{conv1}.weight', p[f'{conv1}.weight']), const(f'{conv1}.bias', p[f'{conv1}.bias'])]))
+        for i, k in enumerate(blocks):
             # The first block's channels are nearly constant over a sparse spectrum (mean squared up to 7e4 times the variance), which a layer norm
             # taking the variance as E[x^2] - E[x]^2 in float32 (ONNX Runtime 1.19) loses, so they are centered first
-            h = norm_conv(x, f'res{i}.ln1', f'res{i}.conv_in', center = i == 1)
-            h = norm_conv(h, f'res{i}.ln2', f'res{i}.conv_dilated', dilations = [2 ** (i - 1)], pads = [2 ** (i - 1), 0])
-            x = norm_conv(h, f'res{i}.ln3', f'res{i}.conv_out', residual = x)
-        x = act(lin(node('Flatten', [node('MaxPool', [x], kernel_shape = [20], strides = [20])]), 'fc1'))
-        emb = lambda k, x: node('Gather', [const(f'{k}_emb.weight', p[f'{k}_emb.weight']), x])
-        x = node('Concat', [x, norm(lin('precursor', 'prec_lin1'), 'prec_bn1'), emb('type', 'glycan_type'), norm(lin('rt', 'rt_lin1'), 'rt_bn1'),
-                            *[emb(k, k) for k in ['mode', 'lc', 'modification', 'trap']]], axis = 1)
-        x = lin(norm(lin(norm(lin(x, 'comb_lin1'), 'comb_bn1'), 'comb_lin2'), 'comb_bn2'), 'comb_lin3')
+            h = norm_conv(x, f'{k}.ln1', f'{k}.conv_in', center = i == 0)
+            h = norm_conv(h, f'{k}.ln2', f'{k}.conv_dilated', dilations = [2 ** i], pads = [2 ** i, 2 ** i if cnn2 else 0])
+            x = norm_conv(h, f'{k}.ln3', f'{k}.conv_out', residual = x)
+        if cnn2:
+            # Adaptive max pooling to 102 windows [floor(i L / 102), ceil((i + 1) L / 102)) of the L = 2048 bins, 21 or 22 bins wide: each window's
+            # maximum is picked from the running maxima of both widths
+            starts, ends = np.arange(102) * 2048 // 102, -(-(np.arange(102) + 1) * 2048 // 102)
+            picks = np.where(ends - starts == 21, starts, 2048 - 21 + 1 + starts)
+            x = node('Concat', [node('MaxPool', [x], kernel_shape = [21]), node('MaxPool', [x], kernel_shape = [22])], axis = 2)
+            x = norm(lin(node('Flatten', [node('Gather', [x, const('pool_picks', picks, 7)], axis = 2)]), 'fc1.0'), 'fc1.1')
+        else:
+            x = act(lin(node('Flatten', [node('MaxPool', [x], kernel_shape = [20], strides = [20])]), 'fc1'))
+        # The spectrum's features end the encoder graph; the head graph takes them as its input 'features'
+        encoder, encoder_weights, encoded, n_features = list(nodes), dict(weights), x, len(p['fc1.0.bias' if cnn2 else 'fc1.bias'])
+        nodes.clear()
+        weights.clear()
+        x = 'features'
+        if cnn2:
+            x = node('Concat', [x, norm(lin('precursor', 'prec_block.0'), 'prec_block.1'), emb('type', 'glycan_type'), norm(lin('rt', 'rt_block.0'), 'rt_block.1'),
+                                *[emb(k, k) for k in ['mode', 'lc', 'modification', 'trap']]], axis = 1)
+            h, c = norm(lin(x, 'comb_block1.0'), 'comb_block1.1'), 'classifier_out'
+            if 'comb_lin2.weight' in p:
+                x, n_classes = lin(h, 'comb_lin2'), len(p['comb_lin2.bias'])
+            else:
+                # The router's softmax renormalized over its top_k experts is the softmax of their router logits; the experts run on every spectrum as
+                # one layer, weighted by these gates (zero for the other experts)
+                n_experts, n_classes = len(p[f'{c}.router.bias']), len(p[f'{c}.experts.0.bias'])
+                router = lin(h, f'{c}.router')
+                top, experts = node('TopK', [router, const('top_k', np.array([top_k]), 7)], outputs = 2, axis = 1)
+                gates = node('ScatterElements', [node('Mul', [router, const('zero', np.zeros(1))]), experts, node('Softmax', [top], axis = 1)], axis = 1)
+                out = node('Gemm', [h, const(f'{c}.experts.weight', np.concatenate([p[f'{c}.experts.{e}.weight'] for e in range(n_experts)])),
+                                    const(f'{c}.experts.bias', np.concatenate([p[f'{c}.experts.{e}.bias'] for e in range(n_experts)]))], transB = 1)
+                out = node('MatMul', [node('Reshape', [gates, const('gate_shape', np.array([-1, 1, n_experts]), 7)]),
+                                      node('Reshape', [out, const('expert_shape', np.array([-1, n_experts, n_classes]), 7)])])
+                x = node('Reshape', [out, const('logit_shape', np.array([-1, n_classes]), 7)])
+                if f'{c}.shared_expert.weight' in p:
+                    x = node('Add', [x, lin(h, f'{c}.shared_expert')])
+        else:
+            x = node('Concat', [x, norm(lin('precursor', 'prec_lin1'), 'prec_bn1'), emb('type', 'glycan_type'), norm(lin('rt', 'rt_lin1'), 'rt_bn1'),
+                                *[emb(k, k) for k in ['mode', 'lc', 'modification', 'trap']]], axis = 1)
+            x, n_classes = lin(norm(lin(norm(lin(x, 'comb_lin1'), 'comb_bn1'), 'comb_lin2'), 'comb_bn2'), 'comb_lin3'), len(p['comb_lin3.bias'])
         def info(name, kind, dims):
             # An input or output: its name, element type (1 float, 7 int64) and shape ('n' the batch size)
             shape = _proto(*[(1, _proto((2, d) if isinstance(d, str) else (1, d))) for d in dims])
             return _proto((1, name), (2, _proto((1, _proto((1, kind), (2, shape))))))
-        inputs = [info('mz', 1, ['n', 2, 2048]), info('precursor', 1, ['n', 12]), info('glycan_type', 7, ['n']), info('rt', 1, ['n', 1])] + [
-            info(k, 7, ['n']) for k in ['mode', 'lc', 'modification', 'trap']]
-        graph = _proto(*[(1, n) for n in nodes], (2, 'candycrunch'), *[(5, w) for w in weights.values()], *[(11, i) for i in inputs],
-                       (12, info(x, 1, ['n', len(p['comb_lin3.bias'])])))
+
+        def model_proto(name, graph_nodes, graph_weights, inputs, output):
+            graph = _proto(*[(1, n) for n in graph_nodes], (2, name), *[(5, w) for w in graph_weights.values()], *[(11, i) for i in inputs], (12, output))
+            return _proto((1, 8), (7, graph), (8, _proto((1, ''), (2, 17))), (8, _proto((1, 'com.microsoft'), (2, 1))))
+
+        inputs = [info('features', 1, ['n', n_features]), info('precursor', 1, ['n', p['prec_block.0.weight' if cnn2 else 'prec_lin1.weight'].shape[1]]),
+                  info('glycan_type', 7, ['n']), info('rt', 1, ['n', 1])] + [info(k, 7, ['n']) for k in ['mode', 'lc', 'modification', 'trap']]
         # A weight the graph does not read (but model.py's unused mz_lin1 and mz_bn1) is a layer this graph lacks: CandyCrunch_CNN changed and this graph did not
         unknown = sorted(set(p) - used - {'mz_lin1.weight', 'mz_lin1.bias', 'mz_bn1.weight', 'mz_bn1.bias'})
         if unknown:
             raise ValueError(f'the ONNX graph has no place for the weights {", ".join(unknown[:5])}; update CandyCrunchCNN to the changed CandyCrunch_CNN')
-        self.onnx = _proto((1, 8), (7, graph), (8, _proto((1, ''), (2, 17))), (8, _proto((1, 'com.microsoft'), (2, 1))))
-        self.session = None
+        self.onnx = {'encode': model_proto('candycrunch_encoder', encoder, encoder_weights, [info('mz', 1, ['n', 2, 2048])], info(encoded, 1, ['n', n_features])),
+                     'head': model_proto('candycrunch_head', nodes, weights, inputs, info(x, 1, ['n', n_classes]))}
+        self.session = {}
 
     def __getstate__(self):
-        # Sent to other processes without its session, which each process makes for itself
-        return {**self.__dict__, 'session': None}
+        # Sent to other processes without its sessions, which each process makes for itself
+        return {**self.__dict__, 'session': {}}
 
-    def __call__(self, mz, precursor, glycan_type, rt, mode, lc, modification, trap):
-        inputs = {'mz': mz, 'precursor': precursor, 'glycan_type': glycan_type, 'rt': rt, 'mode': mode, 'lc': lc, 'modification': modification, 'trap': trap}
+    def encode(self, mz):
+        """The spectra's features (what the CNN makes of the binned intensities and m/z remainders alone, the same for every composition, RT and setting
+        a spectrum is tested with)"""
+        return self._run('encode', {'mz': mz})
+
+    def __call__(self, mz, precursor, glycan_type, rt, mode, lc, modification, trap, features = None):
+        # features: the spectra's features from encode, if already made (mz is then not read)
+        return self._run('head', {'features': self.encode(mz) if features is None else features, 'precursor': precursor, 'glycan_type': glycan_type,
+                                  'rt': rt, 'mode': mode, 'lc': lc, 'modification': modification, 'trap': trap})
+
+    def _run(self, graph, inputs):
+        # Inputs per run: ONNX Runtime keeps the memory of its largest run, which for the encoder is 1.1 GB for 256 inputs and 0.14 GB for 32 (whose runs
+        # are also the fastest); the head needs little memory, and in runs of 32 it read its expert weights (94 MB for CandyCrunch_CNN2) anew for every
+        # 32 inputs, 20x slower than PyTorch's head
+        n, step = len(next(iter(inputs.values()))), 32 if graph == 'encode' else 512
         if sys.platform == 'emscripten':
             # In the browser (Pyodide), the page's onnxruntime-web (globalThis.ort, its threads set by the page) runs the graph. Its session.run is
             # asynchronous, and run_sync waits for it, which needs JavaScript Promise Integration (Chrome and Edge 137+). Each output is copied out in
             # JavaScript at once (a tensor read later from Python failed now and then with several threads)
             import js
             from pyodide.ffi import run_sync, to_js
-            if self.session is None:
-                self.session = (None, run_sync(js.ort.InferenceSession.create(to_js(self.onnx), to_js({'executionProviders': ['wasm']}, dict_converter = js.Object.fromEntries))))
+            if graph not in self.session:
+                self.session[graph] = (None, run_sync(js.ort.InferenceSession.create(to_js(self.onnx[graph]), to_js({'executionProviders': ['wasm']},
+                                                                                                                    dict_converter = js.Object.fromEntries))))
+            session = self.session[graph][1]
             outputs = []
-            for i in range(0, len(mz), 32):
+            for i in range(0, n, step):
                 feeds = js.Object.new()
                 for k, v in inputs.items():
-                    v = np.ascontiguousarray(v[i:i + 32])
+                    v = np.ascontiguousarray(v[i:i + step])
                     data = to_js(v.tobytes()).buffer
                     setattr(feeds, k, js.ort.Tensor.new(*(('int64', js.BigInt64Array.new(data)) if v.dtype == np.int64 else ('float32', js.Float32Array.new(data))), to_js(list(v.shape))))
-                out = getattr(run_sync(self.session[1].run(feeds)), self.session[1].outputNames[0])
+                out = getattr(run_sync(session.run(feeds)), session.outputNames[0])
                 outputs.append(np.frombuffer(js.Float32Array.new(out.data).to_bytes(), np.float32).reshape([int(d) for d in out.dims]))
             return np.concatenate(outputs)
         # The session is made at the first call in a process (a forked one cannot use its parent's threads) and again after set_num_threads;
-        # onnxruntime is only imported here, as only the built app needs it
-        if self.session is None or self.session[0] != (os.getpid(), _threads):
+        # onnxruntime is only imported here, so that importing candycrunch does not load it
+        if self.session.get(graph, (None,))[0] != (os.getpid(), _threads):
             import onnxruntime as ort
             options = ort.SessionOptions()
             options.intra_op_num_threads = _threads
-            self.session = ((os.getpid(), _threads), ort.InferenceSession(self.onnx, options, providers = ['CPUExecutionProvider']))
-        # 32 inputs per run: ONNX Runtime keeps the memory of its largest run (1.1 GB for 256 inputs, 0.14 GB for 32), and these runs are the fastest
-        return np.concatenate([self.session[1].run(None, {k: v[i:i + 32] for k, v in inputs.items()})[0] for i in range(0, len(mz), 32)])
+            # The encoder's and the head's sessions run in turn: a pool spinning after its run would take the cores from the other
+            options.add_session_config_entry('session.intra_op.allow_spinning', '0')
+            self.session[graph] = ((os.getpid(), _threads), ort.InferenceSession(self.onnx[graph], options, providers = ['CPUExecutionProvider']))
+        return np.concatenate([self.session[graph][1].run(None, {k: v[i:i + step] for k, v in inputs.items()})[0] for i in range(0, n, step)])

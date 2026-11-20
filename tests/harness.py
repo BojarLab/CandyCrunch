@@ -548,8 +548,12 @@ def install_caches(cp, cache_dir, enabled, captured, model = None, vocab = None)
     crumbs_src, loader_src = cp._harness_crumbs, cp._harness_loader
     # The model's top-k: model.py, the weights and vocabulary, get_topk and what it reaches, and the device (GPU results differ in the last bits)
     if (id(model), id(vocab)) not in cp._harness_models:
-        cp._harness_models[(id(model), id(vocab))] = (model, vocab, digest(pathlib.Path(cm.__file__).read_text(), [p.detach().cpu().numpy() for p in model.state_dict().values()],
-                                                                           list(vocab), source_closure(orig['get_topk'], orig), str(next(model.parameters()).device), cp._harness_env))
+        # An ONNX model (the default without a GPU) by its graphs, which hold its weights
+        onnx = isinstance(model, cp.CandyCrunchCNN)
+        cp._harness_models[(id(model), id(vocab))] = (model, vocab, digest(pathlib.Path(cm.__file__).read_text(),
+                                                                           list(model.onnx.values()) if onnx else [p.detach().cpu().numpy() for p in model.state_dict().values()],
+                                                                           list(vocab), source_closure(orig['get_topk'], orig), 'onnx' if onnx else str(next(model.parameters()).device),
+                                                                           cp._harness_env))
     model_src = cp._harness_models[(id(model), id(vocab))][2]
     inner = {n: caches['stage'].wrap(n, orig[n], cp._harness_env, orig, cp._harness_codes) for n in STAGES}
     for n in STAGES:
@@ -758,7 +762,8 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
         first_rows = pfi.drop_duplicates('input_id')
         tta = first_rows['tta'].values
         order = np.concatenate([np.flatnonzero(tta), np.flatnonzero(~tta)])
-        sizes = np.where(tta[order], 5, 1)
+        # Copies of each augmented input as wrap_inference made them: the rows the model got, less one per plain input
+        sizes = np.where(tta[order], (len(topk[0]) - int((~tta).sum())) // max(int(tta.sum()), 1), 1)
         per_input = {}
         for i, start, n in zip(order, np.cumsum(sizes) - sizes, sizes):
             best = {}
@@ -901,13 +906,20 @@ def run_file(task):
     out = []
     model, vocab = cp.candycrunch, cp.glycans
     if task['model']:
-        # A fine-tuned checkpoint (the fine-tuning cell): weights and its vocabulary
-        from candycrunch.model import CandyCrunch_CNN
+        # A training checkpoint (model class and settings, vocabulary and composition order: candycrunch/checkpoint.py) or a fine-tuned model (the
+        # fine-tuning cell: weights of the shipped model's architecture and its vocabulary)
+        from candycrunch.model import CandyCrunch_CNN2
         ckpt = torch.load(task['model'], map_location = 'cpu', weights_only = False)
-        vocab = ckpt['glycans']
-        model = CandyCrunch_CNN(2048, num_classes = len(vocab), input_precursor_dim = 12)
-        model.load_state_dict(ckpt['state_dict'])
-        model.eval()
+        if 'model_class' in ckpt:
+            from candycrunch.checkpoint import load_checkpoint
+            loaded = load_checkpoint(task['model'], device = 'cpu')
+            model, vocab = loaded['model'], loaded['glycans']
+            cp.comp_vector_order = loaded['comp_vector_order']
+        else:
+            vocab = ckpt['glycans']
+            model = CandyCrunch_CNN2(2048, num_classes = len(vocab), input_precursor_dim = len(cp.comp_vector_order), **cp.MODEL_KWARGS)
+            model.load_state_dict(ckpt['state_dict'])
+            model.eval()
     for seed in task['seeds']:
         captured = {}
         caches = install_caches(cp, pathlib.Path(task['cache']) / task['label'].replace('/', '__').rstrip(' .'), task['use_cache'], captured, model = model, vocab = vocab)

@@ -55,6 +55,67 @@ def test_gui_main_adduct(app):
     assert panel.values()['run_anion'] == 'Formate'
 
 
+def test_gui_fits_laptop_screens(app, tmp_path, monkeypatch):
+    import time
+    from candycrunch import gui
+    # The spectrum tabs are no wider than the fragment controls on their own (on the native platform the window's minimum went from 1381 to 1081 px, which
+    # fits 1920 px at 150%); the spectrum controls take a second row where one has no room, and give it up again
+    view = gui.ResultsView(gui.GlycanImages())
+    assert view.tabs.minimumSizeHint().width() <= view.spectrum.more.sizeHint().width() + 30, view.tabs.minimumSizeHint().width()
+    panel = gui.SpectrumPanel()
+    panel.resize(panel.minimumSizeHint().width(), 400)
+    panel.show()
+    app.processEvents()
+    assert panel.more_row.indexOf(panel.more) >= 0
+    panel.resize(1400, 400)
+    app.processEvents()
+    assert panel.controls.indexOf(panel.more) >= 0
+    # The fragment table as CSV, one row per fragment
+    panel.annotate('Fuc(a1-2)Gal(b1-4)GlcNAc(b1-6)[Gal(b1-3)]GalNAc', [510.19, 715.27, 990.0], [30.0, 100.0, 20.0], -1, 2.0156, 'underivatized')
+    end = time.time() + 120
+    while not panel.fragment_records and time.time() < end:
+        app.processEvents()
+        time.sleep(0.05)
+    monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'fragments'), 'CSV (*.csv)'))
+    panel.export_fragments()
+    table = pd.read_csv(tmp_path / 'fragments.csv', encoding = 'utf-8-sig')
+    assert list(table.columns) == ['Observed m/z', 'Relative intensity (%)', 'Fragment', 'Theoretical m/z', 'Error (Da)', 'Error (ppm)', 'z'] and len(table) == len(panel.fragment_records) > 0
+    assert 510.19 in table['Observed m/z'].tolist() and not table['Fragment'].str.contains('<').any()
+    panel.show_message('')
+    assert panel.fragment_frame().empty
+
+
+def test_gui_dark_mode(app):
+    import time
+    from candycrunch import gui
+    light = (app.palette(), app.styleSheet())
+    try:
+        gui._set_theme(app, True)
+        assert gui.THEME['name'] == 'dark' and gui.MUTED == gui.THEMES['dark']['muted'] and gui._themed(gui.PALETTE) == gui.PALETTE + '-dark'
+        assert app.palette().color(gui.QPalette.Base).name() == gui.THEMES['dark']['base'] and app.styleSheet() == gui.STYLE.format(**gui.THEMES['dark'])
+        # drawings on the dark page are stickers on a transparent background, cached apart from the light ones
+        images = gui.GlycanImages()
+        assert images.dark
+        end = time.time() + 60
+        while images.get('Gal(b1-3)GalNAc', compact = False) is None and time.time() < end:
+            app.processEvents()
+            time.sleep(0.05)
+        image = images.get('Gal(b1-3)GalNAc', compact = False)
+        assert not image.isNull() and image.hasAlphaChannel() and image.pixelColor(0, 0).alpha() == 0
+        # with the sticker's white cut around the symbols
+        assert any(image.pixelColor(x, y).alpha() == 255 and image.pixelColor(x, y).lightnessF() > 0.97 for x in range(0, image.width(), 3) for y in range(0, image.height(), 3))
+        images.set_dark(False)
+        assert images.get('Gal(b1-3)GalNAc', compact = False) is not image
+        # a spectrum is drawn dark on screen
+        panel = gui.SpectrumPanel()
+        panel.annotate('Gal(b1-3)GalNAc', [204.09, 384.15], [10.0, 100.0], -1, 2.0156, 'underivatized')
+        assert panel.request['palette'] == gui.PALETTE + '-dark'
+    finally:
+        gui._set_theme(app, False)
+    assert gui.THEME['name'] == 'light' and gui.MUTED == '#857a90' and gui._themed(gui.PALETTE) == gui.PALETTE
+    assert app.styleSheet() == gui.STYLE.format(**gui.THEMES['light'])
+
+
 def test_gui_long_choices_keep_forms_narrow(app):
     from candycrunch import gui
     # A combo as wide as its longest choice widens its form beyond its view, which cuts off the form's right edge (combo arrows, buttons, Restore defaults)
@@ -109,6 +170,8 @@ def test_gui_results_curation(app):
     view.toggle_excluded()
     out = view.export_frame(view.current_frame())
     assert out['top1_pred'].tolist() == ['Gal(b1-4)GlcNAc'] and out['curation'].tolist() == ['reassigned']
+    # the reduced (alditol) Hex1HexNAc1 of the default reducing end, after its composition
+    assert out['formula'].tolist() == ['C14H27NO11'] and list(out.columns).index('formula') == list(out.columns).index('composition') + 1
 
 
 def test_gui_ms3(app):
@@ -645,14 +708,14 @@ def test_gui_models_and_misprediction_report(app, tmp_path, monkeypatch):
     import time
     import torch
     from candycrunch import gui
-    from candycrunch.model import CandyCrunch_CNN
+    from candycrunch.model import CandyCrunch_CNN2
     import numpy as np
     import candycrunch.prediction as cp
-    from candycrunch.prediction import glycans
+    from candycrunch.prediction import glycans, comp_vector_order, MODEL_KWARGS
     # Weights saved with their own vocabulary are a model; weights that do not fit the built-in vocabulary, or a file of anything else, are refused with why
-    torch.save({'state_dict': CandyCrunch_CNN(2048, num_classes = len(glycans) + 1, input_precursor_dim = 12).state_dict(), 'glycans': glycans + ['Gal(b1-3)GalNAc6S']},
-               tmp_path / 'tuned.pt')
-    torch.save(CandyCrunch_CNN(2048, num_classes = 3, input_precursor_dim = 12).state_dict(), tmp_path / 'small.pt')
+    make = lambda n: CandyCrunch_CNN2(2048, num_classes = n, input_precursor_dim = len(comp_vector_order), **MODEL_KWARGS).state_dict()
+    torch.save({'state_dict': make(len(glycans) + 1), 'glycans': glycans + ['Gal(b1-3)GalNAc6S']}, tmp_path / 'tuned.pt')
+    torch.save(make(3), tmp_path / 'small.pt')
     (tmp_path / 'notes.pt').write_text('not a model')
     assert gui._check_model(str(tmp_path / 'tuned.pt')) == len(glycans) + 1
     for name, reason in (('small.pt', 'no CandyCrunch model'), ('notes.pt', 'no PyTorch weights file')):

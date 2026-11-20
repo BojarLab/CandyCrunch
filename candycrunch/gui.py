@@ -56,7 +56,9 @@ for _arg, _default in zip(_batch_def.args.args[-len(_batch_def.args.defaults):],
         pass
 _constants = {node.targets[0].id: node.value for node in _tree.body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)}
 MZ_REF = ast.literal_eval(_constants['MZ_REF'])
-FILTER_CHOICES = sorted(set(ast.literal_eval(_constants['comp_vector_order'])) | DEFAULTS['filter_out'] | {'Ac', 'PCho', 'PEtN'}, key = str.lower)
+# The shipped model's composition vector and settings, which an imported model (fine-tuned from it) shares
+COMP_VECTOR_ORDER, MODEL_KWARGS = ast.literal_eval(_constants['comp_vector_order']), ast.literal_eval(_constants['MODEL_KWARGS'])
+FILTER_CHOICES = sorted(set(COMP_VECTOR_ORDER) | DEFAULTS['filter_out'] | {'Ac', 'HexN', 'Me', 'PCho', 'PEtN'}, key = str.lower)
 ANALYZER_TRAPS, MZXML_ANALYZER_TRAPS = ast.literal_eval(_constants['ANALYZER_TRAPS']), ast.literal_eval(_constants['MZXML_ANALYZER_TRAPS'])
 MZDATA_ANALYZER_TRAPS = ast.literal_eval(_constants['MZDATA_ANALYZER_TRAPS'])
 # What a run's name may say about its settings; a setting is only taken from the name if it names exactly one of its choices
@@ -111,6 +113,9 @@ REPORT_DSN = 'https://5ecf60f667f420d84bd6b3c8c4b437bd@o4512244953776128.ingest.
 ISSUES_URL = 'https://github.com/BojarLab/CandyCrunch/issues/new'
 # faulthandler writes native crashes and fatal Python errors of the window and the worker here; a process that ends cleanly removes its file
 CRASH_FILE = os.path.join(tempfile.gettempdir(), 'CandyCrunch-crash-{}-{}.txt')
+# faulthandler also logs the COM errors (0x8001....) that Windows and Qt raise and handle themselves (RPC_E_CANTCALLOUT_ININPUTSYNCCALL when a window
+# opens); they are no crash, so a crash file holding only those belongs to a process that was ended, not one that crashed
+COM_NOISE = re.compile(r'Windows fatal exception: code 0x8001[0-9a-f]{4}\n.*?(?=Windows fatal exception: |Fatal Python error: |\Z)', re.S)
 # What the worker reports while wrap_inference(_batch) runs, keyed by the prediction.py function that starts each step
 STAGES = {'load_spectra_filepath': 'Reading {}', 'condense_dataframe': 'Grouping spectra into chromatographic peaks',
           'assign_candidate_structures': 'Matching precursor compositions', 'assign_annotation_scores_pooled': 'Scoring fragment evidence',
@@ -126,24 +131,76 @@ TAIL_WEIGHT = 0.06
 # Per process: where progress goes and where each step starts within a file, read by the wrappers _install_progress puts around prediction.py
 _PROGRESS = {}
 INK, MUTED, LILAC, LILAC_LIGHT, WASH, CANDY = '#2a2133', '#857a90', '#8c5bb5', '#e6d9f1', '#f6f2f9', '#c8243f'
+# The window's colors, light or dark (View > Dark mode); _set_theme puts the theme's into the names above, which HTML reads as it is written, and into
+# THEME. The dark theme is built on candy's dark version (viscose's Palette.dark): its page is the base of tables and the page of charts and spectra
+THEMES = {'light': {'ink': INK, 'muted': MUTED, 'lilac': LILAC, 'lilac_light': LILAC_LIGHT, 'wash': WASH, 'candy': CANDY, 'base': '#ffffff', 'alternate': '#fbf9fc',
+                    'button': '#efe8f4', 'highlight': LILAC, 'link': '#7a3fa8', 'tip': '#ffffff', 'run': CANDY, 'run_hover': '#a91c34', 'run_disabled': '#e5b8c1',
+                    'line': '#ddd0e8', 'line_soft': '#eee6f3', 'grid': '#f0e9f5', 'handle': '#e9e0f0', 'bar': '#d9c6ea', 'bar_ms1': '#f1e9f7'},
+          'dark': {'ink': '#ebdff8', 'muted': '#ada1b8', 'lilac': '#c396ed', 'lilac_light': '#45365a', 'wash': '#1d1922', 'candy': '#fd8a8d', 'base': '#151219',
+                   'alternate': '#1a161f', 'button': '#2b2532', 'highlight': '#7a4fa3', 'link': '#c396ed', 'tip': '#2b2532', 'run': CANDY, 'run_hover': '#a91c34',
+                   'run_disabled': '#4a2630', 'line': '#3a3243', 'line_soft': '#2c2633', 'grid': '#2a2430', 'handle': '#2a2430', 'bar': '#634a85', 'bar_ms1': '#2b2334'}}
+THEME = dict(THEMES['light'], name = 'light')
+# Grays charts take beside their palette's colors, and their counterparts on a dark page (_gray)
+DARK_GRAYS = {'#cccccc': '#4f4857', '#dddddd': '#3a3441', '#b8b0c0': '#6e6578'}
 # glycowork's modules import each other in a cycle, so two threads importing them at once (the drawing, annotation, and taxonomy threads all
 # start with an import) can hit Python's import deadlock detection, which killed the drawing thread or failed the first annotation
 IMPORT_LOCK = threading.Lock()
-STYLE = f"""
-QWidget#settings {{ background: {WASH}; }}
-QLabel[role="heading"] {{ font-weight: 600; color: {INK}; padding-top: 8px; }}
-QLabel[role="hint"] {{ color: {MUTED}; }}
-QLabel#title {{ font-size: 28pt; font-weight: 300; color: {LILAC}; }}
-QLabel#stage {{ font-size: 12pt; color: {INK}; }}
-QPushButton#run {{ background: {CANDY}; color: white; border: none; border-radius: 4px; padding: 8px 18px; font-weight: 600; }}
-QPushButton#run:hover {{ background: #a91c34; }}
-QPushButton#run:disabled {{ background: #e5b8c1; }}
-QHeaderView::section {{ background: {WASH}; border: none; border-bottom: 1px solid #ddd0e8; border-right: 1px solid #eee6f3; padding: 4px 6px; font-weight: 600; }}
-QTableView {{ gridline-color: #f0e9f5; selection-background-color: {LILAC_LIGHT}; selection-color: {INK}; }}
-QListWidget {{ selection-background-color: {LILAC_LIGHT}; selection-color: {INK}; }}
-QSplitter::handle {{ background: #e9e0f0; }}
-QTabWidget::pane {{ border-top: 1px solid #ddd0e8; }}
+STYLE = """
+QWidget#settings {{ background: {wash}; }}
+QLabel[role="heading"] {{ font-weight: 600; color: {ink}; padding-top: 8px; }}
+QLabel[role="hint"] {{ color: {muted}; }}
+QLabel#title {{ font-size: 28pt; font-weight: 300; color: {lilac}; }}
+QLabel#stage {{ font-size: 12pt; color: {ink}; }}
+QPushButton#run {{ background: {run}; color: white; border: none; border-radius: 4px; padding: 8px 18px; font-weight: 600; }}
+QPushButton#run:hover {{ background: {run_hover}; }}
+QPushButton#run:disabled {{ background: {run_disabled}; }}
+QHeaderView::section {{ background: {wash}; border: none; border-bottom: 1px solid {line}; border-right: 1px solid {line_soft}; padding: 4px 6px; font-weight: 600; }}
+QTableView {{ gridline-color: {grid}; selection-background-color: {lilac_light}; selection-color: {ink}; }}
+QListWidget {{ selection-background-color: {lilac_light}; selection-color: {ink}; }}
+QSplitter::handle {{ background: {handle}; }}
+QTabWidget::pane {{ border-top: 1px solid {line}; }}
 """
+
+
+def _saved_dark(store):
+    """Whether the window is dark: as chosen last under View > Dark mode, else as the system is"""
+    saved = store.value('theme')
+    if saved in THEMES:
+        return saved == 'dark'
+    hints = QApplication.styleHints()
+    return hasattr(hints, 'colorScheme') and hints.colorScheme() == Qt.ColorScheme.Dark
+
+
+def _set_theme(app, dark):
+    """Puts the light or dark theme into the app's palette and style sheet, and its colors into the names the window's HTML reads"""
+    global INK, MUTED, LILAC, LILAC_LIGHT, WASH, CANDY
+    THEME.clear()
+    THEME.update(THEMES['dark' if dark else 'light'], name = 'dark' if dark else 'light')
+    INK, MUTED, LILAC, LILAC_LIGHT, WASH, CANDY = (THEME[k] for k in ('ink', 'muted', 'lilac', 'lilac_light', 'wash', 'candy'))
+    # The title bar and the system's dialogs follow (Qt 6.8 and later)
+    if hasattr(app.styleHints(), 'setColorScheme'):
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark if dark else Qt.ColorScheme.Light)
+    palette = QPalette()
+    for role, key in ((QPalette.Window, 'wash'), (QPalette.Base, 'base'), (QPalette.AlternateBase, 'alternate'), (QPalette.Text, 'ink'), (QPalette.WindowText, 'ink'),
+                      (QPalette.ButtonText, 'ink'), (QPalette.Button, 'button'), (QPalette.Highlight, 'highlight'), (QPalette.ToolTipBase, 'tip'),
+                      (QPalette.ToolTipText, 'ink'), (QPalette.Link, 'link'), (QPalette.PlaceholderText, 'muted')):
+        palette.setColor(role, QColor(THEME[key]))
+    palette.setColor(QPalette.HighlightedText, QColor('#ffffff'))
+    for role in (QPalette.ButtonText, QPalette.WindowText, QPalette.Text):
+        palette.setColor(QPalette.Disabled, role, QColor(MUTED))
+    app.setPalette(palette)
+    app.setStyleSheet(STYLE.format(**THEME))
+
+
+def _themed(palette):
+    """A viscose palette's name in the window's theme: its dark version (name-dark) while the window is dark"""
+    light = palette[:-5] if isinstance(palette, str) and palette.endswith('-dark') else palette
+    return f'{light}-dark' if THEME['name'] == 'dark' and isinstance(light, str) else light
+
+
+def _gray(ax, color):
+    """A gray of the light page, or its counterpart where the axes are on a dark page"""
+    return DARK_GRAYS[color] if ax.pal.is_dark else color
 
 
 def _scrub(text):
@@ -211,7 +268,7 @@ def _load_model(path):
     from candycrunch.inference import CandyCrunchCNN, load_weights
     try:
         import torch
-        from candycrunch.model import CandyCrunch_CNN
+        from candycrunch.model import CandyCrunch_CNN2
     except ImportError:
         torch = None
     try:
@@ -225,13 +282,14 @@ def _load_model(path):
         with open(os.path.join(os.path.dirname(importlib.util.find_spec('candycrunch').origin), 'glycans.pkl'), 'rb') as file:
             glycans = pickle.load(file)
     try:
-        if torch is not None:
-            model = CandyCrunch_CNN(2048, num_classes = len(glycans), input_precursor_dim = 12)
+        # PyTorch with a GPU, else ONNX Runtime where it is installed, as the shipped model (prediction.default_model)
+        if torch is not None and (torch.cuda.is_available() or importlib.util.find_spec('onnxruntime') is None):
+            model = CandyCrunch_CNN2(2048, num_classes = len(glycans), input_precursor_dim = len(COMP_VECTOR_ORDER), **MODEL_KWARGS)
             model.load_state_dict({k.replace('module.', ''): v for k, v in state.get('state_dict', state).items()})
             return model.to('cuda:0' if torch.cuda.is_available() else 'cpu').eval(), list(glycans)
-        model = CandyCrunchCNN(state.get('state_dict', state))
+        model = CandyCrunchCNN(state.get('state_dict', state), top_k = MODEL_KWARGS['classifier_top_k'])
         # One empty input checks the weights against the architecture and the vocabulary
-        n = model(np.zeros((1, 2, 2048), np.float32), np.zeros((1, 12), np.float32), np.zeros(1, np.int64), np.zeros((1, 1), np.float32),
+        n = model(np.zeros((1, 2, 2048), np.float32), np.zeros((1, len(COMP_VECTOR_ORDER)), np.float32), np.zeros(1, np.int64), np.zeros((1, 1), np.float32),
                   *[np.zeros(1, np.int64)] * 4).shape[1]
         if n != len(glycans):
             raise ValueError(f'it predicts {n}')
@@ -295,9 +353,10 @@ def _worker_main(jobs, messages, warm_up = False):
             messages.put(('log', text))
             return len(text)
     sys.stdout = sys.stderr = Pipe()
-    # If this process dies, the window reads the traceback of the native crash or fatal Python error from this file
+    # If this process dies, the window reads the traceback of the native crash or fatal Python error from this file; only the failing thread's, as
+    # faulthandler reads the other threads' frames while they run, which can crash the process itself
     with contextlib.suppress(OSError):
-        faulthandler.enable(open(CRASH_FILE.format('worker', os.getpid()), 'w'), all_threads = True)
+        faulthandler.enable(open(CRASH_FILE.format('worker', os.getpid()), 'w'), all_threads = False)
     try:
         import candycrunch.prediction as cp
     except Exception as error:
@@ -372,10 +431,15 @@ def _install_progress(messages, weights, n_files):
         """get_topk's model, counting batches (get_topk makes its own batches from a plain loader, so wrapping the loader would not see them)"""
         def __init__(self, model):
             self.model = model
-        def __call__(self, *inputs):
-            out = self.model(*inputs)
+        def __call__(self, *inputs, **kwargs):
+            out = self.model(*inputs, **kwargs)
             advance(1)
             return out
+
+        def __getattr__(self, name):
+            # The model's other attributes (encode, and onnx, by which get_topk tells an ONNX model)
+            return getattr(self.model, name)
+
     def staged(func, name):
         def run(*args, **kwargs):
             p = _PROGRESS
@@ -638,7 +702,7 @@ class InferenceRunner(QObject):
                 self.busy = False
                 try:
                     with open(CRASH_FILE.format('worker', self.process.pid), encoding = 'utf-8', errors = 'replace') as file:
-                        dump = file.read()[-100000:]
+                        dump = COM_NOISE.sub('', file.read())[-100000:]
                 except OSError:
                     dump = ''
                 self.report = {'files': {'worker_crash.txt': f'Exit code {self.process.exitcode}\n{dump}'}}
@@ -653,8 +717,14 @@ class GlycanImages(QObject):
 
     def __init__(self):
         super().__init__()
-        self.images, self.pending, self.requests, self.order, self.large = {}, set(), queue.PriorityQueue(), itertools.count(), []
+        # A cache per theme (set_dark), as drawings on the dark page are GlycoDraw's die-cut stickers
+        self.caches, self.dark = {False: {}, True: {}}, THEME['name'] == 'dark'
+        self.images, self.pending, self.requests, self.order, self.large = self.caches[self.dark], set(), queue.PriorityQueue(), itertools.count(), []
         threading.Thread(target = self.render_loop, daemon = True).start()
+
+    def set_dark(self, dark):
+        """Gives the drawings of the light or the dark theme from now on; those of the other stay cached"""
+        self.dark, self.images = dark, self.caches[dark]
 
     def get(self, glycan, compact = True, urgent = False, highlight = None):
         """Returns the QImage (null if GlycoDraw cannot draw it), or None while it is still being rendered; highlight: (residue indices to keep in full
@@ -666,9 +736,9 @@ class GlycanImages(QObject):
         image = self.images.get(key)
         if image is not None:
             return image
-        if key not in self.pending or urgent:
-            self.pending.add(key)
-            self.requests.put((0 if urgent else 1, next(self.order), key))
+        if (self.dark, key) not in self.pending or urgent:
+            self.pending.add((self.dark, key))
+            self.requests.put((0 if urgent else 1, next(self.order), (self.dark, key)))
         return None
 
     def render_loop(self):
@@ -680,26 +750,30 @@ class GlycanImages(QObject):
             # Without the drawing stack every structure is shown as text
             GlycoDraw = convert_svg_to_png = None
         while True:
-            key = self.requests.get()[2]
-            if key in self.images:
+            dark, key = self.requests.get()[2]
+            if key in self.caches[dark]:
                 continue
             try:
                 # A hover highlight fades everything but the fragment and marks the cleaved bond in red, on the plain drawing's canvas, so nothing moves
                 highlight = {'highlight_residues': list(key[2][0]), 'highlight_linkages': [key[2][1]] if key[2][1] is not None else None} if len(key) > 2 else {}
                 # Compact drawings are shown at up to 0.4 px per SVG unit (tables, candidate lists), so 0.8 stays sharp on 2x screens at a sixth of the memory
-                image = QImage.fromData(convert_svg_to_png(GlycoDraw(key[0], compact = key[1], suppress = True, **highlight).as_svg(), None, return_bytes = True,
-                                                           scale = 0.8 if key[1] else 2))
+                # glycorender cuts a sticker out as it renders; GlycoDraw leaves the cut its room
+                sticker = {'sticker': True} if dark else {}
+                image = QImage.fromData(convert_svg_to_png(GlycoDraw(key[0], compact = key[1], suppress = True, **highlight, **sticker).as_svg(), None, return_bytes = True,
+                                                           scale = 0.8 if key[1] else 2, **sticker))
             except Exception:
                 image = QImage()
-            self.images[key] = image
+            self.caches[dark][key] = image
             if len(key) > 2 or not key[1]:
                 # Drawings with linkages (detail view, previews, hover highlights) take 1.5 MB on average and up to 4 MB, so only the newest 60 are kept:
                 # all of them held 360 MB once every peak of five runs had been looked at
-                self.large.append(key)
+                self.large.append((dark, key))
                 if len(self.large) > 60:
                     old = self.large.pop(0)
-                    self.images.pop(old, None)
+                    self.caches[old[0]].pop(old[1], None)
                     self.pending.discard(old)
+            if dark != self.dark:
+                continue
             try:
                 self.ready.emit(key)
             except RuntimeError:
@@ -731,10 +805,10 @@ def _support_markers(ax, structure, support, ion_trap):
         if id(e) in read and read[id(e)][2] == 'a2-3':
             residues = range(len(glycan_to_glycangraph(structure)) // 2 + 1)
             points['support' if read[id(e)][3] else 'against'].setdefault(read[id(e)][0], [read[id(e)][1], (structure, tuple(i for i in residues if i != e['residue']), e['residue']), f'{linkage[id(e)]}<br>15% or more reads a2-3 (ion-trap CID)'])
-    for color, side in ((LILAC, 'support'), (CANDY, 'against')):
+    for color, side in (('a1', 'support'), ('b1', 'against')):
         if points[side]:
             xs, ys = list(points[side]), [v[0] * 100 + 3 for v in points[side].values()]
-            ax.scatter(xs, ys, marker = 'v', s = 45, color = color, edge = ('white', 0.6), z = 7)
+            ax.scatter(xs, ys, marker = 'v', s = 45, color = color, edge = ('paper', 0.6), z = 7)
             markers.append((Target(ax, xs, ys), [(*v[1:], None) for v in points[side].values()]))
     return markers
 
@@ -870,7 +944,7 @@ class Annotator(QObject):
                         near = [int(np.argmin(np.abs(mzs - p))) for p in request['ms3']]
                         hit = [abs(mzs[k] - p) <= request['tolerance'] for k, p in zip(near, request['ms3'])]
                         xs = [mzs[k] if h else p for k, h, p in zip(near, hit, request['ms3'])]
-                        ax.scatter(xs, [0] * len(xs), marker = '^', s = 70, color = CANDY, edge = ('white', 0.8), z = 6)
+                        ax.scatter(xs, [0] * len(xs), marker = '^', s = 70, color = 'b1', edge = ('paper', 0.8), z = 6)
                         figure.ms3_artists = (Target(ax, xs, [0] * len(xs), radius = 6.0),
                                               Target(ax, xs, [ints[k] / (ints.max() or 1) * 100 if h else 0 for k, h in zip(near, hit)], stick = True))
                     if support and (support['residues'] or support['candidates']):
@@ -971,6 +1045,22 @@ def _mass_tag(settings):
     else:
         label = composition_to_mass({}, sample_prep = sample_prep, modification = modification) - composition_to_mass({}, sample_prep = sample_prep)
     return label + (settings.get('mass_tag') or 0)
+
+
+def _formula(composition, settings):
+    """Elemental formula of a row's neutral glycan as measured (reducing end, derivatization, and sialic acid derivatization included), from which Skyline or
+    MZmine compute its ions with any adduct; empty for a label known only by its mass"""
+    modification = settings.get('modification')
+    modification = modification.split('+')[0] if isinstance(modification, str) else modification[0] if isinstance(modification, (list, tuple)) else modification
+    if not isinstance(composition, dict) or not composition or (modification == 'custom' and settings.get('mass_tag')):
+        return ''
+    with IMPORT_LOCK:
+        from glycowork.motif.tokenization import get_formula
+    try:
+        return get_formula(composition, settings.get('sample_prep', 'underivatized'), modification = None if modification in ('custom', 'unreduced') else modification,
+                           sialic_derivatization = settings.get('sialic_derivatization'))
+    except Exception:
+        return ''
 
 
 def _composition(composition):
@@ -1117,14 +1207,22 @@ class BarDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         bar = index.data(TableModel.BAR_ROLE)
-        if bar is not None and bar[0] > 0:
-            rect = option.rect.adjusted(3, 6, -3, -6)
-            painter.save()
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor('#f1e9f7' if bar[1] else LILAC_LIGHT))
-            painter.drawRoundedRect(QRectF(rect.x(), rect.y(), max(2.0, rect.width() * min(bar[0], 1.0)), rect.height()), 2, 2)
-            painter.restore()
-        super().paint(painter, option, index)
+        if bar is None or bar[0] <= 0:
+            return super().paint(painter, option, index)
+        # The cell's background, then the bar, then the number: drawn over the bar, the selection (of the bar's own color) hid the selected row's bar
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text, opt.text = opt.text, ''
+        opt.widget.style().drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        rect = option.rect.adjusted(3, 6, -3, -6)
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(THEME['bar_ms1'] if bar[1] else THEME['bar']))
+        painter.drawRoundedRect(QRectF(rect.x(), rect.y(), max(2.0, rect.width() * min(bar[0], 1.0)), rect.height()), 2, 2)
+        painter.restore()
+        opt.text, opt.state = text, opt.state & ~QStyle.State_Selected
+        opt.features &= ~QStyleOptionViewItem.Alternate
+        opt.widget.style().drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
 
 
 class LabelTarget:
@@ -1187,10 +1285,22 @@ class SpectrumPanel(QWidget):
         self.controls.addWidget(QLabel('Tolerance'))
         self.controls.addWidget(self.tolerance)
         self.controls.addWidget(self.unit)
-        self.controls.addWidget(QLabel('Fragments'))
-        self.controls.addWidget(self.fragment_types)
-        self.controls.addWidget(self.cartoons)
-        self.controls.addWidget(self.save)
+        # The fragment settings and Save image… follow the tolerance where the row has room for them and take a row of their own where it has not
+        # (resizeEvent): in one row they kept the window at least 1381 px wide, wider than a laptop screen at 125% or 150% scaling
+        self.more = QWidget()
+        more = QHBoxLayout(self.more)
+        more.setContentsMargins(0, 0, 0, 0)
+        more.addWidget(QLabel('Fragments'))
+        more.addWidget(self.fragment_types)
+        more.addWidget(self.cartoons)
+        more.addWidget(self.save)
+        # Never a minimum width of the row it is in; the panel is as wide as these controls on their own
+        self.more.setMinimumWidth(1)
+        self.setMinimumWidth(self.more.sizeHint().width() + 12)
+        self.more_row = QHBoxLayout()
+        self.more_row.setContentsMargins(6, 0, 6, 0)
+        self.more_row.addStretch(1)
+        self.controls.addWidget(self.more)
         self.message = _label('', 'hint')
         self.message.setAlignment(Qt.AlignCenter)
         self.holder = QWidget()
@@ -1203,6 +1313,7 @@ class SpectrumPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         layout.addLayout(self.controls)
+        layout.addLayout(self.more_row)
         self.summary.setContentsMargins(10, 0, 6, 0)
         # Next to the summary rather than the controls: there it made the window's minimum width 141 px wider once a spectrum was shown
         self.summary_row = QHBoxLayout()
@@ -1212,6 +1323,10 @@ class SpectrumPanel(QWidget):
         layout.addWidget(self.stack, 1)
         self.fragments = QTextBrowser()
         self.fragments.setOpenLinks(False)
+        # The fragment table's rows (fragment_frame), for Copy table and Export table… in its right-click menu
+        self.fragment_records = []
+        self.fragments.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.fragments.customContextMenuRequested.connect(self.fragments_menu)
         self.tolerance.valueChanged.connect(self.resubmit)
         self.unit.currentIndexChanged.connect(lambda: self.set_tolerance(self.tolerance.value() * (1000 if self.unit.currentData() == 'ppm' else 1e-3), self.unit.currentData()))
         self.unit.currentIndexChanged.connect(self.resubmit)
@@ -1260,7 +1375,7 @@ class SpectrumPanel(QWidget):
                    'mass_tag': mass_tag, 'sample_prep': sample_prep, 'ms3': [float(p) for p, _ in ms3], 'ms3_spectra': [int(n) for _, n in ms3],
                    'candidates': list(candidates), 'kwargs': kwargs, 'tolerance': self.tolerance.value() if ppm is None else ppm * 1e-3, 'ppm': ppm,
                    'cartoons': self.cartoons.isChecked(), 'toggles': dict(toggles or {}), 'ion_trap': bool(ion_trap),
-                   'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100), 'mirror': None, 'palette': self.palette}
+                   'figsize': (max(size.width(), 500) / 100, max(size.height(), 300) / 100), 'mirror': None, 'palette': _themed(self.palette)}
         if mirror is not None:
             # its tolerance as the spectrum's: a Da window, or ppm with its Da value at m/z 1000 for deisotoping
             unit, value = mirror.get('unit', self.unit.currentData()), mirror.get('tolerance', self.tolerance.value())
@@ -1287,6 +1402,13 @@ class SpectrumPanel(QWidget):
                 self.summary.setText(f'Annotating with CandyCrumbs: {self.request["structure"]}')
 
     def resizeEvent(self, event):
+        # The fragment settings and Save image… stay next to the tolerance only where all controls fit at their natural widths
+        spacing = self.controls.spacing()
+        needed = sum(item.sizeHint().width() + spacing for item in (self.controls.itemAt(i) for i in range(self.controls.count())) if item.widget() is not self.more and not item.isEmpty())
+        row = self.controls if event.size().width() >= needed + self.more.sizeHint().width() + 12 else self.more_row
+        if row.indexOf(self.more) < 0:
+            (self.more_row if row is self.controls else self.controls).removeWidget(self.more)
+            row.addWidget(self.more)
         super().resizeEvent(event)
         if self.request is not None and abs(event.size().height() - event.oldSize().height()) + abs(event.size().width() - event.oldSize().width()) > 40:
             self.relayout.start()
@@ -1299,6 +1421,7 @@ class SpectrumPanel(QWidget):
 
     def show_message(self, text):
         self.request, self.spec, self.hover_targets, self.label_targets, self.stick_targets, self.drawn = None, None, [], [], [], None
+        self.fragment_records = []
         self.save.setEnabled(False)
         self.clear_highlight()
         self.latest = self.annotator.counter + 1
@@ -1326,7 +1449,7 @@ class SpectrumPanel(QWidget):
             return
         if error:
             # Nothing of the spectrum shown before stays: its fragment table, or Save image…, which would save that spectrum
-            self.drawn = None
+            self.drawn, self.fragment_records = None, []
             self.save.setEnabled(False)
             self.fragments.setHtml(f'<p style="color:{MUTED}">CandyCrumbs could not annotate this spectrum with {self.request["structure"]}</p>')
             self.message.setText(f'CandyCrumbs could not annotate this spectrum with {self.request["structure"]}. Check its notation: IUPAC-condensed, a composition such as Hex3HexNAc2, or a glycopeptide.\n\n{error}')
@@ -1402,9 +1525,10 @@ class SpectrumPanel(QWidget):
             self.hover_targets.append((figure.ms3_artists[0], tips))
             self.stick_targets.append((figure.ms3_artists[1], tips))
 
-        def fragment_rows(found, peak_d):
-            """The fragment table's rows of a spectrum's annotated peaks, and the tooltip of each peak"""
-            rows, tips, base = [], {}, max(peak_d.values()) or 1
+        def fragment_rows(found, peak_d, spectrum = None):
+            """The fragment table's rows of a spectrum's annotated peaks, as HTML and as records (fragment_frame; spectrum: which one, where a mirror is
+            shown), and the tooltip of each peak"""
+            rows, records, tips, base = [], [], {}, max(peak_d.values()) or 1
             for mz in sorted(found):
                 hit = found[mz]
                 for n, (names, theo, z) in enumerate(zip(hit['Domon-Costello nomenclatures'], hit['Theoretical fragment masses'], hit['Fragment charges'])):
@@ -1413,14 +1537,18 @@ class SpectrumPanel(QWidget):
                     flat = [x for sub in names for x in sub] if names and isinstance(names[0], list) else list(names)
                     first = f'<td>{mz:.4f}</td><td align="right">{peak_d.get(mz, 0) / base * 100:.1f}</td>' if n == 0 else '<td></td><td></td>'
                     rows.append(f'<tr>{first}<td>{domon_costello_to_html(flat)}</td><td>{theo:.4f}</td><td align="right">{mz - theo:+.3f}</td><td align="right">{(mz - theo) / theo * 1e6:+.1f}</td><td align="right">{z}</td></tr>')
+                    records.append({'Spectrum': spectrum, 'Observed m/z': round(mz, 4), 'Relative intensity (%)': round(peak_d.get(mz, 0) / base * 100, 1),
+                                    'Fragment': html.unescape(re.sub(r'<[^>]+>', '', domon_costello_to_html(flat))), 'Theoretical m/z': round(theo, 4),
+                                    'Error (Da)': round(mz - theo, 4), 'Error (ppm)': round((mz - theo) / theo * 1e6, 1), 'z': z})
                     tips[mz] = tips.get(mz, f'Observed m/z <b>{mz:.4f}</b>') + f'<br>{domon_costello_to_html(flat)}: theoretical m/z <b>{theo:.4f}</b> (error {mz - theo:+.4f} Da' + (f', z = {z}' if abs(z) > 1 else '') + ')'
-            return rows, tips
+            return rows, records, tips
 
-        rows, tips = fragment_rows(hits, peaks)
+        rows, self.fragment_records, tips = fragment_rows(hits, peaks, 'upper' if mirror is not None else None)
         # a mirrored spectrum's rows follow under a row naming it
-        mirror_rows, mirror_tips = fragment_rows(mirror_hits, mirror_peaks) if mirror is not None else ([], {})
+        mirror_rows, mirror_records, mirror_tips = fragment_rows(mirror_hits, mirror_peaks, f'mirrored: {mirror.get("title") or "second spectrum"}') if mirror is not None else ([], [], {})
         if mirror is not None:
             rows += [f'<tr style="background:{WASH}"><td colspan="7"><b>Mirrored: {html.escape(mirror.get("title") or "second spectrum")}</b></td></tr>'] + mirror_rows
+            self.fragment_records += mirror_records
         self.fragment_html = (f'<table cellspacing="0" cellpadding="3" width="100%"><tr style="background:{WASH}"><th align="left">Observed m/z</th>'
                               f'<th align="right">Rel. int. (%)</th><th align="left">Fragment</th><th align="left">Theoretical m/z</th><th align="right">Error (Da)</th>'
                               f'<th align="right">Error (ppm)</th><th align="right">z</th></tr>{"".join(rows)}</table>')
@@ -1453,7 +1581,7 @@ class SpectrumPanel(QWidget):
                 path += re.search(r'\*(\.\w+)', chosen).group(1)
         request, hit_dict, diagnostic, mirror = self.drawn
         # a mirror takes the room of a second spectrum below the axis
-        figure = vc.Figure(12.0, (6.0 if request['cartoons'] else 4.6) + (2.6 if mirror is not None else 0.0), request['palette'])
+        figure = vc.Figure(12.0, (6.0 if request['cartoons'] else 4.6) + (2.6 if mirror is not None else 0.0), self.palette)
         with IMPORT_LOCK:
             from candycrunch.analysis import plot_annotated_spectrum, resolve_spectrum_input
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -1481,6 +1609,7 @@ class SpectrumPanel(QWidget):
         menu = QMenu(self)
         menu.addAction('Copy image', lambda: self.save_image(clipboard = True))
         menu.addAction('Save image…', lambda: self.save_image())
+        menu.addAction('Export fragment table…', self.export_fragments)
         menu.addAction('Show the whole spectrum', self.toolbar.home)
         if self.toggles:
             menu.addAction('Reset fragment cartoons', self.reset_cartoons)
@@ -1489,6 +1618,37 @@ class SpectrumPanel(QWidget):
     def reset_cartoons(self):
         self.toggles = {}
         self.resubmit()
+
+    def fragment_frame(self):
+        """The fragment table shown, a row per fragment of an annotated peak; its Spectrum column only where a mirrored spectrum is shown"""
+        frame = pd.DataFrame(self.fragment_records, columns = ['Spectrum', 'Observed m/z', 'Relative intensity (%)', 'Fragment', 'Theoretical m/z', 'Error (Da)', 'Error (ppm)', 'z'])
+        return frame.drop(columns = 'Spectrum') if frame['Spectrum'].isna().all() else frame
+
+    def fragments_menu(self, position):
+        """Right-click on the fragment table: the text box's own actions, and the whole table copied (tab-separated, pastes into a spreadsheet) or exported"""
+        menu = self.fragments.createStandardContextMenu()
+        menu.addSeparator()
+        menu.addAction('Copy table', lambda: QApplication.clipboard().setText(self.fragment_frame().to_csv(sep = '\t', index = False))).setEnabled(bool(self.fragment_records))
+        menu.addAction('Export table…', self.export_fragments).setEnabled(bool(self.fragment_records))
+        menu.exec(self.fragments.viewport().mapToGlobal(position))
+
+    def export_fragments(self):
+        """Writes the fragment table as CSV (UTF-8 with BOM, so Excel reads the Greek letters of fragment names) or Excel"""
+        if not self.fragment_records:
+            return
+        path, chosen = QFileDialog.getSaveFileName(self, 'Export fragment table', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'fragments.csv'),
+                                                   'CSV (*.csv);;Excel (*.xlsx)')
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += '.xlsx' if chosen.startswith('Excel') else '.csv'
+        try:
+            if path.lower().endswith('.xlsx'):
+                self.fragment_frame().to_excel(path, index = False)
+            else:
+                self.fragment_frame().to_csv(path, index = False, encoding = 'utf-8-sig')
+        except Exception as error:
+            QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
 
     def show_support(self, support):
         """Marks the peaks that support a residue's placement (lilac) or fit another placement instead (red) and lists them above the fragment table"""
@@ -1682,16 +1842,16 @@ class QuantPanel(QWidget):
         ax, scan_ax = figure.add_axes([left, 0.16, 0.62 - left, 0.74]), figure.add_axes([0.71, 0.16, 0.27, 0.74])
         times, trace, left, right = d['times'], d['trace'], d['left'], d['right']
         if left >= 0:
-            ax.fill_between(times[left:right + 1], np.maximum(trace[left:right + 1], d['baseline']), d['baseline'], color = LILAC, alpha = 0.35, label = 'Integrated')
-            ax.hlines(d['baseline'], times[left], times[right], color = MUTED, dash = (3.0, 1.3), lw = 0.8, label = 'Baseline')
+            ax.fill_between(times[left:right + 1], np.maximum(trace[left:right + 1], d['baseline']), d['baseline'], color = 'a1', alpha = 0.35, label = 'Integrated')
+            ax.hlines(d['baseline'], times[left], times[right], color = 'muted', dash = (3.0, 1.3), lw = 0.8, label = 'Baseline')
         if 'auto' in d and d['auto'][0] >= 0:
-            ax.axvline(times[d['auto'][0]], color = MUTED, dash = (0.8, 1.3), label = 'CandyCrunch\'s range')
-            ax.axvline(times[d['auto'][1]], color = MUTED, dash = (0.8, 1.3))
-        ax.plot(times, trace, color = INK, lw = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"] * self.sign}')
+            ax.axvline(times[d['auto'][0]], color = 'muted', dash = (0.8, 1.3), label = 'CandyCrunch\'s range')
+            ax.axvline(times[d['auto'][1]], color = 'muted', dash = (0.8, 1.3))
+        ax.plot(times, trace, color = 'ink', lw = 1, label = f'm/z {d["mz"]:.4f}, z = {d["charge"] * self.sign}')
         for o in d['others']:
-            ax.plot(times, o['trace'], color = LILAC if o['added'] else '#b8b0c0', dash = None if o['added'] else (3.0, 1.3), lw = 0.8,
+            ax.plot(times, o['trace'], color = 'a1' if o['added'] else _gray(ax, '#b8b0c0'), dash = None if o['added'] else (3.0, 1.3), lw = 0.8,
                     label = f'{o.get("ion") or "z = " + str(o["charge"] * self.sign)} (m/z {o["mz"]:.2f}): ' + ('added' if o['added'] else 'not added') + (f', r {o["r"]:.2f}' if o['r'] is not None else ', flat'))
-        ax.axvline(d['rt'], color = CANDY, dash = (0.8, 1.3), label = 'Peak RT')
+        ax.axvline(d['rt'], color = 'b1', dash = (0.8, 1.3), label = 'Peak RT')
         ax.set_xlim(times[0], times[-1]) if len(times) > 1 else None
         ax.set_xlabel('Retention time (min)')
         ax.set_ylabel('Intensity')
@@ -1700,8 +1860,8 @@ class QuantPanel(QWidget):
         if d['scan'] is not None:
             mzs, ints = d['scan']
             for lo, hi in d['windows']:
-                scan_ax.axvspan(lo, hi, color = LILAC)
-            scan_ax.vlines(mzs, 0, ints, color = INK, lw = 0.8)
+                scan_ax.axvspan(lo, hi, color = 'a1')
+            scan_ax.vlines(mzs, 0, ints, color = 'ink', lw = 0.8)
             spacing = 1.00335 / d['charge']
             scan_ax.set_xlim(d['windows'][0][0] - 1.5 * spacing, d['windows'][-1][1] + 1.5 * spacing)
             scan_ax.set_ylim(0, max(ints.max(initial = 0), 1) * 1.1)
@@ -2276,6 +2436,8 @@ class ResultsView(QWidget):
         self.export = QPushButton('Export')
         self.export_menu = QMenu(self)
         self.export.setMenu(self.export_menu)
+        # its last action, the fragment table, only while a spectrum is annotated
+        self.export_menu.aboutToShow.connect(lambda: self.export_menu.actions() and self.export_menu.actions()[-1].setEnabled(bool(self.spectrum.fragment_records)))
         top.addWidget(self.experiment)
         top.addWidget(self.dataset)
         top.addWidget(self.search, 1)
@@ -2355,6 +2517,7 @@ class ResultsView(QWidget):
         self.info_scroll.setFrameShape(QFrame.NoFrame)
         self.info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.info_scroll.setWidget(info)
+        self.info_scroll.installEventFilter(self)
         # The curation buttons stay in view below the details, which scroll if they must (inside them, the buttons were out of view at 1440 x 900), and
         # the candidate list takes the room left instead of its default 192 px height
         self.alternatives.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
@@ -2368,8 +2531,9 @@ class ResultsView(QWidget):
         self.spectrum = SpectrumPanel()
         self.spectrum_file = QComboBox()
         self.spectrum_file.setToolTip('Run whose MS2 spectrum is shown for this feature')
-        # It may shrink below its longest run name (the list shows them in full): 50-character names made the window at least 1430 px wide
-        self.spectrum_file.setMinimumWidth(80)
+        # About 16 characters wide, not its longest run name (the list shows them in full): 50-character names made the window at least 1430 px wide
+        self.spectrum_file.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.spectrum_file.setMinimumContentsLength(16)
         self.spectrum.controls.insertWidget(1, self.spectrum_file)
         QWidget.setTabOrder(self.spectrum_file, self.spectrum.tolerance)
         # MS3 spectra of the selected peak, pooled per isolated MS2 fragment, annotated as fragments of that fragment
@@ -2398,8 +2562,6 @@ class ResultsView(QWidget):
         bottom.addWidget(self.tabs)
         bottom.setStretchFactor(1, 1)
         bottom.setSizes([380, 900])
-        # The detail drawing is fitted to the pane's width, so it is fitted again when the pane is resized
-        bottom.splitterMoved.connect(lambda: self.row is not None and self.update_drawing())
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.addWidget(self.table)
         self.splitter.addWidget(bottom)
@@ -2499,6 +2661,8 @@ class ResultsView(QWidget):
         if payload['features'] is not None:
             self.export_menu.addAction('All tables as CSV…', lambda: self.export_all('.csv'))
             self.export_menu.addAction('All tables as Excel…', lambda: self.export_all('.xlsx'))
+        self.export_menu.addSeparator()
+        self.export_menu.addAction('Fragment table of the MS2 spectrum…', self.spectrum.export_fragments)
         self.show_dataset()
         self.experiment_shown.emit(payload['name'])
 
@@ -2520,9 +2684,12 @@ class ResultsView(QWidget):
         structures = list(df['top1_pred'])
         compositions = [_composition(c) for c in df['composition']]
         notes_tip = 'Notes from the pipeline, adducts, and your curation'
+        formulas = self.formulas(df)
         columns = [{'title': 'Structure', 'kind': 'structure', 'raw': [s if isinstance(s, str) else None for s in structures],
                     'text': [s if isinstance(s, str) else '' for s in structures], 'image': [s if isinstance(s, str) else c or None for s, c in zip(structures, compositions)]},
                    {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions},
+                   {'title': 'Formula', 'kind': 'text', 'raw': formulas, 'text': formulas, 'tip': 'Elemental formula of the neutral glycan as measured (reducing end '
+                    'and derivatization included), e.g., to extract its ions with any adduct in Skyline or MZmine'},
                    # sorted by m/z, the rows of one ion (a composition and charge, whose m/z differ by noise) go by RT
                    dict(_number_column('m/z', df['m/z'], 4), sort = mz_order(df['m/z'], df['RT'], df['charge'].values, df['composition'].tolist()).tolist()),
                    _number_column('z', df['charge'], 0, 'Precursor charge'), _number_column('RT', df['RT'], 2, 'Retention time (min)')]
@@ -2530,18 +2697,23 @@ class ResultsView(QWidget):
             columns.append(_number_column('MS2 runs', df['n_files_ms2'], 0, 'Runs in which this feature has MS2 evidence'))
             for run in self.payload['tables']:
                 if run in df.columns:
-                    column = _number_column(run, df[run], 2, f'Abundance in {run} (%); pale where MS1 signal only')
+                    column = _number_column(run, df[run], 2, f'Relative abundance in {run}: % of the summed abundance of the glycans this run reports (MS1 peak '
+                                                             'areas, else precursor intensities). A pale bar: the run has MS1 signal of this glycan but no MS2 '
+                                                             'spectrum of it, so it was found by its m/z and retention time')
                     evidence = list(df.get(f'evidence_{run}', [None] * len(df)))
                     top = max([v for v in column['raw'] if v is not None] or [1]) or 1
                     column.update(kind = 'bar', bar = [None if v is None else (v / top, e == 'ms1_only') for v, e in zip(column['raw'], evidence)],
-                                  tips = [f'{t} ({e})' if isinstance(e, str) else t for t, e in zip(column['text'], evidence)])
+                                  tips = [f'{t}% of the glycan signal in {run}' + ('; MS1 signal only, found by m/z and retention time (no MS2 spectrum in this run)'
+                                                                                    if e == 'ms1_only' else '; with MS2 spectra in this run' if e == 'ms2' else '') if t else ''
+                                          for t, e in zip(column['text'], evidence)])
                     columns.append(column)
             notes = ['; '.join(x for x in (f'not compared: {f}' if isinstance(f, str) and f else '', c) if isinstance(x, str) and x)
                      for f, c in zip(df.get('flag', [''] * len(df)), df['curation'])]
         else:
             abundance = 'rel_abundance' if 'rel_abundance' in df.columns else 'num_spectra'
             column = _number_column('Abundance' if abundance == 'rel_abundance' else 'Spectra', df[abundance], 2 if abundance == 'rel_abundance' else 0,
-                                    'Relative abundance (%), from MS1 peak areas where the file has MS1 scans, else from precursor intensities')
+                                    'Relative abundance (%), from MS1 peak areas where the file has MS1 scans, else from precursor intensities; a pale bar: '
+                                    'MS1 signal only, no MS2 spectrum')
             top = max([v for v in column['raw'] if v is not None] or [1]) or 1
             evidence = list(df.get('evidence', [None] * len(df)))
             column.update(kind = 'bar', bar = [None if v is None else (v / top, e == 'ms1_only') for v, e in zip(column['raw'], evidence)])
@@ -2577,7 +2749,7 @@ class ResultsView(QWidget):
                     self.table.setColumnWidth(c, min(self.table.columnWidth(c), 210))
             # Another run or the feature table keeps the sort chosen before if it has that column (every switch sorted by m/z again), else by m/z
             titles = [c['title'] for c in columns]
-            self.table.sortByColumn(titles.index(sort_title), sort_order) if sort_title in titles else self.table.sortByColumn(2, Qt.AscendingOrder)
+            self.table.sortByColumn(titles.index(sort_title), sort_order) if sort_title in titles else self.table.sortByColumn(titles.index('m/z'), Qt.AscendingOrder)
         else:
             self.table.sortByColumn(sort_column, sort_order)
         self.filter(self.search.text())
@@ -2714,6 +2886,12 @@ class ResultsView(QWidget):
         else:
             QDesktopServices.openUrl(QUrl(link))
 
+    def eventFilter(self, watched, event):
+        # The detail drawing is fitted to its pane's width, so it is fitted again whenever that changes (a moved splitter or a resized window)
+        if watched is self.info_scroll and event.type() == QEvent.Resize and event.size().width() != event.oldSize().width() and self.row is not None:
+            self.update_drawing()
+        return super().eventFilter(watched, event)
+
     def update_drawing(self):
         structure = self.alternative or self.frame['top1_pred'].iat[self.row]
         structure = self.drawing_of = structure if isinstance(structure, str) else _composition(self.frame['composition'].iat[self.row]) or None
@@ -2729,7 +2907,7 @@ class ResultsView(QWidget):
             # At most its natural size, the pane's width and 150 px high, and the label at least as high as the drawing: the label kept 90 px, so it cut off
             # the top and bottom of every drawing taller than that (most N-glycans)
             ratio = self.devicePixelRatioF()
-            box = QSize(min(int(image.width() * 0.3), max(120, self.info_scroll.viewport().width() - 30)), 150)
+            box = QSize(min(int(image.width() * 0.3), max(120, self.info_scroll.width() - self.info_scroll.verticalScrollBar().sizeHint().width() - 30)), 150)
             pixmap = QPixmap.fromImage(image.scaled(box * ratio, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             pixmap.setDevicePixelRatio(ratio)
             self.drawing.setMinimumHeight(max(90, round(pixmap.height() / ratio)))
@@ -2972,9 +3150,9 @@ class ResultsView(QWidget):
             size = (df['rel_abundance'] if 'rel_abundance' in df.columns else df['num_spectra']).astype(float).values
         size = 12 + 380 * np.sqrt(np.nan_to_num(size) / (np.nanmax(size, initial = 0) or 1))
         known = ~np.isnan(color)
-        ax.scatter(df['RT'].values[~known], df['m/z'].values[~known], s = size[~known], color = '#cccccc', edge = ('white', 0.5))
+        ax.scatter(df['RT'].values[~known], df['m/z'].values[~known], s = size[~known], color = _gray(ax, '#cccccc'), edge = ('paper', 0.5))
         if known.any():
-            ax.scatter(df['RT'].values[known], df['m/z'].values[known], s = size[known], c = color[known], edge = ('white', 0.5), alpha = 0.9)
+            ax.scatter(df['RT'].values[known], df['m/z'].values[known], s = size[known], c = color[known], edge = ('paper', 0.5), alpha = 0.9)
             # A number of runs: whole numbers only (it was labeled 1.2, 1.4, ..., or 0.925 to 1.075 when every feature had MS2 in one run)
             ax.colorbar(color_label, integer = self.dataset.currentData() == FEATURES)
         self.map_points = Target(ax, df['RT'].values, df['m/z'].values, radius = 4.0)
@@ -3001,7 +3179,7 @@ class ResultsView(QWidget):
         evidence = [df[f'evidence_{run}'].iat[row] if f'evidence_{run}' in df.columns else None for run in runs]
         ax.barh(range(len(runs)), values, height = 0.6, color = ['a1' if e != 'ms1_only' else 'a3' for e in evidence])
         for k, (e, value) in enumerate(zip(evidence, values)):
-            ax.annotate(f'{value:.2f}' if isinstance(e, str) else 'not found', (value, k), offset = (4, 0), size = 7, color = INK if isinstance(e, str) else MUTED, halo = 0.0)
+            ax.annotate(f'{value:.2f}' if isinstance(e, str) else 'not found', (value, k), offset = (4, 0), size = 7, color = 'ink' if isinstance(e, str) else 'muted', halo = 0.0)
         ax.set_yticks(range(len(runs)), runs)
         ax.invert_yaxis()
         ax.set_xlabel('Relative abundance (%); pale: MS1 signal only')
@@ -3115,9 +3293,15 @@ class ResultsView(QWidget):
                                   'peaks': ms3[1] if ms3 else spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': _row_settings(self.payload['settings'], table, r),
                                   'ms3_precursor': ms3[0] if ms3 else None, 'tolerance': (panel.tolerance.value(), panel.unit.currentData())})
 
+    def formulas(self, df):
+        """Each row's formula (_formula) with its experiment's settings, and its own reducing end where the runs have several side by side"""
+        return [_formula(c, _row_settings(self.payload['settings'], df, r)) for r, c in enumerate(df['composition'])]
+
     def export_frame(self, df):
-        """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated"""
-        out = df[~df['excluded'].astype(bool)].drop(columns = ['excluded', 'ms3', 'xic', 'confidence_terms', '_top1'], errors = 'ignore')
+        """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated, a formula after the composition"""
+        out = df.drop(columns = ['ms3', 'xic', 'confidence_terms', '_top1'], errors = 'ignore')
+        out.insert(out.columns.get_loc('composition') + 1, 'formula', self.formulas(df))
+        out = out[~out['excluded'].astype(bool)].drop(columns = 'excluded')
         with IMPORT_LOCK:
             references.reference_index()
         return references.add_references(out.drop(columns = ['curation']) if not out['curation'].astype(bool).any() else out)
@@ -3790,7 +3974,7 @@ class CompareTab(QWidget):
         q = df['corr p-val'].astype(float).values
         # an underflowed 0 at the smallest p-value above it
         y = -np.log10(np.clip(q, q[q > 0].min() if (q > 0).any() else 1e-300, None))
-        colors = np.where(df['significant'].values.astype(bool), np.where(x > 0, CANDY, LILAC) if two else LILAC, '#cccccc')
+        colors = np.where(df['significant'].values.astype(bool), np.where(x > 0, 'b1', 'a1') if two else 'a1', '#cccccc')
         return x, y, colors, two
 
     def volcano_pressed(self, event):
@@ -3803,19 +3987,20 @@ class CompareTab(QWidget):
     def draw_volcano(self, figure, small = True):
         ax = figure.add_axes([0.09, 0.14, 0.86, 0.8] if small else [0.12, 0.12, 0.83, 0.82])
         x, y, colors, two = self.volcano_axes()
+        colors = np.where(colors == '#cccccc', _gray(ax, '#cccccc'), colors)
         # those tested on detection as triangles pointing to the group they were found in
         rows_at = {}
         for rows, marker in ((~self.absent, 'o'), (self.absent & (x > 0), '>'), (self.absent & (x <= 0), '<')):
             if rows.any():
                 ax.scatter(x[rows], y[rows], s = 34 if marker != 'o' else 28, hue = colors[rows], colors = {c: c for c in set(colors[rows])}, marker = marker if two else 'D' if marker != 'o' else 'o',
-                           edge = ('white', 0.5), legend = None)
+                           edge = ('paper', 0.5), legend = None)
                 rows_at[Target(ax, x[rows], y[rows], radius = 4.0)] = np.flatnonzero(rows)
         if self.absent.any():
             ax.text(0.99, 0.98, f'{"Triangles at the edges" if two else "Diamonds"}: missing from every run of a group, tested on detection', axes_fraction = True,
-                    ha = 'right', va = 'top', size = 7, color = MUTED)
-        ax.axhline(-np.log10(self.result['alpha']), color = MUTED, dash = (3.0, 1.3))
+                    ha = 'right', va = 'top', size = 7, color = 'muted')
+        ax.axhline(-np.log10(self.result['alpha']), color = 'muted', dash = (3.0, 1.3))
         if two:
-            ax.axvline(0, color = '#dddddd', dash = None)
+            ax.axvline(0, color = _gray(ax, '#dddddd'), dash = None)
             a, b = self.result['groups']
             ax.set_xlabel(f'Log2 fold change, {b} over {a}')
         else:
@@ -4021,6 +4206,7 @@ class MainWindow(QMainWindow):
     taxa_ready = Signal(object)
     references_ready = Signal()
     update_found = Signal(str)
+    update_checked = Signal(str)
     update_progress = Signal(int)
     update_downloaded = Signal(bool)
     error_caught = Signal(str, object)
@@ -4140,6 +4326,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction('Quit', self.close, QKeySequence('Ctrl+Q'))
         view_menu = self.menuBar().addMenu('&View')
         view_menu.addAction(self.log_dock.toggleViewAction())
+        self.dark_action = view_menu.addAction('Dark mode')
+        self.dark_action.setCheckable(True)
+        self.dark_action.setChecked(THEME['name'] == 'dark')
+        self.dark_action.toggled.connect(self.set_theme)
         help_menu = self.menuBar().addMenu('&Help')
         help_menu.addAction('CandyCrunch on GitHub', lambda: QDesktopServices.openUrl(QUrl('https://github.com/BojarLab/CandyCrunch')))
         help_menu.addAction('Report a bug…', lambda: self.open_report())
@@ -4158,6 +4348,7 @@ class MainWindow(QMainWindow):
         self.usage_action.toggled.connect(lambda on: (self.store.setValue('usage_stats', on), on or self.store.remove(f'sessions/{os.getpid()}'),
                                                       setattr(self, 'session', self.session if on else None)))
         help_menu.addSeparator()
+        help_menu.addAction('Check for updates…', lambda: self.check_update(announce = True))
         help_menu.addAction('About CandyCrunch', self.about)
         self.settings.add_files.clicked.connect(self.choose_files)
         self.settings.add_folder.clicked.connect(self.choose_folder)
@@ -4184,6 +4375,7 @@ class MainWindow(QMainWindow):
         self.images.ready.connect(self.image_ready)
         self.update_button.clicked.connect(self.install_update)
         self.update_found.connect(lambda tag: (self.update_button.setText(f'Update to CandyCrunch {tag}'), self.update_button.show()))
+        self.update_checked.connect(lambda text: QMessageBox.information(self, 'Check for updates', text))
         self.update_progress.connect(lambda percent: self.update_button.setText(f'Downloading update… {percent}%'))
         self.update_downloaded.connect(lambda ok: (self.update_button.setEnabled(True), self.update_button.setText('Install update and restart' if ok else 'Download failed, retry')))
         self.error_caught.connect(self.caught_error, Qt.QueuedConnection)
@@ -4255,21 +4447,65 @@ class MainWindow(QMainWindow):
         if sessions:
             self.open_session(sessions[0])
         self.load_taxa()
-        if getattr(sys, 'frozen', False) and sys.platform == 'win32':
-            # The installed app offers the newest GitHub release that carries a Windows installer; without network access it simply offers nothing
-            def check():
-                try:
-                    from importlib.metadata import version
-                    from packaging.version import Version
-                    with urllib.request.urlopen('https://api.github.com/repos/BojarLab/CandyCrunch/releases/latest', timeout = 10) as response:
-                        release = json.load(response)
-                    asset = next(a for a in release['assets'] if a['name'].endswith('-Windows-Setup.exe'))
-                    if Version(release['tag_name'].lstrip('v')) > Version(version('candycrunch')):
-                        self.update_url = asset['browser_download_url']
-                        self.update_found.emit(release['tag_name'].lstrip('v'))
-                except Exception:
-                    pass
-            threading.Thread(target = check, daemon = True).start()
+        self.check_update()
+        if THEME['name'] == 'dark':
+            self.retheme()
+
+    def set_theme(self, dark):
+        """View > Dark mode: the window's colors, kept for the next start, and everything drawn in them drawn again"""
+        self.store.setValue('theme', 'dark' if dark else 'light')
+        _set_theme(QApplication.instance(), dark)
+        self.images.set_dark(dark)
+        self.retheme()
+
+    def retheme(self):
+        """Draws again in the theme what was drawn in the other: charts and spectra in their palette's dark or light version, glycan drawings (stickers on
+        the dark page), and the HTML of tables, details, and fragment tables"""
+        self.update_button.setStyleSheet(f'color: {CANDY}; font-weight: 600;')
+        for view in self.findChildren(ChartView):
+            view.palette = _themed(view.palette)
+            view.new_figure()
+        for panel in self.findChildren(SpectrumPanel):
+            panel.resubmit()
+        if self.results.payload is not None:
+            self.results.show_dataset(keep_row = self.results.row)
+        compare = self.compare
+        if compare.experiment is not None and compare.experiment['comparison']['result'] is not None:
+            compare.show_result(compare.experiment['comparison']['result'], keep_row = compare.row)
+        self.crumbs.update_preview()
+        # the welcome page's drawing, which image_ready shows once drawn
+        self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
+
+    def check_update(self, announce = False):
+        """The installed Windows app offers the newest GitHub release that carries a Windows installer, without network access simply nothing; announce:
+        asked from the Help menu, so the answer comes also without a newer release, and other installs are told how they are updated"""
+        from importlib.metadata import version
+        running = version('candycrunch')
+        if not (getattr(sys, 'frozen', False) and sys.platform == 'win32'):
+            if announce:
+                QMessageBox.information(self, 'Check for updates', f'This is CandyCrunch {running}. ' + (
+                    'The newest release is on <a href="https://github.com/BojarLab/CandyCrunch/releases/latest">GitHub</a>.' if getattr(sys, 'frozen', False) else
+                    'It runs from its Python package, which <code>pip install --upgrade "candycrunch[gui]"</code> updates.'))
+            return
+
+        def check():
+            try:
+                from packaging.version import Version
+                with urllib.request.urlopen('https://api.github.com/repos/BojarLab/CandyCrunch/releases/latest', timeout = 10) as response:
+                    release = json.load(response)
+                asset = next(a for a in release['assets'] if a['name'].endswith('-Windows-Setup.exe'))
+                if Version(release['tag_name'].lstrip('v')) > Version(running):
+                    self.update_url = asset['browser_download_url']
+                    self.update_found.emit(release['tag_name'].lstrip('v'))
+                    if announce:
+                        self.update_checked.emit(f'CandyCrunch {release["tag_name"].lstrip("v")} is out (this is {running}): Update in the status bar installs it.')
+                elif announce:
+                    self.update_checked.emit(f'CandyCrunch {running} is the newest version.')
+            except Exception:
+                if announce:
+                    self.update_checked.emit(f'This is CandyCrunch {running}. GitHub could not be reached to look for a newer version.')
+
+        threading.Thread(target = check, daemon = True).start()
 
     def caught_error(self, text, values):
         self.append_log(text)
@@ -4841,15 +5077,7 @@ def main():
     app.setOrganizationName('BojarLab')
     app.setApplicationName('CandyCrunch')
     app.setStyle('Fusion')
-    palette = QPalette()
-    for role, color in ((QPalette.Window, WASH), (QPalette.Base, '#ffffff'), (QPalette.AlternateBase, '#fbf9fc'), (QPalette.Text, INK), (QPalette.WindowText, INK),
-                        (QPalette.ButtonText, INK), (QPalette.Button, '#efe8f4'), (QPalette.Highlight, LILAC), (QPalette.HighlightedText, '#ffffff'),
-                        (QPalette.ToolTipBase, '#ffffff'), (QPalette.ToolTipText, INK), (QPalette.Link, '#7a3fa8'), (QPalette.PlaceholderText, MUTED)):
-        palette.setColor(role, QColor(color))
-    for role in (QPalette.ButtonText, QPalette.WindowText, QPalette.Text):
-        palette.setColor(QPalette.Disabled, role, QColor(MUTED))
-    app.setPalette(palette)
-    app.setStyleSheet(STYLE)
+    _set_theme(app, _saved_dark(QSettings()))
     app.installEventFilter(_WheelGuard(app))
     app.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'candycrunch_icon.png')))
     if sys.argv[1:2] == ['--self-test']:
@@ -4875,7 +5103,7 @@ def main():
         with contextlib.suppress(OSError):
             if own or time.time() - os.path.getmtime(path) > 86400:
                 with open(path, encoding = 'utf-8', errors = 'replace') as file:
-                    text = file.read()
+                    text = COM_NOISE.sub('', file.read())
                 os.remove(path)
                 if own:
                     # The window of that process never closed; faulthandler wrote a trace if it crashed
@@ -4883,7 +5111,8 @@ def main():
                 if own and text.strip():
                     crashes.append(text[-100000:])
     crash_file = open(CRASH_FILE.format('window', os.getpid()), 'w')
-    faulthandler.enable(crash_file, all_threads = True)
+    # Only the failing thread: faulthandler reads the other threads' frames while they run, which can crash the window itself
+    faulthandler.enable(crash_file, all_threads = False)
     window = MainWindow([os.path.abspath(p) for p in sys.argv[1:]], crashes, ended)
     window.show()
     code = app.exec()

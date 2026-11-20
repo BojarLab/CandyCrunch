@@ -28,12 +28,13 @@ dependencies = [
     "scipy",
     "torch>=2.3,<3; (platform_system != 'Darwin' or platform_machine != 'x86_64') and platform_system != 'Emscripten'",
     "torch>=2.2,<2.3; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    "onnxruntime>=1.30; platform_system != 'Emscripten' and (platform_system != 'Darwin' or platform_machine != 'x86_64')",
     "numpy<2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
     "numpy",
     "pandas>=2.2.2",
     "zstandard; python_version < '3.14'",
     "openpyxl",
-    "viscose>=0.3.0",
+    "viscose>=0.3.2",
     "glycorender",
 ]
 
