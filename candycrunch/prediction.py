@@ -4205,10 +4205,34 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
     rows_to_drop = []
     # The (de)protonated ion reports the species when it was observed, as it is the m/z every other tool lists, else the stronger signal
     plain = dict(zip(df_out.index, ~df_out['adduct'].apply(lambda a: isinstance(a, str)))) if 'adduct' in df_out.columns else defaultdict(lambda: True)
+    # An anion adduct row counts for the (de)protonated row of its composition nearest in RT (within rt_diff), also if the model named no structure for it,
+    # else for that of its exact isobar: formate and bicarbonate differ by an O, as Hex and dHex and as Neu5Gc and Neu5Ac do, so a bicarbonate adduct of a
+    # fucosylated glycan whose spectrum the model did not name reads as the formate adduct of the composition with a Hex for its Fuc, and was dropped. The
+    # nearest row, as below the first row in RT took the adduct ions of an isomer eluting up to rt_diff later; added once the (de)protonated ions are folded,
+    # which compare their own signal
+    nearest = {}
+    if mode == 'negative' and 'adduct' in df_out.columns:
+        swaps = {'Formate': ({'Hex': -1, 'dHex': 1}, {'Neu5Gc': -1, 'Neu5Ac': 1}), 'HCO3-': ({'Hex': 1, 'dHex': -1}, {'Neu5Gc': 1, 'Neu5Ac': -1})}
+        rts = df_out['RT'].values
+        plain_rows = defaultdict(list)
+        for i, key in enumerate(df_out['top_pred']):
+            if plain[i] and isinstance(key, str):
+                plain_rows[key].append(i)
+        for i, (a, c, preds) in enumerate(zip(df_out['adduct'], df_out['composition'], df_out['predictions'])):
+            c = get_comp(preds[0][0]) if len(preds) else c
+            if plain[i] or not isinstance(c, dict):
+                continue
+            for d in ({},) + swaps.get(a, ()):
+                reading = {k: c.get(k, 0) + d.get(k, 0) for k in set(c) | set(d)}
+                near = [j for j in plain_rows.get(stringify_dict({k: v for k, v in reading.items() if v}), []) if abs(rts[j] - rts[i]) <= rt_diff] if min(reading.values()) >= 0 else []
+                if near:
+                    nearest[i] = min(near, key = lambda j: abs(rts[j] - rts[i]))
+                    break
+    folded_into = {}
     for pred in repeated:
-        pred_df = df_out[df_out['top_pred'] == pred].sort_values('RT')
+        pred_df = df_out[(df_out['top_pred'] == pred) & ~df_out.index.isin(list(nearest))].sort_values('RT')
         mz_vals = mzs[pred_df.index].values
-        if mz_vals.max() - mz_vals.min() < 1.0:
+        if len(pred_df) < 2 or mz_vals.max() - mz_vals.min() < 1.0:
             continue
         used = set()
         for i, (idx_i, row_i) in enumerate(pred_df.iterrows()):
@@ -4229,6 +4253,7 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
                         df_out.at[idx_i, 'xic'] = df_out.at[idx_i, 'xic'] + df_out.at[idx_j, 'xic']
                     rows_to_drop.append(idx_j)
                     used.add(idx_j)
+                    folded_into[idx_j] = idx_i
                 else:
                     df_out.at[idx_j, 'rel_abundance'] = df_out.at[idx_j, 'rel_abundance'] + df_out.at[idx_i, 'rel_abundance']
                     df_out.at[idx_j, 'num_spectra'] = df_out.at[idx_j, 'num_spectra'] + df_out.at[idx_i, 'num_spectra']
@@ -4236,7 +4261,16 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
                         df_out.at[idx_j, 'xic'] = df_out.at[idx_j, 'xic'] + df_out.at[idx_i, 'xic']
                     rows_to_drop.append(idx_i)
                     used.add(idx_i)
+                    folded_into[idx_i] = idx_j
                     break
+    for i, j in nearest.items():
+        while j in folded_into:
+            j = folded_into[j]
+        df_out.at[j, 'rel_abundance'] = df_out.at[j, 'rel_abundance'] + df_out.at[i, 'rel_abundance']
+        df_out.at[j, 'num_spectra'] = df_out.at[j, 'num_spectra'] + df_out.at[i, 'num_spectra']
+        if 'xic' in df_out.columns:
+            df_out.at[j, 'xic'] = df_out.at[j, 'xic'] + df_out.at[i, 'xic']
+        rows_to_drop.append(i)
     df_out = df_out.drop(rows_to_drop).drop(['top_pred'], axis = 1)
     df_out.index = mzs[df_out.index.values]
     return df_out

@@ -685,7 +685,8 @@ def test_filter_out_is_airtight():
 
 def test_search_options_keep_the_checks(tmp_path):
     # Without imputation and database search a run only loses what those two add: domain_filter still runs, so a [M+HCO3]- three times stronger than its [M-H]- is
-    # folded into that row and listed at its m/z
+    # never listed at its own m/z, and its spectra count for the row of their glycan nearest in RT. That holds also where the model names none of them: spectra
+    # without a structure kept (get_missing), the adduct of the fucosylated glycan reads as the formate adduct of the composition with a Hex for its Fuc
     example = str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx')
     off = {'supplement': False, 'experimental': False}
     with_search, without = wrap_inference(example, 'O'), wrap_inference(example, 'O', **off)
@@ -702,7 +703,11 @@ def test_search_options_keep_the_checks(tmp_path):
     pd.concat([spectra, adduct], ignore_index = True).sort_values('RT').to_excel(path, index = False)
     out = wrap_inference(str(path), 'O', **off)
     assert (np.abs(out.index.values - mz) < 0.1).any() and not (np.abs(out.index.values - mz - shift) < 0.1).any()
-    assert out.loc[np.abs(out.index.values - mz) < 0.1, 'num_spectra'].max() > without.loc[mz, 'num_spectra']
+    kept, out = wrap_inference(example, 'O', get_missing = True, **off), wrap_inference(str(path), 'O', get_missing = True, **off)
+    assert not (np.abs(out.index.values - mz - shift) < 0.1).any()
+    # (each isomer within the minute gets the adduct spectra of its own peak; before, the first one in RT got all of them)
+    at_peak = lambda df: df.loc[(np.abs(df.index.values - mz) < 0.1) & (np.abs(df['RT'].values - rt) < 0.1), 'num_spectra'].sum()
+    assert at_peak(out) - at_peak(kept) == ((adduct['RT'] - rt).abs() < 0.5).sum()
 
 
 def test_onnx_model_matches_torch():
