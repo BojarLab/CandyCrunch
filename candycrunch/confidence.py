@@ -4,16 +4,17 @@ import re
 import numpy as np
 import pandas as pd
 
-# Logistic model over the terms below, fitted (C = 0.3) on the rows the pipeline reported for the development test sets, labeled against their curated
-# ground truths: 1 for the exact structure, 0 for another structure or a peak without a ground-truth glycan (rows of ground-truth peaks without a structure
-# left out). Leave-one-set-out, it is calibrated within 0.03 (expected calibration error; the model's own probability of the structure: 0.18).
+# Logistic model over the terms below, fitted (C = 0.3) on the rows the pipeline reported for the development test sets (their raw files, CandyCrunch_CNN2),
+# labeled against their curated ground truths: 1 for the exact structure, 0 for another structure or a peak without a ground-truth glycan (rows of
+# ground-truth peaks without a structure left out). Leave-one-set-out, it is calibrated within 0.03 (expected calibration error; the model's own probability
+# of the structure: 0.20). Peaks against a placement ('against') are held at 0: with this model, rows with them are as often right as rows without.
 # Per term: coefficient and mean over the fitted rows, so that a row's contribution, coefficient x (value - mean), is how far it moves the log-odds from a
 # typical reported peak
-CONFIDENCE_INTERCEPT = 0.471
-CONFIDENCE_TERMS = {'logit_conf': (0.065, 1.305), 'no_conf': (0.222, 0.02), 'margin': (0.947, 0.573), 'log_score': (0.122, 2.554), 'z2': (0.22, 0.651),
-                    'database': (-0.278, 0.211), 'sup_frac': (0.672, -0.166), 'against': (-0.215, 0.405), 'note_isomer': (-0.93, 0.308),
-                    'note_insource': (-0.811, 0.015), 'note_same': (-0.471, 0.129), 'no_glytoucan': (-0.803, 0.152), 'log_size': (-0.24, 2.058),
-                    'ab_pct': (1.102, 0.027)}
+CONFIDENCE_INTERCEPT = 0.939
+CONFIDENCE_TERMS = {'logit_conf': (0.131, 1.656), 'no_conf': (0.679, 0.053), 'margin': (0.161, 0.525), 'log_score': (0.521, 2.671), 'z2': (0.139, 0.693),
+                    'database': (-0.212, 0.098), 'sup_frac': (0.19, -0.143), 'against': (0.0, 0.32), 'note_isomer': (-0.62, 0.126),
+                    'note_insource': (-0.282, 0.001), 'note_same': (-0.097, 0.04), 'no_glytoucan': (-0.821, 0.348), 'log_size': (-0.867, 2.12),
+                    'ab_pct': (1.614, 0.025)}
 # How the terms are shown: one line per group, which sums the contributions of its terms
 CONFIDENCE_GROUPS = [('CandyCrunch model', ['logit_conf', 'no_conf', 'margin']), ('Structure from', ['database']), ('Fragments', ['log_score']),
                      ('Diagnostic peaks', ['sup_frac', 'against']), ('Isomer peaks', ['note_isomer', 'note_same']), ('In-source fragment', ['note_insource']),

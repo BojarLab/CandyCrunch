@@ -4468,8 +4468,9 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     | :-
     | Returns a tuple of (dataframe of corrected predictions with unnormalized rel_abundance and the calibrated confidence of each structure, list of spectra)
     """
-    # (the run's last-tenth cap, or None, and the RTs of its first and last MS2, which wrap_inference hands over in attrs)
-    late_window = df_out.attrs.get('late_window')
+    # (the run's last-tenth cap, or None, and the RTs of its first and last MS2, and the calibration of its precursors from their composition matches,
+    # model aside (center and half-width, ppm; None without header charges in orbitrap survey scans), which wrap_inference hands over in attrs)
+    late_window, precursor_calibration = df_out.attrs.get('late_window'), df_out.attrs.get('precursor_calibration')
     df_out = df_out.drop(columns = ['precursor_charge'], errors = 'ignore')
     # Reprioritize predictions based on how well they are explained by biosynthetic precursors in the same file (e.g., core 1 O-glycan making extended core 1 O-glycans more likely)
     try:
@@ -4505,8 +4506,11 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     known = regular & df_out['ppm_error'].notna().values
     known_ppm = df_out['ppm_error'].values[known]
     signed = (df_out.index.values - df_out['theo_mz'].values) / df_out['theo_mz'].values * 1e6
-    # With accurate survey scans the errors center on the run's calibration, which the composition matches of junk spectra hide from a median and MAD
-    window = accurate_ms1_window(signed[known], df_out['annotation_score'].values[known], ppm_thresh, floor = ms1_ppm_floor) if accurate_ms1 else None
+    # With accurate survey scans the errors center on the run's calibration, which the composition matches of junk spectra hide from a median and MAD. The
+    # densest window lies within the run's precursor calibration, as wrap_inference's does: in a dilute run, five rows of high-mannose compositions the
+    # model named at 0.01-0.15 with 2-4 annotations at -24 ppm outnumbered its three sialylated N-glycans at +1 ppm (precursor calibration +1.3 +- 12.7),
+    # and the window centered on them cut every glycan of the run
+    window = accurate_ms1_window(signed[known], df_out['annotation_score'].values[known], ppm_thresh, floor = ms1_ppm_floor, prior = precursor_calibration) if accurate_ms1 else None
     if window is not None:
         # (at least 3 mDa: the calibration moves with m/z, and low m/z rows left the window of the run's larger ions, Gal-GalNAc 384.15 at -6 ppm in runs centered at -2)
         half = np.maximum(window[1], 3000 / df_out.index.values.astype(float))
@@ -4745,10 +4749,15 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                             height = max(height, sm[j])
                     if height <= 0 or dt[(sm >= 0.25 * height) & span].sum() >= 0.25 * dt[span].sum():
                         orphans.add(i)
+            # With accurate survey scans an adduct row ([M+Na]+, [M+Li]+ of permethylated glycans, the run's main ion) is placed and tested on its own ion,
+            # with the rows of its composition, charge and adduct: skipped, its spectra on the flanks of peaks and in background stayed rows, which a model
+            # that names many such spectra turned into dozens of false rows per run without any maximum of their ion (positive-mode permethylated runs).
+            # Not on ion-trap survey scans, whose window of a metal adduct of permethylated milk oligosaccharides holds a broad background that drowned the
+            # peaks of the run's main glycans (2'-FL, LNT, LNFP)
             for i in range(len(df_out)):
-                if comps[i] is not None and not adducts[i] and offsets[i] == 0 and df_out['predictions'].iloc[i]:
-                    groups.setdefault((comps[i], zs[i]), []).append(i)
-            for (_, z), rows in groups.items():
+                if comps[i] is not None and (accurate_ms1 or not adducts[i]) and offsets[i] == 0 and df_out['predictions'].iloc[i]:
+                    groups.setdefault((comps[i], zs[i], df_out['adduct'].iat[i] if adducts[i] else None), []).append(i)
+            for (_, z, _), rows in groups.items():
                 mz, sp = df_out['theo_mz'].values[rows[0]], ISOTOPE_SPACING / z
                 s0, s1 = np.searchsorted(ms1[0], rts[rows].min() - 3.5), np.searchsorted(ms1[0], rts[rows].max() + 3.5, side = 'right')
                 if s1 - s0 < 5:
@@ -5366,11 +5375,13 @@ def check_reducing_end(spectra_filepath, glycan_class, run_args, loaded = None, 
 
     def n_strong(df):
         # the model predictions the run can report (attrs['off_mass']: precursors that miss their structure by ppm_thresh, see wrap_inference), as rows and
-        # distinct compositions
+        # distinct compositions; not those of three or more hexoses alone: glucose oligomers (hexose ladders from glycogen, starch or dextrins) come with free
+        # reducing ends into preparations of every reducing end, and a model that knows them named a dilute reduced run's unreduced ladder (Hex3-Hex9, 120 rows
+        # of 15 compositions against 13 of 9 reduced N-glycans) and switched it to unreduced
         if 'evidence' not in df.columns:
             return 0, 0
         comps = [tuple(sorted(c.items())) if isinstance(c, dict) else c for e, c, k in zip(df['evidence'], df['composition'], zip(df.index, df['RT'])) if
-                 e == 'strong' and k not in df.attrs.get('off_mass', ())]
+                 e == 'strong' and k not in df.attrs.get('off_mass', ()) and not (isinstance(c, dict) and set(c) == {'Hex'} and c['Hex'] >= 3)]
         return len(comps), len(set(comps))
 
     for end in [chosen] + [e for e in ends.values() if e != chosen]:
@@ -5879,10 +5890,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                                              sample_prep = sample_prep, sialic_derivatization = sialic_derivatization, n_jobs = n_jobs,
                                              fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm, deisotoped = condensed.setdefault('deisotoped', {}))
     # A glycosylamine or glycosylaminitol reading is checked against every candidate of its spectrum at the run's own reducing end (below): their best
-    # annotation score and their masses
+    # annotation score, and their masses, against which every side-product reading is checked
     own_best = df_out.groupby('spec_id')['annotation_score'].max() if {'glycosylamine', 'glycosylaminitol'} & set(re_names.values()) else None
     own_masses = df_out.groupby('spec_id')['composition'].agg(lambda cs: [composition_to_mass(c, sample_prep = sample_prep, modification = modification,
-        sialic_derivatization = sialic_derivatization) for c in cs if isinstance(c, dict)]) if own_best is not None else None
+        sialic_derivatization = sialic_derivatization) for c in cs if isinstance(c, dict)]) if re_names else None
     df_out = df_out[df_out['compositional_vector'].notnull()].reset_index(drop = True)
     # Spectra without an annotation above crumbs_thresh are dropped unless rescued, so their inputs get one plain pass instead of 3 augmented ones
     # The model knows permethylated spectra by their own modification code (as build_training_pickles encodes them), whatever the reducing end. A free
@@ -6533,14 +6544,16 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
 
                 ga_ok = ga_ok & np.array([not a or fit(mz, g, z, (mass_tag or 0) + o) < fit(mz, g, z, mass_tag) for a, mz, g, z, o in zip(
                     ga, df_var['m/z'], df_var['candidate_structure'], df_var['charge'], df_var['re_offset'])], dtype = bool)
-                if own_masses is not None:
-                    var_masses = [composition_to_mass(c, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization) + o
-                                  for c, o in zip(df_var['composition'], df_var['re_offset'])]
-                    # With accurate survey scans the reading has to lie nearer to the precursor than every such candidate, as both pass their 20 ppm window: the
-                    # glycosylaminitol of Hex5HexNAc4dHex3 lies 15 ppm above the alditol of Hex5HexNAc4Neu5Ac1dHex1 at z = 2, took its spectra by chance fragments
-                    # and, with no row of its composition to fold into, took the run's main sialylated glycan out of the table
-                    observed = [mz * abs(z) + abs(z) * PROTON_MASS * (1 if mode == 'negative' else -1) for mz, z in zip(df_var['m/z'], df_var['charge'])]
-                    ga_ok = ga_ok & ~(ga & np.array([any(abs(m - q) <= abs(v - q) if accurate_ms1 else abs(m - v) < 0.1 for m in own_masses.get(s, [])) for s, v, q in zip(df_var['spec_id'], var_masses, observed)], dtype = bool))
+            if own_masses is not None and len(df_var):
+                var_masses = [composition_to_mass(c, sample_prep = sample_prep, modification = modification, sialic_derivatization = sialic_derivatization) + o
+                              for c, o in zip(df_var['composition'], df_var['re_offset'])]
+                # With accurate survey scans the reading has to lie nearer to the precursor than every such candidate, as both pass their 20 ppm window: the
+                # glycosylaminitol of Hex5HexNAc4dHex3 lies 15 ppm above the alditol of Hex5HexNAc4Neu5Ac1dHex1 at z = 2, took its spectra by chance fragments
+                # and, with no row of its composition to fold into, took the run's main sialylated glycan out of the table. So does every other side-product
+                # reading: the unreduced Hex6HexNAc5dHex4Neu5Ac1 lies 0.02 Da from the alditol of Hex6HexNAc5Neu5Ac3, and a structure of it that the run
+                # reported elsewhere (with four fucoses and a Neu5Ac, more chance fragments) took the spectra of the run's trisialylated glycan at three RTs
+                observed = [mz * abs(z) + abs(z) * PROTON_MASS * (1 if mode == 'negative' else -1) for mz, z in zip(df_var['m/z'], df_var['charge'])]
+                ga_ok = ga_ok & ~np.array([any(abs(m - q) <= abs(v - q) if accurate_ms1 else abs(m - v) < 0.1 for m in own_masses.get(s, [])) for s, v, q in zip(df_var['spec_id'], var_masses, observed)], dtype = bool)
             df_var = df_var[((df_var['annotation_score'] > crumbs_thresh) | sparse) & ~doomed & ga_ok & (df_var['annotation_score'] > np.array(
                 [own.get(key, -np.inf) for key in zip(np.round(df_var['m/z'].values, 5), np.round(df_var['RT'].values, 2))]) + 2)]
         if len(df_var):
@@ -6595,7 +6608,9 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         df_out['reducing_end'] = [own_end if o == 0 else e for o, e in zip(df_out['re_offset'], df_out['reducing_end'])]
     if not _return_intermediate:
         # A wrong reducing end shows in the run itself: few model predictions among its most intense clusters
-        strong = df_out[(df_out['evidence'].values == 'strong') & np.array([k not in off_mass for k in zip(df_out.index, df_out['RT'])], dtype = bool)] if 'evidence' in df_out.columns else df_out.iloc[:0]
+        # (hexose chains do not count, see check_reducing_end)
+        strong = df_out[(df_out['evidence'].values == 'strong') & np.array([k not in off_mass and not (isinstance(c, dict) and set(c) == {'Hex'} and c['Hex'] >= 3) for k, c in zip(
+            zip(df_out.index, df_out['RT']), df_out['composition'])], dtype = bool)] if 'evidence' in df_out.columns else df_out.iloc[:0]
         comps = [tuple(sorted(c.items())) if isinstance(c, dict) else c for c in strong['composition']]
         top = [c for c, mz, rt in zip(comps, strong.index, strong['RT']) if np.any((np.abs(top_clusters['m/z'].values - mz) < mass_tolerance) & (
             np.abs(top_clusters['RT'].values - rt) < rt_diff))]
@@ -6609,15 +6624,16 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         # A wrong glycan_class shows in the run itself: about as many of its glycans get the top structure of another class (above extra_thresh, or the
         # likelier isomer) as of glycan_class. The file is then also processed as that class, which takes over if it finds at least 1.5x as many glycans of
         # its own class.
-        # (rows of another reducing end repeat structures of the run's own rows, so they do not count)
-        tops = [p[0][0] for p in (df_out.loc[df_out['re_offset'] == 0, 'predictions'] if 're_offset' in df_out.columns else df_out['predictions']) if p]
+        # (rows of another reducing end repeat structures of the run's own rows, so they do not count, and neither do chains of three or more hexoses, which
+        # tell no class: glucose oligomers are in preparations of every class, and their rungs read as free glycans switched a dilute N-glycan run to free glycans)
+        tops = [p[0][0] for p in (df_out.loc[df_out['re_offset'] == 0, 'predictions'] if 're_offset' in df_out.columns else df_out['predictions']) if p and not (set(get_comp(p[0][0])) == {'Hex'} and get_comp(p[0][0])['Hex'] >= 3)]
         # Another class only counts structures no class of the run can hold: free and lipid glycans share every reducing end, and O and free share Gal and GlcNAc
         label, own = '+'.join(classes), sum(in_classes(g, classes) for g in tops)
         counts = {c: sum(enforce_class(g, c) and not in_classes(g, classes) for g in tops) for c in ['N', 'O', 'free'] if c not in classes}
         other = max(counts, key = counts.get, default = None)
         if other is not None and counts[other] >= max(5, own):
             df_other = wrap_inference(spectra_filepath, other, **run_args, _return_intermediate = True, _loaded = loaded_spectra, _condensed = condensed)
-            found = sum(bool(p) and enforce_class(p[0][0], other) for p in (
+            found = sum(bool(p) and enforce_class(p[0][0], other) and not (set(get_comp(p[0][0])) == {'Hex'} and get_comp(p[0][0])['Hex'] >= 3) for p in (
                 df_other.loc[df_other['re_offset'] == 0, 'predictions'] if 're_offset' in df_other.columns else df_other['predictions']))
             print(f"WARNING: As {label} glycans, {os.path.basename(spectra_filepath)} gave {own} {label} structures and "
                   f"{counts[other]} {other} structures that no {label} glycan has; as {other} glycans, it gives {found} {other} structures. " + (
@@ -6632,7 +6648,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     if _return_intermediate:
         df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1, df_use = df_use, accurate_ms2 = trap == 'orbitrap', ms1_ppm_floor = ms1_ppm_floor,
                             ion_trap = trap in ('linear', 'amazon'), off_mass = off_mass, fragment_tolerance = (fragment_tolerance, fragment_ppm),
-                            late_window = (rt_cap, float(loaded_file['RT'].min()), float(loaded_file['RT'].max())) if len(loaded_file) else None)
+                            late_window = (rt_cap, float(loaded_file['RT'].min()), float(loaded_file['RT'].max())) if len(loaded_file) else None,
+                            precursor_calibration = precursor_calibration)
         return df_out
     if df_out.empty:
         df_out = df_out.drop(columns = ['annotation_score', 'evidence'], errors = 'ignore')
@@ -6649,6 +6666,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                                  fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm)
     if len(loaded_file):
         df_out.attrs['late_window'] = (rt_cap, float(loaded_file['RT'].min()), float(loaded_file['RT'].max()))
+    df_out.attrs['precursor_calibration'] = precursor_calibration
     df_out, spectra_out = finalise_predictions(df_out, get_missing, mode, modification, mass_tag,
                                                ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1,
@@ -6684,6 +6702,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                                               fragment_ppm = fragment_ppm)
                 if len(loaded_file):
                     df_pair.attrs['late_window'] = (rt_cap, float(loaded_file['RT'].min()), float(loaded_file['RT'].max()))
+                df_pair.attrs['precursor_calibration'] = precursor_calibration
                 df_pair, spectra_pair = finalise_predictions(df_pair, False, mode, modification, mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                              glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1, accurate_ms1 = accurate_ms1,
                                                              sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floor,
@@ -6843,6 +6862,15 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     best, _ = check_reducing_end(spectra_filepath_list[0], glycan_class, {**inference_kwargs, 'model': model, 'df_use': given_df_use}, loaded = first, condensed = condensed) if not ends else (None, None)
     if ms1 is not None:
         first.attrs['ms1'] = ms1
+    # A switch must hold in most of the first three files (a tie keeps the reducing end given): the first file by name can be a blank or the most dilute run
+    # of a series, whose few ions read better as another reducing end, and it switched a whole batch whose other runs keep their own (a dilution series of
+    # N-glycans lost its 100x and 1000x runs)
+    for k, fp in enumerate(spectra_filepath_list[1:3] if best is not None else []):
+        if check_reducing_end(fp, glycan_class, {**inference_kwargs, 'model': model, 'df_use': given_df_use}, loaded = load_spectra_filepath(fp), condensed = {})[0] == best:
+            break
+        if k == 1 or len(spectra_filepath_list) == 2:
+            print("These runs: most of the first files keep the reducing end given, so all files keep it.")
+            best = None
     if best is not None:
         modification, mass_tag, mass_dic = (None if best[0] == 'custom' else best[0]), best[1], None
         inference_kwargs.update(modification = best[0], mass_tag = best[1])
@@ -6886,11 +6914,13 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if experimental and not mass_dic:
         mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
     inference_dfs, file_modes, ms1_paths, accurate_ms1s, accurate_ms2s, ms1_ppm_floors, ion_traps, late_windows, fragment_tolerances = {}, {}, {}, {}, {}, {}, {}, {}, {}
+    precursor_calibrations = {}
     for file_label, (df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap) in zip(file_labels, results):
         # wrap_inference overrides the ion mode if the file says otherwise, so downstream steps have to follow it
         file_modes[file_label], ms1_paths[file_label], accurate_ms1s[file_label], accurate_ms2s[file_label] = file_mode, ms1_path, accurate_ms1, accurate_ms2
         ms1_ppm_floors[file_label], ion_traps[file_label], late_windows[file_label] = ms1_ppm_floor, ion_trap, df_out.attrs.pop('late_window', None)
         fragment_tolerances[file_label] = df_out.attrs.pop('fragment_tolerance', (None, None))
+        precursor_calibrations[file_label] = df_out.attrs.pop('precursor_calibration', None)
         inference_dfs[file_label] = df_out.assign(condition_label = file_label) if not df_out.empty else df_out
     # The table of a file without any glycan peak
     empty_table = pd.DataFrame(columns = ['top1_pred', 'predictions', 'composition', 'num_spectra', 'charge', 'RT', 'rel_abundance'],
@@ -6990,7 +7020,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         if ms1_paths[file_label]:
             with np.load(ms1_paths[file_label]) as ms1_file:
                 ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])
-        df_out.attrs['late_window'] = late_windows[file_label]
+        df_out.attrs['late_window'], df_out.attrs['precursor_calibration'] = late_windows[file_label], precursor_calibrations[file_label]
         return finalise_predictions(df_out, get_missing, file_modes[file_label], modification,
                                     mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                     glycan_class = glycan_class, mass_tolerance = mass_tolerance,
@@ -7078,7 +7108,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 if ms1_paths[file_label]:
                     with np.load(ms1_paths[file_label]) as ms1_file:
                         ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])
-                df_pair.attrs['late_window'] = late_windows[file_label]
+                df_pair.attrs['late_window'], df_pair.attrs['precursor_calibration'] = late_windows[file_label], precursor_calibrations[file_label]
                 df_pair, spectra_pair = finalise_predictions(df_pair, False, file_mode, modification, mass_tag, ppm_thresh, rt_diff, sample_prep = sample_prep,
                                                              glycan_class = glycan_class, mass_tolerance = mass_tolerance, ms1 = ms1, accurate_ms1 = accurate_ms1s[file_label],
                                                              sialic_derivatization = sialic_derivatization, n_jobs = n_jobs, ms1_ppm_floor = ms1_ppm_floors[file_label],
@@ -7187,17 +7217,34 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                 # On ion-trap survey scans, whose window holds every ion within half a spacing of the glycan's m/z, the glycan's M+1 trace has to follow its M trace
                 # over the survey scans within 0.5 min of the apex (Pearson r >= 0.95, windows of half a spacing around its calibrated m/z): the peak found there was
                 # mostly another ion or background otherwise (accurate survey scans made ion-trap-like: 28% of these rows were the glycan, 82% with the test, and its
-                # abundance within 2x of the accurate one for 59% -> 90%)
+                # abundance within 2x of the accurate one for 59% -> 90%). Ion traps merge the M and M+1 of a multiply charged ion into one centroid between them in
+                # some scans (a fifth of the peak scans at z = 2, half where the ion is the scan's base peak), which the windows put wholly into M: a peak also stays
+                # where traces that share each centroid between its two nearest isotope positions, averaged over three scans, correlate (r >= 0.97), with M+1 / M over
+                # the peak's scans 0.71-1.41x the formula's, at most half of that signal between the isotope positions (a lone ion there counts for M and M+1
+                # alike) and at most a fifth of M one spacing below (a lighter ion's 13C peak): known glycans passing at z = 2 23% -> 44%, at the same simulated precision
                 if not calibration:
                     shift, spacing = (df_out.attrs.get('ms1_calibration') or (0, mass_tolerance))[0], ISOTOPE_SPACING / z
                     s0, s1 = int(np.searchsorted(ms1[0], apex_rt - 0.5)), int(np.searchsorted(ms1[0], apex_rt + 0.5, side = 'right'))
-                    traces = np.zeros((2, max(s1 - s0, 0)))
+                    traces, shared, between = np.zeros((2, max(s1 - s0, 0))), np.zeros((3, max(s1 - s0, 0))), np.zeros((2, max(s1 - s0, 0)))
                     for j, s in enumerate(range(s0, s1)):
                         cum = np.concatenate([[0.0], np.cumsum(ms1[2][ms1[3][s]:ms1[3][s + 1]], dtype = np.float64)])
                         bounds = np.searchsorted(ms1[1][ms1[3][s]:ms1[3][s + 1]], theo_mzs[i] + shift + spacing * np.array([-0.5, 0.5, 1.5]))
                         traces[:, j] = cum[bounds[1:]] - cum[bounds[:-1]]
-                    if s1 - s0 < 5 or not (traces.std(axis = 1) > 0).all() or np.corrcoef(traces)[0, 1] < 0.95:
+                        lo, hi = ms1[3][s] + np.searchsorted(ms1[1][ms1[3][s]:ms1[3][s + 1]], theo_mzs[i] + shift + spacing * np.array([-2, 2]))
+                        u, intensity = (ms1[1][lo:hi] - theo_mzs[i] - shift) / spacing, ms1[2][lo:hi]
+                        shared[:, j] = (intensity * np.clip(1 - np.abs(u - np.array([[-1], [0], [1]])), 0, None)).sum(axis = 1)
+                        between[:, j] = intensity[(u > 0.25) & (u < 0.75)].sum(), intensity[(u >= -0.5) & (u < 1.5)].sum()
+                    if s1 - s0 < 5:
                         continue
+                    if not ((traces.std(axis = 1) > 0).all() and np.corrcoef(traces)[0, 1] >= 0.95):
+                        peak = shared[1] >= 0.3 * shared[1].max()
+                        distribution = isotope_distribution(get_formula(plain_composition(row['repr_composition']), sample_prep = 'permethylated' if sample_prep == 'deuteropermethylated' else sample_prep),
+                                                            2) if isinstance(row['repr_composition'], dict) else None
+                        smoothed = np.array([np.convolve(x, np.ones(3) / 3, mode = 'same') for x in shared[1:]])
+                        if (distribution is None or not (smoothed.std(axis = 1) > 0).all() or np.corrcoef(smoothed)[0, 1] < 0.97 or
+                                not 0.71 <= shared[2][peak].sum() / shared[1][peak].sum() * distribution[0] / distribution[1] <= 1.41 or
+                                not between[0][peak].sum() <= 0.5 * between[1][peak].sum() > 0 or shared[0][peak].sum() > 0.2 * shared[1][peak].sum()):
+                            continue
                 near = (own_z == z) & (np.abs(own['RT'].values - apex_rt) <= rt_diff) & (own_apex >= 0.25 * apex_ints[i]) if len(own) else np.zeros(0, dtype = bool)
                 if any((np.abs(row['repr_mz'] - own.index.values[near] - k * 1.00336 / z) <= mass_tolerance / 2).any() for k in (1, 2, 3)):
                     continue
@@ -7311,10 +7358,11 @@ def _batch_inference_file(spectra_filepath, ms1_path, inference_kwargs):
     ms1, file_mode, accurate_ms1 = df_out.attrs.pop('ms1', None), df_out.attrs.pop('mode'), df_out.attrs.pop('accurate_ms1', False)
     accurate_ms2, ms1_ppm_floor, ion_trap = df_out.attrs.pop('accurate_ms2', False), df_out.attrs.pop('ms1_ppm_floor', 3.0), df_out.attrs.pop('ion_trap', False)
     late_window, fragment_tolerance = df_out.attrs.get('late_window'), df_out.attrs.get('fragment_tolerance', (None, None))
+    precursor_calibration = df_out.attrs.get('precursor_calibration')
     df_out.attrs.clear()
-    # (the late-row window of finalise_predictions and the fragment tolerance of augment_predictions travel with the frame; wrap_inference_batch takes
-    # them off before pooling the files)
-    df_out.attrs.update(late_window = late_window, fragment_tolerance = fragment_tolerance)
+    # (the late-row window and precursor calibration of finalise_predictions and the fragment tolerance of augment_predictions travel with the frame;
+    # wrap_inference_batch takes them off before pooling the files)
+    df_out.attrs.update(late_window = late_window, fragment_tolerance = fragment_tolerance, precursor_calibration = precursor_calibration)
     if ms1 is None or len(ms1[0]) == 0 or ms1_path is None:
         return df_out, file_mode, None, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap
     np.savez(ms1_path, rts = ms1[0], mzs = ms1[1], ints = ms1[2], offsets = ms1[3])
