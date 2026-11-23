@@ -1472,7 +1472,7 @@ def report_main_adduct(name, tables):
 
 
 def anion_adduct_ions(charges, anion):
-    """the ions of a glycan that carry an anion adduct and, from charge 2 on, lost at least one proton: [M+HCO3]-, [M+HCO3-H]2-, [M+HCO3-2H]3-, [M+2HCO3-H]3-, ...\n
+    """the ions of a glycan that carry an anion adduct: [M+HCO3]-, [M+HCO3-H]2-, [M+2HCO3]2-, [M+HCO3-2H]3-, [M+2HCO3-H]3-, [M+3HCO3]3-, ...\n
     | Arguments:
     | :-
     | charges (list): the charge states of the glycan
@@ -1483,7 +1483,7 @@ def anion_adduct_ions(charges, anion):
     """
     name = anion.rstrip('-')
     return [(z, k * (mass_dict[anion] + PROTON_MASS), f"[M+{k if k > 1 else ''}{name}{'' if k == z else '-H' if z - k == 1 else f'-{z - k}H'}]{z if z > 1 else ''}-")
-            for z in charges for k in range(1, max(z, 2))]
+            for z in charges for k in range(1, z + 1)]
 
 
 def ion_trace(ms1, mz, rt, half_width = 0.75, ppm = 7.0):
@@ -1729,7 +1729,7 @@ def transfer_features(ms1, target_mzs, rt_centers, charges, formulas, apex_toler
 
 def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1.0, mz_tolerance = 0.5, search_window = 0,
                       isotopes = 3, weights = None, mz_calibration = None, glycans = None, sample_prep = 'underivatized', other_charges = None, mode = 'negative',
-                      details = None, adduct_ions = None):
+                      details = None, adduct_ions = None, adduct_peak = False):
     """integrates the MS1 isotope envelope of each precursor over its own chromatographic peak\n
     | Arguments:
     | :-
@@ -1748,6 +1748,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
     | other_charges (list): if given, per target the other charge states of its molecule whose envelopes are added if they co-elute with it (over its peak); default:None
     | mode (string): ion mode, which sets the charge carrier of other_charges; default:'negative'
     | adduct_ions (list): if given, per target the adduct ions of its molecule, as (charge, mass added to the neutral glycan, name), whose envelopes are added if they co-elute with it (over its peak); default:None
+    | adduct_peak (bool): with adduct_ions of an anion the run is known to carry, find each target's peak on the sum of its own trace and theirs, and judge each adduct ion against the sum of the others; default:False
     | details (list): if given, one dict per target is appended that shows how its area was integrated: the summed envelope trace ('times', 'trace', from
     |                 rt_window before to rt_window after the scans searched), 'left'/'apex'/'right' as indices into it (-1 if not integrated), 'baseline',
     |                 'area' (before 'scale', the area split and isotope share applied after), the m/z 'windows', the survey scan at the apex ('scan'), and
@@ -1802,6 +1803,18 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             continue
         rts = ms1_rts[s0:s1]
         ints_arr = xic(target_mzs[t] + shift + spacing[t] * np.arange(isotopes[t] + 1), widths[t], s0, s1)
+        neutral = (target_mzs[t] - (-1 if mode == 'negative' else 1) * PROTON_MASS) * charges[t]
+        other_ions = []
+        for z, added, ion in [(z, 0.0, None) for z in (other_charges[t] if other_charges is not None else [])] + (adduct_ions[t] if adduct_ions is not None else []):
+            mz, sp = (neutral + added) / z + (-1 if mode == 'negative' else 1) * PROTON_MASS, ISOTOPE_SPACING / z
+            width = 0.5 * sp if half_width >= 0.2 * sp else max(half_width, 5e-6 * mz)
+            other_ions.append((z, ion, mz, sp, width, xic(mz + shift + sp * np.arange(isotopes[t] + 1), width, s0, s1)))
+        # A glycan that also ionizes as adducts of the run's anion has its peak found on the sum of its own ion and those adduct ions: its own ion can be its
+        # weakest (a large neutral N-glycan's [M-2H]2- in ammonium bicarbonate, a third of its [M+2HCO3]2-), near noise in a weak run, where a peak found on it
+        # alone lost every adduct ion of the glycan in one replicate and kept them in the other
+        own_arr = ints_arr
+        if adduct_peak and any(ion is not None for _, ion, _, _, _, _ in other_ions):
+            ints_arr = own_arr + np.sum([trace for _, ion, _, _, _, trace in other_ions if ion is not None], axis = 0)
         # Smoothing (sigma of 0.05 min, at least 0.7 scans) only steers apex and boundary finding; the area comes from the raw trace. Survey scans
         # sharing a retention time (one per ion mobility scan) gave a zero median step and an infinite sigma, so only real steps count
         steps = np.diff(rts)
@@ -1838,7 +1851,8 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
         while right < len(smooth) - 1 and rts[right + 1] - rts[apex] <= rt_window and (smooth[right + 1] <= smooth[right] or (low >= top and smooth[right + 1] <= 1.1 * low)) and smooth[right] > cut:
             right += 1
             low = min(low, smooth[right])
-        areas[t], apex_scans[t] = _trapezoid(np.clip(ints_arr[left:right + 1] - baseline, 0, None), rts[left:right + 1]), s0 + apex
+        own_baseline = np.percentile(own_arr, 10)
+        areas[t], apex_scans[t] = _trapezoid(np.clip(own_arr[left:right + 1] - own_baseline, 0, None), rts[left:right + 1]), s0 + apex
         if records is not None:
             # The trace again from rt_window before to rt_window after the scans searched, which shows the neighboring peaks, and the survey scan at the
             # apex around the envelope; indices point into this view
@@ -1847,19 +1861,17 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
             a0, a1 = ms1_offsets[s0 + apex], ms1_offsets[s0 + apex + 1]
             near = np.abs(ms1_mzs[a0:a1] - centers.mean()) <= (isotopes[t] / 2 + 2) * spacing[t]
             records[t].update(times = ms1_rts[v0:v1].astype(np.float32), trace = xic(centers, widths[t], v0, v1).astype(np.float32), left = int(s0 - v0 + left),
-                              apex = int(s0 - v0 + apex), right = int(s0 - v0 + right), baseline = float(baseline), area = float(areas[t]),
+                              apex = int(s0 - v0 + apex), right = int(s0 - v0 + right), baseline = float(own_baseline), area = float(areas[t]),
                               windows = [(float(c - widths[t]), float(c + widths[t])) for c in centers], scan = (ms1_mzs[a0:a1][near], ms1_ints[a0:a1][near]))
-        if (other_charges is not None or adduct_ions is not None) and right - left >= 2:
+        if other_ions and right - left >= 2:
             # The other charge states of the molecule (those no row of the run reports) elute with it: each adds its envelope over the same peak if its
             # trace follows this one (r >= 0.9), as a glycan's charge states share its abundance (N-glycans ionize mostly as [M-2H]2-, also as [M-H]-), and
-            # so do its adduct ions
-            neutral = (target_mzs[t] - (-1 if mode == 'negative' else 1) * PROTON_MASS) * charges[t]
-            for z, added, ion in [(z, 0.0, None) for z in (other_charges[t] if other_charges is not None else [])] + (adduct_ions[t] if adduct_ions is not None else []):
-                mz, sp = (neutral + added) / z + (-1 if mode == 'negative' else 1) * PROTON_MASS, ISOTOPE_SPACING / z
-                width = 0.5 * sp if half_width >= 0.2 * sp else max(half_width, 5e-6 * mz)
-                trace = xic(mz + shift + sp * np.arange(isotopes[t] + 1), width, s0, s1)
+            # so do its adduct ions, with adduct_peak each judged against the sum of the molecule's other ions, which follows the peak more closely than its weakest ion
+            smooth_own = smooth if own_arr is ints_arr else np.convolve(np.pad(own_arr, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
+            for z, ion, mz, sp, width, trace in other_ions:
                 smooth_z = np.convolve(np.pad(trace, len(kernel) // 2, mode = 'edge'), kernel / kernel.sum(), mode = 'valid')
-                r = np.corrcoef(smooth_z[left:right + 1], smooth[left:right + 1])[0, 1] if np.ptp(smooth_z[left:right + 1]) > 0 and np.ptp(smooth[left:right + 1]) > 0 else None
+                ref = smooth_own if ion is None or own_arr is ints_arr else smooth - smooth_z
+                r = np.corrcoef(smooth_z[left:right + 1], ref[left:right + 1])[0, 1] if np.ptp(smooth_z[left:right + 1]) > 0 and np.ptp(ref[left:right + 1]) > 0 else None
                 area = _trapezoid(np.clip(trace[left:right + 1] - np.percentile(trace, 10), 0, None), rts[left:right + 1]) if r is not None and r >= 0.9 else 0.0
                 areas[t] += area
                 # (of the adduct ions only those added: most of a run's are not there at all)
@@ -3411,20 +3423,25 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                                                                                    composition_to_mass({}, sample_prep = sample_prep) + cap for k in SIALIC_KEYS[sia]] for sia in SIALIC_KEYS}
     charges_abs = np.abs(df_out['charge'].values)
     raw_masses = df_out.index.values * charges_abs
+    # Candidates were matched by m/z within mass_tolerance, so without accurate survey scans an adduct ion is one within mass_tolerance of the m/z, i.e. |z|
+    # times that in mass: with the flat mass window, ion-trap precursors 0.2-0.4 m/z off at z >= 2 ([M+3NH4]3+, [M+Formate-2H]3-, [M+Acetate-H]2-)
+    # matched their adduct candidates but lost the label, and the rows went on as plain ions of their compositions at the adduct's m/z, 15-30 m/z from
+    # the glycans' own ions. An accurate precursor is never that far off, and at z = 4 a 2 Da window labels chance compositions of a dense permethylated range
+    adduct_window = mass_tolerance * (1 if trust_header_charge else charges_abs)
     df_out['adduct'] = None
     for adduct in adduct_list:
         adduct_mass = mass_dict.get(adduct, 999)
         if adduct_mass == 999:
             continue
         # Singly-charged adduct: mz × |z| = M + adduct
-        df_out.loc[np.abs(computed_masses + adduct_mass - raw_masses) < mass_tolerance, 'adduct'] = adduct
+        df_out.loc[np.abs(computed_masses + adduct_mass - raw_masses) < adduct_window, 'adduct'] = adduct
         # Multiply-charged adduct: mz × |z| = M + adduct − (|z|−1)×H in negative mode, + (|z|−1)×H in positive mode
         proton_offset = (charges_abs - 1) * PROTON_MASS
         df_out.loc[(charges_abs > 1) & (
-                np.abs(computed_masses + adduct_mass + multiplier * proton_offset - raw_masses) < mass_tolerance), 'adduct'] = adduct
+                np.abs(computed_masses + adduct_mass + multiplier * proton_offset - raw_masses) < adduct_window), 'adduct'] = adduct
         # A multiply charged precursor may carry only cations, e.g., [M+2Na]2+ (assign_candidate_structures matches these too)
         df_out.loc[(charges_abs > 1) & (np.abs(
-            computed_masses + charges_abs * adduct_mass - raw_masses) < mass_tolerance), 'adduct'] = adduct
+            computed_masses + charges_abs * adduct_mass - raw_masses) < adduct_window), 'adduct'] = adduct
     # In ion-trap CID an anion adduct ([M+Formate]-, [M+HCO3-H]2-, ...) mostly fragments as the glycan, without the (de)protonated ion its neutral loss
     # would give (GPST000578: none of 91 such rows with a model prediction had it among its 10 most intense fragments), so an adduct reading also holds if
     # the (de)protonated ion of its composition co-elutes (within 1 min), which confirms the composition behind it
@@ -3828,14 +3845,17 @@ def pair_spectra(df, max_scans = 30, ppm = 10.0):
     | ppm (float): tolerance of the precursor m/z; default:10.0\n
     | Returns:
     | :-
-    | Returns the HCD scans of df (all scans but the electron-activated ones in a run without HCD), with their partners' peaks, activation, analyzer, and scan number in paired_peak_d,
-    | paired_activation, paired_analyzer, and paired_scan
+    | Returns the HCD scans of df (all scans but the electron-activated ones in a run without HCD; the electron-activated ones, unpaired, in a run of nothing else), with their
+    | partners' peaks, activation, analyzer, and scan number in paired_peak_d, paired_activation, paired_analyzer, and paired_scan
     """
     df = df.dropna(subset = ['precursor_charge']).sort_values('scan')
     # Survey scans stay with the reader's table: pandas compares attrs when runs are concatenated, which raises on the arrays of different runs
     df.attrs = {k: v for k, v in df.attrs.items() if k != 'ms1'}
     electron = df[df['activation'].isin(['EThcD', 'ETD', 'ECD', 'ETciD'])]
     hcd = df[~df.index.isin(electron.index)]
+    # A run of electron-activated scans alone (EThcD-only methods) keeps those, unpaired
+    if hcd.empty:
+        hcd, electron = electron, electron.iloc[:0]
     # CID scans that an HCD scan triggered (HCD-pd-CID) are not the run's HCD spectra; a run without HCD keeps its other scans
     hcd = (hcd[hcd['activation'].eq('HCD')] if hcd['activation'].eq('HCD').any() else hcd).copy()
     e_scan, e_mz, e_z = electron['scan'].values, electron['m/z'].values, electron['precursor_charge'].values
@@ -4681,7 +4701,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         # Neutral glycans can ionize largely as adducts of the mobile phase's anion and acidic ones hardly (ammonium bicarbonate, reduced N-glycans on PGC,
         # orbitrap survey scans: [M+HCO3-H]2- 0.67x of the [M-2H]2- of H4N4F1, 0.003x for H5N4S2), and DDA decided which adduct ions counted. The anion whose ions
         # the run's major neutral glycans show (at least a tenth of their own signal) is the run's: its ions, not fragmented ones alone, count for every peak they
-        # follow. [M+2HCO3]2- stays out: counted, it overshot published shares that count the other ions
+        # follow, [M+2HCO3]2- among them (large neutral N-glycans ionize mostly as it)
         offsets = df_out['re_offset'].values if 're_offset' in df_out.columns else np.zeros(len(df_out))
         anion_shares = {}
         if run_anion is None and mode == 'negative':
@@ -4715,7 +4735,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         xic_areas = extract_xic_areas(ms1, df_out['theo_mz'].values, df_out['RT'].values, charges = df_out['charge'].values,
                                       mz_tolerance = mass_tolerance, isotopes = isotopes, weights = df_out['rel_abundance'].values,
                                       mz_calibration = calibration, sample_prep = sample_prep, mode = mode, other_charges = other_charges,
-                                      glycans = [k[0][0] if k else None for k in df_out['predictions']], details = details, adduct_ions = adduct_ions)
+                                      glycans = [k[0][0] if k else None for k in df_out['predictions']], details = details, adduct_ions = adduct_ions, adduct_peak = True)
         df_out.attrs['anion_shares'], df_out.attrs['run_anion'] = anion_shares, run_anion
         if (xic_areas > 0).any():
             df_out['rel_abundance'] = xic_areas
@@ -7229,7 +7249,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                       charges = missing['repr_charge'].values, mz_tolerance = mass_tolerance,
                                       mz_calibration = df_out.attrs.get('ms1_calibration'), sample_prep = sample_prep,
                                       glycans = missing['repr_top1'].tolist(), other_charges = other_charges, mode = file_mode, details = details,
-                                      adduct_ions = [anion_adduct_ions([abs(int(z0))] + c, batch_anion) for z0, c in zip(missing['repr_charge'], other_charges)] if batch_anion and file_mode == 'negative' else None)
+                                      adduct_ions = [anion_adduct_ions([abs(int(z0))] + c, batch_anion) for z0, c in zip(missing['repr_charge'], other_charges)] if batch_anion and file_mode == 'negative' else None,
+                                      adduct_peak = True)
             # Only fill with a genuine peak at least as intense as the weakest precursor that got MS2 in this file,
             # and never with the peak of a feature that already has MS2 in this file
             own = all_ms2[all_ms2['condition_label'] == file_label]

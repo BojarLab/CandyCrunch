@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from glycowork.glycan_data.loader import stringify_dict
 from glycowork.motif.processing import canonicalize_iupac
-from glycowork.motif.tokenization import glycan_to_composition
-from candycrunch.prediction import ISOTOPE_SPACING, PROTON_MASS, acidic_count, bin_intensities, load_spectra_filepath, plain_composition, wrap_inference
+from glycowork.motif.tokenization import get_ion_mzs, glycan_to_composition
+from candycrunch.prediction import ISOTOPE_SPACING, PROTON_MASS, acidic_count, bin_intensities, get_adduct_list, load_spectra_filepath, plain_composition, wrap_inference
 
 SPECTRUM_COLUMNS = ['spec_id', 'peak_d', 'RT', 'rt_range', 'intensity', 'num_spectra', 'model_input', 'RT2']
 # Where a label's structure came from: its mapping row's RT as the mapping gives it (fewer than 5 anchors), shifted by the median offset, by the fitted
@@ -102,7 +102,9 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    | Arguments:
    | :-
    | inputs (dataframe): the run's model inputs, from run_inputs
-   | mapping (dataframe): the run's glycans, columns Mass (m/z of the observed ion), glycan (IUPAC) and optionally RT (min; missing or NaN: any RT, but
+   | mapping (dataframe): the run's glycans, columns Mass (m/z of the observed ion), glycan (IUPAC), optionally adduct (the carrier of a row whose Mass is
+   |                      an adduct ion, e.g., Na+; a row with RT and without it also labels its glycan's adduct ions where no row fits an input's own ion)
+   |                      and optionally RT (min; missing or NaN: any RT, but
    |                      only on the composition's most intense inputs at each charge above crumbs_thresh, as many as the mapping has rows of that composition;
    |                      on PGC two such rows differing only in a2-3 / a2-6 sialic linkages split two of them by elution order, a2-6 first); a row
    |                      without glycan but with Mass and RT labels nothing, yet keeps the inputs nearer it than any structured row of their mass
@@ -210,6 +212,22 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         tol = (np.minimum(mz_tolerance, np.maximum(ppm_tolerance * mz_values[:, None] / 1e6, 0.5 * 10.0 ** -decimals[None, :] * z / z_in))
                if settings.get('accurate_ms1') else mz_tolerance)
         other_charge |= np.abs(mz_values[:, None] - at_z) <= tol
+    # ... and its glycan's adduct ions as wrap_inference reads them (the run's carriers, which the map's adduct rows name, and the mode's usual adducts;
+    # not for adduct rows, whose Mass is no protonated ion): maps list a paper's ions, mostly (de)protonated ones, while DDA also fragments the [M+HCOO]-,
+    # [M+H+Na]2+, [M+H+NH4]2+ ... ions of the same peak, which wrap_inference reads under the row's composition (they label, but do not place rows for the
+    # RT shift: as placement evidence they switched the alignment of a few runs, which lost labels)
+    carriers = mapping['adduct'].dropna().astype(str).str.strip() if 'adduct' in mapping.columns else pd.Series(dtype = object)
+    carriers = get_adduct_list(settings['mode'], adducts = sorted(set(carriers[carriers != ''])))
+    adduct_fit = np.zeros_like(fits)
+    plain_row = (mapping.loc[row_ids, 'adduct'].fillna('').astype(str).str.strip() == '').to_numpy() if 'adduct' in mapping.columns else np.ones(len(row_ids), bool)
+    for z in range(1, 5):
+        for name, at_z in get_ion_mzs((masses - sign * PROTON_MASS) * z, max_charge = sign * 4, adducts = carriers).items():
+            z_ion = int(name.rsplit(']', 1)[1][:-1] or 1)
+            if re.fullmatch(r'\[M[+-]\d*H\]\d*[+-]', name):
+                continue
+            tol = (np.minimum(mz_tolerance, np.maximum(ppm_tolerance * mz_values[:, None] / 1e6, 0.5 * 10.0 ** -decimals[None, :] * z / z_in))
+                   if settings.get('accurate_ms1') else mz_tolerance)
+            adduct_fit |= (z_in == z_ion) & (np.abs(mz_values[:, None] - np.atleast_1d(at_z)[None, :]) <= tol) & plain_row[None, :]
     input_keys = [tuple(sorted(plain_composition(c).items())) if isinstance(c, dict) else None for c in inputs['composition']]
     input_acid = [acidic_count(dict(k)) if k else 0 for k in input_keys]
     # Inputs from the most intense down (spectrum counts without precursor intensities); crumbs_thresh as the pipeline's gate
@@ -352,9 +370,16 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
             shift = np.where(open_files == f, v, shift)
         return shift
     map_rts = map_rts + np.where(own, 0.0, row_shift)
-    # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT)
-    near = [[k for k in np.flatnonzero(fits[i] | (other_charge[i] & ~np.isnan(map_rts) & passing[i])) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
-            for i, (rt, key) in enumerate(zip(inputs['RT'], input_keys))]
+    # The mapping rows of the input's composition within the windows (a mapping row without RT fits any RT); rows at one of their adduct ions only where
+    # none fits the input's own ion (among co-eluting isomers a map's formate row of one isomer is the formate ion of another; [M+Na]+ of one
+    # composition is [M+K]+ of another within 20 ppm), as such an input's label then comes second to its spectrum's own-ion labels (below)
+    near, via_adduct = [], np.zeros(len(inputs), bool)
+    for i, (rt, key) in enumerate(zip(inputs['RT'], input_keys)):
+        n = [k for k in np.flatnonzero(fits[i] | (other_charge[i] & ~np.isnan(map_rts) & passing[i])) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
+        if not n:
+            n = [k for k in np.flatnonzero(adduct_fit[i] & ~np.isnan(map_rts) & passing[i]) if keys[k] == key and not abs(map_rts[k] - rt) > rt_window]
+            via_adduct[i] = bool(n)
+        near.append(n)
     windowed = {k for n in near for k in n}
     # An input nearer a same-mass row without structure (moved as above, with the acidic residues of the input's composition) than a structured row is the
     # open row's peak, not the structured row's: an isomer's composition-level row 0.3-0.8 min from a structured one otherwise gives its peak the
@@ -413,10 +438,10 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                            activation = inputs['activation'] if 'activation' in inputs.columns else settings.get('activation'),
                            modification = 'permethylated' if settings['sample_prep'] in ('permethylated', 'deuteropermethylated') else (
                                'reduced' if settings['modification'] is None and not settings['mass_tag'] else settings['modification']),
-                           order = np.arange(len(inputs)))
+                           via_adduct = via_adduct, order = np.arange(len(inputs)))
     labelled = inputs[[len(c) > 0 for c in candidates]]
-    # A pooled spectrum labeled under several compositions keeps the one its fragments support best
-    labelled = labelled.sort_values('annotation_score', ascending = False, kind = 'stable')
+    # A pooled spectrum labeled under several compositions keeps the one its fragments support best, a label at the row's own ion before one at its adduct ion
+    labelled = labelled.sort_values(['via_adduct', 'annotation_score'], ascending = [True, False], kind = 'stable')
     labelled = labelled[~labelled['spec_id'].duplicated()].sort_values('order')
     labelled = labelled.assign(glycan = [c[0] for c in labelled['glycan_candidates']],
                                glycan_match_status = ['unique' if len(c) == 1 else 'candidates' for c in labelled['glycan_candidates']])

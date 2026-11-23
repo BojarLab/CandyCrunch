@@ -808,8 +808,8 @@ def test_quantification_synthetic(result_collector):
 
 def test_anion_adduct_quantification():
     # A neutral glycan's [M+HCO3-H]2- follows its [M-2H]2- and counts for its abundance, whichever got MS2, so a row that read it as the formate adduct of the
-    # composition with a Hex for its Fuc goes; [M+2HCO3]2- stays out, and a sialylated glycan shows none
-    assert [i[2] for i in anion_adduct_ions([2, 1], 'HCO3-')] == ['[M+HCO3-H]2-', '[M+HCO3]-'] and [i[2] for i in anion_adduct_ions([3], 'Formate')] == ['[M+Formate-2H]3-', '[M+2Formate-H]3-']
+    # composition with a Hex for its Fuc goes; [M+2HCO3]2- counts as well, and a sialylated glycan shows none
+    assert [i[2] for i in anion_adduct_ions([2, 1], 'HCO3-')] == ['[M+HCO3-H]2-', '[M+2HCO3]2-', '[M+HCO3]-'] and [i[2] for i in anion_adduct_ions([3], 'Formate')] == ['[M+Formate-2H]3-', '[M+2Formate-H]3-', '[M+3Formate]3-']
     fucosylated = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc'
     sialylated = 'Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
     isobar = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
@@ -828,9 +828,9 @@ def test_anion_adduct_quantification():
     out, _ = finalise_predictions(rows, False, 'negative', 'reduced', None, 300, 1.0, glycan_class = 'N', ms1 = ms1, accurate_ms1 = True, xic_details = True)
     assert out.attrs['run_anion'] == 'HCO3-' and sorted(out['top1_pred']) == sorted([fucosylated, sialylated])
     fuc = out[out['top1_pred'] == fucosylated].iloc[0]
-    assert {o['ion'] for d in fuc['xic'] for o in d['others'] if o['ion']} == {'[M+HCO3-H]2-'}
-    # The summed envelopes of both glycans have the same width: 4 + 2 against 8
-    assert abs(fuc['rel_abundance'] / out['rel_abundance'].sum() - 6 / 14) < 0.03
+    assert {o['ion'] for d in fuc['xic'] for o in d['others'] if o['ion']} == {'[M+HCO3-H]2-', '[M+2HCO3]2-'}
+    # The summed envelopes of both glycans have the same width: 4 + 2 + 1 against 8
+    assert abs(fuc['rel_abundance'] / out['rel_abundance'].sum() - 7 / 15) < 0.03
     # Without the anion, as in a run whose neutral glycans do not show it, only its own ion counts
     out, _ = finalise_predictions(rows.drop(rows.index[2]), False, 'negative', 'reduced', None, 300, 1.0, glycan_class = 'N', ms1 = ms1, accurate_ms1 = True, run_anion = False)
     assert abs(out[out['top1_pred'] == fucosylated]['rel_abundance'].iat[0] / out['rel_abundance'].sum() - 4 / 12) < 0.03
@@ -996,6 +996,31 @@ def test_label_inputs_accurate_ms1():
     inputs.attrs['accurate_ms1'] = False
     labelled, _ = pl.label_inputs(inputs, mapping)
     assert sorted(labelled['spec_id']) == [0, 1, 2, 3]
+
+
+def test_label_inputs_adduct_ions():
+    # A row with RT also labels its glycan's adduct ions as wrap_inference reads them, within the RT window and at its composition: the formate ion 0.2 min
+    # from the [M-H]- row, not the one 4 min away, and not for a row whose map names its carrier (its Mass is no deprotonated ion); in positive mode [M+Na+H]2+
+    import training.pipeline_labels as pl
+    from glycowork.motif.tokenization import glycan_to_mass, get_ion_mzs
+    glycan = 'Fuc(a1-2)Gal(b1-4)Glc'
+    ions = get_ion_mzs(glycan_to_mass(glycan), max_charge = -1, adducts = ['Formate'])
+    mzs = [ions['[M-H]-'], ions['[M+Formate]-'], ions['[M+Formate]-']]
+    inputs = pd.DataFrame({'spec_id': range(3), 'RT': [10.0, 10.2, 14.0], 'intensity': 1e5, 'peak_d': [{300.0: 1.0}] * 3, 'rt_range': [(r, r) for r in (10.0, 10.2, 14.0)],
+                           'num_spectra': 3, 'composition': [{'Hex': 2, 'dHex': 1}] * 3, 'charge': 1, 'annotation_score': 12.0, 'model_input': [np.zeros((3, 1), np.float32)] * 3,
+                           'RT2': 0.3, 'glycan_type': 1, 'compositional_vector': [np.zeros(12)] * 3}, index = pd.Index(mzs, name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'orbitrap', lc = 'HILIC', modification = None, mass_tag = None, sample_prep = 'underivatized', ms1_trap = 'orbitrap', accurate_ms1 = True)
+    mapping = pd.DataFrame({'Mass': [round(ions['[M-H]-'], 4)], 'RT': [10.0], 'glycan': [glycan]})
+    labelled, unlabelled = pl.label_inputs(inputs, mapping)
+    assert labelled['spec_id'].tolist() == [0, 1] and labelled['glycan'].tolist() == [glycan] * 2 and unlabelled['spec_id'].tolist() == [2]
+    assert [r['status'] for r in labelled.attrs['map_rows']] == ['labelled'] and labelled.attrs['map_rows'][0]['labels'] == 2
+    labelled, _ = pl.label_inputs(inputs, mapping.assign(adduct = 'Na+'))
+    assert labelled['spec_id'].tolist() == [0]
+    ions = get_ion_mzs(glycan_to_mass(glycan), max_charge = 2, adducts = ['Na+'])
+    pos = inputs.iloc[:2].set_axis(pd.Index([ions['[M+2H]2+'], ions['[M+Na+H]2+']], name = 'm/z')).assign(charge = 2)
+    pos.attrs = dict(inputs.attrs, mode = 'positive')
+    labelled, _ = pl.label_inputs(pos, mapping.assign(Mass = round(ions['[M+2H]2+'], 4)))
+    assert labelled['spec_id'].tolist() == [0, 1]
 
 
 def test_label_inputs_open_rows():
@@ -2353,6 +2378,9 @@ def test_mass_spec_helpers_from_glycopeptide_search():
     paired = pair_spectra(df).set_index('scan')
     assert paired.index.tolist() == [1, 3] and paired.loc[1, 'paired_peak_d'] == {2.0: 2.0} and paired.loc[1, 'paired_activation'] == 'EThcD' and pd.isna(paired.loc[3, 'paired_peak_d'])
     assert paired.loc[1, 'paired_scan'] == 2 and pd.isna(paired.loc[3, 'paired_scan'])
+    # A run of EThcD scans alone keeps them as its spectra, unpaired
+    paired = pair_spectra(df[df['activation'].eq('EThcD')]).set_index('scan')
+    assert paired.index.tolist() == [2, 50] and paired['paired_peak_d'].isna().all() and paired.loc[2, 'peak_d'] == {2.0: 2.0}
 
 
 def test_cc_survey_scans(tmp_path, monkeypatch):
