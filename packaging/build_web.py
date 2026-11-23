@@ -10,7 +10,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description = 'Build the in-browser CandyCrunch site')
 parser.add_argument('out', help = 'folder to build the site into (replaced)')
-# The glycowork CI tests against (1.11.1 exists only on dev, not on PyPI)
+# The glycowork CI tests against by default; a release builds PyPI's (--glycowork glycowork)
 parser.add_argument('--glycowork', default = 'glycowork @ git+https://github.com/BojarLab/glycowork.git@dev', help = 'pip requirement or path of the glycowork to build')
 args = parser.parse_args()
 out = pathlib.Path(args.out)

@@ -13,7 +13,7 @@ def parameters():
    """
     types = {'str_to_bool': 'bool'}
     return json.dumps([{'name': a.dest, 'flag': a.option_strings[0], 'help': a.help, 'type': types.get(getattr(a.type, '__name__', None), getattr(a.type, '__name__', None)),
-                        'choices': a.choices, 'nargs': a.nargs, 'default': a.default, 'required': a.required} for a in build_parser()._actions if a.dest != 'help'])
+                        'choices': a.choices, 'nargs': a.nargs, 'default': a.default, 'required': a.required} for a in build_parser()._actions if a.dest not in ('help', 'version')])
 
 
 def run(argv):

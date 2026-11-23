@@ -62,7 +62,7 @@ packages = ["candycrunch"]
 candycrunch = ["*.pkl", "*.pt", "*.png", "*.xlsx"]
 
 [tool.setuptools.exclude-package-data]
-"*" = ["tests*", "*.ipynb"]
+"*" = ["tests*"]
 
 [tool.setuptools.package-dir]
 candycrunch = "candycrunch"

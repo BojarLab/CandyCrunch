@@ -1,4 +1,6 @@
+import math
 import pytest
+import math
 import re
 import random
 import time
@@ -6,9 +8,10 @@ from collections import Counter
 import numpy as np
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, supporting_ions, WATER_MASS, mono_attributes, smiles_mono_attributes, \
+    build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, glycan_splits, O_SITE_GLYCANS, supporting_ions, WATER_MASS, \
+    mono_attributes, smiles_mono_attributes, \
     CHAIN_IONS, domon_costello_to_label, deisotope_ms2, \
-    peptide_to_glycowork, infer_glycosites, AA_masses, fragment_residue_mass, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
+    peptide_to_glycowork, infer_glycosites, AA_masses, fragment_residue_mass, backbone_ions, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
     subgraphs_to_domon_costello, rank_chains, X_cross_rings, peptide_to_RF_nomenclature, get_glycan_cleavages, max_fragment_charge, chance_fragment, relabel_graph
 from glycowork.motif.tokenization import glycan_to_mass, composition_to_mass, calculate_adduct_mass, HYDROGEN_MASS, PROTON_MASS, modification_formula_dict
 
@@ -367,6 +370,20 @@ def test_glycopeptide_structure_chance_categories():
         assert found[name] is None, (name, found[name])
 
 
+def test_backbone_ions():
+    # b, c, y, and z. ions of every cleavage as pyteomics makes them; several peptides at once give each one's ladder, an N-terminal modification on b and c only
+    ladder = backbone_ions([AA_masses[a] for a in 'PEPTIDE'])
+    assert ladder['cleavage'].tolist() == [1, 2, 3, 4, 5, 6] and ladder['peptide'].tolist() == [0] * 6
+    for k in range(1, 7):
+        for ion, part, kind in (('b', 'PEPTIDE'[:k], 'b'), ('c', 'PEPTIDE'[:k], 'c'), ('y', 'PEPTIDE'[k:], 'y'), ('z', 'PEPTIDE'[k:], 'z-dot')):
+            assert abs(ladder[ion][k - 1] + PROTON_MASS - mass.fast_mass(part, ion_type = kind, charge = 1)) < 5e-4
+    many = backbone_ions([AA_masses[a] for a in 'PEPTIDEGLYK'], lengths = [7, 4], n_term = [57.021464, 0.0])
+    assert many['peptide'].tolist() == [0] * 6 + [1] * 3 and many['cleavage'].tolist() == [1, 2, 3, 4, 5, 6, 1, 2, 3]
+    assert np.allclose(many['b'][:6], ladder['b'] + 57.021464) and np.allclose(many['c'][:6], ladder['c'] + 57.021464) and np.allclose(many['y'][:6], ladder['y'])
+    glyk = backbone_ions([AA_masses[a] for a in 'GLYK'])
+    assert all(np.allclose(many[ion][6:], glyk[ion]) for ion in 'bcyz')
+
+
 def test_rank_glycopeptide_sites():
     # c ions that carry the glycan only from its site on decide between the Ser/Thr; without them every placement ties, and an O-glycoprotease's prior puts
     # the glycan on the first residue
@@ -374,9 +391,57 @@ def test_rank_glycopeptide_sites():
     cum = np.cumsum([AA_masses[a] for a in pep])
     c_ions = {cum[i - 1] + 17.026549 + PROTON_MASS + (hexnac if i > 7 else 0): 100.0 for i in range(2, 10)}
     df = rank_glycopeptide_sites(pep, ['HexNAc'], c_ions, charge = 2, glycan_class = 'O', fragmentation_method = 'ETD')
-    assert df['glycosites'].tolist() == [[7], [2], [0]] and df['rank'].tolist() == [1, 2, 3]
+    assert df['glycosites'].tolist() == [[7], [2], [0]] and df['rank'].tolist() == [1, 2, 3] and df.attrs['localization'] == 'localized'
     flat = rank_glycopeptide_sites(pep, ['HexNAc'], {hexnac + PROTON_MASS: 100.0}, charge = 2, glycan_class = 'O', fragmentation_method = 'ETD', protease = 'IMPa')
-    assert flat['glycosites'][0] == [0] and flat['rank'].tolist() == [1, 2, 2] and flat['prior'].tolist() == [0.1, 0.0, 0.0]
+    site = 0.01 * math.log(O_SITE_GLYCANS['N1'] / sum(O_SITE_GLYCANS.values()))
+    assert flat['glycosites'][0] == [0] and flat['rank'].tolist() == [1, 2, 2] and flat['prior'].tolist() == pytest.approx([site + 0.1, site, site])
+    assert flat.attrs['localization'] == 'ambiguous' and flat.attrs['gap'] == pytest.approx(0.1)
+
+
+def test_rank_glycopeptide_sites_splits_and_priors():
+    # with a glycan space the total composition is split into one O-glycan per Ser/Thr (each holding a HexNAc): one sialyl-T on the second Thr goes there, ions between
+    # the sites tell two T antigens from one core 2 glycan, collisional scans holding HexHexNAc2 (which only a glycan of two HexNAc makes) favor the core 2 split in
+    # proportion to how many of them hold it, the charge-reduced precursor minus part of its glycan is no site evidence, and one Ser/Thr leaves one placement
+    space = [{'HexNAc': 1}, {'Hex': 1, 'HexNAc': 1}, {'Hex': 1, 'HexNAc': 1, 'Neu5Ac': 1}, {'Hex': 2, 'HexNAc': 2}, {'Hex': 1}]
+    assert glycan_splits('H2N2', space) == [('H1N1', 'H1N1'), ('H2N2',)] and ('N1', 'N1', 'H1', 'H1') in glycan_splits('H2N2', space, glycan_class = None)
+    pep = 'TPATPGAPGK'
+    residues = [AA_masses[r] for r in pep]
+    glycan = {g: composition_to_mass(g) - WATER_MASS for g in ('H1N1A1', 'H1N1')}
+
+    def spectrum(on, cleavages = range(1, len(pep))):
+        peaks = {}
+        for k in cleavages:
+            n_side, c_side = sum(m for p, m in on.items() if p < k), sum(m for p, m in on.items() if p >= k)
+            peaks[sum(residues[:k]) + PROTON_MASS + calculate_adduct_mass('NH3') + n_side] = 100.0
+            peaks[sum(residues[k:]) + WATER_MASS + PROTON_MASS - calculate_adduct_mass('NH3') + HYDROGEN_MASS + c_side] = 80.0
+        return peaks
+
+    args = {'charge': 3, 'glycan_class': 'O', 'mass_threshold_ppm': 20, 'glycan_space': space}
+    one = rank_glycopeptide_sites(pep, ['H1N1A1'], spectrum({3: glycan['H1N1A1']}), **args)
+    assert one['glycosites'][0] == [3] and one['glycans'][0] == ['H1N1A1'] and one.attrs['localization'] == 'localized'
+    between = spectrum({0: glycan['H1N1'], 3: glycan['H1N1']}, cleavages = [2, *range(5, len(pep))])
+    plain = rank_glycopeptide_sites(pep, ['H2N2'], [between, between], **{**args, 'charge': [3, 3]})
+    assert plain['glycans'][0] == ['H1N1', 'H1N1'] and plain.attrs['localization'] == 'localized' and plain.attrs['gap'] < 0.2
+    hexhexnac2 = composition_to_mass({'Hex': 1, 'HexNAc': 2}) - WATER_MASS + PROTON_MASS
+    held, faint, none = {204.087: 1e5, hexhexnac2: 2e4}, {204.087: 1e5, hexhexnac2: 5e2}, {204.087: 1e5, 366.14: 4e4}
+    assert rank_glycopeptide_sites(pep, ['H2N2'], between, collisional_masses = [none, faint], **args)['glycans'][0] == ['H1N1', 'H1N1']
+    assert rank_glycopeptide_sites(pep, ['H2N2'], between, collisional_masses = [held, none, none, none], **args)['glycans'][0] == ['H1N1', 'H1N1']
+    core2 = rank_glycopeptide_sites(pep, ['H2N2'], between, collisional_masses = [held], **args)
+    assert core2['glycans'][0] == ['H2N2'] and core2.attrs['localization'] == 'ambiguous'
+    with pytest.raises(ValueError):
+        rank_glycopeptide_sites(pep, ['H1A1'], between, **args)
+    single = rank_glycopeptide_sites('APAGPGTPGK', ['H1N1A1'], spectrum({}), **args)
+    assert single['glycosites'][0] == [6] and single.attrs['localization'] == 'single_site' and len(single) == 1
+    # C1-INH's TSSSSQDPESLQDR with sialyl-T on Thr1: c1 and c3 carry the glycan and z13 lacks it, but the charge-reduced precursor - Neu5Ac lies 19 ppm from z11 with
+    # the glycan (Ser4); as the precursor's peak it is no evidence, and the backbone ions place the glycan on Thr1
+    pep, gm = 'TSSSSQDPESLQDR', composition_to_mass({'Hex': 1, 'HexNAc': 1, 'Neu5Ac': 1}) - WATER_MASS
+    res = np.array([AA_masses[r] for r in pep])
+    c = np.cumsum(res)[:-1] + PROTON_MASS + calculate_adduct_mass('NH3')
+    z = res.sum() + WATER_MASS - np.cumsum(res)[:-1] + PROTON_MASS - calculate_adduct_mass('NH3') + HYDROGEN_MASS
+    shed = res.sum() + WATER_MASS + gm + PROTON_MASS - (composition_to_mass({'Neu5Ac': 1}) - WATER_MASS)
+    assert abs(shed - (z[2] + gm)) / shed * 1e6 < 20
+    df = rank_glycopeptide_sites(pep, ['H1N1A1'], {c[0] + gm: 2e4, c[2] + gm: 2e4, z[0]: 4e4, shed: 1e6, 1000.0: 5e5}, charge = 3, glycan_class = 'O', mass_threshold_ppm = 20)
+    assert df['glycosites'][0] == [0] and df.set_index(df['glycosites'].map(tuple))['site_ions'][(3,)] == 0
 
 
 def test_glycopeptide_nsite_pieces():

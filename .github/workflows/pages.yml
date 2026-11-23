@@ -30,7 +30,7 @@ jobs:
         python-version: '3.12'
 
     - name: Build the site
-      run: python packaging/build_web.py _site
+      run: python packaging/build_web.py _site ${{ github.event_name == 'release' && '--glycowork glycowork' || '' }}
 
     # The example run on the built site in headless Chromium against the same run natively (tests/test_web.py): a Pyodide, onnxruntime-web, glycowork
     # or candycrunch change that breaks the page fails here and is not deployed
@@ -38,7 +38,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install torch --index-url https://download.pytorch.org/whl/cpu
-        pip install "glycowork @ git+https://github.com/BojarLab/glycowork.git@dev"
+        if [ "${{ github.event_name }}" != "release" ]; then pip install "glycowork @ git+https://github.com/BojarLab/glycowork.git@dev"; fi
         pip install . -r requirements-dev.txt playwright
         python -m playwright install --with-deps chromium
 

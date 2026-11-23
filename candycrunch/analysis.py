@@ -75,12 +75,12 @@ mono_attributes = {
                      '12X': 102.0317, '03X': 72.0211, '02X': 42.0106, 'Pen': 132.0423},
             'atoms': {'01A': [2, 3, 4, 5], '02A': [3, 4, 5], '03A': [4, 5], '15X': [1], '15A': [2, 3, 4, 5],
                       '12X': [1, 3, 4, 5], '03X': [1, 2, 3], '02X': [1, 2], 'Pen': [1, 2, 3, 4, 5]}},
-    'Global': {'mass': {'H2O': -18.0105546, 'NH3': -17.026549, 'CH2O': -30.0106, 'CH4O': -32.026215, 'C2H2O': -42.0106, 'CO2': -43.9898,
+    'Global': {'mass': {'H2O': -calculate_adduct_mass('H2O'), 'NH3': -17.026549, 'CH2O': -30.0106, 'CH4O': -32.026215, 'C2H2O': -42.0106, 'CO2': -43.9898,
                         'SO4': -79.9568, 'PO4': -79.9663, 'C3H8O4': -108.0423, 'C2H4O2': -60.0211, 'CD3OH': -35.045046, 'CH3SOH': -63.998285,
                         '+Acetate': 59.013851,
                         '+Na': +22.989218, '+K': 38.963158, '+Li': 7.015454, '+H': HYDROGEN_MASS, '-H': -HYDROGEN_MASS}}
 }
-WATER_MASS = 18.0105546
+WATER_MASS = calculate_adduct_mass('H2O')
 CH2_MASS = calculate_adduct_mass('CH2')
 bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond'], 3: ['peptide_a', 'peptide_b', 'peptide_c', 'peptide_c-1'],
                     4: ['peptide_y', 'peptide_z', 'peptide_w', 'peptide_z+1']}
@@ -159,6 +159,38 @@ def fragment_residue_mass(token):
    | Returns the mass of the residue as backbone and Y ions carry it
    """
     return AA_masses[token] - LABILE_SIDE_CHAINS.get(token, 0.0)
+
+
+def backbone_ions(residues, lengths = None, n_term = 0.0):
+    """Neutral masses of the backbone fragments of every cleavage of one peptide or of many at once: b and c ions from the N-terminus, y and z. ions (the radical electron
+    activation makes) from the C-terminus\n
+    | Arguments:
+    | :-
+    | residues (array): residue masses as fragments carry them (fragment_residue_mass), the peptides one after another
+    | lengths (array): residues of each peptide; default:None (one peptide)
+    | n_term (float or array): what every N-terminal fragment carries beyond its residues (an N-terminal modification), one value or one per peptide; default:0.0\n
+    | Returns:
+    | :-
+    | Returns a dict of arrays over the cleavages, peptide by peptide, cleavage k leaving k residues N-terminal (k = 1 .. length - 1): 'b', 'c', 'y', 'z' (neutral
+    | masses; + PROTON_MASS gives the singly protonated ion), 'peptide' (index of the peptide), and 'cleavage' (k)
+    """
+    residues = np.asarray(residues, dtype = np.float64)
+    lengths = np.array([len(residues)], dtype = np.int64) if lengths is None else np.asarray(lengths, dtype = np.int64)
+    # one row per peptide, summed from either end within its row: every peptide's ions are its own running sums, as many peptides as one alone (a running sum over all of
+    # them drifts by up to 2e-7 Da across 50,000 peptides)
+    columns = np.arange(lengths.max(initial = 0))
+    inside = columns < lengths[:, None]
+    grid = np.zeros(inside.shape)
+    grid[inside] = residues
+    prefix, suffix = np.cumsum(grid, axis = 1), np.cumsum(grid[:, ::-1], axis = 1)[:, ::-1]
+    n_side, c_side = columns < lengths[:, None] - 1, inside & (columns > 0)
+    peptide = np.broadcast_to(np.arange(len(lengths))[:, None], inside.shape)[n_side]
+    b = prefix[n_side]
+    if np.any(n_term):
+        b = b + (np.asarray(n_term, dtype = np.float64)[peptide] if np.ndim(n_term) else n_term)
+    y = suffix[c_side] + WATER_MASS
+    return {'b': b, 'c': b + 17.026549, 'y': y, 'z': y - 17.026549 + HYDROGEN_MASS, 'peptide': peptide,
+            'cleavage': np.broadcast_to(columns + 1, inside.shape)[n_side]}
 
 
 tester_ma_addition = {k: {'mass': {k: fragment_residue_mass(k)}, 'atoms': {k: [1, 2, 3, 4, 5, 6]}} for k in AA_masses}
@@ -2946,17 +2978,17 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
             pep_res[0] += peptide_modification_mass(n_term_modification)
         n_aa = len(pep_res)
         full_pep = sum(pep_res) + WATER_MASS
-        cum_n = list(np.cumsum(pep_res))
-        cum_c = list(np.cumsum(pep_res[::-1]))
+        # ion i holds i residues: an N-terminal one is cleavage i of the ladder, a C-terminal one cleavage n_aa - i
+        ladder = backbone_ions(pep_res)
         allowed_ion_types = PEPTIDE_ION_TYPES[fragmentation_method] if isinstance(fragmentation_method, (str, type(None))) else set(fragmentation_method)
-        pep_ions = [('b', lambda i: cum_n[i - 1], 'n'),
-                    ('a', lambda i: cum_n[i - 1] - 27.994915, 'n'),
-                    ('c', lambda i: cum_n[i - 1] + 17.026549, 'n'),
-                    ('y', lambda i: cum_c[i - 1] + WATER_MASS, 'c'),
-                    ('z', lambda i: cum_c[i - 1] + WATER_MASS - 17.026549 + HYDROGEN_MASS, 'c'),
-                    ('c-1', lambda i: cum_n[i - 1] + 17.026549 - HYDROGEN_MASS, 'n'),
-                    ('z+1', lambda i: cum_c[i - 1] + WATER_MASS - 17.026549 + 2 * HYDROGEN_MASS, 'c'),
-                    ('w', lambda i: cum_c[i - 1] + WATER_MASS - 17.026549 + HYDROGEN_MASS - W_SIDE_CHAIN_LOSSES[peptide_seq[n_aa - i]]
+        pep_ions = [('b', lambda i: ladder['b'][i - 1], 'n'),
+                    ('a', lambda i: ladder['b'][i - 1] - 27.994915, 'n'),
+                    ('c', lambda i: ladder['c'][i - 1], 'n'),
+                    ('y', lambda i: ladder['y'][n_aa - i - 1], 'c'),
+                    ('z', lambda i: ladder['z'][n_aa - i - 1], 'c'),
+                    ('c-1', lambda i: ladder['c'][i - 1] - HYDROGEN_MASS, 'n'),
+                    ('z+1', lambda i: ladder['y'][n_aa - i - 1] - 17.026549 + 2 * HYDROGEN_MASS, 'c'),
+                    ('w', lambda i: ladder['z'][n_aa - i - 1] - W_SIDE_CHAIN_LOSSES[peptide_seq[n_aa - i]]
                      if peptide_seq[n_aa - i] in W_SIDE_CHAIN_LOSSES else None, 'c')]
         pep_ions = [x for x in pep_ions if x[0] in allowed_ion_types]
         # a1/b1 require N-terminal acylation and are not formed by ordinary peptides
@@ -3822,6 +3854,26 @@ def supporting_ions(glycan, peaks, charge = -1, candidates = (), mass_tolerance 
     return out
 
 
+def hexnac_oxonium_ratio(fragment_masses, mass_threshold = 0.2, mass_threshold_ppm = 10):
+    """The ratio of GlcNAc's to GalNAc's HexNAc oxonium ring fragments, (138 + 168) / (126 + 144), in a collisional MS2 spectrum\n
+    | Arguments:
+    | :-
+    | fragment_masses (dict): a peak dictionary of m/z : intensity such as the peak_d of load_spectra_filepath
+    | mass_threshold (float): fragment mass tolerance in Da, the tolerance of ion-trap spectra; default:0.2
+    | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; None for low-resolution spectra; default:10\n
+    | Returns:
+    | :-
+    | Returns the ratio (below 1 in 85% of one-HexNAc O-glycopeptides, GalNAc, median 0.56; above 2 in 77% of N-glycopeptides, GlcNAc, median 3.14), or None without 126 and 144
+    """
+    # The HexNAc oxonium ions of GlcNAc and GalNAc differ in their ring fragments: (138 + 168) / (126 + 144) was below 1 in 85% of the collisional spectra
+    # of one-site O-glycopeptides with one HexNAc (GalNAc, median 0.56) and in 0.9% of N-glycopeptides (GlcNAc, median 3.14), above 2 in 77% of these and
+    # 2% of those; electron-transfer spectra rarely record these ions
+    mzs, ints = np.array(list(fragment_masses), dtype = float), np.array(list(fragment_masses.values()), dtype = float)
+    ox = [ints[np.abs(mzs - m) <= (min(mass_threshold, m * mass_threshold_ppm / 1e6) if mass_threshold_ppm else mass_threshold)].sum()
+          for m in (OXONIUM_IONS[k] for k in ('HexNAc-C2H4O2-H2O', 'HexNAc-CH2O-2H2O', 'HexNAc-C2H4O2', 'HexNAc-2H2O'))]
+    return float((ox[1] + ox[3]) / (ox[0] + ox[2])) if ox[0] + ox[2] > 0 else None
+
+
 def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, intensities = None, charge = 2, structures = None,
                                  fragmentation_method = None, mass_threshold = 0.2, mass_threshold_ppm = 10, kingdom = 'Animalia',
                                  top_n_peaks = 150, max_candidates = 100, o_glycan_root = 'GalNAc', hexnac_penalty = 0.5, **kwargs):
@@ -3857,13 +3909,7 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
         fragment_masses = dict(zip(fragment_masses, [1.0] * len(fragment_masses) if intensities is None else intensities))
     if not fragment_masses:
         raise ValueError("No peaks to score")
-    # The HexNAc oxonium ions of GlcNAc and GalNAc differ in their ring fragments: (138 + 168) / (126 + 144) was below 1 in 85% of the collisional spectra
-    # of one-site O-glycopeptides with one HexNAc (GalNAc, median 0.56) and in 0.9% of N-glycopeptides (GlcNAc, median 3.14), above 2 in 77% of these and
-    # 2% of those; electron-transfer spectra rarely record these ions
-    mzs, ints = np.array(list(fragment_masses), dtype = float), np.array(list(fragment_masses.values()), dtype = float)
-    ox = [ints[np.abs(mzs - m) <= (min(mass_threshold, m * mass_threshold_ppm / 1e6) if mass_threshold_ppm else mass_threshold)].sum()
-          for m in (OXONIUM_IONS[k] for k in ('HexNAc-C2H4O2-H2O', 'HexNAc-CH2O-2H2O', 'HexNAc-C2H4O2', 'HexNAc-2H2O'))]
-    oxonium_ratio = float((ox[1] + ox[3]) / (ox[0] + ox[2])) if ox[0] + ox[2] > 0 else None
+    oxonium_ratio = hexnac_oxonium_ratio(fragment_masses, mass_threshold = mass_threshold, mass_threshold_ppm = mass_threshold_ppm)
     hexnac = None if oxonium_ratio is None else 'GalNAc' if oxonium_ratio < 1 else 'GlcNAc' if oxonium_ratio > 2 else None
     # An accurate spectrum is scored deisotoped, as the app annotates it: the 13C peaks of the oxonium and Y ions are no fragments of their own, but took
     # chance labels from candidates with more residue kinds (ETD runs: database structures of every composition within 10 ppm and -1 to +2
@@ -4019,90 +4065,221 @@ def rank_glycopeptide_compositions(peptide, compositions, fragment_masses, inten
 
 # O-glycoproteases that cut N-terminal to a glycosylated Ser/Thr, so that their peptides carry a glycan on the first residue
 N_TERMINAL_O_GLYCOPROTEASES = {'IMPa', 'OgpA', 'OpeRATOR', 'SmE'}
+# How often each glycan sits on one Ser/Thr: the 3,352 localized sites of the Malaker lab's validated O-glycopeptides (TIM1, TIM3, TIM4, GP1b, and C1-INH; IMPa, OgpA, SmE,
+# and trypsin digests, with and without sialidase). Mucin-type cores dominate (Tn, T, sialyl-T, core 2), so a split of a total composition into one glycan per site leans to
+# them where the site ions leave it open; each glycan of a placement adds O_SITE_PRIOR_WEIGHT x its log frequency (a glycan never seen counted as half). Learned on four of
+# the five proteins and tested on the fifth, at glycopeptide level, the validated placement came first in 0.717 of 449 glycopeptides (0.670 without it; chance 0.32)
+O_SITE_GLYCANS = {'H1N1': 910, 'N1': 846, 'H1N1A1': 420, 'H2N2': 360, 'H1N1A2': 209, 'H2N2A2': 137, 'H2N2A1': 122, 'H2N2F1A1': 65, 'H1N2': 59, 'H1N2A1': 38, 'H2N2F1': 37,
+                  'H1N1F1': 35, 'N2': 32, 'H2N2F1A2': 20, 'H1N3A1': 15, 'H2N3F1A1': 9, 'H2N2A3': 9, 'N1A1': 7, 'H1N2F1': 5, 'H1N3': 5, 'H2N3F1': 4, 'H1N3F1': 4, 'H1N3F1A1': 4}
+O_SITE_PRIOR_WEIGHT = 0.01
+# Oxonium ions only a glycan of two or more HexNAc makes (HexNAc2, HexHexNAc2, Hex2HexNAc2, and their Neu5Ac forms); two glycans of one HexNAc each, on two sites, never
+# make them. In the collisional scans of the Malaker lab's 34 O-glycoprotein samples one of them above 1% of the base peak (10 ppm) sits in 29% of spectra whose total
+# composition must hold such a glycan and in 1.0% of spectra with one HexNAc (HexNAc-only totals, Tn on several sites, 0.8-3.9%; adjacent Ser/Thr no more often); the
+# electron-activated scans hold them in 7.1% of one-HexNAc spectra, so only collisional scans count
+EXTENDED_OXONIUM = np.array(sorted(composition_to_mass(c) - calculate_adduct_mass('H2O') + PROTON_MASS for c in (
+    {'HexNAc': 2}, {'Hex': 1, 'HexNAc': 2}, {'Hex': 2, 'HexNAc': 2}, {'HexNAc': 2, 'Neu5Ac': 1}, {'Hex': 1, 'HexNAc': 2, 'Neu5Ac': 1}, {'Hex': 2, 'HexNAc': 2, 'Neu5Ac': 1})))
+
+
+def glycan_splits(composition, glycan_space, max_glycans = 4, glycan_class = 'O'):
+    """Lists the ways a glycopeptide's total composition is made of glycans of a glycan space, one glycan per occupied site\n
+    | Arguments:
+    | :-
+    | composition (dict or string): the total glycan composition, e.g., {'Hex': 2, 'HexNAc': 2} or 'H2N2'
+    | glycan_space (list): the glycans a site can carry, as composition dicts
+    | max_glycans (int): most glycans in a split; default:4
+    | glycan_class (string): with 'O', only glycans holding a HexNAc (the GalNAc of mucin-type O-glycans) take part, as glycowork's mammalian O-glycans also hold
+    |                        compositions without one (H2A2, H1), which otherwise made splits such as H2A2 + N1 + N1 for H2N2A2 and lifted localization by chance; default:'O'\n
+    | Returns:
+    | :-
+    | Returns a list of splits, each a tuple of canonical composition strings in the order of glycan_space
+    """
+    total = canonicalize_composition(composition) if isinstance(composition, str) else dict(composition)
+    keys = sorted(set(total) | {r for g in glycan_space for r in g})
+    want = np.array([total.get(r, 0) for r in keys])
+    parts = np.array([[g.get(r, 0) for r in keys] for g in glycan_space]).reshape(len(glycan_space), len(keys))
+    usable = (parts <= want).all(axis = 1) & (parts.sum(axis = 1) > 0)
+    if glycan_class == 'O':
+        usable &= np.array([g.get('HexNAc', 0) > 0 for g in glycan_space], dtype = bool)
+    fit = np.flatnonzero(usable)
+    names = {j: canonicalize_composition(dict(glycan_space[j]), as_string = True) for j in fit}
+    out = []
+
+    def grow(rest, start, chosen):
+        if not rest.any():
+            out.append(tuple(names[j] for j in chosen))
+            return
+        if len(chosen) == max_glycans:
+            return
+        for j in fit[fit >= start]:
+            if (parts[j] <= rest).all():
+                grow(rest - parts[j], j, chosen + [j])
+
+    grow(want, 0, [])
+    return out
 
 
 def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = None, charge = 2, candidate_sites = None, glycan_class = None,
-                            fragmentation_method = None, mass_threshold = 0.2, mass_threshold_ppm = 10, top_n_peaks = 100, protease = None, prior_weight = 0.1,
-                            max_placements = 200, **kwargs):
-    """Ranks the placements of a glycopeptide's glycans on its candidate sites by the site-determining ions of its MS2 spectrum, the backbone ions (c/z with
-    electron transfer, b/y with collisional activation) that carry every glycan whose site they cover, and optionally by the cleavage rule of the protease\n
+                            fragmentation_method = None, mass_threshold = 0.2, mass_threshold_ppm = 10, top_n_peaks = None, protease = None, prior_weight = 0.1,
+                            glycan_space = None, site_prior_weight = None, collisional_masses = None, extended_weight = 0.2, margin = 0.02, max_placements = 200000):
+    """Ranks the placements of a glycopeptide's glycans on its candidate sites by the site-determining ions of its MS2 spectra, the backbone ions (c/z with
+    electron transfer, b/y with collisional activation) that carry every glycan whose site they cover, plus priors from the protease, from how often each glycan
+    sits on a site, and from the oxonium ions of its collisional scans\n
     | Arguments:
     | :-
-    | peptide (string): amino acid sequence, in CandyCrunch's one-letter code (c, j, k, m, n, q for modified residues)
-    | glycans (list): the glycans to place, one per occupied site, as compositions (dicts or strings, 'H1N1A1') or IUPAC-condensed structures
-    | fragment_masses (list or dict): observed m/z values, or a peak dictionary of m/z : intensity such as the peak_d of load_spectra_filepath
-    | intensities (list): intensities of the m/z values if fragment_masses is a list; default:None (all equal)
-    | charge (int): precursor charge state; default:2
+    | peptide (string): amino acid sequence, in CandyCrunch's one-letter code (c, j, k, m, n, q, x for modified residues)
+    | glycans (list): the glycans to place, one per occupied site, as compositions (dicts or strings, 'H1N1A1') or IUPAC-condensed structures; with glycan_space,
+    |                 their sum is the total composition, and every split of it into glycans of glycan_space is placed
+    | fragment_masses (list or dict): observed m/z values, a peak dictionary of m/z : intensity such as the peak_d of load_spectra_filepath, or a list of peak
+    |                                 dictionaries (several spectra of the glycopeptide, scored apart and averaged)
+    | intensities (list): intensities of the m/z values if fragment_masses is a list of m/z; default:None (all equal)
+    | charge (int or list): precursor charge state, one per spectrum with several; default:2
     | candidate_sites (list): 0-based positions the glycans can occupy; default:None (those infer_glycosites finds for glycan_class)
-    | glycan_class (string): 'N' or 'O', for the default candidate sites; default:None (both)
-    | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD', e.g., the activation column of load_spectra_filepath; default:None (all peptide ion types)
-    | mass_threshold (float): fragment mass tolerance in Da, the tolerance of ion-trap spectra; default:0.2
-    | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; None for low-resolution spectra; default:10
-    | top_n_peaks (int): how many of the most intense peaks are scored; default:100
+    | glycan_class (string): 'N' or 'O', for the default candidate sites and the site prior; default:None (both)
+    | fragmentation_method (string or list): 'CID'/'HCD' (b/y ions), 'ETD'/'ECD' (c/z ions), 'EThcD'/'ETciD' (both), one per spectrum with several; default:None (both)
+    | mass_threshold (float or list): fragment tolerance in Da, used where mass_threshold_ppm is None (ion-trap spectra); default:0.2
+    | mass_threshold_ppm (float or list): fragment tolerance in ppm for accurate spectra, which are scored deisotoped; None for low-resolution spectra; default:10
+    | top_n_peaks (int): how many of the most intense peaks are scored; default:None (100 of an accurate spectrum, 200 of a low-resolution one)
     | protease (string): the protease that made the peptide; with one of N_TERMINAL_O_GLYCOPROTEASES (IMPa, OgpA/OpeRATOR, SmE), a placement with a glycan
     |                    on the first residue gains prior_weight; default:None (no prior)
     | prior_weight (float): what the protease prior adds to a placement's score; default:0.1
-    | max_placements (int): most placements (distinct assignments of the glycans to sites) to score, at one CandyCrumbs call each; default:200
-    | **kwargs: passed on to CandyCrumbs; default max_cleavages 2\n
+    | glycan_space (list): the glycans a site can carry, as composition dicts; given, the glycans are split anew (glycan_splits); default:None
+    | site_prior_weight (float): what each glycan of a placement adds per unit of its log frequency on a site (O_SITE_GLYCANS); default:None (O_SITE_PRIOR_WEIGHT for
+    |                            glycan_class 'O', else 0)
+    | collisional_masses (list): peak dictionaries of the glycopeptide's collisional (HCD) scans; a placement with a glycan of two or more HexNAc gains extended_weight x
+    |                            the share of them holding an oxonium ion only such a glycan makes (EXTENDED_OXONIUM, 1% of the base peak or more, 10 ppm); default:None
+    | extended_weight (float): see collisional_masses; default:0.2
+    | margin (float): how far the best placement's site ions must lead every other placement's for it to be localized; default:0.02
+    | max_placements (int): most placements to score; with glycan_space, the splits with the fewest glycans that fit are kept; default:200000\n
     | Returns:
     | :-
     | Returns a dataframe with one row per placement, best first: 'glycosites' (0-based positions), 'glycans' (in the order of glycosites), 'score' (site_ions
-    | plus prior), 'rank' (equal scores tie), 'site_ions' (share of the square-root intensity annotated as backbone ions carrying every glycan whose site
-    | they cover), and 'prior'
+    | plus prior), 'rank' (equal scores tie), 'site_ions' (share of the square-root intensity of the top peaks explained by backbone ions carrying every glycan whose
+    | site they cover, averaged over the spectra), and 'prior'; its attrs hold 'gap' (the best score's lead over the next), 'evidence' (how far the best placement's
+    | site ions lead every other placement's), and 'localization' ('single_site' with one placement, 'localized' where evidence exceeds margin, else 'ambiguous';
+    | priors rank, only site ions localize)
     """
-    # Every placement of the identified glycans of 1,640 fully localized O-glycopeptide spectra with more Ser/Thr than glycans: the search engine's placement
-    # ranked first in 0.65 (ion-trap ETD) and 0.68 (EThcD) of O-glycoprotease peptides by these site ions, 0.80/0.82 of tryptic ones (chance 0.35/0.44;
-    # any backbone ion 0.54/0.58 and 0.72/0.70, as one that lost a glycan fits every placement; the annotated share of all peaks 0.52/0.58 and 0.67/0.70).
-    # HCD ranked O-glycoprotease peptides at chance (0.42) and tryptic ones at 0.59. The search engine put the glycan on the first residue of 72-80% of IMPa
-    # and SmE peptides; that prior alone ranked 0.64/0.63, site ions plus a prior of 0.1 0.82/0.82 (0.05: 0.81/0.81, 0.2 as 0.1); StcE, which does not cut
-    # at the glycosite, gets none (a prior of 0.2 ranked its peptides worse)
-    if not isinstance(fragment_masses, dict):
-        fragment_masses = dict(zip(fragment_masses, [1.0] * len(fragment_masses) if intensities is None else intensities))
-    if not fragment_masses:
+    # Every placement is scored at once, each distinct site ion matched once a spectrum (6,307 O-glycopeptides of six samples in 203 s, the slowest in 8.5 s; matching every
+    # placement's own ions took 825 s and 68 s, identical placements), where annotating each placement with CandyCrumbs took 10-30 ms. On 1,764 spectra of the Malaker lab's O-glycopeptides whose curated placement is the only one (six IMPa, OgpA, and SmE samples, glycans given, at most 40
+    # placements), the curated placement ranks first in 0.716 of orbitrap EThcD and 0.748 of ion-trap ETD spectra, 0.844 and 0.865 with the protease prior (CandyCrumbs
+    # annotation: 0.717, 0.704, 0.848, 0.850); ion-trap spectra are scored on 200 peaks (100: 0.716 and 0.840, 300 as 200). Orbitrap spectra are deisotoped with bounded
+    # isotope ratios: undeisotoped they rank 0.728 but localize less (0.383 of spectra at a margin of 0.02, 0.984 right) and localize another peptide's spectra more (2.5%,
+    # deisotoped 2.2%), while bounded deisotoping localizes 0.455 at 0.978 (unbounded 0.456 at 0.976 and 1.5%, ranking 0.709). Held out by protein at glycopeptide level
+    # 0.717 of 449 with the site prior. An ion within twice the tolerance of the charge-reduced precursor (1+ .. (z - 1)+, -1 to +2 H) minus any part
+    # of the total composition is no site evidence, as that peak is the precursor's (C1-INH TSSSSQDPESLQDR: z11 with sialyl-T sits 19 ppm from the charge-reduced
+    # precursor - Neu5Ac): placements an O-glycoprotease's cut decides right in 99.8% (98.3% without). Of 474 validated O-glycopeptides found at 1% glycopeptide FDR with
+    # several placements, 25% are localized at a margin of 0.02, 0.901 of those right (another peptide's spectra localize 4.7%). The protease prior of 0.1 ranked 0.82 of
+    # O-glycoprotease peptides first (0.05: 0.81, 0.2 as 0.1); StcE, which does not cut at the glycosite, gets none. The extended-oxonium prior of 0.2 took the placements
+    # the collisional HexNAc oxonium ratio refutes (a GlcNAc, never a mucin-type core, split into Tn, T, and sialyl-T) from 293 to 155 spectra of 83,757 (0.1: 201, 0.5: 154)
+    spectra = fragment_masses if isinstance(fragment_masses, list) and fragment_masses and isinstance(fragment_masses[0], dict) else [fragment_masses]
+    n = len(spectra)
+    charges, thresholds, thresholds_ppm, methods = [v if isinstance(v, list) else [v] * n for v in (charge, mass_threshold, mass_threshold_ppm, fragmentation_method)]
+    spectra = [s if isinstance(s, dict) else dict(zip(s, [1.0] * len(s) if intensities is None else intensities)) for s in spectra]
+    if not any(spectra):
         raise ValueError("No peaks to score")
     if not glycans:
         raise ValueError("No glycans to place")
     sites = sorted(infer_glycosites(peptide, glycan_class = glycan_class) if candidate_sites is None else candidate_sites)
-    if len(sites) < len(glycans):
-        raise ValueError(f"{len(glycans)} glycans do not fit on the {len(sites)} candidate sites of {peptide}")
-    # a composition is placed by its content, so that equal glycans swapped between sites are one placement
-    keys = [str(sorted((g if isinstance(g, dict) else canonicalize_composition(g)).items())) if isinstance(g, dict) or is_composition(g) else g for g in glycans]
+    # a composition is placed by its canonical string, so that equal glycans swapped between sites are one placement
+    keys = [canonicalize_composition(g if isinstance(g, dict) else canonicalize_composition(g), as_string = True) if isinstance(g, dict) or is_composition(g) else g for g in glycans]
     by_key = dict(zip(keys, glycans))
-    n_placements = math.comb(len(sites), len(glycans)) * math.factorial(len(glycans)) // math.prod(math.factorial(n) for n in Counter(keys).values())
-    if n_placements > max_placements:
-        raise ValueError(f"{n_placements} placements exceed max_placements = {max_placements}; pass fewer candidate_sites or raise max_placements")
-    placements = sorted({tuple(sorted(zip(pos, [keys[k] for k in perm]))) for pos in combinations(sites, len(glycans)) for perm in permutations(range(len(glycans)))})
-    # Accurate spectra are scored deisotoped, as the app annotates them; in ion-trap spectra deisotoping cost more than it gained
-    if mass_threshold_ppm:
-        fragment_masses = deisotope_ms2(fragment_masses, max(abs(charge), 1), mass_tolerance = min(mass_threshold, 0.05), bound_isotope_ratio = True)
-    peaks = sorted(fragment_masses.items(), key = lambda x: -x[1])[:top_n_peaks]
-    weights = np.sqrt(np.maximum([i for _, i in peaks], 0)) if peaks[0][1] > 0 else np.ones(len(peaks))
-    observed = [m for m, _ in peaks]
-    kwargs.setdefault('max_cleavages', 2)
-    rows = []
-    for placement in placements:
-        sites_of = [s for s, _ in placement]
-        hits = CandyCrumbs({'peptide': peptide, 'glycans': [by_key[k] for _, k in placement], 'glycosites': sites_of}, observed, mass_threshold = mass_threshold,
-                           charge = abs(charge), intensities = [i for _, i in peaks], fragmentation_method = fragmentation_method,
-                           mass_threshold_ppm = mass_threshold_ppm, **kwargs)
-        retained = np.zeros(len(observed), dtype = bool)
-        for k, m in enumerate(observed):
-            if hits.get(m) is None:
-                continue
-            name = hits[m]['Domon-Costello nomenclatures'][0]
-            ion = re.fullmatch(r'(.+)_(\d+)', next(t for t in name[0] if not t.startswith('M_')))
-            if ion is None:
-                continue
-            # a backbone ion that covers a glycan's site is site evidence when it carries that glycan; one that lost it (a loss of the glycan, or a Y_0/Z_0 piece of
-            # a structure) fits every placement, as a glycan outside the ion is named the same way
-            covered = [j for j, s in enumerate(sites_of) if (s < int(ion[2]) if ion[1] in N_TERM_IONS else s >= len(peptide) - int(ion[2]))]
-            retained[k] = not any(name[1 + j][0].startswith('loss of') or re.fullmatch(r'[YZ]_0_[A-Za-z]+', name[1 + j][0]) for j in covered)
-        site_ions = float(weights[retained].sum() / weights.sum())
-        prior = prior_weight if protease in N_TERMINAL_O_GLYCOPROTEASES and placement[0][0] == 0 else 0.0
-        rows.append([sites_of, [by_key[k] for _, k in placement], site_ions + prior, site_ions, prior])
-    df_out = pd.DataFrame(rows, columns = ['glycosites', 'glycans', 'score', 'site_ions', 'prior'])
-    df_out = df_out.sort_values('score', ascending = False, kind = 'stable').reset_index(drop = True)
+    composition_of = {k: canonicalize_composition(k) if isinstance(g, dict) or is_composition(g) else glycan_to_composition(g) for k, g in zip(keys, glycans)}
+    if glycan_space is not None:
+        total = Counter()
+        for k in keys:
+            total.update(composition_of[k])
+        splits = sorted([s for s in glycan_splits(dict(total), glycan_space, max_glycans = min(4, len(sites)), glycan_class = glycan_class) if len(s) <= len(sites)], key = len)
+    else:
+        if len(sites) < len(glycans):
+            raise ValueError(f"{len(glycans)} glycans do not fit on the {len(sites)} candidate sites of {peptide}")
+        n_placements = math.comb(len(sites), len(keys)) * math.factorial(len(keys)) // math.prod(math.factorial(v) for v in Counter(keys).values())
+        if n_placements > max_placements:
+            raise ValueError(f"{n_placements} placements exceed max_placements = {max_placements}; pass fewer candidate_sites or raise max_placements")
+        splits = [tuple(keys)]
+    placements = []
+    for split in splits:
+        count = math.comb(len(sites), len(split)) * math.factorial(len(split)) // math.prod(math.factorial(v) for v in Counter(split).values())
+        if len(placements) + count > max_placements and placements:
+            break
+        placements += sorted({tuple(sorted(zip(positions, order))) for positions in combinations(sites, len(split)) for order in permutations(split)})
+    if not placements:
+        raise ValueError(f"No placement of {glycans} on the candidate sites of {peptide}")
+    placed = {k for p in placements for _, k in p}
+    composition_of |= {k: canonicalize_composition(k) for k in placed - composition_of.keys()}
+    mass = {k: composition_to_mass(composition_of[k]) - WATER_MASS for k in placed}
+    on_residue = np.zeros((len(placements), len(peptide)))
+    for i, placement in enumerate(placements):
+        for site, k in placement:
+            on_residue[i, site] = mass[k]
+    total = Counter()
+    for _, k in placements[0]:
+        total.update(composition_of[k])
+    names = [k for k, v in total.items() if v > 0]
+    losses = np.unique(np.array(list(product(*[range(total[k] + 1) for k in names])), dtype = np.float64).reshape(-1, len(names)) @ np.array([composition_to_mass({k: 1}) - WATER_MASS for k in names]))
+    ladder = backbone_ions([fragment_residue_mass(r) for r in peptide])
+    b_ion, c_ion, y_ion, z_ion = (ladder[k] + PROTON_MASS for k in 'bcyz')
+    # the charge-reduced precursor keeps every side chain, a labile one too
+    neutral = sum(AA_masses[r] for r in peptide) + WATER_MASS + float(on_residue[0].sum())
+    shares = np.zeros((n, len(placements)))
+    # an ion depends only on its cleavage and the glycan mass on its side of it, which takes few values over all placements: each such ion is matched once a spectrum, and a
+    # placement gathers its ions' peaks by the codes of its glycan masses (the same ions, peaks, and sums as matching every placement's ions)
+    on_n = np.cumsum(on_residue, axis = 1)[:, :-1]
+    on_c = on_residue.sum(axis = 1, keepdims = True) - on_n
+    n_values, n_code = np.unique(on_n, return_inverse = True)
+    c_values, c_code = np.unique(on_c, return_inverse = True)
+    n_code, c_code = n_code.reshape(on_n.shape), c_code.reshape(on_c.shape)
+    cleavages = np.arange(len(peptide) - 1)
+    for s, (peaks, z, tolerance_da, ppm, method) in enumerate(zip(spectra, charges, thresholds, thresholds_ppm, methods)):
+        z = max(abs(int(z)), 1)
+        top = sorted((deisotope_ms2(peaks, z, 0.05, bound_isotope_ratio = True) if ppm else peaks).items(), key = lambda p: -p[1])[:top_n_peaks or (100 if ppm else 200)]
+        if not top:
+            continue
+        mz = np.array([m for m, _ in top])
+        weight = np.sqrt(np.maximum([i for _, i in top], 0.0))
+        order = np.argsort(mz)
+        mz, weight = mz[order], weight[order] / max(weight.sum(), 1e-300)
+        electron, collisional = method not in ('CID', 'HCD'), method not in ('ETD', 'ECD')
+        fragment_charges = np.arange(1, max(z - 1, 1) + 1)
+        shadows = np.sort(((neutral - losses)[:, None, None] + fragment_charges[None, :, None] * PROTON_MASS + np.arange(-1, 3)[None, None, :] * HYDROGEN_MASS) / fragment_charges[None, :, None], axis = None)
+        tolerance = ppm if ppm else tolerance_da
+        peaks_of = []
+        series = ([(c_ion, n_values, n_code)] if electron else []) + ([(b_ion, n_values, n_code)] if collisional else []) + \
+                 ([(z_ion, c_values, c_code), (z_ion + HYDROGEN_MASS, c_values, c_code)] if electron else []) + ([(y_ion, c_values, c_code)] if collisional else [])
+        for base, values, code in series:
+            flat = (((base[:, None] + values[None, :])[:, :, None] + (fragment_charges - 1) * PROTON_MASS) / fragment_charges).ravel()
+            # an ion that a charge-reduced precursor's peak explains matches nothing (NaN)
+            flat[match_peaks(flat, shadows, 2 * tolerance, bool(ppm))[0]] = np.nan
+            ok, nearest = match_peaks(flat, mz, tolerance, bool(ppm))
+            peaks_of.append((np.where(ok, nearest, -1).reshape(len(base), len(values), len(fragment_charges)), code))
+        for start in range(0, len(placements), 4000):
+            found = np.sort(np.concatenate([table[cleavages, code[start:start + 4000]].reshape(len(code[start:start + 4000]), -1) for table, code in peaks_of], axis = 1), axis = 1)
+            keep = (found >= 0) & np.concatenate([np.ones((len(found), 1), dtype = bool), found[:, 1:] != found[:, :-1]], axis = 1)
+            rows_of = np.broadcast_to(np.arange(len(found))[:, None], found.shape)[keep]
+            shares[s, start:start + 4000] = np.bincount(rows_of, weights = weight[found[keep]], minlength = len(found))
+    site_ions = shares.mean(axis = 0)
+    if site_prior_weight is None:
+        site_prior_weight = O_SITE_PRIOR_WEIGHT if glycan_class == 'O' else 0.0
+    seen = sum(O_SITE_GLYCANS.values())
+    canonical = {k: canonicalize_composition(composition_of[k], as_string = True) for k in placed}
+    prior = np.array([sum(math.log(O_SITE_GLYCANS.get(canonical[k], 0.5) / seen) for _, k in p) for p in placements]) * site_prior_weight
+    if protease in N_TERMINAL_O_GLYCOPROTEASES:
+        prior += np.array([prior_weight if p[0][0] == 0 else 0.0 for p in placements])
+    if collisional_masses:
+        held = []
+        for peaks in collisional_masses:
+            mz, it = np.fromiter(peaks.keys(), dtype = np.float64, count = len(peaks)), np.fromiter(peaks.values(), dtype = np.float64, count = len(peaks))
+            held.append(bool(len(it)) and any(it[np.abs(mz - m) <= m * 10e-6].sum() >= 0.01 * it.max() for m in EXTENDED_OXONIUM))
+        held = float(np.mean(held))
+        if held > 0:
+            extended = {k for p in placements for _, k in p if composition_of[k].get('HexNAc', 0) >= 2}
+            prior += extended_weight * held * np.array([any(k in extended for _, k in p) for p in placements], dtype = float)
+    score = site_ions + prior
+    order = np.argsort(-score, kind = 'stable')
+    df_out = pd.DataFrame({'glycosites': [[s for s, _ in placements[i]] for i in order], 'glycans': [[by_key.get(k, k) for _, k in placements[i]] for i in order],
+                           'score': score[order], 'site_ions': site_ions[order], 'prior': prior[order]})
     df_out.insert(3, 'rank', df_out['score'].round(10).rank(ascending = False, method = 'min').astype(int))
+    evidence = float(site_ions[order[0]] - np.delete(site_ions, order[0]).max()) if len(order) > 1 else float('inf')
+    df_out.attrs = {'gap': float(score[order[0]] - score[order[1]]) if len(order) > 1 else float('inf'), 'evidence': evidence,
+                    'localization': 'single_site' if len(order) == 1 else 'localized' if evidence > margin else 'ambiguous'}
     return df_out
 
 
@@ -4960,10 +5137,12 @@ def match_peaks(ions, spec_mz, tolerance, ppm, charges = None):
     if _MATCH_COMPILED[0] is not None:
         return _MATCH_COMPILED[0](np.ascontiguousarray(ions, dtype = np.float64), charges, padded, float(tolerance), bool(ppm))
     mz = ions if one else ((ions[None, :] + (charges[:, None] - 1) * PROTON_MASS) / charges[:, None]).ravel()
-    pos = np.searchsorted(padded, mz)
-    d_left, d_right = mz - padded[pos - 1], padded[pos] - mz
-    use_left = d_left <= d_right
-    return np.where(use_left, d_left, d_right) <= (mz * tolerance * 1e-6 if ppm else tolerance), pos - 1 - use_left
+    # a NaN ion sorts past the +inf sentinel and matches nothing, as an infinite one does
+    pos = np.minimum(np.searchsorted(padded, mz), len(padded) - 1)
+    with np.errstate(invalid = 'ignore'):
+        d_left, d_right = mz - padded[pos - 1], padded[pos] - mz
+        use_left = d_left <= d_right
+        return np.where(use_left, d_left, d_right) <= (mz * tolerance * 1e-6 if ppm else tolerance), pos - 1 - use_left
 
 
 def add_qvalues(df, score = 'score', decoy = 'is_decoy'):

@@ -2,6 +2,7 @@
 
 import argparse
 import os
+from candycrunch import __version__
 
 def str_to_bool(value):
     if value.lower() in ('true', '1', 'yes'):
@@ -13,6 +14,7 @@ def str_to_bool(value):
 def build_parser():
     # The CLI's options, also the settings form of the in-browser page (web.py)
     parser = argparse.ArgumentParser(description='Run CandyCrunch prediction.')
+    parser.add_argument('--version', action='version', version=f'CandyCrunch {__version__}')
     parser.add_argument('--spectra_filepath', help='Path(s) to spectra files (Thermo .raw, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion traps) and Agilent MassHunter .d folders, Waters .raw folders, .mzML, .mzXML, mzData (.mzdata/.mzdata.xml), .mgf, .cc/.xlsx from extract_spectra) and/or folders of .raw/.wiff/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files; several files are harmonized with wrap_inference_batch', type=str, nargs='+', required=True)
     parser.add_argument('--glycan_class', help='Glycan class, or several measured together in one run (e.g., N O)', type=str, nargs='+', choices=['O', 'N', 'free', 'lipid'], required=True)
     parser.add_argument('--mode', help='negative/positive mode', type=str, choices=['negative', 'positive'], required=False)
@@ -27,7 +29,7 @@ def build_parser():
     parser.add_argument('--lc', help='LC type', type=str, choices=['PGC', 'C18', 'other'], required=False)
     parser.add_argument('--trap', help='Mass analyzer of the MS2 spectra (the survey scan analyzer is read from the file); the instrument stored in the file overrides it', type=str, choices=['linear', 'orbitrap', 'amazon', 'other'], required=False)
     parser.add_argument('--rt_min', help='Minimum retention time in minutes; default: 0 (runs longer than 20 min then skip their first 2 min)', type=float, required=False)
-    parser.add_argument('--rt_max', help='Maximum retention time in minutes; default: 0 (runs longer than 40 min then skip their last 10%%)', type=float, required=False)
+    parser.add_argument('--rt_max', help='Maximum retention time in minutes; default: 0 (all; in runs longer than 40 min, rows in the last 10%% need a peak of their own over a low background)', type=float, required=False)
     parser.add_argument('--rt_diff', help='Maximum retention time difference within one peak', type=float, required=False)
     parser.add_argument('--spectra', help='Whether to output representative spectra', type=str_to_bool, required=False)
     parser.add_argument('--get_missing', help='Whether to output peaks without prediction', type=str_to_bool, required=False)

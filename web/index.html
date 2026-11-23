@@ -71,12 +71,12 @@ footer a, header a { color: var(--accent); }
   <h2>1. Spectra</h2>
   <div class="row">
     <label class="button" for="pick-files">Choose files</label>
-    <input type="file" id="pick-files" multiple accept=".raw,.mzML,.mzml,.mzXML,.mzxml,.mgf,.cc,.xlsx">
+    <input type="file" id="pick-files" multiple accept=".raw,.mzML,.mzml,.mzXML,.mzxml,.mzdata,.xml,.wiff,.scan,.mgf,.cc,.xlsx">
     <label class="button" for="pick-folder">Choose a folder</label>
     <input type="file" id="pick-folder" webkitdirectory>
     <button id="example" type="button" disabled>Try the example run</button>
   </div>
-  <p class="note">Thermo .raw, .mzML, .mzXML, .mgf, .cc, .xlsx, or a folder: a Bruker .d folder, or a folder of runs. Several runs are combined into one feature table.</p>
+  <p class="note">Thermo .raw, SCIEX .wiff (with its .wiff.scan), .mzML, .mzXML, mzData, .mgf, .cc, .xlsx, or a folder: a Bruker or Agilent .d folder, a Waters .raw folder, or a folder of runs. Several runs are combined into one feature table.</p>
   <ul class="files" id="files"></ul>
 </section>
 
@@ -110,7 +110,7 @@ footer a, header a { color: var(--accent); }
 <footer>
   <span id="versions"></span>
   · <a href="https://github.com/BojarLab/CandyCrunch">CandyCrunch on GitHub</a>
-  · Large runs need a desktop computer: a 700 MB Thermo .raw used under 2 GB of memory and about 6 minutes.
+  · Large runs need a computer with 8 GB of memory: a 665 MB Thermo .raw took 6 minutes and up to 4.7 GB in this tab.
 </footer>
 </main>
 
@@ -191,20 +191,23 @@ function argv() {
   return out;
 }
 
-// The runs among the chosen files: a .d folder is one run (all its files are mounted), any other file of a spectra format is one run
+// The runs among the chosen files: a .d or Waters .raw folder is one run (all its files are mounted), any other file of a spectra format is one run, and
+// a .wiff.scan is mounted beside its .wiff
 function setFiles(list) {
   files = [];
   const found = new Map();
   for (const file of list) {
     const path = file.webkitRelativePath || file.name;
     const parts = path.split('/');
-    const d = parts.findIndex((x) => /\.d$/i.test(x));
+    const d = parts.findIndex((x, i) => i < parts.length - 1 && /\.(d|raw)$/i.test(x));
     if (d >= 0) {
       const run = parts.slice(0, d + 1).join('/');
       found.set(run, (found.get(run) || 0) + file.size);
       files.push({path, file});
-    } else if (/\.(raw|mzml|mzxml|mgf|cc|xlsx)$/i.test(path)) {
+    } else if (/\.(raw|wiff|mzml|mzxml|mzdata|mzdata\.xml|mgf|cc|xlsx)$/i.test(path)) {
       found.set(path, file.size);
+      files.push({path, file});
+    } else if (/\.wiff\.scan$/i.test(path)) {
       files.push({path, file});
     }
   }

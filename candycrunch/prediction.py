@@ -1778,7 +1778,7 @@ def extract_xic_areas(ms1, target_mzs, rt_centers, charges = None, rt_window = 1
                         int(np.searchsorted(ms1_rts, finite.max() + search_window + 2 * rt_window, side = 'right'))) if len(finite) else (0, 0)
     o0, o1 = ms1_offsets[lo_scan], ms1_offsets[hi_scan]
     scan_keys = np.empty(o1 - o0, dtype = np.complex128)
-    scan_keys.real = np.repeat(np.arange(hi_scan - lo_scan, dtype = np.float64), np.diff(ms1_offsets[lo_scan:hi_scan + 1]))
+    scan_keys.real = np.repeat(np.arange(hi_scan - lo_scan, dtype = np.float64), np.diff(ms1_offsets[lo_scan:hi_scan + 1]).astype(np.intp))
     scan_keys.imag = ms1_mzs[o0:o1]
     # each scan's cumulative intensities after a 0 of its own, so scan si's window at position p of scan_keys sums from cum[p + si - lo_scan]
     cum = np.zeros(o1 - o0 + hi_scan - lo_scan, dtype = np.float64)
@@ -2369,14 +2369,16 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         # Only the clusters before the first one less than ten times as intense (by_apex order) and within mz_diff_use are looked at, found with numpy: looping over
         # every stronger cluster made this quadratic (10 million iterations, 40% of condensing a 16,000-cluster run)
         tenth, by_mz = np.array([c['apex_int'] * 0.1 for c in by_apex]), np.array([c['apex_mz'] for c in by_apex])
+        # (tenth falls along by_apex, so the first cluster less than ten times as intense is found by bisection: comparing all of them for every cluster was
+        # quadratic again: most of the time condensing a large permethylated orbitrap run took)
+        neg_tenth = -tenth
         # (each cluster's candidates from a window of them sorted by m/z, in by_apex order)
         tail_of, mz_order = {}, np.argsort(by_mz, kind = 'stable')
         mz_sorted = by_mz[mz_order]
         for w in by_apex[::-1]:
             if w['apex_int'] <= 0:
                 continue
-            below = tenth < w['apex_int']
-            n = int(below.argmax()) if below.any() else len(by_apex)
+            n = int(np.searchsorted(neg_tenth, -w['apex_int'], side = 'right'))
             near = np.sort(mz_order[np.searchsorted(mz_sorted, w['apex_mz'] - mz_diff_use - 1e-6):np.searchsorted(mz_sorted, w['apex_mz'] + mz_diff_use + 1e-6, side = 'right')])
             for k in near[(near < n) & (np.abs(by_mz[near] - w['apex_mz']) <= mz_diff_use)]:
                 c = by_apex[k]
@@ -3300,8 +3302,15 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
     # A row without a prediction one or two isotope spacings above a co-eluting predicted row of the same charge is the 13C peak of that glycan,
     # fragmented on its own (e.g., a header charge kept its precursor from being refined), so it joins that row instead of claiming the peak
     charges = df['charge'].values
+
+    def isotope_rows(k, n):
+        # the rows n isotope spacings below row k (within 0.25 m/z), in index order, from the sorted index: testing every row for every row was quadratic
+        t = idx_vals[k] - n * ISOTOPE_SPACING / abs(charges[k])
+        near = np.arange(np.searchsorted(idx_vals, t - 0.25 - 1e-6), np.searchsorted(idx_vals, t + 0.25 + 1e-6, side = 'right'))
+        return near[np.abs(t - idx_vals[near]) <= 0.25]
+
     for k in np.flatnonzero([p is None for p in first_preds]):
-        iso = [j for n in (1, 2) for j in np.flatnonzero(np.abs(idx_vals[k] - n * ISOTOPE_SPACING / abs(charges[k]) - idx_vals) <= 0.25)
+        iso = [j for n in (1, 2) for j in isotope_rows(k, n)
                if first_preds[j] is not None and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff]
         if iso:
             reps[k] = reps[max(iso, key = lambda j: conf_first[j])]
@@ -3311,7 +3320,7 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
     # (the vectors only of the rows compared, as they come up: orbitrap and TOF spectra hold thousands of peaks)
     vectors, peak_col = {}, df['peak_d'].values if 'peak_d' in df.columns else None
     for k in np.flatnonzero([p is not None for p in first_preds]) if peak_col is not None else []:
-        iso = [j for n in (1, 2) for j in np.flatnonzero(np.abs(idx_vals[k] - n * ISOTOPE_SPACING / abs(charges[k]) - idx_vals) <= 0.25)
+        iso = [j for n in (1, 2) for j in isotope_rows(k, n)
                if first_preds[j] is not None and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff and (abund is None or abund[j] > abund[k])]
         for x in [k] + iso if iso else []:
             if x not in vectors:
@@ -3334,7 +3343,7 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
     comps = df['composition'].values if 'composition' in df.columns else [None] * len(df)
     isobars = ({'dHex': 2, 'Neu5Ac': -1}, {'Hex': 1, 'dHex': 1, 'Neu5Gc': -1})
     for k in np.flatnonzero([p is not None and isinstance(c, dict) for p, c in zip(first_preds, comps)]):
-        iso = [j for n in (1, 2) for j in np.flatnonzero(np.abs(idx_vals[k] - n * ISOTOPE_SPACING / abs(charges[k]) - idx_vals) <= 0.25)
+        iso = [j for n in (1, 2) for j in isotope_rows(k, n)
                if isinstance(comps[j], dict) and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff and (abund is None or abund[j] > abund[k])
                and any(all(comps[k].get(r, 0) - comps[j].get(r, 0) == d.get(r, 0) for r in set(comps[k]) | set(comps[j]) | set(d)) for d in isobars)
                and (not mz_ppm or abs(charges[k]) > 1 or abs(idx_vals[k] - idx_vals[j] - n * ISOTOPE_SPACING / abs(charges[k])) < abs(idx_vals[k] - idx_vals[j] - 1.0204 / abs(charges[k])))]
@@ -3344,7 +3353,10 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
     dedup_df = df.iloc[pd.unique(reps)].copy()
     if abund is not None:
         # A representative carries the abundance of the rows it represents, so a row linking two representatives is not counted twice
-        dedup_df['rel_abundance'] = [np.nansum(abund[reps == r]) for r in pd.unique(reps)]
+        members = defaultdict(list)
+        for i, r in enumerate(reps):
+            members[r].append(i)
+        dedup_df['rel_abundance'] = [np.nansum(abund[members[r]]) for r in pd.unique(reps)]
         dedup_df = dedup_df.astype({'rel_abundance': df['rel_abundance'].dtype})
     return dedup_df
 
@@ -3450,7 +3462,9 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
             for sia, targets in ions.items():
                 seen = [t for t in targets if t > mz_arr.min()]
                 tol = np.array(seen)[None, :] * fragment_ppm / 1e6 if fragment_ppm else fragment_tolerance
-                hits = int_arr[np.any(np.abs(mz_arr[:, None] - np.array(seen)[None, :]) < tol, axis = 1)] if seen else []
+                # (only the peaks within the outermost windows are compared with each target: spectra of thousands of peaks, in every row)
+                near = (mz_arr > min(seen) - np.max(tol) - 1e-6) & (mz_arr < max(seen) + np.max(tol) + 1e-6) if seen else None
+                hits = int_arr[near][np.any(np.abs(mz_arr[near][:, None] - np.array(seen)[None, :]) < tol, axis = 1)] if seen else []
                 levels[sia] = (hits.max() / int_arr.max() if len(hits) else 0.0) if seen else None
             accurate_sia.append(levels)
     # Neu5Ac and Neu5Gc B1 ions (also less H2O) as a share of the base peak per spectrum, for any MS2, matched within the fragment tolerance of accurate MS2,
@@ -3465,7 +3479,8 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 tol = (targets * fragment_ppm / 1e6 if fragment_ppm else np.full(len(targets), fragment_tolerance)) if fragment_tolerance is not None else np.full(
                     len(targets), mass_tolerance / 2)
                 seen = targets + tol > mz_arr.min()
-                hits = int_arr[np.any(np.abs(mz_arr[:, None] - targets[seen][None, :]) < tol[seen][None, :], axis = 1)]
+                near = (mz_arr > (targets - tol).min() - 1e-6) & (mz_arr < (targets + tol).max() + 1e-6)
+                hits = int_arr[near][np.any(np.abs(mz_arr[near][:, None] - targets[seen][None, :]) < tol[seen][None, :], axis = 1)]
                 levels[sia] = (hits.max() / int_arr.max() if len(hits) else 0.0) if seen.any() else None
         b1_levels.append(levels)
     for k in range(len(df_out)):
@@ -4611,8 +4626,8 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         supported = np.ones(len(df_out), dtype = bool)
         for i in np.flatnonzero(own_rows & (zs > 0)):
             s0, s1 = np.searchsorted(ms1_rts, rts[i] - 0.15), np.searchsorted(ms1_rts, rts[i] + 0.15, side = 'right')
-            heights, weighted, floor = np.zeros(3), np.zeros(3), np.inf
-            centers = df_out.index[i] + ISOTOPE_SPACING / zs[i] * np.arange(-1, 2)
+            heights, weighted, floor = np.zeros(5), np.zeros(5), np.inf
+            centers = df_out.index[i] + ISOTOPE_SPACING / zs[i] * np.arange(-1, 4)
             for si in range(s0, s1):
                 scan_mzs, scan_ints = ms1_mzs[ms1_offsets[si]:ms1_offsets[si + 1]], ms1_ints[ms1_offsets[si]:ms1_offsets[si + 1]]
                 if len(scan_ints):
@@ -4626,13 +4641,25 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 lighter = weighted[0] / heights[0] if heights[0] > 0 else np.nan
                 on_isotope = heights[0] >= 0.5 * heights[1] and abs(lighter - weighted[1] / heights[1] + ISOTOPE_SPACING / zs[i]) <= 3e-6 * df_out.index[i] and abs(
                     lighter - df_out.index[i] + ISOTOPE_SPACING / zs[i]) <= 8e-6 * df_out.index[i] and isinstance(df_out['composition'].iat[i], dict)
-                if on_isotope:
+                # ... and a row's isotopes M+1 to M+3 over the same scans may not fall short of its composition's envelope (dot product of at least 0.9 with
+                # it, as batch gap filling asks of a gap peak, once every isotope is capped at its expected height, since a co-eluting ion's envelope only
+                # adds to them; counting the isotopes the scans' weakest centroid would show): a precursor whose M+1 and M+2 hold a quarter of what the
+                # composition gives them is no ion of it (permethylated [M+3H]3+ rows of large sialylated glycans read at 0.1-0.5 of their M+1), and the model
+                # names structures for such spectra while accurate MS1 lowers their annotation gate
+                envelope = 1.0
+                if isinstance(df_out['composition'].iat[i], dict):
                     try:
-                        own = isotope_distribution(get_formula(df_out['composition'].iat[i], sample_prep = 'permethylated' if sample_prep == 'deuteropermethylated' else sample_prep), 2)
-                        on_isotope = heights[2] < 0.8 * own[1] / own[0] * heights[1]
+                        own = isotope_distribution(get_formula(df_out['composition'].iat[i], sample_prep = 'permethylated' if sample_prep == 'deuteropermethylated' else sample_prep), 4)
+                        if on_isotope:
+                            on_isotope = heights[2] < 0.8 * own[1] / own[0] * heights[1]
+                        expected = own / own[0] * heights[1]
+                        seen = expected > 3 * floor * (s1 - s0)
+                        if seen[:2].all():
+                            x, y = np.minimum(heights[1:], expected)[seen], expected[seen]
+                            envelope = float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y)))
                     except (ValueError, KeyError):
                         on_isotope = False
-                supported[i] = not (no_isotope or on_isotope)
+                supported[i] = not (no_isotope or on_isotope or envelope < 0.9)
         df_out = df_out[supported]
     # Rows of another reducing end (wrap_inference's reducing_end_variants) are carried at the m/z of the run's reducing end; their ions sit re_offset / z away
     if 're_offset' in df_out.columns:
@@ -5168,6 +5195,23 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
                 rows = np.flatnonzero((df_out['top1_pred'].values == parent) & (np.abs(df_out['RT'].values - df_out['RT'].values[a]) <= 0.1))
                 keep[a] = not any(abs(f - z1[a]) <= 0.5 or abs(f - df_out.index.values[a]) <= 0.5 for b in rows for f in list(df_out['top_fragments'].iloc[b] or [])[:3])
         df_out = df_out[keep]
+    # The model's vocabulary holds hedged structures beside the structures each stands for, as the ground truths it learned from hedge isomers their
+    # spectra could not tell apart. A reported structure with floating parts ({Fuc(a1-3/6)}..., {GlcNAc(b1-4/6)}...) leaves open where a residue sits,
+    # which fragments tell (core or antenna Fuc, bisecting or antenna GlcNAc), and names one of its placements: the most likely full placement of it
+    # among the row's predictions takes its place, with the hedge's probability added. A hedged linkage (a2-3/6) stays, as fragments rarely tell those,
+    # and so does a hedge none of whose placements the model names. Only here, after every step that takes rows of one structure for copies of one
+    # peak (deduplication, delayed copies, tails): an isomer row named by the hedge beside one named by its placement had been dropped as a copy
+    resolved = []
+    for top1, preds in zip(df_out['top1_pred'], df_out['predictions']):
+        if isinstance(top1, str) and '{' in top1:
+            placements = [g for g in preds if len(g) > 1 and '{' not in g[0] and compare_glycans(top1, g[0], subsumes = True)]
+            if placements:
+                best = max(placements, key = lambda g: g[1])
+                hedge = next((g[1] for g in preds if len(g) > 1 and g[0] == top1), 0)
+                top1, preds = best[0], [(best[0], round(min(best[1] + hedge, 1.0), 4))] + [g for g in preds if g[0] != best[0]]
+        resolved.append((top1, preds))
+    if resolved:
+        df_out['top1_pred'], df_out['predictions'] = [r[0] for r in resolved], [r[1] for r in resolved]
     # Map GlyTouCan IDs of the structure reported, which can differ from the first candidate
     df_out["GlyTouCan_ID"] = [glytoucan_mapping.get(g, '') if isinstance(g, str) else '' for g in df_out['top1_pred']]
     if 'reducing_end' in df_out.columns:
@@ -5574,7 +5618,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             triggered = np.searchsorted(ms1[0], loaded_file['RT'].to_numpy(float)[own], side = 'right') - 1
             keep = np.zeros(len(ms1[0]), dtype = bool)
             keep[triggered[triggered >= 0]] = True
-            peaks = np.repeat(keep, np.diff(ms1[3]))
+            peaks = np.repeat(keep, np.diff(ms1[3]).astype(np.intp))
             ms1 = (ms1[0][keep], ms1[1][peaks], ms1[2][peaks], np.concatenate([[0], np.cumsum(np.diff(ms1[3])[keep])]))
         loaded_file = loaded_file[own].reset_index(drop = True)
         loaded_file.attrs['detected_mode'] = mode
@@ -5593,7 +5637,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             new = shift.copy()
             for sc in range(len(rts1)):
                 mz_s, int_s = mzs1[offsets1[sc]:offsets1[sc + 1]], ints1[offsets1[sc]:offsets1[sc + 1]]
-                top = mz_s[np.argsort(int_s)[::-1][:100]] * (1 - shift[sc] * 1e-6)
+                # the most intense first, ties by m/z, so that the 100 do not depend on the platform's sort
+                top = mz_s[np.lexsort((mz_s, -int_s))[:100]] * (1 - shift[sc] * 1e-6)
                 if len(top) < 10:
                     continue
                 found = []
@@ -5609,7 +5654,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 if seen.sum() >= 10:
                     new[sc] = shift[sc] + float(np.median(np.nanmedian(found[:, seen], axis = 0)))
             shift = new
-        ms1 = (rts1, (mzs1 * (1 - np.repeat(shift, np.diff(offsets1)) * 1e-6)).astype(mzs1.dtype), ints1, offsets1)
+        ms1 = (rts1, (mzs1 * (1 - np.repeat(shift, np.diff(offsets1).astype(np.intp)) * 1e-6)).astype(mzs1.dtype), ints1, offsets1)
         # ... and, as the scans now agree, a precursor's m/z is the intensity-weighted mean of its centroid (within 10 ppm) in the 7 survey scans around its
         # trigger, not the 3 its refinement averaged: a weak ion's centroid scatters by several ppm from scan to scan by counting statistics alone
         scans = np.searchsorted(rts1, loaded_file['RT'].to_numpy(float), side = 'right') - 1
@@ -6393,17 +6438,22 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                        (df_out['annotated'] >= 2) & (df_out['annotated_share'] >= 0.7) & (top_conf >= 0.5) & strongest)
     # One chromatographic peak is one glycan: when a cluster's fragments fail crumbs_thresh while a cluster at least ten times weaker at the same m/z,
     # whose spectra continue it (within 0.25 min), passes with the same top prediction, the tail's evidence counts for the peak, reported at its apex
-    tails = []
-    for spec, row in df_out[passes & np.array([bool(p) for p in df_out['predictions']], dtype = bool)].iterrows():
-        apex = df_out[~passes & ((df_out['m/z'] - row['m/z']).abs() <= mass_tolerance) & (df_out['rel_abundance'] >= 10 * row['rel_abundance'])]
-        apex = apex[[bool(p) and p[0][0] == row['predictions'][0][0] and max(r[0] - row['rt_range'][1], row['rt_range'][0] - r[1]) <= 0.25
-                     for p, r in zip(apex['predictions'], apex['rt_range'])]]
-        if len(apex):
-            a = apex['rel_abundance'].idxmax()
-            df_out.at[a, 'annotation_score'] = row['annotation_score']
-            df_out.at[a, 'num_spectra'] += row['num_spectra']
+    # (each row's candidates from the rows sorted by m/z, in row order: a mask over all rows for every passing row was quadratic)
+    tails, passed = [], passes.to_numpy().copy()
+    mz_vals, abund, preds, ranges = df_out['m/z'].to_numpy(), df_out['rel_abundance'].to_numpy(), df_out['predictions'].to_numpy(), df_out['rt_range'].to_numpy()
+    mz_order = np.argsort(mz_vals, kind = 'stable')
+    mz_sorted = mz_vals[mz_order]
+    for i in np.flatnonzero(passed & np.array([bool(p) for p in preds], dtype = bool)):
+        near = np.sort(mz_order[np.searchsorted(mz_sorted, mz_vals[i] - mass_tolerance - 1e-6):np.searchsorted(mz_sorted, mz_vals[i] + mass_tolerance + 1e-6, side = 'right')])
+        near = near[~passed[near] & (np.abs(mz_vals[near] - mz_vals[i]) <= mass_tolerance) & (abund[near] >= 10 * abund[i])]
+        near = near[[bool(preds[j]) and preds[j][0][0] == preds[i][0][0] and max(ranges[j][0] - ranges[i][1], ranges[i][0] - ranges[j][1]) <= 0.25 for j in near]]
+        if len(near):
+            a = df_out.index[near[np.argmax(abund[near])]]
+            df_out.at[a, 'annotation_score'] = df_out['annotation_score'].iat[i]
+            df_out.at[a, 'num_spectra'] += df_out['num_spectra'].iat[i]
             passes[a] = True
-            tails.append(spec)
+            passed[df_out.index == a] = True
+            tails.append(df_out.index[i])
     df_out = df_out[passes].drop(tails).drop(columns = ['candidate_structure']).set_index('m/z')
     if 'ms3' in df_out.columns:
         # MS3 spectra resolve isomers whose MS2 fragments look alike: an isomer explaining a row's MS3 spectra with more fragments of the fragment
@@ -7002,15 +7052,22 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         vecs /= np.linalg.norm(vecs, axis = 1, keepdims = True) + 1e-12
         named = np.array([bool(p) and isinstance(t, str) for p, t in zip(cats['predictions'], cats['top1_pred'])], dtype = bool)
         in_library = named & np.array([isinstance(t, str) and in_classes(t, classes) for t in cats['top1_pred']], dtype = bool)
-        mzs, charges, files = cats.index.values.astype(float), cats['charge'].abs().values, cats['condition_label'].values
+        # (the file labels as a NumPy array: indexing a string extension array row by row took 60 ms a row)
+        mzs, charges, files = cats.index.values.astype(float), cats['charge'].abs().values, cats['condition_label'].to_numpy(dtype = object)
         top1, predictions, compositions = list(cats['top1_pred']), list(cats['predictions']), list(cats['composition'])
+        # (each row's candidates from the library rows sorted by m/z, in row order: testing every row for every row was quadratic)
+        lib = np.flatnonzero(in_library)
+        lib = lib[np.argsort(mzs[lib], kind = 'stable')]
+        lib_mzs = mzs[lib]
         for k in np.flatnonzero(~named & np.array([isinstance(p, dict) for p in cats['peak_d']], dtype = bool)):
-            hits = np.flatnonzero(in_library & (np.abs(mzs - mzs[k]) <= mass_tolerance) & (charges == charges[k]) & (files != files[k]))
-            if len(hits) and (vecs[hits] @ vecs[k]).max() >= library_thresh:
-                j = hits[np.argmax(vecs[hits] @ vecs[k])]
+            near = np.sort(lib[np.searchsorted(lib_mzs, mzs[k] - mass_tolerance - 1e-6):np.searchsorted(lib_mzs, mzs[k] + mass_tolerance + 1e-6, side = 'right')])
+            hits = near[(np.abs(mzs[near] - mzs[k]) <= mass_tolerance) & (charges[near] == charges[k]) & (files[near] != files[k])]
+            sims = vecs[hits] @ vecs[k]
+            if len(hits) and sims.max() >= library_thresh:
+                j = hits[np.argmax(sims)]
                 top1[k], predictions[k], compositions[k] = top1[j], [cats['predictions'].iloc[j][0]], compositions[j]
         cats['top1_pred'], cats['predictions'], cats['composition'] = top1, predictions, compositions
-    prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n = top_n_isomers)
+    prevailing_category_predictions = filter_top_n_isomers(smoothed_category_predictions, top_n = top_n_isomers, rt_diff = rt_diff)
     # Per-file augment, finalize, and quantify
     harmonized_labels = set(prevailing_category_predictions.condition_label.unique())
     augmented = {}
@@ -7092,7 +7149,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             next_cat = int(assigned_cats['category_label'].max()) + 1 if next_cat is None else next_cat
             pair_cats['category_label'] += next_cat
             next_cat = int(pair_cats['category_label'].max()) + 1
-            pair_cats = filter_top_n_isomers(assign_modal_category_prediction(pair_cats), top_n = top_n_isomers)
+            pair_cats = filter_top_n_isomers(assign_modal_category_prediction(pair_cats), top_n = top_n_isomers, rt_diff = rt_diff)
             neutral = lambda mz, z, file_mode: np.abs(z) * mz - (np.abs(z) - 1) * (-1 if file_mode == 'negative' else 1) * PROTON_MASS
             for file_label, df_pair in pair_cats.groupby('condition_label', sort = False):
                 file_mode = file_modes[file_label]
@@ -7369,7 +7426,7 @@ def _batch_inference_file(spectra_filepath, ms1_path, inference_kwargs):
     return df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap
 
 
-def filter_top_n_isomers(df_in, top_n = 5):
+def filter_top_n_isomers(df_in, top_n = 5, rt_diff = 1.0):
     df_out = df_in.copy(deep = True)
     # Rank the isomer groups (categories) at each mass within each file: carrying a prediction first, then by abundance in that file, then by the number of
     # files they were seen in; a group stays if it is among the top_n of any file. One cap over all files dropped real isomers once more files brought more
@@ -7378,7 +7435,24 @@ def filter_top_n_isomers(df_in, top_n = 5):
     keys = ['mass_label', 'category_label']
     cats = df_out.groupby(keys).agg(has_pred = ('top1_pred', lambda x: x.notna().any()), file_presences = ('condition_label', 'nunique')).reset_index()
     cats = df_out.groupby(keys + ['condition_label'])['rel_abundance'].sum().reset_index().merge(cats, on = keys)
-    cats = cats.sort_values(['has_pred', 'rel_abundance', 'file_presences'], ascending = False, kind = 'stable').groupby(['mass_label', 'condition_label']).head(top_n)
+    cats = cats.sort_values(['has_pred', 'rel_abundance', 'file_presences'], ascending = False, kind = 'stable')
+    # The cap counts the isomer peaks a file will report: a group whose rows in the file all carry the structure of rows of a group ranked before it within
+    # rt_diff is that peak again (a cluster of the same precursors that took another structure before the modal vote), which finalise_predictions merges
+    # into it, so it takes no place of its own. A one-spectrum copy of a stronger isomer had pushed out a disialylated biantennary isomer (4 spectra) of a PGC run
+    rows = defaultdict(list)
+    for key in zip(df_out.mass_label, df_out.category_label, df_out.condition_label, df_out.top1_pred, df_out.RT):
+        rows[key[:3]].append(key[3:])
+    taken, counted, kept = defaultdict(list), defaultdict(int), []
+    for m, c, f in zip(cats.mass_label, cats.category_label, cats.condition_label):
+        own = rows[(m, c, f)]
+        copy_of_kept = all(isinstance(t, str) and any(t == t2 and abs(rt - rt2) <= rt_diff for t2, rt2 in taken[(m, f)]) for t, rt in own)
+        if copy_of_kept or counted[(m, f)] < top_n:
+            counted[(m, f)] += not copy_of_kept
+            taken[(m, f)].extend(own)
+            kept.append(True)
+        else:
+            kept.append(False)
+    cats = cats[kept]
     permitted = dict(zip(zip(cats.mass_label, cats.category_label), cats.file_presences))
     df_out['file_presences'] = [permitted.get(k, 0) for k in zip(df_out.mass_label, df_out.category_label)]
     return df_out[df_out['file_presences'] > 0]

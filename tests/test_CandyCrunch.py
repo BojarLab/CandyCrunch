@@ -2319,6 +2319,13 @@ def test_mass_spec_helpers_from_glycopeptide_search():
     assert hit.tolist() == [True, False] and best[0] == 1
     hit, best = match_peaks(np.array([200.0, 399.0]), spec, 2.0, False, charges = [1, 2])
     assert hit.shape == (4,) and hit[0] and best[0] == 1
+    # an ion a caller masks as NaN, or an infinite one, matches nothing, compiled and by numpy
+    import candycrunch.analysis as cca
+    compiled = cca._MATCH_COMPILED[:]
+    for path in ([None], compiled):
+        cca._MATCH_COMPILED[:] = path
+        assert match_peaks(np.array([np.nan, 200.0, np.inf]), spec, 1.0, False)[0].tolist() == [False, True, False]
+    cca._MATCH_COMPILED[:] = compiled
     # A target at the top, a decoy, then two targets: decoys / targets at or above each score, made monotone
     q = add_qvalues(pd.DataFrame({'score': [1.0, 3.0, 2.0, 4.0], 'is_decoy': [False, True, False, False]}))
     assert q['score'].tolist() == [4.0, 3.0, 2.0, 1.0] and q['q_value'].tolist() == [0.0, 1 / 3, 1 / 3, 1 / 3]

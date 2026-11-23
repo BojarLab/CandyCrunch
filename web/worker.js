@@ -21,7 +21,8 @@ async function init(threads) {
   await micropip.install(manifest.wheels.map((w) => new URL('wheels/' + w, self.location.href).href));
   micropip.destroy();
   post('status', {text: 'Loading the model'});
-  await py.runPythonAsync('import candycrunch.prediction\nfrom candycrunch import web');
+  // The model is made now, while the heap is small: made during a run, its build took its place on top of the run's data
+  await py.runPythonAsync('import candycrunch.prediction\nfrom candycrunch import web\ncandycrunch.prediction.default_model()');
   const versions = py.runPython("import importlib.metadata as m, sys\n{'candycrunch': m.version('candycrunch'), 'glycowork': m.version('glycowork'), 'python': sys.version.split()[0]}");
   return {parameters: py.runPython('web.parameters()'), versions: versions.toJs({dict_converter: Object.fromEntries}), threads};
 }
@@ -33,29 +34,25 @@ async function run(files, argv) {
   } catch (e) {}
   py.FS.mkdirTree('/data');
   py.FS.mount(py.FS.filesystems.WORKERFS, {blobs: files.map((f) => ({name: f.path, data: f.file}))}, '/data');
-  py.runPython("import os, shutil\nshutil.rmtree('/out', ignore_errors = True)\nos.makedirs('/out')");
+  py.runPython("import os, shutil\nfor d in ('/out', '/preview'):\n    shutil.rmtree(d, ignore_errors = True)\n    os.makedirs(d)");
   py.globals.set('argv', py.toPy(argv));
   // Asynchronous, as the model's calls wait for onnxruntime-web
   await py.runPythonAsync('web.run(list(argv))');
-  // Every file the CLI wrote; each table also as .xlsx and as text for the page's preview
-  const out = await py.runPythonAsync(`
-import io, os
+  // Every file the CLI wrote; each table also as .xlsx and as text for the page's preview. They reach JavaScript as files of the in-memory file system:
+  // Pyodide copies Python objects to JavaScript wrongly once they lie past 2 GiB of its heap, which a large run's heap passes
+  await py.runPythonAsync(`
+import json, os
 import pandas as pd
-out = []
-for name in sorted(os.listdir('/out')):
-    item = {'name': name, 'data': open(os.path.join('/out', name), 'rb').read()}
+for name in os.listdir('/out'):
     if name.endswith('.csv'):
         df = pd.read_csv(os.path.join('/out', name))
-        buffer = io.BytesIO()
-        df.to_excel(buffer, index = False)
-        item['xlsx'] = buffer.getvalue()
-        item['columns'], item['rows'] = [str(c) for c in df.columns], df.astype(object).where(df.notna(), '').astype(str).values.tolist()
-    out.append(item)
-out
+        df.to_excel(os.path.join('/preview', name + '.xlsx'), index = False)
+        with open(os.path.join('/preview', name + '.json'), 'w', encoding = 'utf-8') as f:
+            json.dump({'columns': [str(c) for c in df.columns], 'rows': df.astype(object).where(df.notna(), '').astype(str).values.tolist()}, f)
 `);
-  const result = out.toJs({dict_converter: Object.fromEntries});
-  out.destroy();
-  return result;
+  return py.FS.readdir('/out').filter((n) => n !== '.' && n !== '..').sort().map((name) => name.endsWith('.csv') ?
+    {name, data: py.FS.readFile('/out/' + name), xlsx: py.FS.readFile('/preview/' + name + '.xlsx'), ...JSON.parse(py.FS.readFile('/preview/' + name + '.json', {encoding: 'utf8'}))} :
+    {name, data: py.FS.readFile('/out/' + name)});
 }
 
 onmessage = async (e) => {

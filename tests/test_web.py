@@ -23,7 +23,7 @@ def same_predictions(x, y):
 
 
 @pytest.mark.skipif(not SITE, reason = 'needs a site built by packaging/build_web.py in CC_WEB_SITE (the Pages workflow runs this before deploying)')
-def test_web_example_matches_native():
+def test_web_example_matches_native(tmp_path):
     # The page's example run (packaging/self_test.mzML, O-glycans) in headless Chromium against the same run natively on ONNX Runtime, the graph the
     # page runs on onnxruntime-web: the same table but for float32 noise in the model's probabilities
     sync_api = pytest.importorskip('playwright.sync_api')
@@ -63,13 +63,13 @@ def test_web_example_matches_native():
             browser.close()
     finally:
         server.shutdown()
-    from candycrunch import prediction
+    from candycrunch import cli, prediction
     from candycrunch.inference import CandyCrunchCNN, load_weights
-    # The CLI's run and table (cli.main writes df_out.reset_index()), on the ONNX graph whether or not PyTorch is installed
-    model = prediction.candycrunch if isinstance(prediction.candycrunch, CandyCrunchCNN) else CandyCrunchCNN(
-        prediction.sdict if isinstance(prediction.sdict, dict) else load_weights(prediction.sdict))
-    native = prediction.wrap_inference(str(BASE_DIR / 'packaging' / 'self_test.mzML'), ['O'], model = model).reset_index()
-    native = pd.read_csv(io.StringIO(native.to_csv(index = False)))
+    # The same CLI run natively (its table, with the references column the CLI adds), on the ONNX graph whether or not PyTorch is installed
+    if not isinstance(prediction.candycrunch, CandyCrunchCNN):
+        prediction.candycrunch = CandyCrunchCNN(load_weights(prediction.sdict), top_k = prediction.MODEL_KWARGS['classifier_top_k'])
+    cli.main(['--spectra_filepath', str(BASE_DIR / 'packaging' / 'self_test.mzML'), '--glycan_class', 'O', '--output', str(tmp_path / 'native.csv')])
+    native = pd.read_csv(tmp_path / 'native.csv')
     assert list(web.columns) == list(native.columns) and len(web) == len(native), (list(web.columns), len(web), len(native))
     for c in native.columns:
         a, b = native[c], web[c]

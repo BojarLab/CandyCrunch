@@ -125,17 +125,19 @@ class CandyCrunchCNN:
 
     def __init__(self, state_dict, top_k = 4):
         used = set()
-        # The weights, noting which ones the graph reads
+        # The weights, noting which ones the graph reads; each is made float32 where the graph reads it, so a float16 file is never held twice over
         class Weights(dict):
             def __getitem__(self, k):
                 used.add(k)
-                return super().__getitem__(k)
-        p = Weights({k.replace('module.', ''): np.asarray(v.detach().cpu() if hasattr(v, 'detach') else v, dtype = np.float32) for k, v in state_dict.items()})
+                return np.asarray(super().__getitem__(k), dtype = np.float32)
+        p = Weights({k.replace('module.', ''): v.detach().cpu() if hasattr(v, 'detach') else v for k, v in state_dict.items()})
         nodes, weights = [], {}
         # ONNX messages (onnx.proto), written here so that inference needs neither PyTorch nor the onnx package
         def const(name, value, kind = 1):
             # kind: the element type, 1 float, 7 int64
-            weights[name] = _proto(*[(1, d) for d in value.shape], (2, kind), (8, name), (9, np.ascontiguousarray(value, dtype = {1: np.float32, 7: np.int64}[kind]).tobytes()))
+            # its fields before the raw data, and the data, which model_proto joins into the model without copying it first
+            data = np.ascontiguousarray(value, dtype = {1: np.float32, 7: np.int64}[kind])
+            weights[name] = (_proto(*[(1, d) for d in value.shape], (2, kind), (8, name)) + _varint(9 << 3 | 2) + _varint(data.nbytes), data)
             return name
         def node(op, inputs, domain = '', outputs = 1, **attrs):
             # An attribute is its name, its value in the field of its type and that type: float 2/1, int 3/2, string 4/3, floats 7/6, ints 8/7
@@ -219,8 +221,14 @@ class CandyCrunchCNN:
             return _proto((1, name), (2, _proto((1, _proto((1, kind), (2, shape))))))
 
         def model_proto(name, graph_nodes, graph_weights, inputs, output):
-            graph = _proto(*[(1, n) for n in graph_nodes], (2, name), *[(5, w) for w in graph_weights.values()], *[(11, i) for i in inputs], (12, output))
-            return _proto((1, 8), (7, graph), (8, _proto((1, ''), (2, 17))), (8, _proto((1, 'com.microsoft'), (2, 1))))
+            # The model's bytes joined once from the graph's pieces and the weights' arrays: nesting whole messages copied the weights three times over
+            # (a 0.65 GB peak for 126 MB of model, a 1 GB heap in the browser)
+            pieces = [_proto(*[(1, n) for n in graph_nodes], (2, name))]
+            for fields, data in graph_weights.values():
+                pieces += [_varint(5 << 3 | 2) + _varint(len(fields) + data.nbytes) + fields, data]
+            pieces.append(_proto(*[(11, i) for i in inputs], (12, output)))
+            size = sum(x.nbytes if isinstance(x, np.ndarray) else len(x) for x in pieces)
+            return b''.join([_proto((1, 8)) + _varint(7 << 3 | 2) + _varint(size)] + pieces + [_proto((8, _proto((1, ''), (2, 17))), (8, _proto((1, 'com.microsoft'), (2, 1))))])
 
         inputs = [info('features', 1, ['n', n_features]), info('precursor', 1, ['n', p['prec_block.0.weight' if cnn2 else 'prec_lin1.weight'].shape[1]]),
                   info('glycan_type', 7, ['n']), info('rt', 1, ['n', 1])] + [info(k, 7, ['n']) for k in ['mode', 'lc', 'modification', 'trap']]
@@ -253,23 +261,36 @@ class CandyCrunchCNN:
         n, step = len(next(iter(inputs.values()))), 32 if graph == 'encode' else 512
         if sys.platform == 'emscripten':
             # In the browser (Pyodide), the page's onnxruntime-web (globalThis.ort, its threads set by the page) runs the graph. Its session.run is
-            # asynchronous, and run_sync waits for it, which needs JavaScript Promise Integration (Chrome and Edge 137+). Each output is copied out in
-            # JavaScript at once (a tensor read later from Python failed now and then with several threads)
+            # asynchronous, and run_sync waits for it, which needs JavaScript Promise Integration (Chrome and Edge 137+). Pyodide copies a buffer between
+            # Python and JavaScript wrongly once it lies past 2 GiB of its heap (RangeError: offset is out of bounds; the model then failed to parse), which
+            # a large run's heap passes, so the model and every array go through a file of Emscripten's in-memory file system, whose copies hold at any
+            # address. Each output is copied out at once (a tensor read later from Python failed now and then with several threads)
             import js
+            import pyodide_js
             from pyodide.ffi import run_sync, to_js
+            path = '/tmp/candycrunch_onnx_io'
+
+            def staged(data):
+                # the bytes as a JavaScript Uint8Array of their own
+                with open(path, 'wb') as f:
+                    f.write(data)
+                return pyodide_js.FS.readFile(path)
+
             if graph not in self.session:
-                self.session[graph] = (None, run_sync(js.ort.InferenceSession.create(to_js(self.onnx[graph]), to_js({'executionProviders': ['wasm']},
-                                                                                                                    dict_converter = js.Object.fromEntries))))
+                self.session[graph] = (None, run_sync(js.ort.InferenceSession.create(staged(self.onnx[graph]), to_js({'executionProviders': ['wasm']},
+                                                                                                                     dict_converter = js.Object.fromEntries))))
             session = self.session[graph][1]
             outputs = []
             for i in range(0, n, step):
                 feeds = js.Object.new()
                 for k, v in inputs.items():
                     v = np.ascontiguousarray(v[i:i + step])
-                    data = to_js(v.tobytes()).buffer
+                    data = staged(v).buffer
                     setattr(feeds, k, js.ort.Tensor.new(*(('int64', js.BigInt64Array.new(data)) if v.dtype == np.int64 else ('float32', js.Float32Array.new(data))), to_js(list(v.shape))))
                 out = getattr(run_sync(session.run(feeds)), session.outputNames[0])
-                outputs.append(np.frombuffer(js.Float32Array.new(out.data).to_bytes(), np.float32).reshape([int(d) for d in out.dims]))
+                pyodide_js.FS.writeFile(path, js.Uint8Array.new(js.Float32Array.new(out.data).buffer))
+                outputs.append(np.fromfile(path, np.float32).reshape([int(d) for d in out.dims]))
+            os.remove(path)
             return np.concatenate(outputs)
         # The session is made at the first call in a process (a forked one cannot use its parent's threads) and again after set_num_threads;
         # onnxruntime is only imported here, so that importing candycrunch does not load it

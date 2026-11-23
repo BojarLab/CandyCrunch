@@ -19,7 +19,7 @@ Mass,charge,glycan,9_NGlycan_StandardTransfection_Lysis treated_Replicate1,9_NGl
 864.3,-2,Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,46.4,1,45.71,1,45.81,0,,added
 884.82,-2,Neu5Ac(a2-6)GalNAc(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,44.52,0,,1,43.79,0,,added
 885.33,-2,Fuc(a1-3)[GalNAc(b1-4)]GlcNAc(b1-2)Man(a1-3)[Man(a1-3/6)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,51.82,1,51.2,1,51.35,0,,given
-893.33,-2,Fuc(a1-3)[GalNAc(b1-4)]GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,49.06,1,48.23,0,,0,,added
+893.33,-2,Fuc(a1-3)[GalNAc(b1-4)]GlcNAc(b1-2)Man(a1-3)[Man(a1-3)[Man(a1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,48.05,1,48.23,0,,0,,added
 893.33,-2,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,61.44,1,60.91,1,61.08,1,63.43,given
 913.84,-2,Gal(b1-4)GlcNAc(b1-2)Man(a1-6)[GlcNAc(b1-2)Man(a1-3)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,47,1,46.31,1,46.55,1,48.66,added
 913.84,-2,Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[GlcNAc(b1-2)Man(a1-6)][GlcNAc(b1-4)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,48.63,1,47.94,1,48.04,1,50.3,given
@@ -85,6 +85,10 @@ Mass,charge,glycan,9_NGlycan_StandardTransfection_Lysis treated_Replicate1,9_NGl
 1512.53,-2,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-4)]Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,0,,0,,1,73.21,1,73.36,added
 667.2302,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,40.44,1,39.71,1,39.72,1,41.31,added
 829.2831,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,48.05,1,47.35,0,,1,49.04,added
-991.3359,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,52.96,1,52.20,1,52.33,1,53.97,added
+991.3359,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,52.96,1,52.2,1,52.33,1,53.97,added
 1153.3887,-1,Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc(?1-?)Glc,1,55.89,1,55.17,1,55.35,1,57.25,added
 1549.5532,-2,,1,66.89,0,,1,66.79,0,,added
+1366.9871,-2,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2/4)[Gal(b1-4)GlcNAc(b1-2/4)]Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,73.91,1,73.49,1,73.5,1,74.13,added
+1366.9871,-2,Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2/4)[Gal(b1-4)GlcNAc(b1-2/4)]Man(a1-3)[Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc,1,75.66,1,75.12,1,75.42,1,75.93,added
+1038.8733,-2,{Fuc(a1-3/6)}Neu5Ac(a2-3/6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)[Gal(b1-4)GlcNAc(b1-2)Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,0,,0,,1,54.32,1,55.36,added
+876.8205,-2,{HexNAc(b1-2/4)}{Fuc(a1-3/6)}{Neu5Ac(a2-3/6)}GlcNAc(b1-2)Man(a1-3/6)[Man(a1-3/6)]Man(b1-4)GlcNAc(b1-4)GlcNAc,1,53.8,0,,1,53.45,0,,added

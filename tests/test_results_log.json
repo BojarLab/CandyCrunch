@@ -253,63 +253,63 @@
             "(True, True, 'quant')": 0.7274918098481825
         },
         "gt_hash": "14172689300414554469-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000596_quant": {
         "scores": {
             "(True, True, 'quant')": 0.9951746877431245
         },
         "gt_hash": "8782881672232974547-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "timestamp": "2026-11-22 11:11:18"
     },
     "synthetic_quant": {
         "scores": {
             "(True, True, 'quant')": 0.8070175438596491
         },
         "gt_hash": "7209460372743581938-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000374_N_quant": {
         "scores": {
             "(True, True, 'quant')": 0.845261601018952
         },
-        "gt_hash": "9411528473872978848-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "gt_hash": "11801673605568304003-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000374_O_quant": {
         "scores": {
             "(True, True, 'quant')": 0.973734884855865
         },
         "gt_hash": "12762911468810586710-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000548_quant": {
         "scores": {
-            "(True, True, 'quant')": 0.9212106073156876
+            "(True, True, 'quant')": 0.9189894169842182
         },
-        "gt_hash": "5279715454193769592-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "gt_hash": "14972654004894945959-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000403_quant": {
         "scores": {
-            "(True, True, 'quant')": 0.7321741885077122
+            "(True, True, 'quant')": 0.7335218190833753
         },
-        "gt_hash": "8344990690447498300-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "gt_hash": "1804150684352392220-hungarian-halfopen-seeded-braces",
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000556_quant": {
         "scores": {
-            "(True, True, 'quant')": 0.9692172659965004
+            "(True, True, 'quant')": 0.969470695695825
         },
         "gt_hash": "3270272007592155843-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000239_quant": {
         "scores": {
-            "(True, True, 'quant')": 0.9917371594448896
+            "(True, True, 'quant')": 0.9906158834131414
         },
         "gt_hash": "11762210189236237868-hungarian-halfopen-seeded-braces",
-        "timestamp": "2026-11-06 10:10:04"
+        "timestamp": "2026-11-22 11:11:18"
     },
     "GPST000153_N": {
         "scores": {

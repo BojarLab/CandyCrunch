@@ -27,10 +27,29 @@ jobs:
       with:
         python-version: '3.12'
 
+    # A build run by hand carries a development version below its release (1.0.0.dev<run>), or above it once that release is tagged (1.0.0.post<run>),
+    # so the installed app's updater offers every release newer than the code it was built from
+    - name: Give a build run by hand its own version
+      if: github.event_name != 'release'
+      shell: bash
+      run: |
+        python - "${{ github.run_number }}" <<'EOF'
+        import re, subprocess, sys
+        text = open('pyproject.toml', newline = '').read()
+        base = re.search(r'(?m)^version = "([^"]+)"', text).group(1)
+        released = subprocess.run(['git', 'ls-remote', '--exit-code', '--tags', 'origin', f'refs/tags/v{base}'], capture_output = True).returncode == 0
+        version = f'{base}.{"post" if released else "dev"}{sys.argv[1]}'
+        open('pyproject.toml', 'w', newline = '').write(text.replace(f'version = "{base}"', f'version = "{version}"', 1))
+        print(f'This build is CandyCrunch {version}')
+        EOF
+
+    - name: Install glycowork's development version
+      if: github.event_name != 'release'
+      run: pip install "glycowork @ git+https://github.com/BojarLab/glycowork.git@dev"
+
     - name: Install CandyCrunch
       run: |
         python -m pip install --upgrade pip
-        pip install "glycowork @ git+https://github.com/BojarLab/glycowork.git@dev"
         pip install ".[gui]"
         # The app runs the model on ONNX Runtime; the spec leaves PyTorch out
         pip install "onnxruntime>=1.30"
@@ -70,8 +89,9 @@ jobs:
       shell: pwsh
       run: |
         $version = python -c "from importlib.metadata import version; print(version('candycrunch'))"
+        $numbers = ([regex]::Matches($version, '\d+') | Select-Object -First 4 | ForEach-Object Value) -join '.'
         if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
-        & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\candycrunch.iss
+        & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DNumericVersion=$numbers" packaging\candycrunch.iss
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # No installer that Microsoft Defender flags reaches a release; the log names the file and the threat. The runner image excludes C:\ and D:\ from

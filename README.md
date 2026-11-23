@@ -18,13 +18,11 @@
 ```bash
 pip install candycrunch
 ```
-## `CandyCrunch.ipynb` [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/BojarLab/CandyCrunch/blob/main/CandyCrunch.ipynb)
-If you are looking for a **convenient** and **easy-to-run** version of the code that does not require any local installations, we have also created a Google Colaboratory notebook.  
-The notebook contains an example pipeline ready to run, which can be copied, executed, and customized in any way.
-The example file included in the notebook is the same as in `examples/` and is ready for use in the notebook workflow. 
+## Using CandyCrunch &ndash; In your browser
+No installation at all: [bojarlab.github.io/CandyCrunch](https://bojarlab.github.io/CandyCrunch/) runs the whole CandyCrunch pipeline in your browser tab, with the same files and settings as the command line, and gives its results as CSV and Excel downloads. Your files are read where they are and never uploaded. A bundled example run lets you try it without data of your own. It needs Chrome or Edge 137 or newer.
 
 ## Using CandyCrunch &ndash; Desktop app
-No Python or command line needed: download `CandyCrunch-<version>-Windows-Setup.exe` (Windows) or `CandyCrunch-<version>-macOS.dmg` (macOS) from the [latest release](https://github.com/BojarLab/CandyCrunch/releases/latest), install it, and start CandyCrunch from the Start menu or Applications. The Windows installer needs no administrator rights; afterwards, Thermo .raw, mzML, mzXML, and mgf files can be opened with CandyCrunch from their right-click menu, and saved results open with a double-click. The macOS app is not notarized, so on first start macOS asks you to allow it once under System Settings > Privacy & Security > Open Anyway.
+No Python or command line needed: download `CandyCrunch-<version>-Windows-Setup.exe` (Windows) or `CandyCrunch-<version>-macOS.dmg` (macOS) from the [latest release](https://github.com/BojarLab/CandyCrunch/releases/latest), install it, and start CandyCrunch from the Start menu or Applications. The Windows installer needs no administrator rights; afterwards, Thermo .raw, mzML, mzXML, and mgf files can be opened with CandyCrunch from their right-click menu, and saved results open with a double-click. The macOS app is not notarized, so on first start macOS asks you to allow it once under System Settings > Privacy & Security > Open Anyway. The Windows app looks for a new release at every start and installs it in place with two clicks on Update in the status bar, keeping your settings; on macOS, a new release is installed by downloading its disk image.
 
 Python users get the same app with
 ```bash
@@ -62,7 +60,7 @@ If you would like to run our main inference function from the command line, you 
 --lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
 --trap, type=string: type of mass analyzer that records the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; the instrument stored in the file overrides it; default:'linear' <br />
 --rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
---rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (runs longer than 40 min then skip their last 10%) <br />
+--rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (all; in runs longer than 40 min, rows in the last 10% need a peak of their own over a low background) <br />
 --rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 --spectra, type=bool: whether to also output the actual spectra used for prediction, as a peak_d column; default:False <br />
 --get_missing, type=bool: whether to also organize spectra without a matching prediction but a valid composition; default:False <br />
@@ -123,7 +121,7 @@ modification, type=string or list: reducing-end modification of glycans; options
 lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
 trap, type=string: type of mass analyzer that records the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; the instrument stored in the file overrides it; default:'linear' <br />
 rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
-rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (runs longer than 40 min then skip their last 10%) <br />
+rt_max, type=float: whether only spectra up to a maximum retention time (in minutes) should be considered; default:0 (all; in runs longer than 40 min, rows in the last 10% need a peak of their own over a low background) <br />
 rt_diff, type=float: maximum retention time difference (in minutes) to peak apex that can be grouped with that peak; default:1.0 <br />
 pred_thresh, type=float: minimum model probability of a structure among the isomers of its composition; default:0.01 <br />
 temperature, type=float: the temperature factor used to calibrate logits; default:1.15 <br />
@@ -254,6 +252,7 @@ prior_weight, type=float: weighting of prior-informed scoring with simplify=True
 allow_internal_peptide_fragments, type=bool: whether to allow peptide fragments cleaved at both termini; default:False <br />
 max_global_mods, type=int: how many global modifications may co-occur on one fragment; default:None (chosen from the glycan) <br />
 metal_cations, type=bool or set: whether fragments can carry metal cations (positive mode; True: Na+ and K+), or the ones they can carry (e.g., {'+Li'} for a lithiated precursor); default:True <br />
+n_term_modification, type=string or float: a modification of a glycopeptide's N-terminal amine, by Unimod name (e.g., 'Carbamidomethyl' of an over-alkylated peptide) or mass, which every N-terminal ion and the intact peptide carry; default:None <br />
 </pre>
 </details>
 
@@ -292,7 +291,7 @@ GlycoDraw(fragment_iupac)
 ### More tools (in `candycrunch.analysis`)
 - `plot_annotated_spectrum(glycan, mzs, intensities)`: an MS2 spectrum with its CandyCrumbs annotations labeled and drawn as SNFG cartoons (also straight from the table and spectra of `wrap_inference(..., spectra = True)`)
 - `supporting_ions(glycan, peaks, candidates = other_predictions)`: the intense peaks that tie each residue of a predicted structure to its position, and those that tell it apart from competing candidates
-- `rank_glycopeptide_structures(peptide, modification_str, peaks)`, `rank_glycopeptide_compositions`, `rank_glycopeptide_sites`: the glycan structures, compositions, and sites of a glycoproteomics identification (e.g., `'N5(HexNAc(4)Hex(5)Fuc(1))'` from a search engine) ranked by their fragment evidence
+- `rank_glycopeptide_structures(peptide, modification_str, peaks)`, `rank_glycopeptide_compositions`, `rank_glycopeptide_sites`: the glycan structures, compositions, and sites (with a glycan space, also the split of a total composition into one glycan per site, `glycan_splits`) of a glycoproteomics identification (e.g., `'N5(HexNAc(4)Hex(5)Fuc(1))'` from a search engine) ranked by their fragment evidence
 ```python
 from candycrunch.prediction import load_spectra_filepath
 from candycrunch.analysis import rank_glycopeptide_structures
@@ -337,4 +336,4 @@ The Windows installer and the `CandyCrunch.exe` it installs are signed. Only fil
 - Committers and reviewers: Daniel Bojar, James Urban, Vahid Atabaigi Elmi
 - Approvers: Daniel Bojar
 
-Privacy: the desktop app sends crash and bug reports only when you choose to send them, sends anonymous usage statistics unless you switch them off (Help > Send anonymous usage statistics), and asks GitHub whether a newer version exists. [packaging/privacy.txt](packaging/privacy.txt), which the installer shows before installing, lists exactly what each contains.
+Privacy: the desktop app sends crash and bug reports only when you choose to send them, sends anonymous usage statistics unless you switch them off (Help > Send anonymous usage statistics), and asks GitHub whether a newer version exists. [packaging/privacy.txt](https://github.com/BojarLab/CandyCrunch/blob/main/packaging/privacy.txt), which the installer shows before installing, lists exactly what each contains.

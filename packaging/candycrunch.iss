@@ -4,6 +4,9 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+#ifndef NumericVersion
+  #define NumericVersion AppVersion
+#endif
 
 [Setup]
 AppId={{4E1A620D-4376-4048-8BAC-5FA02B8EE921}
@@ -11,7 +14,7 @@ AppName=CandyCrunch
 AppVersion={#AppVersion}
 AppPublisher=Bojar Lab, University of Gothenburg
 AppPublisherURL=https://github.com/BojarLab/CandyCrunch
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
 VersionInfoCopyright=Copyright (c) 2022 BojarLab
 DefaultDirName={autopf}\CandyCrunch
 DefaultGroupName=CandyCrunch
