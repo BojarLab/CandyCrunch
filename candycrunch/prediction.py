@@ -2643,12 +2643,15 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                     own = sorted(set(part.tolist()))
 
                     def on_peak(k):
-                        # a spectrum within the half-height width of the part's MS1 peak, not only on its far flank
+                        # a spectrum within the half-height width of the part's MS1 peak, not only on its far flank; widened by half the re-trigger
+                        # interval on either side, as DDA samples a precursor only every re-trigger interval, and a C18 peak narrower than that (half-height
+                        # width 0.15 min, re-triggered every 0.26 min) holds its spectra just outside its half height on both flanks (the main isomer of a
+                        # resolved pair then counted as no part of its own, and the pair stayed one cluster)
                         a = tops[k]
                         left = np.flatnonzero(sm[:a] < sm[a] / 2)[-1:]
                         right = a + 1 + np.flatnonzero(sm[a + 1:] < sm[a] / 2)[:1]
                         t0, t1 = t[left[0]] if len(left) else t[0], t[right[0]] if len(right) else t[-1]
-                        return any(t0 <= r <= t1 for r, q in zip(c['RT'], part) if q == k)
+                        return any(t0 - retrigger / 2 <= r <= t1 + retrigger / 2 for r, q in zip(c['RT'], part) if q == k)
 
                     # (a part's peak stands three times over the median of its trace within 2 min, the ground-truth audit's bar for adding a peak: below it, back-to-back maxima of
                     # one broad PGC peak split into rows)
@@ -3464,10 +3467,12 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
     sia_tol = mass_tolerance if fragment_tolerance is None else (None if fragment_ppm else fragment_tolerance)
     has_sulfate = {}
     water = {'permethylated': calculate_adduct_mass('CH4O'), 'deuteropermethylated': calculate_adduct_mass('CD3OH'), 'peracetylated': calculate_adduct_mass('C2H4O2')}.get(sample_prep, mass_dict['H2O'])
-    # Sialic acid ions as a share of the base peak per spectrum (None where the scan range starts above all of them), for accurate MS2
+    # Sialic acid ions as a share of the base peak per spectrum (None where the scan range starts above all of them), for accurate MS2; in negative mode
+    # also as C ions (plus water), as milk oligosaccharides there show their sialylated antenna as its C ion (Neu5Ac-Hex-HexNAc 673.23) without any B1
+    # (positive-mode oxonium ions are B ions: the C-ion masses only matched noise of TOF spectra)
     accurate_sia = None
     if fragment_tolerance is not None and sialic_derivatization is None:
-        ions = {sia: [sm + a + PROTON_MASS * multiplier - w for sm in sia_masses[sia] for a in (0, res_mass['Hex'] + res_mass['HexNAc']) for w in (0, water)]
+        ions = {sia: [sm + a + PROTON_MASS * multiplier - w for sm in sia_masses[sia] for a in (0, res_mass['Hex'] + res_mass['HexNAc']) for w in ((0, water, -water) if mode == 'negative' else (0, water))]
                 for sia in ('Neu5Ac', 'Neu5Gc')}
         accurate_sia = []
         for pk in peak_col:
@@ -3572,16 +3577,22 @@ def domain_filter(df_out, glycan_class, mode = 'negative', modification = 'reduc
                 ac, gc = b1_levels[k].get('Neu5Ac'), b1_levels[k].get('Neu5Gc')
                 truth.append(ac is None or gc is None or ac < 0.1 or gc >= 0.2 * ac)
             # A sialic acid the structure lacks must not leave its ion among the 5 most intense fragments, matched within the fragment tolerance of accurate MS2:
-            # within the 1 Da of mass_tolerance, 2-AB-labelled sialyllactoses in an orbitrap lost every reading to the label's fragment at 306.12 (Neu5Gc B1 306.08)
-            if 'Neu5Gc' not in m:
+            # within the 1 Da of mass_tolerance, 2-AB-labelled sialyllactoses in an orbitrap lost every reading to the label's fragment at 306.12 (Neu5Gc B1 306.08).
+            # An a2-6-linked Neu5Ac leaves its own ion there, the 0,4A2 - CO2 ion of the residue it sits on (306.12), which an ion trap cannot tell from the
+            # Neu5Gc B1: at 7-14% of a 290 base peak it emptied every 6'-sialyllactose and sialyl-Tn reading of ion-trap runs. Below half of the Neu5Ac B1 it is
+            # that ion, not a Neu5Gc
+            if 'Neu5Gc' not in m and not (re.search(r'Neu5Ac\(a2-(6|3/6|\?)', m) and (b1_levels[k].get('Neu5Ac') or 0) >= 0.1 and
+                                          (b1_levels[k].get('Neu5Gc') or 0) < 0.5 * b1_levels[k]['Neu5Ac']):
                 truth.append(not any(abs(sm + PROTON_MASS * multiplier - j) < (sia_tol if sia_tol is not None else j * fragment_ppm / 1e6)
                                      for j in top_frags[:5] if isinstance(j, float) for sm in sia_masses['Neu5Gc']))
             if 'Neu5Ac' not in m and 'Neu5Gc' not in m:
                 truth.append(not any(abs(sm + PROTON_MASS * multiplier - j) < (sia_tol if sia_tol is not None else j * fragment_ppm / 1e6)
                                      for j in top_frags[:5] if isinstance(j, float) for sm in sia_masses['Neu5Ac']))
-            if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1):
+            if 'Neu5Ac' not in m and (m.count('Fuc') + m.count('dHex') > 1) and sample_prep == 'underivatized' and sialic_derivatization is None:
                 # Neu5Ac (291.095) and two dHex (292.116) differ by 1.02 Da, inside 2x mass_tolerance, and the 13C peak of a loss of two dHex sits 0.02 Da from a
-                # loss of Neu5Ac: a Neu5Ac ion or loss only counts within half the mass tolerance and if it is not the 13C peak of a more intense peak below it
+                # loss of Neu5Ac: a Neu5Ac ion or loss only counts within half the mass tolerance and if it is not the 13C peak of a more intense peak below it.
+                # Not where they are no isobars (permethylated, 13 Da apart, or with a derivatized sialic acid), which emptied difucosylated glycans whose
+                # spectra carry a co-isolated sialic acid ion
                 pk = peak_col[k]
                 truth.append(not any((abs(sm + PROTON_MASS * multiplier - j) < mass_tolerance / 2 or abs(precursor_mz - sm - j) < mass_tolerance / 2) and not any(
                     abs(j - ISOTOPE_SPACING - q) < 0.15 and y > max([v for p, v in pk.items() if abs(p - j) < 0.01], default = 0) for q, y in pk.items())
@@ -4217,13 +4228,15 @@ def combine_charge_states(df_out):
     return out.sort_index(kind = 'stable')
 
 
-def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
+def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative', isomers_apart = False):
     """combines abundances when the same glycan appears as different adduct forms (e.g., [M-H]⁻ and [M+Acetate]⁻)\n
     | Arguments:
     | :-
     | df_out (dataframe): prediction dataframe generated within wrap_inference
     | rt_diff (float): retention time tolerance (in minutes) for considering two rows the same species; default:1.0
-    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default:'negative'\n
+    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default:'negative'
+    | isomers_apart (bool): whether the rows' clusters are peaks of their precursor's MS1 trace (accurate survey scans), so that two (de)protonated
+    |                       rows of different charge that combine_charge_states left apart are ions of different isomers and stay; default:False\n
     | Returns:
     | :-
     | Returns prediction dataframe with adduct abundances consolidated into the primary ion form
@@ -4279,6 +4292,13 @@ def combine_adduct_species(df_out, rt_diff = 1.0, mode = 'negative'):
                 if abs(row_i['RT'] - row_j['RT']) > rt_diff:
                     continue
                 if abs(mzs[idx_i] - mzs[idx_j]) < 1.0:
+                    continue
+                # Two (de)protonated rows are charge states, which combine_charge_states has joined one per charge to the lowest-charge row nearest in
+                # RT: where clusters are peaks of their precursor's MS1 trace, a row it left is another isomer's ion, which folding it here by its top
+                # prediction took into its neighbour (PGC isomers and anomers 0.3-0.7 min apart, each fragmented at z = 1 or z = 2 only). Not without
+                # survey scans, nor with ion-trap MS2 or permethylated glycans (condense_dataframe's single-spectrum peaks are off there), whose clusters
+                # of one glycan split along its elution and tails, so that the rows left are its own charge states
+                if isomers_apart and plain[idx_i] and plain[idx_j]:
                     continue
                 # Fold the weaker signal into the stronger one, with current values, as either row may already have absorbed another
                 if (plain[idx_i], df_out.at[idx_i, 'rel_abundance']) >= (plain[idx_j], df_out.at[idx_j, 'rel_abundance']):
@@ -5033,7 +5053,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     side = (df_out['reducing_end'].values == 'glycosylaminitol') if 'reducing_end' in df_out.columns else np.zeros(len(df_out), dtype = bool)
     df_side, df_out = df_out[side], df_out[~side]
     df_out = combine_charge_states(df_out)
-    df_out = combine_adduct_species(df_out, rt_diff = rt_diff, mode = mode)
+    df_out = combine_adduct_species(df_out, rt_diff = rt_diff, mode = mode, isomers_apart = accurate_ms1 and not ion_trap and 'permethylated' not in sample_prep)
     if len(df_side):
         df_out = pd.concat([df_out, df_side]).sort_index(kind = 'stable')
     if mode == 'negative' and 'adduct' in df_out.columns:
