@@ -510,6 +510,12 @@ def _pool_initializer(messages, weights, n_files, initializer, initargs):
     threading.Thread(target = lambda: (parent.join(), os._exit(1)), daemon = True).start()
 
 
+def _run_folder(path):
+    """The Bruker or Agilent .d or Waters .raw folder that path is or lies in (analysis.tdf, AcqData, _FUNC001.DAT), else None"""
+    path = os.path.normpath(path)
+    return next((p for p in (path, os.path.dirname(path), os.path.dirname(os.path.dirname(path))) if p.lower().endswith(('.d', '.raw')) and os.path.isdir(p)), None)
+
+
 def _detect_run(path, results):
     """Runs in a process of its own, as reading a large file takes seconds: what a run's file says about its settings, as the pipeline reads it (ion mode, MS2
     analyzer, how many MS2 spectra carry each precursor charge, and how many MS2 spectra there are), and what its name says (NAME_HINTS); puts (path, found,
@@ -1772,8 +1778,10 @@ class QuantPanel(QWidget):
         self.summary.setContentsMargins(10, 0, 6, 0)
         self.summary.setToolTip('Area: the isotope envelope (M to M+3) above its baseline (dashed) over the range, by the trapezoid rule, plus the other charge states '
                                 'and, in a run whose neutral glycans show them, the adduct ions of its mobile phase\'s anion (e.g., [M+HCO3-H]2-), whose traces follow it '
-                                'there (r >= 0.9, shown in the chart). Factor: its share of a peak that several rows landed on, divided by the share of its molecules within '
-                                'M to M+3. Part: its share of the abundance, which sums every row folded into this peak')
+                                'there (r >= 0.9, shown in the chart). Each isotope\'s m/z window is the m/z spread the run\'s own survey scans show, at most the mass '
+                                'tolerance; where that spread reaches a fifth of the isotope spacing (multiply charged ions in ion-trap survey scans), the windows touch. '
+                                'Factor: its share of a peak that several rows landed on, divided by the share of its molecules within M to M+3, so the abundance is that '
+                                'of the whole molecule. Part: its share of the abundance, which sums every row folded into this peak')
         self.message = _label('', 'hint')
         self.message.setAlignment(Qt.AlignCenter)
         self.chart = ChartView(palette = PALETTE)
@@ -1859,14 +1867,17 @@ class QuantPanel(QWidget):
         ax.legend('upper right')
         if d['scan'] is not None:
             mzs, ints = d['scan']
-            for lo, hi in d['windows']:
-                scan_ax.axvspan(lo, hi, color = 'a1')
+            # Each isotope window in a shade of its own and named, as windows that touch (multiply charged ions in ion-trap survey scans) read as one band
+            for n, (lo, hi) in enumerate(d['windows']):
+                scan_ax.axvspan(lo, hi, color = 'a1', alpha = 0.12 if n % 2 else 0.25)
+                scan_ax.annotate('M' if n == 0 else f'M+{n}', ((lo + hi) / 2, 1.0), offset = (0.0, -4.0), size = 7, color = 'muted', ha = 'center', va = 'top', halo = 0.0,
+                                 y_fraction = True)
             scan_ax.vlines(mzs, 0, ints, color = 'ink', lw = 0.8)
             spacing = 1.00335 / d['charge']
             scan_ax.set_xlim(d['windows'][0][0] - 1.5 * spacing, d['windows'][-1][1] + 1.5 * spacing)
-            scan_ax.set_ylim(0, max(ints.max(initial = 0), 1) * 1.1)
+            scan_ax.set_ylim(0, max(ints.max(initial = 0), 1) * 1.2)
             scan_ax.set_title(f'Survey scan at {times[d["apex"]]:.2f} min', size = 8)
-        scan_ax.set_xlabel('m/z (shaded: windows summed)')
+        scan_ax.set_xlabel('m/z (shaded: isotope windows summed)')
         self.chart.canvas.span = lambda lo, hi: self.select(k, lo, hi)
         self.chart.canvas.draw_idle()
 
@@ -2193,6 +2204,8 @@ class SettingsPanel(QScrollArea):
         existing, target = set(self.paths()), self.current_experiment()
         empty = target is None or not target.childCount()
         for path in map(os.path.normpath, paths):
+            # A file or folder inside a .d or Waters .raw folder (analysis.tdf, AcqData) is that run
+            path = _run_folder(path) or path
             # A .d or Waters .raw folder is one run; any other folder adds its runs
             found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith(('.d', '.raw')) else [path]
             # A run's raw file and the .cc made from it are one run, read from its .cc
@@ -2681,15 +2694,21 @@ class ResultsView(QWidget):
             self.tabs.setCurrentIndex(0)
         with IMPORT_LOCK:
             from candycrunch.utils import mz_order
+            from glycowork.motif.tokenization import calculate_adduct_mass
         structures = list(df['top1_pred'])
         compositions = [_composition(c) for c in df['composition']]
         notes_tip = 'Notes from the pipeline, adducts, and your curation'
         formulas = self.formulas(df)
+        # Sorted by formula, the glycans go by their mass and the rows of one glycan (its charge states, adducts, and isomers) by RT; rows without a formula go last
+        masses = {f: calculate_adduct_mass(f) for f in set(formulas) if f}
+        by_mass = np.empty(len(df), dtype = int)
+        by_mass[np.lexsort((df['RT'].to_numpy(dtype = float), [masses.get(f, np.inf) for f in formulas]))] = np.arange(len(df))
         columns = [{'title': 'Structure', 'kind': 'structure', 'raw': [s if isinstance(s, str) else None for s in structures],
                     'text': [s if isinstance(s, str) else '' for s in structures], 'image': [s if isinstance(s, str) else c or None for s, c in zip(structures, compositions)]},
                    {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions},
-                   {'title': 'Formula', 'kind': 'text', 'raw': formulas, 'text': formulas, 'tip': 'Elemental formula of the neutral glycan as measured (reducing end '
-                    'and derivatization included), e.g., to extract its ions with any adduct in Skyline or MZmine'},
+                   {'title': 'Formula', 'kind': 'text', 'raw': formulas, 'text': formulas, 'sort': [int(k) if f else None for k, f in zip(by_mass, formulas)],
+                    'tip': 'Elemental formula of the neutral glycan as measured (reducing end and derivatization included), e.g., to extract its ions with any adduct '
+                    'in Skyline or MZmine. Sorts by mass, so the charge states, adducts, and isomers of a glycan, and its isobars, stand together, by RT'},
                    # sorted by m/z, the rows of one ion (a composition and charge, whose m/z differ by noise) go by RT
                    dict(_number_column('m/z', df['m/z'], 4), sort = mz_order(df['m/z'], df['RT'], df['charge'].values, df['composition'].tolist()).tolist()),
                    _number_column('z', df['charge'], 0, 'Precursor charge'), _number_column('RT', df['RT'], 2, 'Retention time (min)')]
@@ -2747,9 +2766,10 @@ class ResultsView(QWidget):
                     self.table.setColumnWidth(c, max(90, self.table.columnWidth(c)))
                 elif column['title'] == 'Composition':
                     self.table.setColumnWidth(c, min(self.table.columnWidth(c), 210))
-            # Another run or the feature table keeps the sort chosen before if it has that column (every switch sorted by m/z again), else by m/z
+            # Another run or the feature table keeps the sort chosen before if it has that column (every switch sorted again), else by mass (the formula),
+            # where the ions of a glycan stand together (by m/z, its [M-H]- and [M-2H]2- were far apart), or by m/z where no row has a formula
             titles = [c['title'] for c in columns]
-            self.table.sortByColumn(titles.index(sort_title), sort_order) if sort_title in titles else self.table.sortByColumn(titles.index('m/z'), Qt.AscendingOrder)
+            self.table.sortByColumn(titles.index(sort_title), sort_order) if sort_title in titles else self.table.sortByColumn(titles.index('Formula' if any(formulas) else 'm/z'), Qt.AscendingOrder)
         else:
             self.table.sortByColumn(sort_column, sort_order)
         self.filter(self.search.text())
@@ -3542,7 +3562,6 @@ class CompareTab(QWidget):
         form_widget = QWidget()
         form_widget.setObjectName('settings')
         form_widget.setMinimumWidth(330)
-        form_widget.setMaximumWidth(460)
         layout = QVBoxLayout(form_widget)
         layout.setContentsMargins(14, 8, 14, 14)
         layout.addWidget(_label('Experiment'))
@@ -3562,6 +3581,8 @@ class CompareTab(QWidget):
         self.runs.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.runs.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
         self.runs.setWordWrap(False)
+        # Run names of one experiment share their start and differ at their end (replicate, plate position), so a name too long is shortened in its middle
+        self.runs.setTextElideMode(Qt.ElideMiddle)
         layout.addWidget(self.runs, 1)
         buttons = QHBoxLayout()
         self.set_group, self.set_covariate, self.guess = QPushButton('Set group…'), QPushButton('Set covariate…'), QPushButton('Guess from run names')
@@ -3656,10 +3677,12 @@ class CompareTab(QWidget):
         right_layout.addLayout(summary_row)
         right_layout.addLayout(top)
         right_layout.addWidget(self.splitter, 1)
+        # The groups pane starts 460 px wide and can be dragged wider, to read long run names in full
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(form_widget)
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([460, 1000])
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(splitter)
@@ -4694,8 +4717,25 @@ class MainWindow(QMainWindow):
                                          'a folder adds its runs but not its .xlsx files, which are added one by one', 10000)
 
     def choose_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, 'Add LC-MS/MS runs', self.store.value('folder', os.path.expanduser('~')),
-                                                'Spectra (*.raw *.RAW *.wiff *.mzML *.mzXML *.mzdata *.mzdata.xml *.mgf *.cc *.xlsx);;All files (*)')
+        folder = self.store.value('folder', os.path.expanduser('~'))
+        folder = os.path.dirname(run) if (run := _run_folder(folder)) else folder
+        dialog = QFileDialog(self, 'Add LC-MS/MS runs', folder, 'Spectra (*.raw *.RAW *.wiff *.mzML *.mzXML *.mzdata *.mzdata.xml *.mgf *.cc *.xlsx);;All files (*)')
+        dialog.setFileMode(QFileDialog.ExistingFiles)
+        runs = []
+
+        def open_run(entered):
+            # A .d or Waters .raw run is a folder, which a file dialog opens instead of choosing: opening one (or a folder in it) chooses it, and the run
+            # folders selected with it
+            if not runs and (run := _run_folder(entered)):
+                runs.extend(dict.fromkeys([run] + [r for r in map(_run_folder, dialog.selectedFiles()) if r]))
+                QTimer.singleShot(0, dialog.reject)
+
+        dialog.directoryEntered.connect(open_run)
+        chosen = dialog.exec()
+        paths = runs or (dialog.selectedFiles() if chosen else [])
+        if runs:
+            # Of several folders selected, Windows opens the first and tells of no other
+            self.statusBar().showMessage(f'{os.path.basename(runs[0])} added. Add folder… adds every .d or Waters .raw run of a folder at once, as does dropping them here', 10000)
         if paths:
             self.store.setValue('folder', os.path.dirname(paths[0]))
             self.add_runs(paths)
@@ -4703,7 +4743,7 @@ class MainWindow(QMainWindow):
     def choose_folder(self):
         path = QFileDialog.getExistingDirectory(self, 'Add a folder of runs, a .d folder, or a Waters .raw folder', self.store.value('folder', os.path.expanduser('~')))
         if path:
-            self.store.setValue('folder', os.path.dirname(path) if path.lower().endswith(('.d', '.raw')) else path)
+            self.store.setValue('folder', os.path.dirname(run) if (run := _run_folder(path)) else path)
             self.add_runs([path])
 
     def dragEnterEvent(self, event):

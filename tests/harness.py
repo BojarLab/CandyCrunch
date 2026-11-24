@@ -28,7 +28,7 @@ trace, metric), 'memory' (the process's GB so far) and 'peaks'/'fps' (every grou
 false positive), which tests/harness_diff.py compares between two runs.
 
 Trace (stage where each ground-truth peak was lost, in pipeline order): no_ms2 (no MS2 spectrum within 0.5 m/z and 1 min, or with accurate survey
-scans none of the glycan on its own MS1 maximum and those within 1 min nearer other peaks), no_cluster, composition_not_candidate,
+scans none of the glycan on its own MS1 maximum and those of the glycan within 1 min nearer other peaks), no_cluster, composition_not_candidate,
 model_no_composition (no structure of the composition in the model's raw top 25), below_pred_thresh (in the top 25, but no prediction survives
 pred_thresh / the class veto), domain_filter, other_composition_chosen (the spectrum is reported with another composition), crumbs_gate, deduplicated,
 finalize (ppm / RT / merge steps), matched_elsewhere (a reported row is near, but the one-to-one matching gave it to another peak or it lies just outside the
@@ -750,6 +750,10 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
         load, ag.load_spectra_filepath = ag.load_spectra_filepath, lambda *args, **kwargs: loaded.assign(peak_d = None)
         run = ag.Run('')
         ag.load_spectra_filepath = load
+        # Some runs read every precursor 10-20 ppm off the ground truth's masses (calibration): their median offset over the MS2 within 1 min and 50 ppm
+        # of a peak's m/z
+        off = np.concatenate([((lmz - m) / m)[(np.abs(loaded['RT'].values - r) <= 1) & (np.abs(lmz - m) <= 5e-5 * m)] for m, r in zip(gt['Mass'], gt[rt_col])] + [[]])
+        shift = float(np.median(off)) if len(off) >= 20 else 0.0
     cond = captured.get('condense_dataframe', pd.DataFrame(columns = ['m/z', 'RT']))
     cmz = cond['m/z'].values if 'm/z' in cond.columns else cond.index.values
     cand = captured.get('assign_annotation_scores_pooled', captured.get('assign_candidate_structures', pd.DataFrame(columns = ['m/z', 'RT', 'spec_id', 'composition'])))
@@ -829,25 +833,32 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
         hit = near(lmz, lrt, lz, gmz, grt, gzz, sign = sign)
         fragmented = hit.any()
         if fragmented and run is not None:
-            # never fragmented also when no MS2 of its glycan (20 ppm, at any charge, or at the 13C peak, which instruments pick as the monoisotopic m/z
-            # of large glycans; also at the 13C peak of its m/z read at another charge, as the metric matches m/z whatever the ground truth's charge)
-            # lies in the half-height window of its own MS1 maximum, the one nearest it within 0.3 min, and every MS2 within 0.5 m/z and 1 min lies
-            # nearer (in RT) to another ground-truth peak the metric could match a row there to. A peak without a maximum, or with spectra nearer to it
-            # than to any other peak, keeps the 1-min rule: its ground-truth RT up to 1 min off its peak, or its mass given to 0.1, put the maximum or the
-            # 20 ppm beside its own MS2, and the metric still matches it to a row there
+            # never fragmented also when no MS2 of its glycan (20 ppm after the run's shift, in the polarity of its own charge: at M or the 13C peak at
+            # any charge, at its own charge also at the 13C2 / 13C3 peaks, which instruments pick as the monoisotopic m/z of large glycans while still
+            # isolating the glycan; also at the 13C peak of its m/z read at another charge, as the metric matches m/z whatever the ground truth's
+            # charge) lies in the half-height window of its own MS1 maximum, the one nearest it within 0.3 min, and every MS2 of its glycan within
+            # 0.5 m/z and 1 min lies nearer (in RT) to another ground-truth peak the metric could match a row there to. MS2 of another ion within
+            # 0.5 m/z (another glycan, or an isotope of one, which accurate survey scans resolve from this one) do not count: the pipeline reports them
+            # at their own mass. A peak without a maximum, or with spectra of its glycan nearer to it than to any other peak, keeps the 1-min rule: its
+            # ground-truth RT up to 1 min off its peak, or its mass given to 0.1, put the maximum beside its own MS2, and the metric still matches it
+            # to a row there
             z, tol = int(abs(gzz)) if gzz == gzz and gzz else 1, max(2e-5 * gmz, 0.01)
             mx = sorted((m for m in run.maxima(sum(run.trace(gmz + j * ISOTOPE_SPACING / z - tol, gmz + j * ISOTOPE_SPACING / z + tol) for j in range(3)))
                          if abs(m['RT'] - grt) <= 0.3), key = lambda m: abs(m['RT'] - grt))
             if mx:
-                m1 = z1(np.array([gmz]), np.array([gzz]), sign)[0]
-                ions = np.array([(m1 + (k - 1) * sign * PROTON_MASS) / k + j * ISOTOPE_SPACING / k for k in range(1, 5) for j in (0, 1)] + [gmz + ISOTOPE_SPACING / k for k in range(1, 5)])
-                fragmented = ((np.abs(lmz[:, None] - ions) <= np.maximum(2e-5 * ions, 0.01)).any(1) & (lrt >= mx[0]['window'][0]) & (lrt <= mx[0]['window'][1])).any()
+                m1, pol = z1(np.array([gmz]), np.array([gzz]), sign)[0], np.sign(gzz) if gzz == gzz and gzz else sign
+                ions = np.array([(m1 + (k - 1) * pol * PROTON_MASS) / k + j * ISOTOPE_SPACING / k for k in range(1, 5) for j in (0, 1)] + [gmz + j * ISOTOPE_SPACING / z for j in (2, 3)]
+                                + [gmz + ISOTOPE_SPACING / k for k in range(1, 5)])
+                # (a mass given to fewer decimals, 0.1 in some maps, lies anywhere within half its last digit)
+                digits = next(d for d in range(5) if abs(gmz - round(gmz, d)) < 1e-6 or d == 4)
+                own = (np.abs(lmz[:, None] - ions * (1 + shift)) <= np.maximum(2e-5 * ions, 0.01) + 0.5 * 10.0 ** -digits).any(1)
+                fragmented = (own & (lrt >= mx[0]['window'][0]) & (lrt <= mx[0]['window'][1])).any()
                 if not fragmented:
                     nearer = np.zeros(hit.sum(), dtype = bool)
                     for k, (mk, rk, zk) in enumerate(zip(gt['Mass'], gt[rt_col], gt_z)):
                         if k != i:
                             nearer |= near(lmz[hit], lrt[hit], lz[hit], mk, rk, zk, sign = sign) & (np.abs(lrt[hit] - rk) < np.abs(lrt[hit] - grt))
-                    fragmented = not nearer.all()
+                    fragmented = (own[hit] & ~nearer).any()
         if not fragmented:
             stage = 'no_ms2'
         # (clusters with their charge, as the spectra above: a row whose ion was fragmented at another charge has its cluster there)

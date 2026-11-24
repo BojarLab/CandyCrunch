@@ -55,6 +55,27 @@ def test_gui_main_adduct(app):
     assert panel.values()['run_anion'] == 'Formate'
 
 
+def test_gui_sorts_by_mass_and_compare_names(app):
+    from candycrunch import gui
+    from PySide6.QtCore import Qt
+    # Opened, a table is sorted by mass: the [M-2H]2- of a glycan stands beside its [M-H]-, isomers by RT, as by m/z they were far apart
+    comps = [{'Hex': 4, 'HexNAc': 3, 'Neu5Ac': 1, 'dHex': 1}, {'Hex': 5, 'HexNAc': 2}, {'Hex': 4, 'HexNAc': 3, 'Neu5Ac': 1, 'dHex': 1}, {'Hex': 2, 'HexNAc': 2, 'dHex': 1},
+             {'Hex': 5, 'HexNAc': 2}]
+    features = pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc'] * 5, 'm/z': [1714.6, 1235.4, 856.3, 895.3, 1235.4], 'RT': [49.11, 43.68, 52.93, 43.34, 36.77],
+                             'charge': [-1, -1, -2, -1, -1], 'composition': comps, 'GlyTouCan_ID': [''] * 5, 'n_files_ms2': [2] * 5, 'a': [20.0] * 5, 'b': [20.0] * 5,
+                             'evidence_a': ['ms2'] * 5, 'evidence_b': ['ms2'] * 5})
+    tables = {r: (pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc'], 'predictions': [[('Gal(b1-3)GalNAc', 0.9)]], 'composition': [{'Hex': 1, 'HexNAc': 1}], 'num_spectra': [3],
+                                'charge': [-1], 'RT': [11.0], 'rel_abundance': [100.0], 'evidence': ['strong'], 'notes': [''], 'ppm_error': [10.0], 'GlyTouCan_ID': ['']},
+                               index = pd.Index([384.15], name = 'm/z')), [{204.09: 50.0}]) for r in ('a', 'b')}
+    view = gui.ResultsView(gui.GlycanImages())
+    view.set_results({'files': ['a.mzML', 'b.mzML'], 'settings': dict(gui.DEFAULTS), 'tables': tables, 'features': features})
+    order = [view.proxy.mapToSource(view.proxy.index(i, 0)).row() for i in range(view.proxy.rowCount())]
+    assert view.model.columns[view.table.horizontalHeader().sortIndicatorSection()]['title'] == 'Formula' and order == [3, 4, 1, 0, 2]
+    # Long run names keep their distinguishing end in view, and the groups pane has no maximum width
+    tab = gui.CompareTab(gui.GlycanImages())
+    assert tab.runs.textElideMode() == Qt.ElideMiddle and [s for s in tab.findChildren(gui.QSplitter) if s.orientation() == Qt.Horizontal][0].widget(0).maximumWidth() > 10000
+
+
 def test_gui_fits_laptop_screens(app, tmp_path, monkeypatch):
     import time
     from candycrunch import gui
@@ -263,6 +284,36 @@ def test_gui_experiments(app):
     # Moving the last run out of an experiment removes it
     panel.move_runs([panel.files.topLevelItem(1).child(0)], panel.files.topLevelItem(0))
     assert [name for name, _, _ in panel.experiments()] == ['Experiment 1'] and len(panel.paths()) == 3
+
+
+def test_gui_run_folders_from_add_files(app, tmp_path):
+    from PySide6.QtCore import QSettings, QTimer
+    from candycrunch import gui
+    for inner in ('a.d/analysis.tdf', 'b.D/AcqData/MSScan.bin', 'c.raw/_FUNC001.DAT', 'plain/x.mzML'):
+        (tmp_path / inner).parent.mkdir(parents = True, exist_ok = True)
+        (tmp_path / inner).write_bytes(b'')
+    # A file or folder inside a .d or Waters .raw folder is that run, once
+    panel = gui.SettingsPanel()
+    panel.add_paths([str(tmp_path / x) for x in ('a.d/analysis.tdf', 'b.D/AcqData', 'b.D/AcqData/MSScan.bin', 'c.raw/_FUNC001.DAT')], detect = False)
+    assert sorted(map(os.path.basename, panel.paths())) == ['a.d', 'b.D', 'c.raw']
+    # Add files… opens beside a run folder it was left in, passes through other folders, and takes a run folder it is opened into as that run
+    window, added, seen = QtWidgets.QMainWindow(), [], []
+    window.store, window.add_runs = QSettings(str(tmp_path / 'settings.ini'), QSettings.IniFormat), added.extend
+    window.store.setValue('folder', str(tmp_path / 'b.D' / 'AcqData'))
+
+    def browse():
+        # Entered as a double-click enters a folder (setDirectory does not tell)
+        dialog = next(w for w in app.topLevelWidgets() if isinstance(w, QtWidgets.QFileDialog) and w.isVisible())
+        seen.append(os.path.normpath(dialog.directory().absolutePath()))
+        dialog.directoryEntered.emit(str(tmp_path / 'plain'))
+        seen.append(dialog.isVisible())
+        dialog.directoryEntered.emit(str(tmp_path / 'a.d'))
+        QTimer.singleShot(2000, dialog.reject)
+
+    QTimer.singleShot(200, browse)
+    gui.MainWindow.choose_files(window)
+    assert seen == [str(tmp_path), True] and added == [str(tmp_path / 'a.d')] and os.path.normpath(window.store.value('folder')) == str(tmp_path)
+    assert window.statusBar().currentMessage().startswith('a.d added')
 
 
 def test_gui_glycan_class_list(app):

@@ -4178,11 +4178,12 @@ def extract_spectra(spectra_filepath, output_filepath = None, file_format = 'xls
     return output_filepath
 
 
-def combine_charge_states(df_out):
+def combine_charge_states(df_out, ms1 = None):
     """looks for several charges at the same RT with the same top prediction composition and combines their relative abundances\n
     | Arguments:
     | :-
-    | df_out (dataframe): prediction dataframe generated within wrap_inference\n
+    | df_out (dataframe): prediction dataframe generated within wrap_inference
+    | ms1 (tuple): flat MS1 data from process_mzML_stack; if given (survey scans that resolve isomers), two charge states only join on one MS1 peak; default:None\n
     | Returns:
     | :-
     | Returns prediction dataframe where one row per co-eluting charge-state group (a reported structure, then the most abundant) carries the sum of abundances
@@ -4211,8 +4212,19 @@ def combine_charge_states(df_out):
         # Hex5HexNAc4 [M+2H]2+ peaks 0.5 min apart became one row with a co-eluting [M+H]+)
         lows, highs = pred_rows.index[pred_rows['charge'].abs() == lowest], pred_rows.index[pred_rows['charge'].abs() > lowest]
         partner_of = {}
+
+        def one_peak(i, j):
+            # With survey scans that resolve isomers, a glycan's charge states co-elute on one MS1 peak: the lower charge's ion trace between the two
+            # rows holds no valley below half the lower of its ends (isomers 0.3-0.7 min apart on C18, each fragmented at one charge only, became one row)
+            if ms1 is None or not len(ms1[0]):
+                return True
+            a, b = sorted((pred_rows.at[i, 'RT'], pred_rows.at[j, 'RT']))
+            trace = ion_trace(ms1, mzs[i], (a + b) / 2, half_width = (b - a) / 2 + 0.02)
+            s = np.convolve(trace, np.ones(3) / 3, mode = 'valid') if len(trace) >= 5 else np.zeros(0)
+            return len(s) < 3 or s.min() >= 0.5 * min(s[0], s[-1])
+
         for d, i, j in sorted((abs(pred_rows.at[j, 'RT'] - pred_rows.at[i, 'RT']), i, j) for i in lows for j in highs):
-            if d < 1 and j not in partner_of and all(abs(pred_rows.at[k, 'charge']) != abs(pred_rows.at[j, 'charge']) for k, m in partner_of.items() if m == i):
+            if d < 1 and j not in partner_of and all(abs(pred_rows.at[k, 'charge']) != abs(pred_rows.at[j, 'charge']) for k, m in partner_of.items() if m == i) and one_peak(i, j):
                 partner_of[j] = i
         for idx in lows:
             group = pred_rows.loc[[idx] + [j for j in highs if partner_of.get(j) == idx]]
@@ -4636,7 +4648,15 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
             inside = (np.abs(df_out['RT'].values - rt_med) <= rt_cut) & has_pred.values
             neutral = df_out.index.values.astype(float) * np.abs(df_out['charge'].values)
             early = accurate_ms1 & (df_out['RT'].values < rt_med) & (neutral <= np.min(neutral[inside], initial = np.inf))
-            df_out = df_out[(~has_pred) | (np.abs(df_out['RT'] - rt_med) <= rt_cut) | major | early]
+            # ... nor a sulfated or phosphorylated row within the window of the run's (five or more) such rows: their acidic group, which stays charged,
+            # makes them a population of their own, eluting minutes from the run's other glycans (labelled sulfated sialylated N-glycans on C18 at 27-31
+            # min, where the others elute at 12-21, fell to the cut)
+            acidic = np.array([bool(p) and any(get_comp(p[0][0]).get(k, 0) for k in ('S', 'P')) for p in df_out['predictions']], dtype = bool)
+            rts_acidic, own = df_out.loc[acidic & ~side, 'RT'].values, False
+            if len(rts_acidic) >= 5:
+                acidic_med = np.median(rts_acidic)
+                own = acidic & (np.abs(df_out['RT'].values - acidic_med) <= 3.0 * 1.4826 * np.median(np.abs(rts_acidic - acidic_med)))
+            df_out = df_out[(~has_pred) | (np.abs(df_out['RT'] - rt_med) <= rt_cut) | major | early | own]
     # Clean-up
     if sialic_derivatization is None:
         df_out['composition'] = [get_comp(k[0][0]) if k else val for k, val in
@@ -5052,7 +5072,7 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
     # co-eluting charge state of its alditol along and, without another row of that glycan to fold into, lost it
     side = (df_out['reducing_end'].values == 'glycosylaminitol') if 'reducing_end' in df_out.columns else np.zeros(len(df_out), dtype = bool)
     df_side, df_out = df_out[side], df_out[~side]
-    df_out = combine_charge_states(df_out)
+    df_out = combine_charge_states(df_out, ms1 = ms1 if accurate_ms1 and not ion_trap and 'permethylated' not in sample_prep else None)
     df_out = combine_adduct_species(df_out, rt_diff = rt_diff, mode = mode, isomers_apart = accurate_ms1 and not ion_trap and 'permethylated' not in sample_prep)
     if len(df_side):
         df_out = pd.concat([df_out, df_side]).sort_index(kind = 'stable')
