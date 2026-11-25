@@ -5365,6 +5365,36 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+def _moved_to_applications():
+    """The macOS app started from its disk image (mounted under /Volumes, or translocated by Gatekeeper) offers to copy itself into Applications and
+    start from there, as otherwise every start opens the disk image again; True once the copy is in place and starts after this process ends"""
+    bundle = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))))
+    if not (bundle.endswith('.app') and (bundle.startswith('/Volumes/') or '/AppTranslocation/' in bundle)):
+        return False
+    if QMessageBox.question(None, 'CandyCrunch', 'CandyCrunch is running from its disk image. Move it into your Applications folder and start it from there?') != QMessageBox.Yes:
+        return False
+    for folder in ('/Applications', os.path.expanduser('~/Applications')):
+        target, part = os.path.join(folder, 'CandyCrunch.app'), os.path.join(folder, '.CandyCrunch.app.part')
+        try:
+            os.makedirs(folder, exist_ok = True)
+            shutil.rmtree(part, ignore_errors = True)
+            subprocess.run(['ditto', bundle, part], check = True, capture_output = True)
+            if os.path.exists(target):
+                shutil.rmtree(target)
+            os.rename(part, target)
+            break
+        except (OSError, subprocess.CalledProcessError):
+            shutil.rmtree(part, ignore_errors = True)
+    else:
+        QMessageBox.warning(None, 'CandyCrunch', 'CandyCrunch could not be copied into Applications. Drag it from its disk image onto the Applications folder beside it.')
+        return False
+    # Once this process has ended, the disk image is ejected and the copy started
+    volume = '/'.join(bundle.split('/')[:3]) if bundle.startswith('/Volumes/') else ''
+    subprocess.Popen(['/bin/sh', '-c', 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; [ -z "$2" ] || hdiutil detach -quiet "$2"; open "$3"', 'sh',
+                      str(os.getpid()), volume, target], start_new_session = True, stdin = subprocess.DEVNULL, stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL)
+    return True
+
+
 def main():
     mp.freeze_support()
     if sys.platform == 'win32':
@@ -5393,6 +5423,8 @@ def main():
         with open('candycrunch_self_test.log', 'w', encoding = 'utf-8') as file:
             file.write(''.join(log) + f'\nGlycan peaks found: {outcome[0] if outcome else 0}\nExample run bundled: {os.path.exists(EXAMPLE_RUN)}\n')
         sys.exit(0 if outcome and outcome[0] > 0 and os.path.exists(EXAMPLE_RUN) else 1)
+    if getattr(sys, 'frozen', False) and sys.platform == 'darwin' and _moved_to_applications():
+        sys.exit(0)
     # A window crash file that can be removed belongs to an earlier session that did not end cleanly (one in use is a running CandyCrunch's), and is
     # offered as a crash report; worker files are removed by their window, or here once a day old
     crashes, ended = [], {}

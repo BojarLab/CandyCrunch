@@ -2951,7 +2951,7 @@ def complementary_pairs(mz, peaks, charge, tolerance, n = 15):
 
 def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struct_map, mass_tolerance, mode, mass_tag,
                                 modification = 'reduced', sample_prep = 'underivatized', max_charge = -3, cross_class = None, ms1_ppm = None,
-                                sialic_derivatization = None, adducts = (), vocabulary = None):
+                                sialic_derivatization = None, adducts = (), vocabulary = None, masses = None):
     idx_col = 'm/z' if 'm/z' in df_in.columns else 'reducing_mass'
     red_masses = np.array(df_in[idx_col])
     known_charges = [None if pd.isna(c) else int(c) for c in df_in['precursor_charge'].values] if 'precursor_charge' in df_in.columns else [None] * len(red_masses)
@@ -2975,12 +2975,19 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     multi_all = [{} for _ in red_masses]
     alts = [[] for _ in red_masses]
     for pool_df, pool_comp_map, pool_topo_map, fallback in pools:
-        pool_comps = pool_df.groupby('comp_str').first()['Composition']
-        comps_in = [x for c, x in pool_comps.items() if not fallback or c not in comp_struct_map]
-        if sialic_derivatization is not None:  # a linkage-specific derivatization gives each way of linking the sialic acids a mass of its own
-            comps_in = [split for x in comps_in for split in sialic_linkage_splits(x, sialic_derivatization = sialic_derivatization)]
-        comp_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep, modification = modification,
-                                                    sialic_derivatization = sialic_derivatization) + tag for x in comps_in])
+        # A caller reading one spectrum at a time (acquisition.SpectrumPath) keeps each database's compositions and masses in masses: they depend only
+        # on the run's settings, and making them was most of a single spectrum's time
+        if masses is not None and (id(pool_df), fallback) in masses:
+            comps_in, comp_masses = masses[(id(pool_df), fallback)]
+        else:
+            pool_comps = pool_df.groupby('comp_str').first()['Composition']
+            comps_in = [x for c, x in pool_comps.items() if not fallback or c not in comp_struct_map]
+            if sialic_derivatization is not None:  # a linkage-specific derivatization gives each way of linking the sialic acids a mass of its own
+                comps_in = [split for x in comps_in for split in sialic_linkage_splits(x, sialic_derivatization = sialic_derivatization)]
+            comp_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep, modification = modification,
+                                                        sialic_derivatization = sialic_derivatization) + tag for x in comps_in])
+            if masses is not None:
+                masses[(id(pool_df), fallback)] = (comps_in, comp_masses)
         comps_with_none = [(x, pool_comp_map, pool_topo_map) for x in comps_in] + [None]
         # With accurate survey scans, a cross-class composition has to match the precursor m/z within ms1_ppm
         tolerances = ms1_ppm * red_masses / 1e6 if fallback and ms1_ppm else np.full(len(red_masses), mass_tolerance)
@@ -3135,8 +3142,13 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     # z = 3 or as Ac compositions at z = 1, with 2-7 such pairs at z = 2 and none at their reading. As candidates of every spectrum (any charge, no
     # pairs), such compositions lost in 21 of 100 projects
     if vocabulary is not None:
-        v_comps = [x for c, x in vocabulary[0].groupby('comp_str').first()['Composition'].items() if c not in comp_struct_map]
-        v_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep, modification = modification) + tag for x in v_comps])
+        if masses is not None and (id(vocabulary[0]), 'vocabulary') in masses:
+            v_comps, v_masses = masses[(id(vocabulary[0]), 'vocabulary')]
+        else:
+            v_comps = [x for c, x in vocabulary[0].groupby('comp_str').first()['Composition'].items() if c not in comp_struct_map]
+            v_masses = np.array([composition_to_mass(x, mass_value = 'monoisotopic', sample_prep = sample_prep, modification = modification) + tag for x in v_comps])
+            if masses is not None:
+                masses[(id(vocabulary[0]), 'vocabulary')] = (v_comps, v_masses)
         for i, (x, m_all, kc, mz, peaks) in enumerate(zip(comps_out, multi_all, known_charges, red_masses, df_in['peak_d'])):
             if ladder[i] or not len(v_comps) or (x[0] and x[0][0][0][1] is not comp_struct_map):
                 continue

@@ -117,11 +117,15 @@ jobs:
         }
         exit 0
 
+    # The disk image opens on the app beside a link to Applications, the folder it is dragged onto to install it
     - name: Build the macOS disk image
       if: runner.os == 'macOS'
       run: |
         version=$(python -c "from importlib.metadata import version; print(version('candycrunch'))")
-        hdiutil create -volname CandyCrunch -srcfolder dist/CandyCrunch.app -ov -format UDZO "dist/CandyCrunch-$version-macOS.dmg"
+        mkdir dmg
+        ditto dist/CandyCrunch.app dmg/CandyCrunch.app
+        ln -s /Applications dmg/Applications
+        hdiutil create -volname CandyCrunch -srcfolder dmg -ov -format UDZO "dist/CandyCrunch-$version-macOS.dmg"
 
     - uses: actions/upload-artifact@v7
       with:
