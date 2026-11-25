@@ -29,7 +29,7 @@ OutputBaseFilename=CandyCrunch-{#AppVersion}-Windows-Setup
 SetupIconFile=candycrunch.ico
 UninstallDisplayIcon={app}\CandyCrunch.exe
 LicenseFile=..\LICENSE
-; What the app sends over the internet and how to switch it off, shown before installing (SignPath Foundation's free signing requires it)
+; What the app sends over the internet and how to switch it off, shown before installing
 InfoBeforeFile=privacy.txt
 Compression=lzma2/max
 SolidCompression=yes

@@ -75,6 +75,7 @@ If you would like to run our main inference function from the command line, you 
 --top_n_isomers, type=int: several files only, number of isomer groups at each composition to retain in each file; default:5 <br />
 --n_jobs, type=int: number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default:1 <br />
 --plot_glycans, type=bool: whether to write the output as an .xlsx file that contains SNFG images of all top1 predictions (a `.csv` output additionally gets an `.xlsx` of the same name); default:False <br />
+--composition_format, type=string: how the output tables write compositions, 'dict' ({'Hex': 5, 'HexNAc': 4, 'dHex': 1}), 'names' (Hex5HexNAc4dHex1), or 'letters' (H5N4F1; A Neu5Ac, G Neu5Gc, S sulfate); in the app, View > Compositions as (or a right click on the Composition column's header) sets how tables, the detail pane, and exports write them; default:dict <br />
 --version: prints the CandyCrunch version and exits
 </pre>
 </details>
@@ -333,12 +334,5 @@ The data used to train `CandyCrunch` can be found at Zenodo, under [doi:10.5281/
 }
 ```
 
-## Code signing policy
-Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
-
-The Windows installer and the `CandyCrunch.exe` it installs are signed. Only files built from this repository by the [Desktop app workflow](https://github.com/BojarLab/CandyCrunch/blob/main/.github/workflows/app.yml) on GitHub Actions are signed, and every release is approved by hand before it is signed.
-
-- Committers and reviewers: [Daniel Bojar](https://github.com/Bribak), [James Urban](https://github.com/urbj), [Vahid Atabaigi Elmi](https://github.com/EasternCaveMan)
-- Approvers: [Daniel Bojar](https://github.com/Bribak)
-
-Privacy: the desktop app sends crash and bug reports only when you choose to send them, sends anonymous usage statistics unless you switch them off (Help > Send anonymous usage statistics), and asks GitHub whether a newer version exists. [packaging/privacy.txt](https://github.com/BojarLab/CandyCrunch/blob/main/packaging/privacy.txt), which the installer shows before installing, lists exactly what each contains.
+## Privacy
+The desktop app sends crash and bug reports only when you choose to send them, sends anonymous usage statistics unless you switch them off (Help > Send anonymous usage statistics), and asks GitHub whether a newer version exists. [packaging/privacy.txt](https://github.com/BojarLab/CandyCrunch/blob/main/packaging/privacy.txt), which the installer shows before installing, lists exactly what each contains.

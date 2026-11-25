@@ -168,7 +168,7 @@ def test_gui_wheel_scrolls_past_settings(app):
     app.removeEventFilter(guard)
 
 
-def test_gui_results_curation(app):
+def test_gui_results_curation(app, tmp_path):
     from candycrunch import gui
     df = pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc', 'Fuc(a1-2)Gal(b1-3)GalNAc'],
                        'predictions': [[('Gal(b1-3)GalNAc', 0.9), ('Gal(b1-4)GlcNAc', 0.05)], [('Fuc(a1-2)Gal(b1-3)GalNAc', 0.8)]],
@@ -193,6 +193,35 @@ def test_gui_results_curation(app):
     assert out['top1_pred'].tolist() == ['Gal(b1-4)GlcNAc'] and out['curation'].tolist() == ['reassigned']
     # the reduced (alditol) Hex1HexNAc1 of the default reducing end, after its composition
     assert out['formula'].tolist() == ['C14H27NO11'] and list(out.columns).index('formula') == list(out.columns).index('composition') + 1
+    # compositions as the table shows them (names by default); View > Compositions as switches table, detail pane, and exports together, the choice kept in
+    # QSettings: of a test organization, in an INI file of its own, so that the user's settings stay as they are
+    from PySide6.QtCore import QSettings
+    assert out['composition'].tolist() == ['Hex1HexNAc1']
+    names = app.organizationName(), app.applicationName()
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path))
+    app.setOrganizationName('CandyCrunchTest')
+    app.setApplicationName('CandyCrunchTest')
+    try:
+        menu = gui.QMenu()
+        for style, table, detail in (('letters', ['H1N1', 'H1N1F1'], 'H1N1F1'), ('names', ['Hex1HexNAc1', 'Hex1HexNAc1dHex1'], 'Hex1HexNAc1dHex1')):
+            gui._composition_menu(menu, view.set_composition_style)
+            next(a for a in menu.actions() if a.data() == style).trigger()
+            gui._composition_menu(menu, view.set_composition_style)
+            assert [a.data() for a in menu.actions() if a.isChecked()] == [style] and QSettings().value('composition_format') == style
+            assert next(c for c in view.model.columns if c['title'] == 'Composition')['text'] == table and view.composition.text() == detail
+            assert view.export_frame(view.current_frame())['composition'].tolist() == table[:1]
+        # the filter finds a composition in either notation
+        view.filter('H1N1F1')
+        assert view.proxy.rowCount() == 1
+        view.filter('')
+    finally:
+        gui.DISPLAY['composition'] = 'names'
+        app.setOrganizationName(names[0])
+        app.setApplicationName(names[1])
+        QSettings.setDefaultFormat(QSettings.NativeFormat)
+    assert gui.format_composition({'Hex': 5, 'HexNAc': 4, 'dHex': 1, 'Neu5Ac': 2}, 'letters') == 'H5N4F1A2'
+    assert gui.format_composition({'Hex': 5, 'HexNAc': 4, 'Neu5Ac_a2-6': 1, 'Neu5Ac_a2-3': 1}, 'names') == 'H5N4E1L1'
 
 
 def test_gui_ms3(app):
@@ -268,6 +297,16 @@ def test_gui_quantification(app):
     assert 'earlier CandyCrunch' in view.quant.message.text()
     view.quant.show([], 50.0)
     assert 'survey scans' in view.quant.message.text()
+    # The glycan map's chromatogram sums every integrated peak, so its area is the run's summed area (but the ramps from zero into each range), and the
+    # selected peak is ringed on it too
+    view.dataset.setCurrentIndex(view.dataset.findData('a'))
+    top, grid, total = view.map_chromatogram
+    assert np.isclose((getattr(np, 'trapezoid', None) or np.trapz)(total, grid), sum(raw), rtol = 1e-3)
+    view.tabs.setCurrentWidget(view.map)
+    assert len(view.map.canvas.rings) == 2 and view.map.canvas.rings[1][0] is top
+    # A run without records (run b) has none, and the feature table draws the runs that have one
+    view.dataset.setCurrentIndex(view.dataset.findData('b'))
+    assert view.map_chromatogram is None and len(view.map.canvas.rings) == 1
 
 
 def test_gui_experiments(app):

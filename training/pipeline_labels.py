@@ -114,8 +114,9 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    |                    residues where that fits them better, each term only where it brings more of them closer than it pushes away, and with an intercept
    |                    per map file where several maps have >= 5 of them; if their median deviation from it exceeds 1 min, the mapping counts as RT-less,
    |                    unless at least 5 and 40% of them agree within 1 min, whose median then shifts it; the plain median of them or no shift instead for
-   |                    a map file's rows where that puts >= 10% more of them within rt_window of a passing input of their composition; rows with rt_own
-   |                    (RTs read in the run itself) neither anchor nor move, nor are dropped);
+   |                    a map file's rows where that puts >= 10% more of them within rt_window of a passing input of their composition (rows with rt_own
+   |                    and map_rt: of their own RT); rows with rt_own (RTs read in the run itself) neither move nor are dropped, and where the mapping
+   |                    gives their map_rt (the map's RT) each composition and map RT of them anchors by its offset from it, before any input);
    |                    default:1.0 (2.0 only added labels away from the
    |                    glycans' peaks)
    | crumbs_thresh (float): annotation score an input needs to take a mapping row without RT, and to anchor the RT shift, as the pipeline's gate; default:3
@@ -247,8 +248,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     for i in by_intensity:
         if passing[i] and single.get(input_keys[i]) == 1:
             first.setdefault(input_keys[i], []).append(i)
-    # RTs read in the run itself (rt_own, a map's RT_<run> column) are already on its time axis: they neither anchor the shift of the other rows nor move
-    # (the drift fitted on the other rows moved a run's own rows by up to 14 min)
+    # RTs read in the run itself (rt_own, a map's RT_<run> column) are already on its time axis: they do not move (the drift fitted on the other rows moved
+    # a run's own rows by up to 14 min)
     own = mapping.loc[row_ids, 'rt_own'].fillna(False).to_numpy(bool) if 'rt_own' in mapping.columns else np.zeros(len(row_ids), bool)
     # Unless they are not: RT_<run> columns copied from a publication's table can be on another clock than the deposited run (1-5 of ~105 rows of a run
     # within 0.5 min of a peak of their ion, the others up to 6 min after it), so they count as the run's own only if at least half of the rows that have a
@@ -261,6 +262,20 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
     files = mapping.loc[row_ids, 'map_file'].astype(str).to_numpy() if 'map_file' in mapping.columns else np.full(len(row_ids), '')
     open_files = open_rows['map_file'].astype(str).to_numpy() if 'map_file' in open_rows.columns else np.full(len(open_rows), '')
     offsets, anchor_rts, anchor_acid, anchor_rows, anchored, drift, fixed = [], [], [], [], set(), None, {}
+    # but they anchor the shift of the others, each composition and map RT (isomers are peaks of their own, charge states one) by its own RT minus the map's
+    # RT (map_rt), before any input: such an RT is its ion's apex, confirmed by MS2, where a composition's strongest input can be another isomer's peak. As
+    # anchors read only inputs of rows without such an RT, runs whose RT_<run> cells covered most rows kept under 5 and no shift, and every other row (charge
+    # states and adduct ions without MS2 of their own, rows without a confirmed maximum) sat at its bare map RT, as far off as the run's drift
+    map_given = pd.to_numeric(mapping.loc[row_ids, 'map_rt'], errors = 'coerce').to_numpy(float) if 'map_rt' in mapping.columns else np.full(len(row_ids), np.nan)
+    for k in np.flatnonzero(own & ~np.isnan(map_rts) & ~np.isnan(map_given)):
+        if (keys[k], map_given[k]) not in anchored:
+            anchored |= {keys[k], (keys[k], map_given[k])}
+            offsets.append(map_rts[k] - map_given[k])
+            anchor_rts.append(map_given[k])
+            anchor_acid.append(acidic_count(dict(keys[k])))
+            anchor_rows.append(k)
+    # (an own row's drift is read at its map RT, as its anchor's: at its own RT the RT term gave it, and the switch check below, another shift)
+    map_x = np.where(own & ~np.isnan(map_given), map_given, map_rts)
     for k in range(len(keys)):
         if not np.isnan(map_rts[k]) and not own[k] and single[keys[k]] == 1 and keys[k] not in anchored:
             hit = next((i for i in first.get(keys[k], []) if fits[i, k]), None)
@@ -314,7 +329,7 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
                 coefs = iter(beta[1 + len(extra):])
                 b, c = float(next(coefs)) if keep_rt else 0.0, float(next(coefs)) if keep_acid else 0.0
                 # The RT term only within the anchors' RT range: beyond it the slope of a few minutes of anchors moved rows 15 min later by 1-3 min
-                row_shift = beta[0] + per_map @ beta[1:1 + len(extra)] + b * np.clip(map_rts, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
+                row_shift = beta[0] + per_map @ beta[1:1 + len(extra)] + b * np.clip(map_x, x.min(), x.max()) + c * np.minimum(n_acid, a.max())
                 # (rows without structure take the same drift at their own RT, with the acidic residues of the composition an input gives them)
                 drift = lambda acid, beta = beta, b = b, c = c, lo = x.min(), hi = x.max(), amax = a.max(): (
                     beta[0] + sum(beta[1 + j] * (open_files == f) for j, f in enumerate(extra)) + b * np.clip(open_rts, lo, hi) + c * np.minimum(acid, amax))
@@ -347,9 +362,16 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         row_key, input_key = np.array([ids.setdefault(k, len(ids)) for k in keys]), np.array([ids.get(k, -1) for k in input_keys])
         at_row = (fits | other_charge) & passing[:, None] & (input_key[:, None] == row_key[None, :])
         counted, input_rts = ~np.isnan(given_rts) & ~own, inputs['RT'].to_numpy(dtype = float)
+        # (an own row anchoring by its map RT counts as placed where the shift puts that RT within rt_window of its own RT, its peak: without it, the
+        # inputs of the one or two other rows of a mostly own map decided against every own row, and shifts of 1-2.5 min that the own rows agreed on
+        # went back to none; but only where its offset lies within rt_window of the anchors' median, as one off the map's gradient is a map RT carried
+        # over from another shift or another isomer's apex: three such rows 0.65 min before their map RT, against ten anchors 0.6 min after it, put a
+        # run back to no shift and every other row 0.65 min off its peak)
+        own_at = own & ~np.isnan(map_given) & (np.abs(given_rts - map_given - np.median(offsets)) <= rt_window)
         switched = False
         for f in np.unique(files[counted]):
-            placed = lambda shift: int((at_row & (np.abs(input_rts[:, None] - (given_rts + np.where(own, 0.0, shift))[None, :]) <= rt_window)).any(axis = 0)[counted & (files == f)].sum())
+            placed = lambda shift: int((at_row & (np.abs(input_rts[:, None] - (given_rts + np.where(own, 0.0, shift))[None, :]) <= rt_window)).any(axis = 0)[counted & (files == f)].sum()
+                                       + (np.abs(map_given + shift - given_rts) <= rt_window)[own_at & (files == f)].sum())
             best, now = max([float(np.median(offsets)), 0.0], key = placed), placed(row_shift)
             if placed(best) >= max(1.1 * now, now + 1):
                 row_shift, past, switched, fixed[f] = np.where(files == f, best, row_shift), past & (files != f), True, best

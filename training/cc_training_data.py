@@ -110,6 +110,8 @@ def maps_for_run(project, path, maps_dir):
             rows = df[pd.to_numeric(df[cols[0]], errors = 'coerce') > 0].copy()
             if f'RT_{cols[0]}' in rows.columns:
                 own = pd.to_numeric(rows[f'RT_{cols[0]}'], errors = 'coerce')
+                # (the map's RT stays beside it: how far the run's own RT of a row lies from it is the run's drift there, which moves the other rows)
+                rows['map_rt'] = pd.to_numeric(rows['RT'], errors = 'coerce')
                 rows['RT'] = own.where(own > 0, rows['RT'])
                 # RTs read in this run itself, which label_inputs never drops
                 rows['rt_own'] = own > 0

@@ -2975,8 +2975,8 @@ def assign_candidate_structures(df_in, df_glycan_in, comp_struct_map, topo_struc
     multi_all = [{} for _ in red_masses]
     alts = [[] for _ in red_masses]
     for pool_df, pool_comp_map, pool_topo_map, fallback in pools:
-        # A caller reading one spectrum at a time (acquisition.SpectrumPath) keeps each database's compositions and masses in masses: they depend only
-        # on the run's settings, and making them was most of a single spectrum's time
+        # A caller reading one spectrum at a time keeps each database's compositions and masses in masses: they depend only on the run's settings, and
+        # making them was most of a single spectrum's time
         if masses is not None and (id(pool_df), fallback) in masses:
             comps_in, comp_masses = masses[(id(pool_df), fallback)]
         else:
@@ -3260,24 +3260,36 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         for key, p, masses in [x for y in ms3_rows for x in y]:
             pools.setdefault(key, (p, set()))[1].update(masses)
         structs.append((rows, rounded_mass_rows, ms3_rows, list(pools), strong_counts, weights, fixed_charge, spare_acid))
-        jobs += [(CandyCrumbs, (glycan, unq_rounded_masses, fragment_tolerance),
-                  dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative") and not fixed_charge,
-                       disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0) + offset,
-                       sample_prep = sample_prep, ms3_precursor = ms3_precursor, sialic_derivatization = sialic_derivatization, mass_threshold_ppm = fragment_ppm,
-                       metal_cations = precursor_metals(adducts)))
-                 for ms3_precursor, unq_rounded_masses in pools.values()]
+        crumbs_kwargs = dict(simplify = False, charge = int(multiplier * abs(row_charge)), disable_global_mods = (not is_adduct or mode == "negative") and not fixed_charge,
+                             disable_X_cross_rings = True, disable_A_cross_rings = multiplier > 0, max_cleavages = 2, mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0) + offset,
+                             sample_prep = sample_prep, sialic_derivatization = sialic_derivatization, mass_threshold_ppm = fragment_ppm, metal_cations = precursor_metals(adducts))
+        # each MS3 pool also reads its isolated fragment as an MS2 fragment: an MS3 annotation names that fragment's cleavages too (DC names stay relative to
+        # the whole glycan), which are not the MS3 spectrum's own
+        for ms3_precursor, unq_rounded_masses in pools.values():
+            jobs.append((CandyCrumbs, (glycan, unq_rounded_masses, fragment_tolerance), dict(crumbs_kwargs, ms3_precursor = ms3_precursor)))
+            if ms3_precursor is not None:
+                jobs.append((CandyCrumbs, (glycan, [ms3_precursor], fragment_tolerance), crumbs_kwargs))
     # Every CandyCrumbs call first, so that n_jobs processes can share them
     results = iter(run_jobs(jobs, n_jobs))
     for rows, rounded_mass_rows, ms3_rows, keys, strong_counts, weights, fixed_charge, spare_acid in structs:
         tester_mass_scores, losses = {}, set()
         for key in keys:
             cc_out = next(results)
+            # The isolated fragment's least-cleaved readings, whose cleavages an MS3 annotation inherits
+            parents = [set(a) for a in parent['Domon-Costello nomenclatures']] if key is not None and (parent := next(iter(next(results).values()))) else []
+            parents = [a for a in parents if len(a) == min(map(len, parents))]
             # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
-            # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations
+            # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations of the cleavages made in
+            # MS3 (every MS3 fragment of a cross-ring MS2 fragment named that cross-ring with its own cleavage and went uncounted)
             for _k, _v in cc_out.items():
                 if _v:
                     _filtered = []
                     for ant in _v['Domon-Costello nomenclatures']:
+                        if parents:
+                            inherited = max((a for a in parents if a <= set(ant)), key = len, default = set())
+                            ant = [a for a in ant if a not in inherited]
+                            if not ant:
+                                continue
                         prefs = [a.split('_')[0][-1] for a in ant]
                         if ('A' in prefs or 'X' in prefs) and len(prefs) > 1:
                             continue
@@ -3898,7 +3910,8 @@ def canonicalize_biosynthesis(df_out):
 
 
 def pair_spectra(df, max_scans = 30, ppm = 10.0):
-    """pairs each HCD scan with the EThcD, ETD, ECD, or ETciD scan it triggered in a product-triggered method: the next such scan of the same precursor\n
+    """pairs each HCD scan with the EThcD, ETD, ECD, or ETciD scan of its precursor: in a product-triggered method the next such scan of the same precursor, in a method that
+    acquires the electron-activated scan first the one before\n
     | Arguments:
     | :-
     | df (dataframe): MS2 spectra of one run, as load_spectra_filepath returns them, with activation and scan
@@ -3907,7 +3920,8 @@ def pair_spectra(df, max_scans = 30, ppm = 10.0):
     | Returns:
     | :-
     | Returns the HCD scans of df (all scans but the electron-activated ones in a run without HCD; the electron-activated ones, unpaired, in a run of nothing else), with their
-    | partners' peaks, activation, analyzer, and scan number in paired_peak_d, paired_activation, paired_analyzer, and paired_scan
+    | partners' peaks, activation, analyzer, and scan number in paired_peak_d, paired_activation, paired_analyzer, and paired_scan; a run whose electron-activated scans come
+    | before their HCD scans (more HCD scans find a partner within max_scans before than after) is paired backwards, each HCD scan with the nearest earlier one
     """
     df = df.dropna(subset = ['precursor_charge']).sort_values('scan')
     # Survey scans stay with the reader's table: pandas compares attrs when runs are concatenated, which raises on the arrays of different runs
@@ -3920,12 +3934,26 @@ def pair_spectra(df, max_scans = 30, ppm = 10.0):
     # CID scans that an HCD scan triggered (HCD-pd-CID) are not the run's HCD spectra; a run without HCD keeps its other scans
     hcd = (hcd[hcd['activation'].eq('HCD')] if hcd['activation'].eq('HCD').any() else hcd).copy()
     e_scan, e_mz, e_z = electron['scan'].values, electron['m/z'].values, electron['precursor_charge'].values
-    partner = {}
-    for i, scan, mz, z in zip(hcd.index, hcd['scan'].values, hcd['m/z'].values, hcd['precursor_charge'].values):
-        for j in range(np.searchsorted(e_scan, scan), np.searchsorted(e_scan, scan + max_scans)):
-            if abs(e_mz[j] - mz) <= mz * ppm * 1e-6 and e_z[j] == z:
-                partner[i] = electron.index[j]
-                break
+    def partners(later):
+        # The nearest electron-activated scan of the same precursor within max_scans after the HCD scan (later) or before it
+        found = {}
+        for i, scan, mz, z in zip(hcd.index, hcd['scan'].values, hcd['m/z'].values, hcd['precursor_charge'].values):
+            if later:
+                window = range(np.searchsorted(e_scan, scan), np.searchsorted(e_scan, scan + max_scans))
+            else:
+                window = reversed(range(np.searchsorted(e_scan, scan - max_scans), np.searchsorted(e_scan, scan)))
+            for j in window:
+                if abs(e_mz[j] - mz) <= mz * ppm * 1e-6 and e_z[j] == z:
+                    found[i] = electron.index[j]
+                    break
+        return found
+    partner = partners(True)
+    # A method that acquires each precursor's electron-activated scan before its HCD scan (the Fusion's decision tree of the Drosophila OGA runs of PXD025344, ETciD then
+    # HCD, the partner 1-4 scans earlier for every HCD scan, of which 64 of 13,410 had paired) is paired backwards: a run's pairs go the way more of its HCD scans find one
+    if len(partner) < len(hcd):
+        earlier = partners(False)
+        if len(earlier) > len(partner):
+            partner = earlier
     rows = pd.Series(partner, dtype = object)
     hcd['paired_peak_d'] = pd.Series([df.at[j, 'peak_d'] for j in rows.values], index = rows.index, dtype = object).reindex(hcd.index)
     for col in ('activation', 'analyzer', 'scan'):
@@ -7416,16 +7444,21 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         repr_composition = ('composition', 'first'),
         repr_predictions = ('predictions', 'first'),
         repr_top1 = ('top1_pred', 'first'),
+        repr_confidence = ('confidence', 'max'),
         present_in = ('condition_label', set)
-    ).reset_index() if finalized else pd.DataFrame(columns = ['present_in'])
+    ).reset_index() if finalized else pd.DataFrame(columns = ['present_in', 'repr_confidence'])
     for file_label, spectra_filepath in zip(file_labels, spectra_filepath_list):
         df_out, spectra_out = inference_dfs[file_label]
         file_mode = file_modes[file_label]
         # Cross-file MS1 gap filling: propagate isomer groups to files without MS2 for them when MS1 shows their peak
         # (only groups seen in a file of this ion mode: the m/z of the other mode's ions means nothing in this file's MS1). From 10 files on, only groups
         # that at least two files report: the gap rows of single-file groups pile up with batch size and replicate runs disagree on them (detection
-        # Jaccard of technical replicates 0.72 at 12 runs, 0.65 at 91, against 0.72-0.74 at every size with two)
-        missing = master[master['present_in'].apply(lambda s: file_label not in s and any(file_modes[f] == file_mode for f in s) and len(s) >= (2 if len(file_labels) >= 10 else 1))]
+        # Jaccard of technical replicates 0.72 at 12 runs, 0.65 at 91, against 0.72-0.74 at every size with two). And only groups whose structure a file with MS2
+        # holds more likely right than wrong (calibrated confidence >= 0.5): a gap row has no spectrum of its own and is only as right as the rows it copies, and
+        # below 0.5 those are mostly peaks without that glycan, whose MS1 peak the gap search finds all the same (gap rows of such groups matched their glycan in
+        # a quarter to a third of cases, those of the other groups in about half)
+        missing = master[master['present_in'].apply(lambda s: file_label not in s and any(file_modes[f] == file_mode for f in s) and len(s) >= (2 if len(file_labels) >= 10 else 1)) &
+                         ~(master['repr_confidence'] < 0.5)]
         if ms1_paths[file_label] and not missing.empty:
             with np.load(ms1_paths[file_label]) as ms1_file:
                 ms1 = (ms1_file['rts'], ms1_file['mzs'], ms1_file['ints'], ms1_file['offsets'])

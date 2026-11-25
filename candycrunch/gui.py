@@ -47,7 +47,7 @@ except ImportError as error:
         ctypes.windll.user32.MessageBoxW(None, message, 'CandyCrunch', 0x10)
     raise ImportError(message) from error
 from candycrunch import __version__, references
-from candycrunch.utils import PALETTE, one_file_per_run, vc
+from candycrunch.utils import PALETTE, format_composition, one_file_per_run, vc
 from viscose.qt import DPI, Canvas, ChartEvent, ChartView, Target, Toolbar
 
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch. Only the
@@ -160,6 +160,8 @@ THEMES = {'light': {'ink': INK, 'muted': MUTED, 'lilac': LILAC, 'lilac_light': L
                    'alternate': '#1a161f', 'button': '#2b2532', 'highlight': '#7a4fa3', 'link': '#c396ed', 'tip': '#2b2532', 'run': CANDY, 'run_hover': '#a91c34',
                    'run_disabled': '#4a2630', 'line': '#3a3243', 'line_soft': '#2c2633', 'grid': '#2a2430', 'handle': '#2a2430', 'bar': '#634a85', 'bar_ms1': '#2b2334'}}
 THEME = dict(THEMES['light'], name = 'light')
+# How the app writes compositions in its tables, detail pane, copies, and exports (View > Compositions as; QSettings 'composition_format')
+DISPLAY = {'composition': 'names'}
 # Grays charts take beside their palette's colors, and their counterparts on a dark page (_gray)
 DARK_GRAYS = {'#cccccc': '#4f4857', '#dddddd': '#3a3441', '#b8b0c0': '#6e6578'}
 # glycowork's modules import each other in a cycle, so two threads importing them at once (the drawing, annotation, and taxonomy threads all
@@ -1218,11 +1220,25 @@ def _formula(composition, settings):
 
 def _composition(composition):
     with IMPORT_LOCK:
-        from glycowork.glycan_data.loader import stringify_dict
-        from glycowork.motif.processing import canonicalize_composition
-    # sialic acids of known linkage (Neu5Ac_a2-6, from a linkage-specific derivatization) are written as the E and L of shorthand compositions (H5N4E1L1)
-    return (canonicalize_composition(composition, as_string = True) if any('_a2-' in k for k in composition) else stringify_dict(composition)) if isinstance(
-        composition, dict) and composition else ''
+        return format_composition(composition) if isinstance(composition, dict) and composition else ''
+
+
+def _shown_composition(composition):
+    """A composition in the notation the user chose (View > Compositions as), as the tables, the detail pane, copies, and exports write it; drawings and
+    CandyCrumbs take _composition's names"""
+    with IMPORT_LOCK:
+        return format_composition(composition, DISPLAY['composition']) if isinstance(composition, dict) and composition else ''
+
+
+def _composition_menu(menu, choose):
+    """Fills menu with the notations of compositions, the one in use checked; choose takes the one picked (View > Compositions as, and the right-click
+    menu of the Composition column's header)"""
+    menu.clear()
+    for style, text in (('names', 'Names: Hex5HexNAc4dHex1'), ('letters', 'One-letter codes: H5N4F1 (A Neu5Ac, G Neu5Gc, S sulfate)')):
+        action = menu.addAction(text, lambda *_, style = style: choose(style))
+        action.setCheckable(True)
+        action.setChecked(style == DISPLAY['composition'])
+        action.setData(style)
 
 
 def _draw_in_background(owner, write, path):
@@ -2648,6 +2664,9 @@ class ResultsView(QWidget):
         # Column widths from 200 rows (Qt's default 1000): the same widths, and a table of 3,000 rows opens in half the time
         self.table.horizontalHeader().setResizeContentsPrecision(200)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        # A right click on the Composition column's header switches the notation, as View > Compositions as does
+        self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.horizontalHeader().customContextMenuRequested.connect(self.header_menu)
         self.structure_delegate, self.bar_delegate = StructureDelegate(images, self.table), BarDelegate(self.table)
         # Only while the table has focus, so Ctrl+C in the structure box still copies its text
         QShortcut(QKeySequence.Copy, self.table, self.copy_rows).setContext(Qt.WidgetShortcut)
@@ -2790,7 +2809,7 @@ class ResultsView(QWidget):
         self.quant.run.currentIndexChanged.connect(self.show_quant)
         self.quant.edited.connect(self.integrate)
         self.exported.connect(lambda path, error: QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}') if error else self.status.emit(f'Exported {os.path.basename(path)}'))
-        self.map_points = None
+        self.map_points, self.map_chromatogram = None, None
         self.map.canvas.pressed.connect(self.map_pressed)
         images.ready.connect(self.image_ready)
 
@@ -2876,8 +2895,8 @@ class ResultsView(QWidget):
             from glycowork.motif.tokenization import calculate_adduct_mass
             from glycowork.motif.processing import canonicalize_composition
         structures = list(df['top1_pred'])
-        compositions = [_composition(c) for c in df['composition']]
-        # The filter also finds a composition by its shorthand (H5N4F1A2), as glycomics papers write them: typed so, it found nothing
+        compositions, shown = [_composition(c) for c in df['composition']], [_shown_composition(c) for c in df['composition']]
+        # The filter finds a composition by its names and by its one-letter codes (H5N4F1A2), whichever notation the table shows
         shorthands = [canonicalize_composition(c, as_string = True) if isinstance(c, dict) and c else '' for c in df['composition']]
         notes_tip = 'Notes from the pipeline, adducts, and your curation'
         formulas = self.formulas(df)
@@ -2887,8 +2906,10 @@ class ResultsView(QWidget):
         by_mass[np.lexsort((df['RT'].to_numpy(dtype = float), [masses.get(f, np.inf) for f in formulas]))] = np.arange(len(df))
         columns = [{'title': 'Structure', 'kind': 'structure', 'raw': [s if isinstance(s, str) else None for s in structures],
                     'text': [s if isinstance(s, str) else '' for s in structures], 'image': [s if isinstance(s, str) else c or None for s, c in zip(structures, compositions)]},
-                   {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions,
-                    'search': [f'{c} {s}' for c, s in zip(compositions, shorthands)]},
+                   {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in shown], 'text': shown,
+                    'search': [f'{c} {s}' for c, s in zip(compositions, shorthands)],
+                    'tip': 'Monosaccharide composition; right-click here, or use View > Compositions as, to write it by names (Hex5HexNAc4dHex1) or by one-letter '
+                    'codes (H5N4F1), in the tables and in exports'},
                    {'title': 'Formula', 'kind': 'text', 'raw': formulas, 'text': formulas, 'sort': [int(k) if f else None for k, f in zip(by_mass, formulas)],
                     'tip': 'Elemental formula of the neutral glycan as measured (reducing end and derivatization included), e.g., to extract its ions with any adduct '
                     'in Skyline or MZmine. Sorts by mass, then RT, so that a glycan\'s charge states, adducts, and isomers, and its isobars, stand together'},
@@ -3043,7 +3064,7 @@ class ResultsView(QWidget):
         structure = df['top1_pred'].iat[row]
         self.structure.setPlainText(structure if isinstance(structure, str) else 'No structure assigned')
         self.structure.setFixedHeight(int(self.structure.document().size().height() * self.structure.fontMetrics().lineSpacing()) + 10)
-        self.composition.setText(_composition(df['composition'].iat[row]))
+        self.composition.setText(_shown_composition(df['composition'].iat[row]))
         self.update_drawing()
         facts = [('m/z', _fmt(df['m/z'].iat[row], 4)), ('Charge', _fmt(df['charge'].iat[row], 0)), ('RT', f'{_fmt(df["RT"].iat[row], 2)} min')]
         if self.dataset.currentData() == FEATURES:
@@ -3344,8 +3365,31 @@ class ResultsView(QWidget):
 
     def draw_map(self):
         df, figure = self.frame, self.map.new_figure()
-        ax = figure.add_axes([0.08, 0.14, 0.78, 0.8])
-        if self.dataset.currentData() == FEATURES:
+        features = self.dataset.currentData() == FEATURES
+
+        def chromatogram(table):
+            # A run's glycan chromatogram: every row's integrated MS1 peak (its isotope envelope above baseline over its range, with the charge states and
+            # adduct ions added to it), scaled to its part of the abundance and summed over the run's survey scans, so a row's share of the area is its
+            # abundance; rows excluded by curation are left out, and a run without survey scans has none
+            excluded = table['excluded'].astype(bool) if 'excluded' in table.columns else [False] * len(table)
+            records = [d for x, e in zip(table['xic'] if 'xic' in table.columns else [], excluded) if isinstance(x, list) and not e for d in x if 0 <= d['left'] < d['right']]
+            if not records:
+                return None
+            trapezoid, grid = getattr(np, 'trapezoid', None) or np.trapz, np.unique(np.concatenate([d['times'] for d in records])).astype(float)
+            total = np.zeros(len(grid))
+            for d in records:
+                span = slice(d['left'], d['right'] + 1)
+                times = d['times'][span].astype(float)
+                shape = np.clip(d['trace'][span] - d['baseline'], 0, None) + sum(np.clip(o['trace'][span] - o['baseline'], 0, None) for o in d['others'] if o['added'])
+                area = trapezoid(shape, times)
+                if area > 0:
+                    total += np.interp(grid, times, shape * (d['area'] + sum(o['area'] for o in d['others'])) * d['scale'] / area, left = 0, right = 0)
+            return grid, total
+
+        runs = [(run, table) for run, (table, _) in self.payload['tables'].items()] if features else [(None, df)]
+        traces = [(run, *c) for run, c in ((run, chromatogram(table)) for run, table in runs) if c is not None]
+        ax = figure.add_axes([0.08, 0.14, 0.78, 0.5 if traces else 0.8])
+        if features:
             color, color_label = df['n_files_ms2'].astype(float).values, 'Runs with MS2'
             size = df[[run for run in self.payload['tables'] if run in df.columns]].fillna(0).mean(axis = 1).values
         else:
@@ -3361,6 +3405,31 @@ class ResultsView(QWidget):
         self.map_points = Target(ax, df['RT'].values, df['m/z'].values, radius = 4.0)
         ax.set_xlabel('Retention time (min)')
         ax.set_ylabel('m/z')
+        self.map_chromatogram = None
+        if traces:
+            # Above the map on its time axis. A feature table's runs at their own retention times (before alignment), where their drift shows, each scaled to
+            # its highest point, as runs differ in loading and spray (one run 10x another's left it flat); up to four told apart by shade and named
+            top = figure.add_axes([0.08, 0.7, 0.78, 0.22])
+            named = len(traces) <= 4
+            for (run, grid, total), shade in zip(traces, ['a1', 'b1', 'a3', 'b3'] if named else ['a2'] * len(traces)):
+                if features:
+                    top.plot(grid, total / (total.max() or 1) * 100, color = shade, lw = 0.8, alpha = 1.0 if named else 0.5, label = run if named else None)
+                else:
+                    top.fill_between(grid, total, 0.0, color = 'a1', alpha = 0.35)
+                    top.plot(grid, total, color = 'ink', lw = 0.8)
+            rts = np.concatenate([df['RT'].to_numpy(dtype = float)] + [grid[total > 0] for _, grid, total in traces])
+            lo, hi = np.nanmin(rts), np.nanmax(rts)
+            pad = 0.02 * (hi - lo) or 0.5
+            ax.set_xlim(lo - pad, hi + pad)
+            top.set_xlim(lo - pad, hi + pad)
+            top.set_ylim(0.0, 108.0 if features else max(total.max() for _, _, total in traces) * 1.08 or 1.0)
+            top.tick_params('x', labels = False)
+            top.set_ylabel('% of run maximum' if features else 'Intensity')
+            top.set_title('Glycan chromatogram of each run, at its own retention times' if features else 'Glycan chromatogram: the integrated peaks of all glycans, summed', size = 8)
+            if features and named:
+                top.legend('upper right')
+            if not features:
+                self.map_chromatogram = (top, traces[0][1], traces[0][2])
         self.map.canvas.draw_idle()
 
     def map_pressed(self, event):
@@ -3370,8 +3439,13 @@ class ResultsView(QWidget):
 
     def draw_selection(self):
         df, row = self.frame, self.row
-        # A ring the canvas paints over the map's kept image, so selecting another peak draws nothing again (a full draw of the map took 0.2-0.5 s on every row change)
-        self.map.canvas.rings = [(self.map_points.ax, df['RT'].iat[row], df['m/z'].iat[row])]
+        # A ring the canvas paints over the map's kept image, so selecting another peak draws nothing again (a full draw of the map took 0.2-0.5 s on every row
+        # change), and one on the run's chromatogram where the peak stands
+        rings = [(self.map_points.ax, df['RT'].iat[row], df['m/z'].iat[row])]
+        if self.map_chromatogram is not None:
+            top, grid, total = self.map_chromatogram
+            rings.append((top, df['RT'].iat[row], float(np.interp(df['RT'].iat[row], grid, total))))
+        self.map.canvas.rings = rings
         self.map.canvas.update()
         if self.dataset.currentData() != FEATURES or not self.across.isVisible():
             return
@@ -3441,8 +3515,8 @@ class ResultsView(QWidget):
             return
         expected = self.frame['composition'].iat[self.row]
         if isinstance(expected, dict) and expected and composition != expected:
-            answer = QMessageBox.question(self, 'Enter structure', f'{structure} is {_composition(composition)}, but this peak was matched to '
-                                          f'{_composition(expected)}. Assign it anyway?')
+            answer = QMessageBox.question(self, 'Enter structure', f'{structure} is {_shown_composition(composition)}, but this peak was matched to '
+                                          f'{_shown_composition(expected)}. Assign it anyway?')
             if answer != QMessageBox.Yes:
                 return
         self.curate(structure, 'entered by hand')
@@ -3469,7 +3543,7 @@ class ResultsView(QWidget):
         # The IUPAC string alone, as glycowork and databases take it
         structure = self.frame['top1_pred'].iat[self.row]
         menu.addAction('Copy structure' if isinstance(structure, str) else 'Copy composition', lambda: QApplication.clipboard().setText(
-            structure if isinstance(structure, str) else _composition(self.frame['composition'].iat[self.row])))
+            structure if isinstance(structure, str) else _shown_composition(self.frame['composition'].iat[self.row])))
         menu.addAction(('Include again' if self.frame['excluded'].iat[self.row] else 'Exclude') + '\t' +
                        QKeySequence(QKeySequence.Delete).toString(QKeySequence.NativeText), self.toggle_excluded)
         menu.addAction('Enter structure…', self.enter_structure)
@@ -3504,10 +3578,28 @@ class ResultsView(QWidget):
         """Each row's formula (_formula) with its experiment's settings, and its own reducing end where the runs have several side by side"""
         return [_formula(c, _row_settings(self.payload['settings'], df, r)) for r, c in enumerate(df['composition'])]
 
+    def set_composition_style(self, style):
+        """View > Compositions as, or the Composition header's menu: the notation of compositions in every table, the detail pane, copies, and exports, kept
+        for the next start"""
+        DISPLAY['composition'] = style
+        QSettings().setValue('composition_format', style)
+        if self.payload is not None:
+            self.show_dataset(keep_row = self.row)
+
+    def header_menu(self, position):
+        header = self.table.horizontalHeader()
+        section = header.logicalIndexAt(position)
+        if 0 <= section < len(self.model.columns) and self.model.columns[section]['title'] == 'Composition':
+            menu = QMenu(self)
+            _composition_menu(menu, self.set_composition_style)
+            menu.exec(header.mapToGlobal(position))
+
     def export_frame(self, df):
-        """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated, a formula after the composition"""
+        """What gets written: curated rows as edited, excluded rows dropped, the curation column only if anything was curated, compositions as the tables
+        show them, a formula after the composition"""
         out = df.drop(columns = ['ms3', 'xic', 'confidence_terms', '_top1'], errors = 'ignore')
         out.insert(out.columns.get_loc('composition') + 1, 'formula', self.formulas(df))
+        out['composition'] = [_shown_composition(c) for c in out['composition']]
         out = out[~out['excluded'].astype(bool)].drop(columns = 'excluded')
         with IMPORT_LOCK:
             references.reference_index()
@@ -4600,6 +4692,10 @@ class MainWindow(QMainWindow):
         self.dark_action.setCheckable(True)
         self.dark_action.setChecked(THEME['name'] == 'dark')
         self.dark_action.toggled.connect(self.set_theme)
+        # Names, or one-letter codes as the user's other tools may write compositions (e.g., Skyline lists in H5N4F1); kept for the next start
+        DISPLAY['composition'] = 'letters' if self.store.value('composition_format') == 'letters' else 'names'
+        compositions = view_menu.addMenu('Compositions as')
+        compositions.aboutToShow.connect(lambda: _composition_menu(compositions, self.results.set_composition_style))
         help_menu = self.menuBar().addMenu('&Help')
         help_menu.addAction('CandyCrunch on GitHub', lambda: QDesktopServices.openUrl(QUrl('https://github.com/BojarLab/CandyCrunch')))
         help_menu.addAction('Report a bug…', lambda: self.open_report())

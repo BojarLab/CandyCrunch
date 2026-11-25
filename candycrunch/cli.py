@@ -48,6 +48,7 @@ def build_parser():
     parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition in each file; default: 5', type=int, default=5)
     parser.add_argument('--n_jobs', help='Number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default: 1', type=int, default=1)
     parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions; default: False', type=str_to_bool, required=False)
+    parser.add_argument('--composition_format', help="How the output tables write compositions: dict ({'Hex': 5, 'HexNAc': 4, 'dHex': 1}), names (Hex5HexNAc4dHex1), or letters (H5N4F1; A Neu5Ac, G Neu5Gc, S sulfate); default: dict", type=str, choices=['dict', 'names', 'letters'], default='dict')
     parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)
     return parser
 
@@ -74,7 +75,7 @@ def main(argv=None):
     filepaths = [f for p in map(os.path.normpath, args.spectra_filepath) for f in ([os.path.join(p, x) for x in sorted(os.listdir(p)) if x.lower().endswith(('.raw', '.wiff', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc', '.mzml.gz', '.mzxml.gz', '.mgf.gz')) and not x.startswith('._')]
                                                                               if os.path.isdir(p) and not p.lower().endswith(('.d', '.raw')) else [p])]
     # A run given in several files is read once: from its .cc, else from its vendor file rather than a copy converted from it
-    from candycrunch.utils import one_file_per_run
+    from candycrunch.utils import format_composition, one_file_per_run
     filepaths = one_file_per_run(filepaths)
     if not filepaths:
         parser.error('no .raw/.wiff/.d/.mzML/.mzXML/.mzdata/.mgf/.cc files (or gzipped .mzML/.mzXML/.mgf) found in --spectra_filepath')
@@ -90,7 +91,7 @@ def main(argv=None):
     # wrap_inference takes a free reducing end as a custom label without mass, as the app does
     ends = ['custom' if m == 'unreduced' else m for m in ends]
     args.modification = (ends[0] if len(ends) == 1 else ends) if ends else None
-    args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}
+    args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'composition_format', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}
     # wrap_inference takes the ion mode from the sign of max_charge
     if args.mode or args.max_charge:
         args_dict['max_charge'] = abs(args.max_charge or 3) * (1 if args.mode == 'positive' else -1)
@@ -117,6 +118,8 @@ def main(argv=None):
                 df_out['ms3'] = [[(round(p, 4), {round(float(mz), 4): float(f'{i:.4g}') for mz, i in d.items()}) for p, d in x] if isinstance(x, list) else x for x in df_out['ms3']]
         # Per-file tables are indexed by m/z; the combined feature table has a plain row index that is not worth writing
         df_flat = add_references(df_out.reset_index() if df_out.index.name else df_out)
+        if 'composition' in df_flat.columns:
+            df_flat['composition'] = [format_composition(c, args.composition_format) for c in df_flat['composition']]
         if path.endswith('.csv'):
             df_flat.to_csv(path, index=False)
         if args.plot_glycans and 'top1_pred' in df_flat.columns:

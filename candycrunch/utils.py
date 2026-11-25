@@ -1260,3 +1260,22 @@ def mz_order(mzs, rts, charges, compositions):
     ranks = np.empty(len(mzs), dtype = int)
     ranks[np.lexsort((mzs, rts, heads, mzs[heads]))] = np.arange(len(mzs))
     return ranks
+
+
+def format_composition(composition, style = 'names'):
+    """a composition as a table writes it: 'names' by monosaccharide names and counts (Hex5HexNAc4dHex1), 'letters' by the one-letter codes of glycomics
+    papers (H5N4F1; A Neu5Ac, G Neu5Gc, S sulfate, P phosphate), 'dict' as the dictionary itself ({'Hex': 5, 'HexNAc': 4, 'dHex': 1}); sialic acids of known
+    linkage (from a linkage-specific derivatization) are the E and L of the one-letter codes in names and letters alike (H5N4E1L1)\n
+   | Arguments:
+   | :-
+   | composition (dict): a composition, as wrap_inference gives it
+   | style (str): 'names', 'letters', or 'dict'; default:'names'\n
+   | Returns:
+   | :-
+   | Returns the composition in that style; anything that is no composition (a row without one) as it is
+   """
+    if style == 'dict' or not isinstance(composition, dict) or not composition:
+        return composition
+    from glycowork.glycan_data.loader import stringify_dict
+    from glycowork.motif.processing import canonicalize_composition
+    return canonicalize_composition(composition, as_string = True) if style == 'letters' or any('_a2-' in k for k in composition) else stringify_dict(composition)

@@ -6,14 +6,10 @@ import pandas as pd
 
 
 def _row_label(structure, composition):
-    from glycowork.glycan_data.loader import stringify_dict
-    from glycowork.motif.processing import canonicalize_composition
+    from candycrunch.utils import format_composition
     if isinstance(structure, str) and structure:
         return structure
-    if not isinstance(composition, dict) or not composition:
-        return None
-    # sialic acids of known linkage (from a linkage-specific derivatization) as the E and L of shorthand compositions, as the app writes them
-    return canonicalize_composition(composition, as_string = True) if any('_a2-' in k for k in composition) else stringify_dict(composition)
+    return format_composition(composition) if isinstance(composition, dict) and composition else None
 
 
 def abundance_table(features, runs, motifs = False, include_flagged = False):

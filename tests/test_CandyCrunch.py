@@ -1132,6 +1132,32 @@ def test_label_inputs_past_anchors():
     assert np.allclose(run_rt[:13], run_rts[:13], atol = 0.01) and abs(run_rt[13] - run_rts[13]) < 1e-9
 
 
+def test_label_inputs_own_anchors():
+    # A run whose map rows carry its own RTs (RT_<run>, rt_own) for all but two rows, each 0.6 min after the map's RT (map_rt), as are the peaks of the
+    # other two. The two rows' inputs alone are too few to anchor a shift (they stay at their map RT); with each own row anchoring by its own RT minus
+    # its map RT, they move 0.6 min onto their peaks, while the own rows keep their RTs
+    import training.pipeline_labels as pl
+    from glycowork.motif.tokenization import glycan_to_composition
+    chain = lambda m, h: 'Gal(b1-4)GlcNAc(b1-3)' * m + 'Gal(b1-4)' * h + 'Glc'
+    glycans = [chain(m, h) for m in range(2, 5) for h in range(3)]
+    map_rts = [10.0 + 2 * k for k in range(9)]
+    run_rts = [t + 0.6 for t in map_rts]
+    masses = [300.0 + 37 * k for k in range(9)]
+    own = [True] * 7 + [False] * 2
+    inputs = pd.DataFrame({'spec_id': range(9), 'RT': run_rts, 'intensity': 1e5, 'peak_d': [{50.0: 1.0}] * 9, 'rt_range': [(t, t) for t in run_rts], 'num_spectra': 3,
+                           'composition': [glycan_to_composition(g) for g in glycans], 'charge': 1, 'annotation_score': 12.0,
+                           'model_input': [np.zeros((3, 1), np.float32)] * 9, 'RT2': 0.3, 'glycan_type': 1, 'compositional_vector': [np.zeros(12)] * 9},
+                          index = pd.Index(masses, name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    mapping = pd.DataFrame({'Mass': masses, 'RT': [r if o else t for r, t, o in zip(run_rts, map_rts, own)], 'glycan': glycans, 'rt_own': own})
+    labelled, _ = pl.label_inputs(inputs, mapping)
+    assert labelled.attrs['rt_alignment'] == 'none' and labelled.attrs['rt_anchors'] == 2
+    assert np.allclose([r['run_rt'] for r in labelled.attrs['map_rows']], run_rts[:7] + map_rts[7:])
+    labelled, _ = pl.label_inputs(inputs, mapping.assign(map_rt = map_rts))
+    assert labelled.attrs['rt_alignment'] == 'median' and labelled.attrs['rt_anchors'] == 9 and abs(labelled.attrs['rt_shift'] - 0.6) < 1e-9
+    assert np.allclose([r['run_rt'] for r in labelled.attrs['map_rows']], run_rts) and sorted(labelled['spec_id']) == list(range(9))
+
+
 def test_label_inputs_map_intercepts():
     # A run reading two maps whose RTs come from different reference runs elutes 0.2 min after one map's RTs (7 anchors) and 2.5 min after the other's
     # (5 anchors). One shift (the median of the 7 agreeing anchors) leaves the second map's rows 2.3 min off their peaks; an intercept per map (>= 5
@@ -2450,6 +2476,12 @@ def test_mass_spec_helpers_from_glycopeptide_search():
     # A run of EThcD scans alone keeps them as its spectra, unpaired
     paired = pair_spectra(df[df['activation'].eq('EThcD')]).set_index('scan')
     assert paired.index.tolist() == [2, 50] and paired['paired_peak_d'].isna().all() and paired.loc[2, 'peak_d'] == {2.0: 2.0}
+    # A method that acquires each precursor's electron-activated scan before its HCD scan pairs each HCD scan with the nearest one before it
+    df = pd.DataFrame({'scan': [1, 2, 3, 4, 5], 'm/z': [500.0, 700.0, 500.001, 700.0, 500.0], 'precursor_charge': [2, 3, 2, 3, 2],
+                       'activation': ['ETciD', 'ETciD', 'HCD', 'HCD', 'ETciD'], 'analyzer': ['orbitrap'] * 5,
+                       'peak_d': [{1.0: 1.0}, {2.0: 2.0}, {3.0: 3.0}, {4.0: 4.0}, {5.0: 5.0}]})
+    paired = pair_spectra(df).set_index('scan')
+    assert paired.index.tolist() == [3, 4] and paired.loc[3, 'paired_scan'] == 1 and paired.loc[4, 'paired_scan'] == 2 and paired.loc[3, 'paired_peak_d'] == {1.0: 1.0}
 
 
 def test_cc_survey_scans(tmp_path, monkeypatch):
