@@ -338,7 +338,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io/), certifi
 
 The Windows installer and the `CandyCrunch.exe` it installs are signed. Only files built from this repository by the [Desktop app workflow](https://github.com/BojarLab/CandyCrunch/blob/main/.github/workflows/app.yml) on GitHub Actions are signed, and every release is approved by hand before it is signed.
 
-- Committers and reviewers: Daniel Bojar, James Urban, Vahid Atabaigi Elmi
-- Approvers: Daniel Bojar
+- Committers and reviewers: [Daniel Bojar](https://github.com/Bribak), [James Urban](https://github.com/urbj), [Vahid Atabaigi Elmi](https://github.com/EasternCaveMan)
+- Approvers: [Daniel Bojar](https://github.com/Bribak)
 
 Privacy: the desktop app sends crash and bug reports only when you choose to send them, sends anonymous usage statistics unless you switch them off (Help > Send anonymous usage statistics), and asks GitHub whether a newer version exists. [packaging/privacy.txt](https://github.com/BojarLab/CandyCrunch/blob/main/packaging/privacy.txt), which the installer shows before installing, lists exactly what each contains.
