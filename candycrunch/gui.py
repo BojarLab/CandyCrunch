@@ -3,6 +3,7 @@ import ast
 import contextlib
 import faulthandler
 import glob
+import gzip
 import html
 import importlib.util
 import io
@@ -39,14 +40,33 @@ try:
                                    QFrame, QFileDialog, QMessageBox, QInputDialog, QDockWidget, QProgressBar, QStyledItemDelegate, QStyleOptionViewItem,
                                    QStyle, QMenu, QCompleter, QSizePolicy, QToolTip, QTableWidget, QTableWidgetItem, QHeaderView)
 except ImportError as error:
-    raise ImportError('The CandyCrunch app needs PySide6, which comes with: pip install "candycrunch[gui]"') from error
-from candycrunch import references
-from candycrunch.utils import PALETTE, vc
+    message = 'The CandyCrunch app needs PySide6, which comes with: pip install "candycrunch[gui]"'
+    if sys.stderr is None and sys.platform == 'win32':
+        # candycrunch_gui runs pythonw.exe, which has no console, so the error would go nowhere and the app would just not start
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, 'CandyCrunch', 0x10)
+    raise ImportError(message) from error
+from candycrunch import __version__, references
+from candycrunch.utils import PALETTE, one_file_per_run, vc
 from viscose.qt import DPI, Canvas, ChartEvent, ChartView, Target, Toolbar
 
-# Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch
-_tree = ast.parse(open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8').read())
-_batch_def = next(node for node in _tree.body if isinstance(node, ast.FunctionDef) and node.name == 'wrap_inference_batch')
+# Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch. Only the
+# statements read are parsed: the whole module took 0.15 s at every start of the window, the worker, and each of its pool processes
+with open(importlib.util.find_spec('candycrunch.prediction').origin, encoding = 'utf-8') as _source:
+    _lines = _source.read().splitlines(keepends = True)
+# A line at column 0 starts a top-level statement, or lies in a bracket or string of one, whose lines up to it then do not parse
+_starts = [n for n, line in enumerate(_lines) if line[:1] not in ' \t\r\n'] + [len(_lines)]
+
+
+def _statement(head):
+    """The last top-level statement of prediction.py whose first line starts with head (the one in effect), parsed from its own lines"""
+    start = [k for k, n in enumerate(_starts[:-1]) if _lines[n].startswith(head)][-1]
+    for end in _starts[start + 1:]:
+        with contextlib.suppress(SyntaxError):
+            return ast.parse(''.join(_lines[_starts[start]:end])).body[0]
+
+
+_batch_def = _statement('def wrap_inference_batch(')
 # model_file is the app's own setting (an imported model, None for the built-in one), which the worker turns into wrap_inference's model and glycans
 DEFAULTS = {'intra_cat_thresh': 1.0, 'model_file': None}
 for _arg, _default in zip(_batch_def.args.args[-len(_batch_def.args.defaults):], _batch_def.args.defaults):
@@ -54,7 +74,7 @@ for _arg, _default in zip(_batch_def.args.args[-len(_batch_def.args.defaults):],
         DEFAULTS[_arg.arg] = ast.literal_eval(_default)
     except ValueError:
         pass
-_constants = {node.targets[0].id: node.value for node in _tree.body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)}
+_constants = {name: _statement(f'{name} =').value for name in ('MZ_REF', 'comp_vector_order', 'MODEL_KWARGS', 'ANALYZER_TRAPS', 'MZXML_ANALYZER_TRAPS', 'MZDATA_ANALYZER_TRAPS')}
 MZ_REF = ast.literal_eval(_constants['MZ_REF'])
 # The shipped model's composition vector and settings, which an imported model (fine-tuned from it) shares
 COMP_VECTOR_ORDER, MODEL_KWARGS = ast.literal_eval(_constants['comp_vector_order']), ast.literal_eval(_constants['MODEL_KWARGS'])
@@ -84,7 +104,7 @@ SAMPLE_PREPS = [('Underivatized', 'underivatized'), ('Permethylated', 'permethyl
 # Linkage-specific sialic acid derivatizations of underivatized samples, as wrap_inference's sialic_derivatization
 SIALIC_DERIVATIZATIONS = [('None', None), ('Ethyl esterification (EE)', 'EE'), ('Ethyl esterification + amidation (EEA)', 'EEA'), ('Methyl esterification (ME)', 'ME'),
                           ('Dimethylamidation (DMA)', 'DMA'), ('SALSA', 'SALSA'), ('Glycoqueuing, aniline (GQ)', 'GQ'), ('Glycoqueuing, d5/d0-aniline (GQ-d5)', 'GQ-d5')]
-SIALIC_TIP = 'Linkage-specific sialic acid derivatization: precursor masses then tell a2-6 from a2-3/8 sialic acids, and fragments carry the derivatized sialic acids'
+SIALIC_TIP = 'Linkage-specific sialic acid derivatization: precursor masses then tell a2-6 from a2-3/8/9 sialic acids, and fragments carry the derivatized sialic acids'
 # The main adduct of a run, by ion mode: a cation carries the charge of its precursors in place of protons (wrap_inference's adducts), an anion is its mobile phase's (run_anion)
 MAIN_ADDUCTS = {'positive': [('Automatic', None), ('Na+', 'Na+'), ('K+', 'K+'), ('NH4+', 'NH4+'), ('Li+', 'Li+')],
                 'negative': [('Automatic', None), ('HCO3-', 'HCO3-'), ('Formate', 'Formate'), ('Acetate', 'Acetate')]}
@@ -99,7 +119,7 @@ FRAGMENT_TYPES = [('Automatic', None), ('Glycosidic only', 'glycosidic'), ('All 
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']
 FRAGMENTATIONS = [('Any', None), ('CID', 'CID'), ('HCD', 'HCD'), ('ETD', 'ETD'), ('ECD', 'ECD'), ('EThcD', 'EThcD'), ('ETciD', 'ETciD'), ('EED', 'EED'),
                   ('EDD', 'EDD'), ('NETD', 'NETD'), ('UVPD', 'UVPD')]
-SPECTRA_SUFFIXES = ('.raw', '.wiff', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc')
+SPECTRA_SUFFIXES = ('.raw', '.wiff', '.d', '.mzml', '.mzxml', '.mzdata', '.mzdata.xml', '.mgf', '.cc', '.mzml.gz', '.mzxml.gz', '.mgf.gz')
 # What can be wrong with a peak's prediction, for misprediction reports from the spectrum view; the value tags the report
 MISPREDICTIONS = [('Choose what is wrong…', None), ('Wrong structure (the composition is right)', 'structure'), ('Wrong composition', 'composition'),
                   ('No structure, though it is a glycan', 'missing'), ('Not a glycan (noise, contaminant, adduct, or isotope)', 'not_glycan'),
@@ -382,10 +402,11 @@ def _worker_main(jobs, messages, warm_up = False):
         if job is None:
             return
         experiments, weights = job
-        results = []
-        try:
-            # Experiments one after the other, each with its own settings; only the runs of one experiment are harmonized into a feature table
-            for name, files, settings in experiments:
+        results, failures = [], []
+        # Experiments one after the other, each with its own settings; only the runs of one experiment are harmonized into a feature table. One that fails
+        # (a damaged file) is reported with the results of the others, which it used to take down with it
+        for name, files, settings in experiments:
+            try:
                 _install_progress(messages, weights, len(files))
                 kwargs = {k: v for k, v in settings.items() if k not in BATCH_KEYS and k != 'model_file'}
                 if settings.get('model_file'):
@@ -399,9 +420,12 @@ def _worker_main(jobs, messages, warm_up = False):
                 else:
                     features, tables = cp.wrap_inference_batch(files, spectra = True, **kwargs, **{k: settings[k] for k in BATCH_KEYS})
                 results.append({'name': name, 'files': files, 'settings': settings, 'tables': tables, 'features': features})
-            messages.put(('result', {'experiments': results, 'finished': time.strftime('%Y-%m-%d %H:%M')}))
-        except Exception as error:
-            messages.put(('error', (traceback.format_exc(), _exception_values(error))))
+            except Exception as error:
+                failures.append((name, traceback.format_exc(), _exception_values(error)))
+        if results:
+            messages.put(('result', {'experiments': results, 'finished': time.strftime('%Y-%m-%d %H:%M'), **({'failed': failures} if failures else {})}))
+        else:
+            messages.put(('error', failures[-1][1:]))
 
 
 def _install_progress(messages, weights, n_files):
@@ -520,7 +544,9 @@ def _detect_run(path, results):
     """Runs in a process of its own, as reading a large file takes seconds: what a run's file says about its settings, as the pipeline reads it (ion mode, MS2
     analyzer, how many MS2 spectra carry each precursor charge, and how many MS2 spectra there are), and what its name says (NAME_HINTS); puts (path, found,
     charges, number of MS2 spectra) on results"""
-    found, charges, n_ms2, ext = {}, {}, 0, os.path.splitext(os.path.normpath(path))[1].lower()
+    # (a gzipped .mzML, .mzXML or .mgf is read as it is unpacked)
+    gz = path.lower().endswith('.gz')
+    found, charges, n_ms2, ext = {}, {}, 0, os.path.splitext(os.path.normpath(path)[:-3] if gz else os.path.normpath(path))[1].lower()
     try:
         if ext in ('.mzml', '.mzxml', '.mzdata', '.xml', '.mgf'):
             # Only tags and their attributes are read, never the binary data, in chunks cut after a tag (mgf: a line); the first chunk holds the instruments
@@ -530,7 +556,7 @@ def _detect_run(path, results):
                 '.mzdata': (rb'name="Polarity" value="(Positive|Negative)', None, rb'name="ChargeState" value="(\d+)"', rb'<spectrumInstrument msLevel="2"'),
                 '.mgf': (rb'(?m)^CHARGE=\d+([+-])', None, rb'(?m)^CHARGE=(\d+)', rb'(?m)^BEGIN IONS')}['.mzdata' if ext == '.xml' else ext]]
             cut, tail, header = b'\n' if ext == '.mgf' else b'>', b'', None
-            with open(path, 'rb') as file:
+            with (gzip.open if gz else open)(path, 'rb') as file:
                 while True:
                     chunk = file.read(1 << 24)
                     text = tail + chunk
@@ -831,9 +857,158 @@ def _spectrum_axes(figure, cartoons, peptide = False, mirror = False):
     return ax, figure.add_axes([0.65 / width, 0.55 / height + room - ladder, 1 - 0.85 / width, ladder]) if peptide else None
 
 
+def _annotation_step(kind, request):
+    """One step of a spectrum's annotation: 'hits', CandyCrumbs of the deisotoped spectrum; 'mirror', that of the mirrored spectrum; 'support', the
+    supporting_ions of the structure; 'draw', plot_annotated_spectrum with those, as (figure, index of its spectrum's axes, None). Runs in the annotation
+    process (_annotation_main), else in the panel's thread"""
+    with IMPORT_LOCK:
+        from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, deisotope_ms2
+        # the fragment glyphs import these themselves
+        import glycowork.motif.draw, glycorender.render
+    glycopeptide = bool(resolve_spectrum_input(request['structure'])[0])
+    if kind == 'draw':
+        figure = vc.Figure(*request['figsize'], request['palette'])
+        ax, ladder = _spectrum_axes(figure, request['cartoons'], glycopeptide, request['mirror'] is not None)
+        _, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'], charge = request['charge'],
+                                        mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], ax = ax, ladder_ax = ladder, draw_glycans = request['cartoons'],
+                                        hit_dict = request['hit_dict'], diagnostic = request['diagnostic'], cartoons = request['toggles'], label_fontsize = 7,
+                                        mirror = request['mirror'], **request['kwargs'])
+        # Save image… draws the spectrum again with the same diagnostic peaks and mirror
+        figure.diagnostic, figure.mirror = request['diagnostic'], request['mirror']
+        return figure, figure.axes.index(ax), None
+    if kind == 'support':
+        try:
+            return supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])), charge = request['charge'], candidates = request['candidates'],
+                                   mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], sialic_derivatization = request['kwargs'].get('sialic_derivatization'))
+        except Exception:
+            return {'residues': [], 'candidates': []}
+    # The mirrored spectrum (e.g., the EThcD scan an HCD scan triggered) is annotated as the spectrum is, deisotoped, at its own tolerance and with its own settings
+    spectrum = request['mirror'] if kind == 'mirror' else request
+    # Isotope peaks stay unlabeled, as the pipeline scores deisotoped spectra: offered to CandyCrumbs, the M+1 and M+2 of carbon-rich (permethylated)
+    # fragments took cross-ring or three-cleavage labels. A pattern whose apex is more than twice its first peak keeps both: the first is a noise peak below
+    # a fragment as often as the monoisotopic peak of a heavy fragment, whose M+1 is often the most intense one (and more so when the isolation window
+    # centered the precursor's M+1); glycopeptides with bounded isotope ratios, as the glycopeptide functions score them
+    peaks = dict(zip(spectrum['mzs'], spectrum['intensities']))
+    mono = sorted({m for relabel in (False, True) for m in deisotope_ms2(peaks, max(abs(spectrum['charge']), 1), min(spectrum['tolerance'], 0.05), relabel = relabel,
+                                                                          bound_isotope_ratio = glycopeptide)})
+    # A ppm tolerance alone bounds the matches (CandyCrumbs' Da window, 0.5 by default, is then wider at any fragment m/z)
+    return CandyCrumbs(request['structure'], mono, spectrum['tolerance'] if spectrum['ppm'] is None else None, mass_threshold_ppm = spectrum['ppm'],
+                       max_cleavages = request['kwargs'].get('max_cleavages', 3), simplify = True, charge = spectrum['charge'], mass_tag = request['mass_tag'],
+                       sample_prep = request['sample_prep'], intensities = [peaks[m] for m in mono],
+                       **({k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'} | (spectrum['kwargs'] if kind == 'mirror' else {})))
+
+
+def _viscose_warp(scale, inverse):
+    return vc.axes.WARPS[scale][inverse]
+
+
+class _FigurePickler(pickle.Pickler):
+    """Pickles what the annotation process returns, figures included, whose axes keep their scale's functions from viscose's WARPS"""
+
+    def reducer_override(self, obj):
+        for scale, pair in vc.axes.WARPS.items():
+            for inverse, function in enumerate(pair):
+                if obj is function:
+                    return _viscose_warp, (scale, inverse)
+        return NotImplemented
+
+
+def _annotation_main(connection):
+    """The annotation process: the steps of every spectrum panel's annotations, received as (kind, request) and answered, pickled, with ('ok', result),
+    ('error', exception), or ('local', None) for a result that does not pickle. In the window's process their pure Python held the GIL, which each of the
+    hundreds of calls from Qt into Python that a step through a table makes (data(), delegates, signals) waited for: a step took 150-230 ms beside an
+    annotation, up to 3 s"""
+    # Ends with the window, also where the window is killed while an annotation runs
+    parent = mp.parent_process()
+    threading.Thread(target = lambda: (parent.join(), os._exit(1)), daemon = True).start()
+    # The imports and caches of a first annotation, done while the window starts rather than at its first spectrum
+    with contextlib.suppress(Exception):
+        _annotation_step('hits', {'structure': 'Gal(b1-4)Glc', 'mzs': [161.05, 179.06, 341.11], 'intensities': [1.0, 1.0, 1.0], 'charge': -1, 'mass_tag': None,
+                                  'sample_prep': 'underivatized', 'tolerance': 0.5, 'ppm': None, 'kwargs': {}})
+    # A palette given as an object is used as one object for all its figures, as in the window's process, where viscose keeps what it works out for a
+    # palette by the object
+    palettes = {}
+    while True:
+        try:
+            kind, request = connection.recv()
+        except (EOFError, OSError):
+            return
+        try:
+            if kind == 'draw':
+                palette, named = request['palette']
+                # A palette by name is used by its name, as in the window, under the definition the window has for it (which its app may have registered)
+                if named is not None and vc.palettes.get(named.name) != named:
+                    vc.register_palette(named)
+                request['palette'] = palette if isinstance(palette, str) else palettes.setdefault(pickle.dumps(palette), palette)
+            reply = ('ok', _annotation_step(kind, request))
+        except Exception as error:
+            reply = ('error', error)
+        data = io.BytesIO()
+        try:
+            _FigurePickler(data).dump(reply)
+        except Exception:
+            data = io.BytesIO()
+            _FigurePickler(data).dump(('local', None))
+        try:
+            connection.send_bytes(data.getvalue())
+        except OSError:
+            return
+
+
+class _AnnotationProcess:
+    """The one annotation process that all spectrum panels share (_annotation_main), started with the first panel and kept for the next spectra. A step it
+    cannot take runs in the panel's thread, as all of them did before: its request or result does not pickle, or the process could not start or ended"""
+
+    def __init__(self):
+        self.lock, self.process, self.connection, self.failures = threading.Lock(), None, None, 0
+
+    def run(self, kind, request):
+        with self.lock:
+            try:
+                if self.process is None:
+                    # One that ended twice (killed, or stopped by antivirus software) is not started again; its panels annotate in their threads
+                    if self.failures > 1:
+                        raise OSError('no annotation process')
+                    context = mp.get_context('spawn')
+                    self.connection, child = context.Pipe()
+                    # A daemon, so that it ends when the window's process exits; it also watches that process (_annotation_main)
+                    self.process = context.Process(target = _annotation_main, args = (child,), daemon = True, name = 'CandyCrunch annotation')
+                    self.process.start()
+                    child.close()
+                if kind is None:
+                    return None
+                # A palette by name goes with the window's definition of it (of 'candy' for 'candy-dark'); waiting for the answer holds no GIL
+                sent, palette = {k: v for k, v in request.items() if k not in ('key', 'palette')}, request.get('palette')
+                named = vc.palettes.get(palette, vc.palettes.get(palette[:-5])) if isinstance(palette, str) else None
+                self.connection.send((kind, sent | {'palette': (palette, named)} if kind == 'draw' else sent))
+                data = self.connection.recv_bytes()
+                status, result = pickle.loads(data)
+                if kind == 'draw' and status == 'ok':
+                    # With a second copy of the figure, for the panel's thread to lay out (Annotator.loop)
+                    result = result[:2] + (pickle.loads(data)[1][0],)
+            except (EOFError, OSError):
+                if self.process is not None and not self.process.is_alive():
+                    self.process, self.failures = None, self.failures + 1
+                status = 'local'
+            except Exception:
+                # (a request that does not pickle, which is never sent)
+                status = 'local'
+        if kind is None:
+            return None
+        if status == 'local':
+            return _annotation_step(kind, request)
+        if status == 'error':
+            raise result
+        return result
+
+
+_ANNOTATION = _AnnotationProcess()
+
+
 class Annotator(QObject):
-    """Runs CandyCrumbs, supporting_ions and plot_annotated_spectrum in a background thread; only the newest request is worked on, so scrolling through a
-    table never queues up stale spectra, and while idle it draws the spectra likely shown next (prefetch), which the panel then shows at once"""
+    """Runs CandyCrumbs, supporting_ions and plot_annotated_spectrum from a background thread, in the annotation process; only the newest request is worked
+    on, so scrolling through a table never queues up stale spectra, and while idle it draws the spectra likely shown next (prefetch), which the panel then
+    shows at once"""
     done = Signal(int, object, object, object, str)
     prefetched = Signal(str, object, object, object)
 
@@ -851,6 +1026,9 @@ class Annotator(QObject):
         return self.counter
 
     def loop(self):
+        # The annotation process starts with the first panel, so that its imports are done before the first spectrum is asked for
+        with contextlib.suppress(Exception):
+            _ANNOTATION.run(None, None)
         rested = True
         while True:
             self.wake.wait()
@@ -874,30 +1052,13 @@ class Annotator(QObject):
                     continue
                 stale = lambda: self.request[0] != request_id
                 try:
-                    with IMPORT_LOCK:
-                        from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, deisotope_ms2
-                        # the fragment glyphs import these themselves
-                        import glycowork.motif.draw, glycorender.render
                     # CandyCrumbs can take long, so its results (and those of supporting_ions) are kept for the last spectra, which are drawn again at another
                     # panel size, or after a prefetch was cut short
                     key = repr([request[k] for k in ('structure', 'mzs', 'intensities', 'charge', 'mass_tag', 'sample_prep', 'tolerance', 'ppm')] + sorted(request['kwargs'].items()))
                     if len(self.results) > 200:
                         self.results.clear()
                     if key not in self.results:
-                        # Isotope peaks stay unlabeled, as the pipeline scores deisotoped spectra: offered to CandyCrumbs, the M+1 and M+2 of carbon-rich
-                        # (permethylated) fragments took cross-ring or three-cleavage labels. A pattern whose apex is more than twice its first peak keeps both: the
-                        # first is a noise peak below a fragment as often as the monoisotopic peak of a heavy fragment, whose M+1 is often the most intense one
-                        # (and more so when the isolation window centered the precursor's M+1)
-                        peaks = dict(zip(request['mzs'], request['intensities']))
-                        # (glycopeptides with bounded isotope ratios, as the glycopeptide functions score them)
-                        glycopeptide = bool(resolve_spectrum_input(request['structure'])[0])
-                        mono = sorted({m for relabel in (False, True) for m in deisotope_ms2(peaks, max(abs(request['charge']), 1), min(request['tolerance'], 0.05),
-                                                                                              relabel = relabel, bound_isotope_ratio = glycopeptide)})
-                        # A ppm tolerance alone bounds the matches (CandyCrumbs' Da window, 0.5 by default, is then wider at any fragment m/z)
-                        self.results[key] = CandyCrumbs(request['structure'], mono, request['tolerance'] if request['ppm'] is None else None, mass_threshold_ppm = request['ppm'],
-                                                        max_cleavages = request['kwargs'].get('max_cleavages', 3),
-                                                        simplify = True, charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                        intensities = [peaks[m] for m in mono], **{k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'})
+                        self.results[key] = _ANNOTATION.run('hits', request)
                     hit_dict = self.results[key]
                     # Drawing a spectrum nobody waits for any more only delays the newer one
                     if stale():
@@ -908,42 +1069,28 @@ class Annotator(QObject):
                     if isinstance(request['structure'], str) and '(' in request['structure'] and '*' not in request['structure'] and request['kwargs'].get('ms3_precursor') is None:
                         support_key = key + repr(request['candidates'])
                         if support_key not in self.results:
-                            try:
-                                self.results[support_key] = supporting_ions(request['structure'], dict(zip(request['mzs'], request['intensities'])),
-                                                                            charge = request['charge'], candidates = request['candidates'],
-                                                                            mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                                            sialic_derivatization = request['kwargs'].get('sialic_derivatization'))
-                            except Exception:
-                                self.results[support_key] = {'residues': [], 'candidates': []}
+                            self.results[support_key] = _ANNOTATION.run('support', request)
                         support = self.results[support_key]
                         if stale():
                             continue
                     diagnostic = sorted({s[0] for e in support['residues'] for s in e['support']} | {s[0] for c in support['candidates'] for s in c['support']} |
                                         {e['linkage'][0] for e in support['residues'] if request['ion_trap'] and e.get('linkage') and e['linkage'][2] == 'a2-3'}) if support else None
-                    # The mirrored spectrum (e.g., the EThcD scan an HCD scan triggered) annotated as the spectrum is, deisotoped, at its own tolerance and with its own settings
                     mirror, m = None, request.get('mirror')
                     if m:
                         mirror_key = key + repr(sorted((k, v) for k, v in m.items() if k != 'title'))
                         if mirror_key not in self.results:
-                            mirror_peaks = dict(zip(m['mzs'], m['intensities']))
-                            mirror_mono = sorted({x for relabel in (False, True) for x in deisotope_ms2(mirror_peaks, max(abs(m['charge']), 1), min(m['tolerance'], 0.05), relabel = relabel,
-                                                                                                      bound_isotope_ratio = bool(resolve_spectrum_input(request['structure'])[0]))})
-                            self.results[mirror_key] = CandyCrumbs(request['structure'], mirror_mono, m['tolerance'] if m['ppm'] is None else None, mass_threshold_ppm = m['ppm'],
-                                                                   max_cleavages = request['kwargs'].get('max_cleavages', 3), simplify = True, charge = m['charge'],
-                                                                   mass_tag = request['mass_tag'], sample_prep = request['sample_prep'], intensities = [mirror_peaks[x] for x in mirror_mono],
-                                                                   **({k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'} | m['kwargs']))
+                            self.results[mirror_key] = _ANNOTATION.run('mirror', request)
                         mirror = {'mzs': m['mzs'], 'intensities': m['intensities'], 'charge': m['charge'], 'hit_dict': self.results[mirror_key], 'title': m.get('title')}
                         if stale():
                             continue
-                    figure = vc.Figure(*request['figsize'], request['palette'])
-                    ax, ladder = _spectrum_axes(figure, request['cartoons'], bool(resolve_spectrum_input(request['structure'])[0]), mirror is not None)
-                    hit_dict, ax = plot_annotated_spectrum(request['structure'], request['mzs'], request['intensities'], mass_threshold = request['tolerance'],
-                                                           charge = request['charge'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
-                                                           ax = ax, ladder_ax = ladder, draw_glycans = request['cartoons'], hit_dict = hit_dict,
-                                                           diagnostic = diagnostic, cartoons = request['toggles'], label_fontsize = 7,
-                                                           mirror = mirror, **request['kwargs'])
-                    # Save image… draws the spectrum again with the same diagnostic peaks and mirror
-                    figure.diagnostic, figure.mirror = diagnostic, mirror
+                    figure, index, spare = _ANNOTATION.run('draw', {**request, 'hit_dict': hit_dict, 'diagnostic': diagnostic, 'mirror': mirror})
+                    ax = figure.axes[index]
+                    if spare is not None:
+                        # A figure drawn in the annotation process has its glyphs and text measured here, on a copy, so that the window's first paint finds
+                        # them cached, as for a figure drawn in this thread; the figure shown is laid out by the window alone, as viscose makes its colors
+                        # legible anew at each layout
+                        with contextlib.suppress(Exception):
+                            spare.display_list()
                     if request['ms3']:
                         # A triangle under every peak that was isolated for MS3, clickable like the stick of that peak
                         mzs, ints = np.array(request['mzs']), np.array(request['intensities'])
@@ -1078,21 +1225,47 @@ def _composition(composition):
         composition, dict) and composition else ''
 
 
+def _draw_in_background(owner, write, path):
+    """Runs write, an export that draws every glycan of a table into Excel, in a thread: on the window's thread it froze the window for seconds to minutes
+    (116 N-glycans 7-10 s, 90 glycans of a comparison 5 s), long enough for Windows to call it not responding; owner's exported signal then gives the path
+    and the error, if any"""
+
+    def work():
+        try:
+            write()
+            error = ''
+        except Exception as e:
+            error = str(e) or type(e).__name__
+        with contextlib.suppress(RuntimeError):
+            owner.exported.emit(path, error)
+
+    threading.Thread(target = work, daemon = True).start()
+
+
 class TableModel(QAbstractTableModel):
     """Read-only view of one result table, column by column as ResultsView lays them out; curation lives in the dataframe's own columns"""
     BAR_ROLE, IMAGE_ROLE = Qt.UserRole + 1, Qt.UserRole + 2
 
     def __init__(self, images):
         super().__init__()
-        self.images, self.df, self.columns, self.search, self.marks = images, pd.DataFrame(), [], [], []
+        self.images, self.df, self.columns, self.search, self.marks, self.drawn = images, pd.DataFrame(), [], [], [], {}
         images.ready.connect(self.image_ready)
 
     def set_table(self, df, columns):
         self.beginResetModel()
         self.df, self.columns = df, columns
-        self.search = [' '.join(str(c['text'][r]).lower() for c in columns) for r in range(len(df))]
+        # (a column's 'search' adds what the filter also finds it by)
+        self.search = [' '.join(str(c.get('search', c['text'])[r]).lower() for c in columns) for r in range(len(df))]
         # data() is asked for every role of every cell it sizes and paints, so the excluded and curated flags are not looked up in the dataframe each time
         self.marks = [(bool(e), bool(c)) for e, c in zip(df['excluded'], df['curation'])]
+        # The cells that show each compact drawing, which alone are painted again once it is rendered: a whole column changed for every drawing made the proxy
+        # check all its rows each time (15 ms a drawing at 3,000 rows, 95 ms sorted by structure)
+        self.drawn = {}
+        for c, column in enumerate(columns):
+            if column['kind'] == 'structure':
+                for r, glycan in enumerate(column.get('image', column['raw'])):
+                    if isinstance(glycan, str):
+                        self.drawn.setdefault(glycan, []).append((r, c))
         self.endResetModel()
 
     def rowCount(self, parent = QModelIndex()):
@@ -1115,7 +1288,8 @@ class TableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return column['raw'][row]
         if role == self.BAR_ROLE:
-            return column.get('bar', [None] * (row + 1))[row]
+            # (the default list was built on every call, as long as the row number)
+            return column['bar'][row] if 'bar' in column else None
         if role == self.IMAGE_ROLE:
             return column.get('image', column['raw'])[row]
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -1133,9 +1307,8 @@ class TableModel(QAbstractTableModel):
         return None
 
     def image_ready(self, key):
-        for c, column in enumerate(self.columns):
-            if column['kind'] == 'structure' and len(self.df):
-                self.dataChanged.emit(self.index(0, c), self.index(len(self.df) - 1, c), [Qt.DisplayRole])
+        for r, c in self.drawn.get(key[0], []) if key[1:] == (True,) else []:
+            self.dataChanged.emit(self.index(r, c), self.index(r, c), [Qt.DisplayRole])
 
 
 class TableProxy(QSortFilterProxyModel):
@@ -1938,8 +2111,8 @@ class SettingsPanel(QScrollArea):
             buttons.addWidget(button, n // 2, n % 2)
         layout.addLayout(buttons)
         # Short enough to keep Advanced settings in view in a 702 px high window at the panel's usual width; the formats in full are its tooltip
-        self.file_hint = _label('Thermo, Waters, SCIEX, Bruker, or Agilent raw data, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra. Drop files or folders anywhere here.', 'hint')
-        self.file_hint.setToolTip('Thermo .raw, Waters .raw folders, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a .cc or .xlsx made by extract_spectra')
+        self.file_hint = _label('Thermo, Waters, SCIEX, Bruker, or Agilent raw data, mzML, mzXML, mzData, mgf, or CandyCrunch .cc or .xlsx. Drop files or folders anywhere here.', 'hint')
+        self.file_hint.setToolTip('Thermo .raw, Waters .raw folders, SCIEX .wiff (with its .wiff.scan), Bruker (timsTOF, Q-TOF, ion trap) or Agilent MassHunter .d, mzML, mzXML, mzData, mgf, or a CandyCrunch .cc or .xlsx')
         layout.addWidget(self.file_hint)
         self.inputs = {}
         self.sample_heading = _label('Sample')
@@ -1950,7 +2123,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['glycan_class'].setToolTip('Glycan class of the samples. N- and O-glycans measured in one run: candidate compositions and structures come from '
                                                'both classes, and only structures of other classes need the cross-class model probability')
         self.mode = _combo([('Negative', 'negative'), ('Positive', 'positive')])
-        self.mode.setToolTip('Overridden by the polarity stored in the file (.raw, mzML, mzXML, other vendor formats, .cc or .xlsx made by extract_spectra)')
+        self.mode.setToolTip('Overridden by the polarity stored in the file (.raw, mzML, mzXML, other vendor formats, and CandyCrunch .cc or .xlsx)')
         self.charge = _spin(1, 8, 1)
         self.charge.setToolTip('Highest absolute precursor charge considered for composition matching')
         self.inputs['modification'] = _combo(REDUCING_ENDS)
@@ -1967,7 +2140,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['lc'] = _combo(LCS)
         self.inputs['trap'] = _combo(TRAPS)
         self.inputs['trap'].setToolTip('The analyzer that records the fragment spectra (MS2), e.g., Linear ion trap for orbitrap MS1 with ion-trap MS2. The survey scan (MS1) analyzer is not a setting; it is '
-                                       'read from the file. Overridden by the instrument stored in the file (.raw, mzML, mzXML, other vendor formats, .xlsx made by extract_spectra)')
+                                       'read from the file. Overridden by the instrument stored in the file (.raw, mzML, mzXML, other vendor formats, and CandyCrunch .cc or .xlsx)')
         # Imported models are copies in the app's data folder, so they stay available wherever their file was; each experiment keeps its model
         self.model_dir = os.path.join(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation), 'models')
         self.model = _combo([('Built-in', None)] + [(os.path.splitext(os.path.basename(p))[0], p) for p in
@@ -2030,6 +2203,8 @@ class SettingsPanel(QScrollArea):
         self.inputs['rt_min'] = _spin(0, 1000, 1, 2, ' min')
         self.inputs['rt_max'] = _spin(0, 1000, 1, 2, ' min')
         self.inputs['rt_max'].setSpecialValueText('end of run')
+        self.inputs['rt_min'].setToolTip('Spectra before this retention time are left out; at 0, runs longer than 20 min skip their first 2 min')
+        self.inputs['rt_max'].setToolTip('Spectra after this retention time are left out; at end of run, in runs longer than 40 min, rows in the last 10% need a peak of their own over a low background')
         self.inputs['rt_diff'] = _spin(0.05, 10, 0.25, 2, ' min')
         self.inputs['rt_diff'].setToolTip('Maximum retention time difference to a peak apex that is still grouped with that peak')
         self.inputs['ppm_thresh'] = _spin(1, 5000, 10, 0, ' ppm')
@@ -2042,7 +2217,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['pred_thresh'].setToolTip('Minimum probability the model gives a structure among the isomers of its composition (not the calibrated '
                                               'confidence reported per peak)')
         self.inputs['crumbs_thresh'] = _spin(0, 100, 1, 1)
-        self.inputs['crumbs_thresh'].setToolTip('A peak is only kept if its fragment score exceeds this (2 lower for files with orbitrap or timsTOF survey scans). The fragment score sums, over the '
+        self.inputs['crumbs_thresh'].setToolTip('A peak is only kept if its fragment score exceeds this (2 lower for files with orbitrap or TOF survey scans). The fragment score sums, over the '
                                                 '15 most intense deisotoped fragment peaks, how many fragments of a structure of the precursor\'s composition each one matches '
                                                 '(up to two cleavages): fragment evidence that the peak is that glycan, independent of the model')
         self.inputs['extra_thresh'] = _spin(0, 1, 0.05, 2)
@@ -2055,7 +2230,7 @@ class SettingsPanel(QScrollArea):
         self.inputs['taxonomy_level'] = QComboBox()
         self.inputs['taxonomy_level'].addItems(TAXONOMY_LEVELS)
         self.inputs['taxonomy_filter'] = QLineEdit()
-        self.inputs['taxonomy_filter'].setToolTip('Only glycans of this taxon supply candidate compositions and database structures')
+        self.inputs['taxonomy_filter'].setToolTip('Only glycans of this taxon, at the taxonomic level above (e.g., Mammalia for Class, Homo_sapiens for Species), supply candidate compositions and database structures')
         self.taxa = QCompleter([])
         self.taxa.setCaseSensitivity(Qt.CaseInsensitive)
         self.taxa.setFilterMode(Qt.MatchContains)
@@ -2203,14 +2378,13 @@ class SettingsPanel(QScrollArea):
         what its file and name tell about the experiment's settings"""
         existing, target = set(self.paths()), self.current_experiment()
         empty = target is None or not target.childCount()
-        for path in map(os.path.normpath, paths):
-            # A file or folder inside a .d or Waters .raw folder (analysis.tdf, AcqData) is that run
-            path = _run_folder(path) or path
-            # A .d or Waters .raw folder is one run; any other folder adds its runs
-            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES)] if os.path.isdir(path) and not path.lower().endswith(('.d', '.raw')) else [path]
-            # A run's raw file and the .cc made from it are one run, read from its .cc
-            extracted = {os.path.splitext(f)[0].lower() for f in found if f.lower().endswith('.cc')}
-            found = [f for f in found if f.lower().endswith('.cc') or os.path.splitext(f)[0].lower() not in extracted]
+        # A file or folder inside a .d or Waters .raw folder (analysis.tdf, AcqData) is that run; a run given in several files is added once: its .cc,
+        # else its vendor file rather than a copy converted from it
+        for path in one_file_per_run([_run_folder(p) or p for p in map(os.path.normpath, paths)]):
+            # A .d or Waters .raw folder is one run; any other folder adds its runs, but not the ._ files of metadata macOS writes beside every file it copies to a drive or share
+            found = [os.path.join(path, x) for x in sorted(os.listdir(path)) if x.lower().endswith(SPECTRA_SUFFIXES) and not x.startswith('._')] if os.path.isdir(path) and not path.lower().endswith(('.d', '.raw')) else [path]
+            # (the same within a folder)
+            found = one_file_per_run(found)
             for file in found:
                 if file.lower().endswith(SPECTRA_SUFFIXES + ('.xlsx',)) and os.path.abspath(file) not in existing:
                     existing.add(os.path.abspath(file))
@@ -2426,6 +2600,8 @@ class ResultsView(QWidget):
     report_peak = Signal(object)
     # dirty was set or cleared
     curation_changed = Signal()
+    # (path, error or '') of an export drawn in the background (_draw_in_background)
+    exported = Signal(str, str)
 
     def __init__(self, images):
         super().__init__()
@@ -2469,6 +2645,8 @@ class ResultsView(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(58)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setHighlightSections(False)
+        # Column widths from 200 rows (Qt's default 1000): the same widths, and a table of 3,000 rows opens in half the time
+        self.table.horizontalHeader().setResizeContentsPrecision(200)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.structure_delegate, self.bar_delegate = StructureDelegate(images, self.table), BarDelegate(self.table)
         # Only while the table has focus, so Ctrl+C in the structure box still copies its text
@@ -2505,7 +2683,7 @@ class ResultsView(QWidget):
         self.alternatives.setToolTip('Click a candidate to annotate the spectrum with it; double-click to assign it to this peak')
         actions = QGridLayout()
         self.assign, self.custom, self.exclude, self.crumbs = QPushButton('Assign candidate'), QPushButton('Enter structure…'), QPushButton('Exclude'), QPushButton('Open in CandyCrumbs')
-        self.assign.setToolTip('Make the selected candidate this peak\'s structure (top1_pred) in the table and its exports')
+        self.assign.setToolTip('Make the selected candidate this peak\'s structure in the table and its exports')
         self.custom.setToolTip('Assign a structure that is not among the candidates')
         self.exclude.setToolTip(f'Leave this peak out of exports ({QKeySequence(QKeySequence.Delete).toString(QKeySequence.NativeText)} in the table)')
         self.crumbs.setToolTip('Annotate this spectrum with any structure or setting in the CandyCrumbs tab (from the MS3 tab: the MS3 spectrum shown)')
@@ -2611,6 +2789,7 @@ class ResultsView(QWidget):
         self.tabs.currentChanged.connect(lambda: self.row is not None and self.tabs.currentWidget() is self.quant and self.show_quant())
         self.quant.run.currentIndexChanged.connect(self.show_quant)
         self.quant.edited.connect(self.integrate)
+        self.exported.connect(lambda path, error: QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}') if error else self.status.emit(f'Exported {os.path.basename(path)}'))
         self.map_points = None
         self.map.canvas.pressed.connect(self.map_pressed)
         images.ready.connect(self.image_ready)
@@ -2695,8 +2874,11 @@ class ResultsView(QWidget):
         with IMPORT_LOCK:
             from candycrunch.utils import mz_order
             from glycowork.motif.tokenization import calculate_adduct_mass
+            from glycowork.motif.processing import canonicalize_composition
         structures = list(df['top1_pred'])
         compositions = [_composition(c) for c in df['composition']]
+        # The filter also finds a composition by its shorthand (H5N4F1A2), as glycomics papers write them: typed so, it found nothing
+        shorthands = [canonicalize_composition(c, as_string = True) if isinstance(c, dict) and c else '' for c in df['composition']]
         notes_tip = 'Notes from the pipeline, adducts, and your curation'
         formulas = self.formulas(df)
         # Sorted by formula, the glycans go by their mass and the rows of one glycan (its charge states, adducts, and isomers) by RT; rows without a formula go last
@@ -2705,10 +2887,11 @@ class ResultsView(QWidget):
         by_mass[np.lexsort((df['RT'].to_numpy(dtype = float), [masses.get(f, np.inf) for f in formulas]))] = np.arange(len(df))
         columns = [{'title': 'Structure', 'kind': 'structure', 'raw': [s if isinstance(s, str) else None for s in structures],
                     'text': [s if isinstance(s, str) else '' for s in structures], 'image': [s if isinstance(s, str) else c or None for s, c in zip(structures, compositions)]},
-                   {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions},
+                   {'title': 'Composition', 'kind': 'text', 'raw': [re.sub(r'\d+', lambda m: m.group().zfill(4), c) for c in compositions], 'text': compositions,
+                    'search': [f'{c} {s}' for c, s in zip(compositions, shorthands)]},
                    {'title': 'Formula', 'kind': 'text', 'raw': formulas, 'text': formulas, 'sort': [int(k) if f else None for k, f in zip(by_mass, formulas)],
                     'tip': 'Elemental formula of the neutral glycan as measured (reducing end and derivatization included), e.g., to extract its ions with any adduct '
-                    'in Skyline or MZmine. Sorts by mass, so the charge states, adducts, and isomers of a glycan, and its isobars, stand together, by RT'},
+                    'in Skyline or MZmine. Sorts by mass, then RT, so that a glycan\'s charge states, adducts, and isomers, and its isobars, stand together'},
                    # sorted by m/z, the rows of one ion (a composition and charge, whose m/z differ by noise) go by RT
                    dict(_number_column('m/z', df['m/z'], 4), sort = mz_order(df['m/z'], df['RT'], df['charge'].values, df['composition'].tolist()).tolist()),
                    _number_column('z', df['charge'], 0, 'Precursor charge'), _number_column('RT', df['RT'], 2, 'Retention time (min)')]
@@ -3220,8 +3403,9 @@ class ResultsView(QWidget):
             # A structure outside CandyCrunch's vocabulary (entered by hand) gets the ID glycowork's database has for it, or for its alditol
             ids = glytoucan_to_glycan([structure, f'{structure}-ol'], revert = True, verbose = False)
             self.glytoucan[structure] = next((i for g, i in zip((structure, f'{structure}-ol'), ids) if i != g), '')
-        # A feature's structure also goes to the per-run rows it was matched to, so their tables, exports, and the spectrum shown agree with it
-        targets = [(self.frame, self.row)] + ([(self.payload['tables'][run][0], r) for run, r in (self.spectrum_file.itemData(i) for i in range(self.spectrum_file.count()))]
+        # A feature's structure also goes to the per-run rows it was matched to, so their tables, exports, and the spectrum shown agree with it; also to those
+        # with MS1 signal only (gap filled), as its exclusion does, which kept the old structure in their run's table
+        targets = [(self.frame, self.row)] + ([(self.payload['tables'][run][0], r) for run, r in self.matched_rows(self.row).items()]
                                              if self.dataset.currentData() == FEATURES else [])
         for df, row in targets:
             # (an edited integration stays noted)
@@ -3309,7 +3493,10 @@ class ResultsView(QWidget):
         # From the MS3 tab, the MS3 spectra shown go, with the MS2 fragment they were isolated from
         ms3 = self.ms3_groups[self.ms3_fragment.currentIndex()] if self.tabs.currentWidget() is self.ms3_tab and 0 <= self.ms3_fragment.currentIndex() < len(self.ms3_groups) else None
         panel = self.ms3_panel if ms3 else self.spectrum
-        self.open_in_crumbs.emit({'structure': structure if isinstance(structure, str) else _composition(table['composition'].iat[r]),
+        # The settings the results' spectrum annotates with: the charge carrier of the peak's ion, and for its MS2 spectrum the competing structures and the analyzer
+        annotation = (self.spectrum_args(r, self.alternative)[2] or (None, {}))[1]
+        extra = {'metal_cations': annotation.get('metal_cations', True)} | ({} if ms3 else {k: annotation[k] for k in ('candidates', 'ion_trap') if k in annotation})
+        self.open_in_crumbs.emit(extra | {'structure': structure if isinstance(structure, str) else _composition(table['composition'].iat[r]),
                                   'peaks': ms3[1] if ms3 else spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': _row_settings(self.payload['settings'], table, r),
                                   'ms3_precursor': ms3[0] if ms3 else None, 'tolerance': (panel.tolerance.value(), panel.unit.currentData())})
 
@@ -3334,7 +3521,8 @@ class ResultsView(QWidget):
         elif path.lower().endswith('.csv'):
             df.to_csv(path, index = False)
         else:
-            df.map(lambda v: str(v) if isinstance(v, (list, tuple, dict, set)) else v).to_excel(path, index = False)
+            # (openpyxl writes text as text; xlsxwriter, which pandas takes where installed, turns the references into hyperlinks and leaves a cell empty where they are longer than Excel's 255 characters for a link)
+            df.map(lambda v: str(v) if isinstance(v, (list, tuple, dict, set)) else v).to_excel(path, index = False, engine = 'openpyxl')
 
     def export_table(self, kind):
         label = self.dataset.currentData()
@@ -3342,12 +3530,20 @@ class ResultsView(QWidget):
         suffix = '.csv' if kind == 'csv' else '.xlsx'
         path, _ = QFileDialog.getSaveFileName(self, 'Export table', os.path.join(QSettings().value('folder', os.path.expanduser('~')), stem + suffix),
                                               'CSV (*.csv)' if kind == 'csv' else 'Excel (*.xlsx)')
-        if path:
+        # The table as shown: with a filter typed, its rows (it wrote every row), in the order shown
+        frame, shown = self.current_frame(), self.proxy.rowCount()
+        if shown < self.model.rowCount():
+            frame = frame.iloc[[self.proxy.mapToSource(self.proxy.index(i, 0)).row() for i in range(shown)]]
+        if path and kind == 'snfg':
+            self.status.emit('Drawing the glycans into the export…')
+            frame = self.export_frame(frame)
+            _draw_in_background(self, lambda: self.write(frame, path, kind), path)
+        elif path:
             self.status.emit('Exporting…')
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                self.write(self.export_frame(self.current_frame()), path, kind)
-                self.status.emit(f'Exported {os.path.basename(path)}')
+                self.write(self.export_frame(frame), path, kind)
+                self.status.emit(f'Exported {os.path.basename(path)}' + (f' ({shown} of {self.model.rowCount()} glycan peaks, as filtered)' if shown < self.model.rowCount() else ''))
             except Exception as error:
                 QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
             finally:
@@ -3417,6 +3613,10 @@ class CrumbsTab(QWidget):
         self.ms3_precursor.setSpecialValueText('None (MS2 spectrum)')
         self.ms3_precursor.setToolTip('For an MS3 spectrum: m/z of the MS2 fragment that was isolated, so its peaks are only annotated as fragments of that '
                                       'fragment (glycan structures only)')
+        # metal_cations of CandyCrumbs, as the results' spectrum takes it from the peak's adduct: fragments of a protonated precursor carry no metal cation
+        self.carrier = _combo([('Protons, Na+, or K+', True), ('Protons', False), ('Li+', {'+Li'})])
+        self.carrier.setToolTip('What carries the positive charge of the precursor: fragments of a protonated precursor carry no metal cation, so Protons keeps '
+                                'Na+ and K+ fragments out of the annotation; Open in CandyCrumbs sets it from the peak')
         # As wide as their longest choice, these made the form wider than its limit, which cut off its right edge
         for box in (self.modification, self.sample_prep, self.sialic):
             box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -3429,6 +3629,7 @@ class CrumbsTab(QWidget):
         form.addRow('Max. cleavages', self.cleavages)
         form.addRow('Fragmentation', self.fragmentation)
         form.addRow('MS3 precursor', self.ms3_precursor)
+        form.addRow('Charge carrier', self.carrier)
         layout.addLayout(form)
         self.go = QPushButton('Annotate spectrum')
         self.go.setObjectName('run')
@@ -3447,6 +3648,11 @@ class CrumbsTab(QWidget):
         outer.addWidget(splitter)
         self.spectrum.show_message('Enter a structure and a peak list, then annotate the spectrum')
         form.setRowVisible(self.mass_tag, False)
+        form.setRowVisible(self.carrier, False)
+        self.charge.currentIndexChanged.connect(lambda: form.setRowVisible(self.carrier, self.charge.currentData() > 0))
+        # A spectrum from the results: (structure, peak list, competing structures and whether it is ion-trap CID), which the results' spectrum annotates with
+        # as long as structure and peaks stay as loaded
+        self.loaded = None
         self.debounce = QTimer(self)
         self.debounce.setSingleShot(True)
         self.debounce.setInterval(350)
@@ -3485,7 +3691,9 @@ class CrumbsTab(QWidget):
     def load(self, request):
         settings = request['settings']
         self.structure.setText(request['structure'] or '')
-        self.peaks.setPlainText('\n'.join(f'{mz:.4f}\t{intensity:.1f}' for mz, intensity in sorted(request['peaks'].items())))
+        # Intensities to six significant digits: one decimal turned those of runs whose intensities are small numbers (below 1 in some readers' runs) into
+        # 0.0 or moved them by percents, so the tab annotated another spectrum than the one shown in the results
+        self.peaks.setPlainText('\n'.join(f'{mz:.4f}\t{intensity:.6g}' for mz, intensity in sorted(request['peaks'].items())))
         _set_combo(self.charge, request['charge'])
         modification = settings.get('modification')
         modification = '+'.join(modification) if isinstance(modification, (list, tuple)) else modification
@@ -3494,18 +3702,46 @@ class CrumbsTab(QWidget):
         _set_combo(self.sample_prep, settings.get('sample_prep'))
         self.sialic.setCurrentIndex(max(self.sialic.findData(settings.get('sialic_derivatization')), 0) if settings.get('sialic_derivatization') else 0)
         self.ms3_precursor.setValue(request.get('ms3_precursor') or 0)
+        metals = request.get('metal_cations', True)
+        self.carrier.setCurrentIndex(0 if metals is True else 2 if metals and '+Li' in metals else 1)
         self.spectrum.set_tolerance(*request['tolerance'])
+        self.loaded = (self.structure.text().strip(), self.peaks.toPlainText(), {'candidates': request.get('candidates', []), 'ion_trap': request.get('ion_trap', False)})
         self.annotate()
 
     def annotate(self):
-        # A line split by tabs or semicolons without any '.' has decimal commas (Excel or CSV in comma-decimal locales): 1234,5678<Tab>100; lines that start
-        # with text are no peaks (headers, and the TITLE=, PEPMASS=, CHARGE= lines of a pasted mgf spectrum, whose numbers became peaks)
-        peaks = [[float(x) for x in re.findall(r'\d+(?:\.\d+)?(?:[eE][-+]?\d+)?', line.replace(',', '.') if '.' not in line and re.search(r'[\t;]', line) else line)[:2]]
-                 for line in self.peaks.toPlainText().splitlines() if re.match(r'\s*\.?\d', line)]
+        # A number typed into a spin box counts once the box loses focus or takes Enter (no keyboard tracking), which Ctrl+Return does not do
+        if isinstance(QApplication.focusWidget(), (QSpinBox, QDoubleSpinBox)):
+            QApplication.focusWidget().interpretText()
+        # Columns are split at tabs or semicolons, else at spaces, else at commas (CSV). Within a column, a comma is a decimal comma where its line has no '.'
+        # (Excel or CSV in comma-decimal locales: 1234,5678<Tab>100, also space-separated) and a thousands separator where it has one (Excel's 1,250,000 gave 1,
+        # and 1,204.0874 m/z 1), the later of a point and a comma is the decimal mark (1.250,5), and spaces within a tab-separated column separate thousands
+        # (1 250 000). Lines that start with text are no peaks (headers, and the TITLE=, PEPMASS=, CHARGE= lines of a pasted mgf spectrum, whose numbers became peaks)
+        peaks = []
+        for line in self.peaks.toPlainText().splitlines():
+            line = line.strip()
+            if not re.match(r'\.?\d', line):
+                continue
+            numbers = []
+            for field in re.split(r'[\t;]+', line) if re.search(r'[\t;]', line) else re.split(r'\s+', line) if re.search(r'\s', line) else line.split(','):
+                field = re.sub(r'\s', '', field).strip(',')
+                mark = ',' if field.rfind(',') > field.rfind('.') and ('.' not in line or '.' in field) else '.'
+                numbers += [float(x) for x in re.findall(r'\d+(?:\.\d+)?(?:[eE][-+]?\d+)?', field.replace('.' if mark == ',' else ',', '').replace(',', '.'))]
+            peaks.append(numbers[:2])
         peaks = [p for p in peaks if p and p[0] > 0]
-        if not self.structure.text().strip() or not peaks:
+        structure = self.structure.text().strip()
+        if not structure or not peaks:
             self.spectrum.show_message('Enter a structure and at least one peak')
             return
+        if '*' not in structure:
+            with IMPORT_LOCK:
+                from glycowork.motif.processing import canonicalize_iupac, is_composition
+            # CandyCrumbs reads IUPAC-condensed only and annotated nothing in a structure written otherwise (Galb1-3GalNAc, Neu5Aca2-3Galb1-3GalNAc), which the
+            # drawing, through glycowork, still showed; it gets the structure as glycowork reads it, which the box then shows
+            if not is_composition(structure):
+                with contextlib.suppress(Exception):
+                    structure = canonicalize_iupac(structure)
+                if structure != self.structure.text().strip():
+                    self.structure.setText(structure)
         settings = {'modification': self.modification.currentData(), 'mass_tag': self.mass_tag.value() if self.modification.currentData() == 'custom' else None,
                     'sample_prep': self.sample_prep.currentData()}
         kwargs = {'max_cleavages': self.cleavages.value()}
@@ -3516,7 +3752,11 @@ class CrumbsTab(QWidget):
         if self.ms3_precursor.value():
             # X cross-rings within the isolated fragment explain random MS3 peaks as often as real ones
             kwargs.update(ms3_precursor = self.ms3_precursor.value(), disable_X_cross_rings = True)
-        self.spectrum.annotate(self.structure.text().strip(), [p[0] for p in peaks], [p[1] if len(p) > 1 else 100.0 for p in peaks],
+        if self.charge.currentData() > 0:
+            kwargs['metal_cations'] = self.carrier.currentData()
+        if self.loaded and self.loaded[:2] == (structure, self.peaks.toPlainText()):
+            kwargs.update(self.loaded[2])
+        self.spectrum.annotate(structure, [p[0] for p in peaks], [p[1] if len(p) > 1 else 100.0 for p in peaks],
                                self.charge.currentData(), _mass_tag(settings), self.sample_prep.currentData(), **kwargs)
 
 
@@ -3539,11 +3779,13 @@ class CompareTab(QWidget):
     changed = Signal()
     status = Signal(str)
     log = Signal(str)
+    # (path, error or '') of an export drawn in the background (_draw_in_background)
+    exported = Signal(str, str)
     # How glycowork's result columns are shown: title, decimals ('p' for p-values) and tooltip; other columns are shown under their own names
     COLUMNS = {'Mean abundance': ('Mean (imputed)', 2, 'Mean relative abundance (%) over the compared runs, with missing values imputed as tested'),
                'Log2FC': ('Log2FC', 2, None), 'F statistic': ('F', 2, 'F statistic of the one-way ANOVA (variance-moderated)'),
                'Effect size': ('Effect size', 2, None), 'p-val': ('p', 'p', 'p-value of the test'),
-               'corr p-val': ('q', 'p', 'p-value corrected for multiple testing (Benjamini-Hochberg); significant below the sample-size adjusted alpha'),
+               'corr p-val': ('q', 'p', 'p-value corrected for multiple testing (Benjamini-Hochberg); significant below the sample-size-adjusted alpha'),
                'corr Levene p-val': ('Variance p', 'p', "Corrected p-value of Levene's test: low where the groups differ in their spread"),
                'Equivalence p-val': ('Equivalence p', 'p', 'Corrected p-value of the equivalence test (TOST): low where the groups are the same within a '
                                                          'small effect, for features the test does not find different'),
@@ -3647,6 +3889,8 @@ class CompareTab(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(58)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setHighlightSections(False)
+        # Column widths from 200 rows (Qt's default 1000): the same widths, and a table of 3,000 rows opens in half the time
+        self.table.horizontalHeader().setResizeContentsPrecision(200)
         self.table.setItemDelegateForColumn(0, StructureDelegate(images, self.table))
         self.volcano, self.by_group, self.posthoc = ChartView(palette = PALETTE), ChartView(palette = PALETTE), QTableWidget(0, 6)
         self.posthoc.setHorizontalHeaderLabels(['Group', 'vs group', 'Difference', 'p (adjusted)', '95% interval', 'Significant'])
@@ -3694,6 +3938,7 @@ class CompareTab(QWidget):
         self.guess.clicked.connect(self.guess_groups)
         self.go.clicked.connect(self.run)
         self.done.connect(self.finished)
+        self.exported.connect(lambda path, error: QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}') if error else self.status.emit(f'Exported {os.path.basename(path)}'))
         self.search.textChanged.connect(self.proxy.set_needle)
         self.table.selectionModel().selectionChanged.connect(self.selection_changed)
         self.volcano.canvas.pressed.connect(self.volcano_pressed)
@@ -4093,13 +4338,15 @@ class CompareTab(QWidget):
         if not path:
             return
         posthoc = pd.concat([table.assign(Glycan = glycan) for glycan, table in result['posthoc'].items()], ignore_index = True) if result['posthoc'] else None
+        if kind == 'snfg':
+            with IMPORT_LOCK:
+                from glycowork.motif.draw import plot_glycans_excel
+            self.status.emit('Drawing the glycans into the export…')
+            _draw_in_background(self, lambda: plot_glycans_excel(result['table'].copy(), path, glycan_col_num = 'Glycan'), path)
+            return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            if kind == 'snfg':
-                with IMPORT_LOCK:
-                    from glycowork.motif.draw import plot_glycans_excel
-                plot_glycans_excel(result['table'], path, glycan_col_num = 'Glycan')
-            elif kind == 'csv':
+            if kind == 'csv':
                 result['table'].to_csv(path, index = False)
                 if posthoc is not None:
                     posthoc.to_csv(os.path.splitext(path)[0] + '_posthoc.csv', index = False)
@@ -4426,7 +4673,6 @@ class MainWindow(QMainWindow):
         # abnormal (killed, power cut). None while Help > Send anonymous usage statistics is off
         self.session = None
         if REPORT_DSN and self.usage_action.isChecked():
-            from importlib.metadata import version, PackageNotFoundError
             self.store.beginGroup('sessions')
             for pid in self.store.childKeys():
                 stored, started = json.loads(self.store.value(pid))
@@ -4437,13 +4683,12 @@ class MainWindow(QMainWindow):
             self.store.endGroup()
             if not self.store.value('install_id'):
                 self.store.setValue('install_id', uuid.uuid4().hex)
-            with contextlib.suppress(PackageNotFoundError):
-                self.session, self.session_start = {'sid': str(uuid.uuid4()), 'did': self.store.value('install_id'), 'init': True, 'status': 'ok', 'errors': 0,
-                                                    'started': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                                                    'attrs': {'release': f'candycrunch@{version("candycrunch")}',
-                                                              'environment': 'app' if getattr(sys, 'frozen', False) else 'package'}}, time.time()
-                self.store.setValue(f'sessions/{os.getpid()}', json.dumps([self.session, self.session_start]))
-                _send_session(self.session)
+            self.session, self.session_start = {'sid': str(uuid.uuid4()), 'did': self.store.value('install_id'), 'init': True, 'status': 'ok', 'errors': 0,
+                                                'started': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                                'attrs': {'release': f'candycrunch@{__version__}',
+                                                          'environment': 'app' if getattr(sys, 'frozen', False) else 'package'}}, time.time()
+            self.store.setValue(f'sessions/{os.getpid()}', json.dumps([self.session, self.session_start]))
+            _send_session(self.session)
         if crashes:
             QTimer.singleShot(0, lambda: self.report_error('CandyCrunch closed unexpectedly the last time it ran', files = {'window_crash.txt': '\n\n'.join(crashes)}))
         self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
@@ -4502,8 +4747,7 @@ class MainWindow(QMainWindow):
     def check_update(self, announce = False):
         """The installed Windows app offers the newest GitHub release that carries a Windows installer, without network access simply nothing; announce:
         asked from the Help menu, so the answer comes also without a newer release, and other installs are told how they are updated"""
-        from importlib.metadata import version
-        running = version('candycrunch')
+        running = __version__
         if not (getattr(sys, 'frozen', False) and sys.platform == 'win32'):
             if announce:
                 QMessageBox.information(self, 'Check for updates', f'This is CandyCrunch {running}. ' + (
@@ -4516,8 +4760,8 @@ class MainWindow(QMainWindow):
                 from packaging.version import Version
                 with urllib.request.urlopen('https://api.github.com/repos/BojarLab/CandyCrunch/releases/latest', timeout = 10) as response:
                     release = json.load(response)
-                asset = next(a for a in release['assets'] if a['name'].endswith('-Windows-Setup.exe'))
-                if Version(release['tag_name'].lstrip('v')) > Version(running):
+                asset = next((a for a in release['assets'] if a['name'].endswith('-Windows-Setup.exe')), None)
+                if asset and Version(release['tag_name'].lstrip('v')) > Version(running):
                     self.update_url = asset['browser_download_url']
                     self.update_found.emit(release['tag_name'].lstrip('v'))
                     if announce:
@@ -4713,13 +4957,13 @@ class MainWindow(QMainWindow):
         count = len(self.settings.paths())
         self.settings.add_paths(paths)
         if paths and len(self.settings.paths()) == count:
-            self.statusBar().showMessage('No new runs added. CandyCrunch reads Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, mgf, and .cc or .xlsx made by extract_spectra; '
+            self.statusBar().showMessage('No new runs added. CandyCrunch reads Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, mgf, and CandyCrunch .cc or .xlsx; '
                                          'a folder adds its runs but not its .xlsx files, which are added one by one', 10000)
 
     def choose_files(self):
         folder = self.store.value('folder', os.path.expanduser('~'))
         folder = os.path.dirname(run) if (run := _run_folder(folder)) else folder
-        dialog = QFileDialog(self, 'Add LC-MS/MS runs', folder, 'Spectra (*.raw *.RAW *.wiff *.mzML *.mzXML *.mzdata *.mzdata.xml *.mgf *.cc *.xlsx);;All files (*)')
+        dialog = QFileDialog(self, 'Add LC-MS/MS runs', folder, 'Spectra (*.raw *.RAW *.wiff *.mzML *.mzXML *.mzdata *.mzdata.xml *.mgf *.cc *.xlsx *.mzML.gz *.mzXML.gz *.mgf.gz);;All files (*)')
         dialog.setFileMode(QFileDialog.ExistingFiles)
         runs = []
 
@@ -4768,6 +5012,9 @@ class MainWindow(QMainWindow):
             self.run()
 
     def run(self):
+        # A number typed into a spin box counts once the box loses focus or takes Enter (no keyboard tracking), which Ctrl+R does not do: it ran with the value before
+        if isinstance(QApplication.focusWidget(), (QSpinBox, QDoubleSpinBox)):
+            QApplication.focusWidget().interpretText()
         # The settings check of a run just added (SettingsPanel.add_paths) can still change its experiment's settings, so the run waits for it
         if self.settings.waiting():
             self.run_pending = True
@@ -4917,6 +5164,8 @@ class MainWindow(QMainWindow):
             self.pages.setCurrentWidget(self.results)
 
     def finished(self, payload):
+        # Experiments that stopped with an error (the worker keeps the others' results), told as a failed run is
+        failures = payload.pop('failed', [])
         seconds = int(time.time() - self.started)
         # A single file shows how this computer splits its time over the steps; blending that in makes the next estimate fit the machine
         steps = [(name, t) for name, t in self.stage_times if name in STAGE_WEIGHTS]
@@ -4931,6 +5180,14 @@ class MainWindow(QMainWindow):
         anions = sorted({df.attrs['run_anion'] for e in payload['experiments'] for df, _ in e['tables'].values() if df.attrs.get('run_anion')})
         self.stop(f'Finished in {seconds // 60}:{seconds % 60:02d}: {peaks} glycan peak{"s" if peaks != 1 else ""} in {runs} run{"s" if runs > 1 else ""}{"; " + ", ".join(anions) + " adducts counted" if anions else ""}')
         self.append_log(self.status_text.text() + '\n')
+        for name, text, values in failures:
+            self.status_text.setText(f'{self.status_text.text()}; {name} stopped with an error, details are in the log')
+            self.append_log(f'{name} stopped with an error:\n{text}')
+            self.log_dock.show()
+            if values and values[-1].get('type') in ('ValueError', 'FileNotFoundError'):
+                QMessageBox.warning(self, 'CandyCrunch', f'{name}: {values[-1]["value"]}')
+            else:
+                self.report_error(text.strip().splitlines()[-1], values, box = True)
         if not peaks:
             QApplication.alert(self)
             QMessageBox.information(self, 'CandyCrunch', 'CandyCrunch found no glycan peaks. Check the glycan class, ion mode, and reducing end, '
@@ -5019,12 +5276,14 @@ class MainWindow(QMainWindow):
         self.welcome_text.setText(self.welcome + (f'<br><br>Recent results: {links}' if links else ''))
         self.welcome_text.setMinimumHeight(self.welcome_text.heightForWidth(460))
 
-    def keep_curation(self):
-        """Offers to save curated results before a run or other results replace them or the app closes; False if the user cancels"""
-        if not self.results.dirty:
+    def keep_curation(self, closing = False):
+        """Offers to save curated results before a run or other results replace them or the app closes, and on closing also results never saved (closing
+        the window after a run of many files lost its results without a word); False if the user cancels"""
+        unsaved = closing and self.results.payload is not None and self.session_path is None
+        if not self.results.dirty and not unsaved:
             return True
-        answer = QMessageBox.question(self, 'CandyCrunch', 'Your curation of the current results is not saved yet. Save it first?',
-                                      QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        answer = QMessageBox.question(self, 'CandyCrunch', 'Your curation of the current results is not saved yet. Save it first?' if self.results.dirty else
+                                      'These results are not saved yet. Save them before closing?', QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
         return self.save_session() if answer == QMessageBox.Save else answer == QMessageBox.Discard
 
     def open_session(self, path = None):
@@ -5082,16 +5341,15 @@ class MainWindow(QMainWindow):
         threading.Thread(target = work, daemon = True).start()
 
     def about(self):
-        from importlib.metadata import version
-        QMessageBox.about(self, 'About CandyCrunch', f'<h3>CandyCrunch {version("candycrunch")}</h3><p>Predicting glycan structure from LC-MS/MS data.</p>'
+        QMessageBox.about(self, 'About CandyCrunch', f'<h3>CandyCrunch {__version__}</h3><p>Predicting glycan structure from LC-MS/MS data.</p>'
                           '<p>Urban J, Jin C, Thomsson KA, Karlsson NG, Ives CM, Fadda E, Bojar D. Predicting glycan structure from tandem mass spectrometry via deep '
-                          'learning. <i>Nature Methods</i> 21, 1206-1215 (2024).</p><p><a href="https://github.com/BojarLab/CandyCrunch">github.com/BojarLab/CandyCrunch</a></p>')
+                          'learning. <i>Nature Methods</i> 21, 1206-1215 (2024). <a href="https://doi.org/10.1038/s41592-024-02314-6">doi:10.1038/s41592-024-02314-6</a></p><p><a href="https://github.com/BojarLab/CandyCrunch">github.com/BojarLab/CandyCrunch</a></p>')
 
     def closeEvent(self, event):
         if self.runner.busy and QMessageBox.question(self, 'CandyCrunch', 'A run is still going. Quit anyway?') != QMessageBox.Yes:
             event.ignore()
             return
-        if not self.keep_curation():
+        if not self.keep_curation(closing = True):
             event.ignore()
             return
         self.store.setValue('geometry', self.saveGeometry())

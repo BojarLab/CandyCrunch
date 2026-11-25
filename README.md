@@ -13,16 +13,8 @@
 ## What is CandyCrunch?
 **CandyCrunch** is a package for predicting glycan structure from LC-MS/MS data. It contains the CandyCrunch model, along with the rest of the inference pipeline and downstream spectrum processing tools. These are further described in our manuscript [Urban et al. (2024)](https://www.nature.com/articles/s41592-024-02314-6) &ndash; ***Predicting glycan structure from tandem mass spectrometry via deep learning*** published in Nature Methods.
 
-## Install CandyCrunch
-#### PyPI:
-```bash
-pip install candycrunch
-```
-## Using CandyCrunch &ndash; In your browser
-No installation at all: [bojarlab.github.io/CandyCrunch](https://bojarlab.github.io/CandyCrunch/) runs the whole CandyCrunch pipeline in your browser tab, with the same files and settings as the command line, and gives its results as CSV and Excel downloads. Your files are read where they are and never uploaded. A bundled example run lets you try it without data of your own. It needs Chrome or Edge 137 or newer.
-
 ## Using CandyCrunch &ndash; Desktop app
-No Python or command line needed: download `CandyCrunch-<version>-Windows-Setup.exe` (Windows) or `CandyCrunch-<version>-macOS.dmg` (macOS) from the [latest release](https://github.com/BojarLab/CandyCrunch/releases/latest), install it, and start CandyCrunch from the Start menu or Applications. The Windows installer needs no administrator rights; afterwards, Thermo .raw, mzML, mzXML, and mgf files can be opened with CandyCrunch from their right-click menu, and saved results open with a double-click. The macOS app is not notarized, so on first start macOS asks you to allow it once under System Settings > Privacy & Security > Open Anyway. The Windows app looks for a new release at every start and installs it in place with two clicks on Update in the status bar, keeping your settings; on macOS, a new release is installed by downloading its disk image.
+No Python or command line needed: download `CandyCrunch-<version>-Windows-Setup.exe` (Windows) or `CandyCrunch-<version>-macOS.dmg` (macOS) from the [latest release](https://github.com/BojarLab/CandyCrunch/releases/latest), install it, and start CandyCrunch from the Start menu or Applications. The Windows installer needs no administrator rights; afterwards, Thermo .raw, mzML, mzXML, and mgf files can be opened with CandyCrunch from their right-click menu, and saved results open with a double-click. The macOS app is not notarized, so on first start macOS asks you to allow it once under System Settings > Privacy & Security > Open Anyway. Windows SmartScreen may hold back the installer of a new release at first ("Windows protected your PC"); More info > Run anyway installs it. The Windows app looks for a new release at every start and installs it in place with two clicks on Update in the status bar, keeping your settings; on macOS, a new release is installed by downloading its disk image.
 
 Python users get the same app with
 ```bash
@@ -31,12 +23,18 @@ candycrunch_gui
 ```
 The desktop app runs CandyCrunch on one or several Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, mgf, .cc, or xlsx files without any code, with a progress bar that shows how far a run is and about how long it will still take. Results come as a table with SNFG drawings, and each glycan peak shows its annotated MS² spectrum (Save image… writes it at print size as PNG, SVG, or PDF, with the m/z of every labeled peak), fragment table, candidate structures, and position on a retention time vs. m/z map. Several runs are harmonized into a feature table with per-run abundances, and the Compare groups tab tests which glycans or motifs differ between groups of runs (two groups: glycowork's differential expression; three or more: ANOVA with Tukey's post-hoc tests), with a volcano plot, per-group abundances, and Excel export. Predictions can be curated (assign another candidate, enter a structure, exclude a peak), exported as CSV or Excel (optionally with SNFG drawings), and saved to reopen later without rerunning. The CandyCrumbs tab annotates any peak list with any glycan, composition, or glycopeptide. To try the app without data of your own, File > Add example run adds a small bundled O-glycan run.
 
+## Install CandyCrunch
+CandyCrunch runs on Python 3.11 or newer (on Intel Macs, Python 3.11 or 3.12, the last versions PyTorch builds for them).
+#### PyPI:
+```bash
+pip install candycrunch
+```
 ## Using CandyCrunch &ndash; Command line interface:
-If you would like to run our main inference function from the command line, you can do so using the `candycrunch_predict` command included in this repository. Its tables and the app's exports add a `references` column: the links glycowork's database holds for each structure, also for structures without a GlyTouCan ID.
+If you would like to run our main inference function from the command line, you can do so using the `candycrunch_predict` command that comes with CandyCrunch. Its tables and the app's exports add a `references` column: the links glycowork's database holds for each structure, also for structures without a GlyTouCan ID.
 
 #### Requires at a minimum:
 <pre>
---spectra_filepath, type=string(s): one or more filepaths to Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, or mgf files or .cc/.xlsx files from extract_spectra, and/or folders of .raw, .wiff, .d, mzML, mzXML, mzData, mgf, or .cc files (the .xlsx files in a folder are not used); several files are processed together via `wrap_inference_batch` <br />
+--spectra_filepath, type=string(s): one or more filepaths to Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, or mgf files (also gzipped: .mzML.gz, .mzXML.gz, .mgf.gz) or .cc/.xlsx files from extract_spectra, and/or folders of .raw, .wiff, .d, mzML, mzXML, mzData, mgf, or .cc files (the .xlsx files in a folder are not used); several files are processed together via `wrap_inference_batch` <br />
 --glycan_class, type=string(s): the glycan class measured ("N", "O", "lipid"/"free"), or several measured together in one run (e.g., `--glycan_class N O`) <br />
 --output, type=string: an output filepath ending with `.csv` or `.xlsx`
 </pre>
@@ -52,11 +50,10 @@ If you would like to run our main inference function from the command line, you 
 --sample_prep, type=string: options are 'underivatized', 'permethylated', 'deuteropermethylated', and 'peracetylated'; default:'underivatized' <br />
 --sialic_derivatization, type=string: linkage-specific sialic acid derivatization of underivatized samples, or of samples permethylated after it; options are 'EE' (ethyl esterification), 'EEA' (ethyl esterification and amidation), 'ME' (methyl esterification), 'DMA' (dimethylamidation), 'SALSA', 'GQ' (glycoqueuing: aniline on every sialic acid, which tells no linkage; with GirardP), and 'GQ-d5' (d5-aniline on a2-6); precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
 --reducing_end_variants, type=string(s): other reducing ends the glycans may carry: 'free' (glycans that escaped reduction or labeling, counted for their glycan), 'ethyl_glycoside' (rows of their own), 'glycosylamine' (PA glycans whose label was not reduced, counted for their glycan), and/or 'glycosylaminitol' (1-amino-1-deoxy-alditols of reduced N-glycans that were still glycosylamines when reduced, counted for their glycan); give none of them to turn this off; default: free, plus ethyl_glycoside for lipid, glycosylamine for PA, and glycosylaminitol for reduced N-glycans <br />
---adducts, type=string(s): ions that carry the charge of the precursors in place of protons, e.g., Li+ for lithium salts in the mobile phase ([M+Li]+, [M+2Li]2+, ...); the usual adducts (Na+, K+, NH4+ in positive, acetate, formate, HCO3- in negative mode) are always considered; default:None <br />
+--adducts, type=string(s): ions that carry the charge of the precursors in place of protons, e.g., Li+ for lithium salts in the mobile phase ([M+Li]+, [M+2Li]2+, ...); the usual adducts (Na+, K+, NH4+ in positive, acetate, formate, HCO3- in negative mode) are always considered; default:None (Na+ for permethylated glycans in positive mode) <br />
 --run_anion, type=string: anion of the mobile phase in negative mode (HCO3-, Formate, or Acetate): read before the other anion adducts, and its adduct ions count for abundances; default: all are considered, and with survey scans the anion neutral glycans show counts <br />
---modification, type=string(s): reducing-end modification of glycans; options are 'reduced', 'reduced_D' (NaBD4), 'unreduced' (free reducing end), '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl' (benzyl glycoside, e.g., CORA), 'glycolate' and 'lactate' (O-glycans released oxidatively, on the glycolic acid of their Ser or the lactic acid of their Thr), or 'custom'; several for glycans of several reducing ends side by side (e.g., glycolate lactate), the first being the run's own; default:'reduced'
-| 
-|--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag; default:None <br />
+--modification, type=string(s): reducing-end modification of glycans; options are 'reduced', 'reduced_D' (NaBD4), 'unreduced' (free reducing end), '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl' (benzyl glycoside, e.g., CORA), 'glycolate' and 'lactate' (O-glycans released oxidatively, on the glycolic acid of their Ser or the lactic acid of their Thr), or 'custom'; several for glycans of several reducing ends side by side (e.g., glycolate lactate), the first being the run's own; default:'reduced' <br />
+--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag; default:None <br />
 --lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
 --trap, type=string: type of mass analyzer that records the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; the instrument stored in the file overrides it; default:'linear' <br />
 --rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
@@ -71,14 +68,14 @@ If you would like to run our main inference function from the command line, you 
 --extra_thresh, type=float: model probability from which structures of another glycan class are allowed; default:0.2 <br />
 --frag_num, type=int: number of top fragments to show per spectrum; default:100 <br />
 --supplement, type=bool: whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True <br />
---experimental, type=bool: whether to impute missing predictions via database searches etc.; default:True
-|
-|--taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class' <br />
-|--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
---intra_cat_thresh, type=float: required for several files, minutes the RT of a structure can differ from the mean of its group across files <br />
+--experimental, type=bool: whether to impute missing predictions via database searches etc.; default:True <br />
+--taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class' <br />
+--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
+--intra_cat_thresh, type=float: several files only, minutes the RT of a structure can differ from the mean of its group across files; default:1.0 <br />
 --top_n_isomers, type=int: several files only, number of isomer groups at each composition to retain in each file; default:5 <br />
 --n_jobs, type=int: number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default:1 <br />
---plot_glycans, type=bool: whether to write the output as an .xlsx file that contains SNFG images of all top1 predictions (a `.csv` output additionally gets an `.xlsx` of the same name); default:False
+--plot_glycans, type=bool: whether to write the output as an .xlsx file that contains SNFG images of all top1 predictions (a `.csv` output additionally gets an `.xlsx` of the same name); default:False <br />
+--version: prints the CandyCrunch version and exits
 </pre>
 </details>
 
@@ -86,13 +83,16 @@ If you would like to run our main inference function from the command line, you 
 > [!IMPORTANT]  
 > Users must install CandyCrunch using pip before running the commands below
 ```console
-$ candycrunch_predict --spectra_filepath path_to_my_files/file.mzML --glycan_class 'O' --output path_to_my_outputs/output_file.csv
+$ candycrunch_predict --spectra_filepath path_to_my_files/file.mzML --glycan_class O --output path_to_my_outputs/output_file.csv
 ```
 
 Several files, or a folder of Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, or mgf files, are harmonized across runs with `wrap_inference_batch`. The output file then holds a feature table with one row per isomer group (top1 prediction, consensus m/z and RT, number of files with MS2 evidence) and its relative abundance and evidence (MS2 or MS1-only) in every file, and each file's predictions are written next to it as `output_file_<file name>.csv`:
 ```console
-$ candycrunch_predict --spectra_filepath path_to_my_files/ --glycan_class 'O' --intra_cat_thresh 1.75 --top_n_isomers 2 --output path_to_my_outputs/output_file.csv
+$ candycrunch_predict --spectra_filepath path_to_my_files/ --glycan_class O --intra_cat_thresh 1.75 --top_n_isomers 2 --output path_to_my_outputs/output_file.csv
 ```
+
+## Using CandyCrunch &ndash; In your browser
+To try CandyCrunch without installing anything, [bojarlab.github.io/CandyCrunch](https://bojarlab.github.io/CandyCrunch/) runs the CandyCrunch pipeline in a browser tab, with the same files and settings as the command line, and gives its results as CSV and Excel downloads. Your files are read where they are and never uploaded. A bundled example run lets you try it without data of your own. It needs Chrome or Edge 137 or newer. For large runs and batches, the desktop app is faster.
 
 ## Using CandyCrunch &ndash; LC-MS/MS glycan annotation
 ### `wrap_inference` (in `candycrunch.prediction`) <br>
@@ -103,7 +103,7 @@ Wrapper function to predict glycan structures from raw LC-MS/MS spectra using `C
 - spectra_filepath, type = string: a filepath to a run (Thermo or Waters .raw, SCIEX .wiff, Bruker or Agilent .d, mzML, mzXML, mzData, or mgf, or a .zip of one), or a .cc or .xlsx file from extract_spectra, or a dataframe of spectra as load_spectra_filepath returns them <br />
 - glycan_class, type = string or list: the glycan class measured ("N", "O", "lipid"/"free"), or a list of the classes measured together in one run (e.g., `["N", "O"]` for N- and O-glycans released from one sample)
 </pre>
-Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, and mgf files are internally processed into extracted spectra; .raw files are read directly, and timsTOF .d folders of DDA-PASEF runs (also those of early timsTOF software) as well, without any conversion or vendor software (survey frames are summed over their ion mobility scans, m/z come from the file's own TOF calibration, and the unfragmented precursor is removed from MS2 spectra; diaPASEF is not supported; timsTOF runs without ion mobility, with an analysis.tsf, are read from the centroided line spectra the instrument stores). Bruker ion trap .d folders (esquire, HCT, amaZon, with an Analysis.yep) and Bruker Q-TOF .d folders (maXis, impact, compact, micrOTOF-Q, with an analysis.baf) are read directly as well, from the centroided line spectra the instrument stores (Q-TOF m/z from the file's own TOF calibration). Waters MassLynx .raw folders of Q-TOF DDA runs (SYNAPT, Xevo G2, Q-Tof Premier; e.g., Fast DDA) are read directly too, with the file's own calibration, continuum scans centroided as MassLynx does; the lock mass function is left out and no lock mass correction is applied, and ion mobility (HDMS) and MSE runs are not supported. With accurate (orbitrap or timsTOF) survey scans, a peak the model has no structure for gets a database structure of its composition if the precursor m/z pins that composition and its fragments back the structure up. mzML files converted from timsTOF data work with or without combining ion mobility scans in msconvert. xlsx files need to be already extracted in the format as the example file in `examples/`. `extract_spectra(spectra_filepath)` (in `candycrunch.prediction`) writes such an xlsx from a .raw, .wiff, .d, mzML, mzXML, mzData, or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept). `extract_spectra(spectra_filepath, file_format = 'cc')` instead writes a compact binary .cc file that keeps everything CandyCrunch reads from the original file (MS2 and MS3 spectra exactly as loaded, the detected ion mode and analyzers, and the survey scans), so predictions and XIC quantification from it match the original (a 38 MB mzML becomes a 4.8 MB .cc, read in a tenth of a second); it is a zip of numpy arrays that `numpy.load` opens.
+Thermo and Waters .raw, SCIEX .wiff, Bruker and Agilent .d, mzML, mzXML, mzData, and mgf files are internally processed into extracted spectra; .raw files are read directly, and timsTOF .d folders of DDA-PASEF runs (also those of early timsTOF software) as well, without any conversion or vendor software (survey frames are summed over their ion mobility scans, m/z come from the file's own TOF calibration, and the unfragmented precursor is removed from MS2 spectra; diaPASEF is not supported; timsTOF runs without ion mobility, with an analysis.tsf, are read from the centroided line spectra the instrument stores). Bruker ion trap .d folders (esquire, HCT, amaZon, with an Analysis.yep) and Bruker Q-TOF .d folders (maXis, impact, compact, micrOTOF-Q, with an analysis.baf) are read directly as well, from the centroided line spectra the instrument stores (Q-TOF m/z from the file's own TOF calibration). Waters MassLynx .raw folders of Q-TOF DDA runs (SYNAPT, Xevo G2, Q-Tof Premier; e.g., Fast DDA) are read directly too, with the file's own calibration, continuum scans centroided as MassLynx does; the lock mass function is left out and no lock mass correction is applied, and ion mobility (HDMS) and MSE runs are not supported. With accurate (orbitrap or timsTOF) survey scans, a peak the model has no structure for gets a database structure of its composition if the precursor m/z pins that composition and its fragments back the structure up. mzML files converted from timsTOF data work with or without combining ion mobility scans in msconvert. xlsx files need to be extracted already, in the format of the example file in [`examples/`](https://github.com/BojarLab/CandyCrunch/tree/main/examples). `extract_spectra(spectra_filepath)` (in `candycrunch.prediction`) writes such an xlsx from a .raw, .wiff, .d, mzML, mzXML, mzData, or mgf file, with precursor m/z already refined from MS1, so it gives the same predictions as the original file at a fraction of the size (only quantification falls back to precursor intensity, as MS1 scans are not kept). `extract_spectra(spectra_filepath, file_format = 'cc')` instead writes a compact binary .cc file that keeps everything CandyCrunch reads from the original file (MS2 and MS3 spectra exactly as loaded, the detected ion mode and analyzers, and the survey scans), so predictions and XIC quantification from it match the original (a 38 MB mzML becomes a 4.8 MB .cc, read in a tenth of a second); it is a zip of numpy arrays that `numpy.load` opens.
 <details>
 <summary>
 
@@ -115,9 +115,8 @@ glycans, type=list: ordered list of glycans used to train CandyCrunch which can 
 bin_num, type=int: number of bins to separate the MS2 spectrum into; default:2048 <br />
 frag_num, type=int: number of top fragments to show in df_out per spectrum; default:100 <br />
 max_charge, type=int: maximum signed charge to consider; the sign sets the mass spectrometry mode (negative or positive); default:-3 <br />
-modification, type=string or list: reducing-end modification of glycans; options are 'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl' (benzyl glycoside, e.g., CORA), 'glycolate' and 'lactate' (O-glycans released oxidatively, on the glycolic acid of their Ser or the lactic acid of their Thr), or 'custom' (without mass_tag for a free reducing end); a list for glycans of several reducing ends side by side (e.g., ['glycolate', 'lactate']), the first being the run's own, whose rows then name their reducing end in a column reducing_end; default:'reduced'
-| 
-|--mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag; default:None <br />
+modification, type=string or list: reducing-end modification of glycans; options are 'reduced', 'reduced_D', '2AA', '2AB', 'procainamide', 'PA', 'APTS', 'aminoxyTMT', 'GirardP', 'benzyl' (benzyl glycoside, e.g., CORA), 'glycolate' and 'lactate' (O-glycans released oxidatively, on the glycolic acid of their Ser or the lactic acid of their Thr), or 'custom' (without mass_tag for a free reducing end); a list for glycans of several reducing ends side by side (e.g., ['glycolate', 'lactate']), the first being the run's own, whose rows then name their reducing end in a column reducing_end; default:'reduced' <br />
+mass_tag, type=float: only if modification = "custom", mass of custom reducing end tag; default:None <br />
 lc, type=string: type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC' <br />
 trap, type=string: type of mass analyzer that records the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; the instrument stored in the file overrides it; default:'linear' <br />
 rt_min, type=float: whether only spectra from a minimum retention time (in minutes) onward should be considered; default:0 (runs longer than 20 min then skip their first 2 min) <br />
@@ -133,24 +132,19 @@ crumbs_thresh, type=float: CandyCrumbs annotation score a prediction has to exce
 sample_prep, type=string: options are 'underivatized', 'permethylated', 'deuteropermethylated', and 'peracetylated'; default:'underivatized' <br />
 extra_thresh, type=float: model probability from which structures of another glycan class are allowed (e.g., N-glycans in O-glycan samples); default:0.2 <br />
 supplement, type=bool: whether to impute observed biosynthetic intermediaries from biosynthetic networks; default:True <br />
-experimental, type=bool: whether to impute missing predictions via database searches etc.; default:True
-|
-|--mass_dic, type=dict: only if experimental = "True", dictionary of form mass : list of glycans; will be generated internally 
-|
-|--taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class'
-|
-|--taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia'
-|
-|--df_use, type=DataFrame: only if experimental = "True", sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan <br />
+experimental, type=bool: whether to impute missing predictions via database searches etc.; default:True <br />
+mass_dic, type=dict: only if experimental = "True", dictionary of form mass : list of glycans; will be generated internally <br />
+taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class' <br />
+taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
+df_use, type=DataFrame: only if experimental = "True", sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan <br />
 plot_glycans, type=bool: whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False <br />
 sialic_derivatization, type=string or tuple: linkage-specific sialic acid derivatization of underivatized samples, or of samples permethylated after it, 'EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5', or a pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
 reducing_end_variants, type=dict: other reducing ends the glycans may carry, as name: group on the free glycan's reducing end (formula or mass; 0 for a free reducing end), e.g., {'free': 0} or {'ethyl glycoside': 'C2H4'}; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid', glycosylamines for 'PA', and glycosylaminitols, NH3-O, for reduced N-glycans) <br />
-adducts, type=string or list: ions of glycowork's adduct table that carry the charge of the precursors in place of protons, e.g., 'Li+' for lithium salts in the mobile phase; their compositions come before the protonated ones; the usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered; default:None <br />
+adducts, type=string or list: ions of glycowork's adduct table that carry the charge of the precursors in place of protons, e.g., 'Li+' for lithium salts in the mobile phase; their compositions come before the protonated ones; the usual adducts (Na+, K+, NH4+ or acetate, formate, HCO3-) are always considered; default:None (['Na+'] for permethylated glycans in positive mode, which [] turns off) <br />
 run_anion, type=string: anion of the mobile phase in negative mode ('HCO3-', 'Formate', or 'Acetate'): read before the other anion adducts, and with survey scans its adduct ions count for abundances; default:None (all are considered, and with survey scans the anion neutral glycans show counts) <br />
-n_jobs, type=int: number of processes for fragment scoring and supporting peaks (a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS); default:1
+n_jobs, type=int: number of processes for fragment scoring and supporting peaks (a script using n_jobs > 1 needs if __name__ == '__main__' on Windows and macOS); default:1 <br />
 rt_max_default, type=float: minimum maximum retention time to normalize to; default:30.0 <br />
 return_inputs, type=bool: whether to return the model's inputs instead of predictions, as a callable model receives them (e.g., to build training data from runs with known structures); default:False <br />
-
 </pre>
 </details>
 
@@ -165,14 +159,14 @@ annotated_spectra_df = wrap_inference("C:/myfiles/my_spectra.mzML", 'O')
 | 530.211 | Fuc(a1-2)Gal(b1-3)GalNAc |      0.866 | [('Fuc(a1-2)Gal(b1-3)GalNAc', 0.9339)] | {'Hex': 1, 'HexNAc': 1, 'dHex': 1} |            13 |       -1 | 19.91 |            0.81 | [205.0392, 204.032, 246.9845, ...]  |          |        3.81 |         | G05545HU       | 1/1 residues supported: Fuc(a1-2) on Gal (324.9 C2a, 307.1 B2a) |
 | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... |
 
-confidence is the probability that top1_pred is the glycan of the peak, exactly as written: one calibrated score built from the model's probability of the structure among the isomers of its composition (also in predictions, with the other candidates), the CandyCrumbs fragment evidence, the MS2 peaks that place each residue (see `supporting_ions`), other peaks with the same structure, where the structure came from, the peak's abundance, and more (see `candycrunch/confidence.py`; the app shows each row's breakdown). On curated test sets it is calibrated within about 0.03 overall; single datasets can deviate more. rel_abundance is the peak's share (in %) of the summed abundance of all rows, and supported_by the MS2 peaks that place each residue of the structure (see `supporting_ions`).
+confidence is the probability that top1_pred is the glycan of the peak, exactly as written: one calibrated score built from the model's probability of the structure among the isomers of its composition (also in predictions, with the other candidates), the CandyCrumbs fragment evidence, the MS2 peaks that place each residue (see `supporting_ions`), other peaks with the same structure, where the structure came from, the peak's abundance, and more (see `candycrunch/confidence.py`; the app shows each row's breakdown). On curated test sets it is calibrated to within about 0.03.
 
-rel_abundance is a peak's share of the run. With survey scans it sums the isotope envelope of the glycan's ion over its chromatographic peak, its other charge states that follow that peak, and, in a run whose neutral glycans ionize as adducts of the mobile phase's anion (e.g., ammonium bicarbonate), the adduct ions that follow it ([M+HCO3-H]2-, [M+HCO3]-), whether or not they were fragmented.
+rel_abundance is the peak's share (in %) of the summed abundance of all rows. With survey scans it sums the isotope envelope of the glycan's ion over its chromatographic peak, its other charge states that follow that peak, and, in a run whose neutral glycans ionize as adducts of the mobile phase's anion (e.g., ammonium bicarbonate), the adduct ions that follow it ([M+HCO3-H]2-, [M+HCO3]-), whether or not they were fragmented. supported_by lists the MS2 peaks that place each residue of the structure (see `supporting_ions`).
 
 ### `wrap_inference_batch` (in `candycrunch.prediction`) <br>
 Wrapper function to predict glycan structures from multiple LC-MS/MS files using CandyCrunch. <br />
 This function works similarly to `wrap_inference` except a list of filenames is provided and a tuple is returned: a feature table and a dictionary of output DataFrames, one for each input file, keyed by their filenames. <br />
-The feature table has one row per isomer group with a structure (also those without one with get_missing; a glycan that files report at different charge states is one row) with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID and the number of files with MS2 evidence, followed by its relative abundance in each file and an `evidence_<file>` column per file ('ms2', or 'ms1_only' if it was gap-filled from MS1; in batches of 10 or more files only isomer groups that at least two files report by MS2 are gap-filled). The first column holds the glycans; `compare_groups` (in `candycrunch.differential`) tests the table for differences between groups of files with glycowork's `get_differential_expression` (two groups) or `get_glycanova` (three or more), as the app's Compare groups tab does. <br />
+The feature table has one row per isomer group with a structure (also those without one with get_missing; a glycan that files report at different charge states is one row) with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID, the number of files with MS2 evidence, and a flag (in-source fragment, peeling product, glucose oligomer, or other class; `compare_groups` leaves flagged features out unless `include_flagged`), followed by its relative abundance in each file and an `evidence_<file>` column per file ('ms2', or 'ms1_only' if it was gap-filled from MS1; in batches of 10 or more files only isomer groups that at least two files report by MS2 are gap-filled). The first column holds the glycans; `compare_groups` (in `candycrunch.differential`) tests the table for differences between groups of files with glycowork's `get_differential_expression` (two groups) or `get_glycanova` (three or more), as the app's Compare groups tab does. <br />
 Precursors are clustered by m/z across files within the mass tolerance, and glycan predictions are assigned to groups based on the prediction most often ranked first in the group across files (ties go to the highest probability summed over the group), which rows of the group's composition without a prediction also take. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
 
 The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_thresh.
@@ -189,7 +183,7 @@ At each composition, an isomer group is kept if it is among the top_n_isomers gr
 - top_n_isomers, type = int: number of isomer groups at each composition to retain in each file; default:5 <br />
 - n_jobs, type = int: number of files to process in parallel (in separate processes), and of processes for the supporting peaks of each file's rows; default:1 <br />
 - library_thresh, type = float: MS2 cosine at which a peak without a structure takes the structure of a peak at the same m/z and charge in another file; None turns this off; default:0.9 <br />
-See `wrap_inference`  <br />
+All other optional arguments as in `wrap_inference`, except return_inputs <br />
 <br />  
 ```python
 from candycrunch.prediction import wrap_inference_batch
@@ -266,10 +260,10 @@ n_term_modification, type=string or float: a modification of a glycopeptide's N-
  443.07: {'Theoretical fragment masses': [443.14062],
   'Domon-Costello nomenclatures': [['02A_3_Alpha']],
   'Fragment charges': [-1]},
- 546.19: {'Theoretical fragment masses': [546.20393],
+ 546.19: {'Theoretical fragment masses': [546.20394],
   'Domon-Costello nomenclatures': [['Y_2_Alpha', 'Y_3_Beta']],
   'Fragment charges': [-1]},
- 1216.32: {'Theoretical fragment masses': [1216.44723],
+ 1216.32: {'Theoretical fragment masses': [1216.44724],
   'Domon-Costello nomenclatures': [['M_C2H4O2']],
   'Fragment charges': [-1]}}</pre>
 </details>
@@ -289,7 +283,7 @@ GlycoDraw(fragment_iupac)
 </p>
 
 ### More tools (in `candycrunch.analysis`)
-- `plot_annotated_spectrum(glycan, mzs, intensities)`: an MS2 spectrum with its CandyCrumbs annotations labeled and drawn as SNFG cartoons (also straight from the table and spectra of `wrap_inference(..., spectra = True)`)
+- `plot_annotated_spectrum(glycan, mzs, intensities, charge = -1)`: an MS2 spectrum with its CandyCrumbs annotations labeled and drawn as SNFG cartoons (also straight from the table and spectra of `wrap_inference(..., spectra = True)`)
 - `supporting_ions(glycan, peaks, candidates = other_predictions)`: the intense peaks that tie each residue of a predicted structure to its position, and those that tell it apart from competing candidates
 - `rank_glycopeptide_structures(peptide, modification_str, peaks)`, `rank_glycopeptide_compositions`, `rank_glycopeptide_sites`: the glycan structures, compositions, and sites (with a glycan space, also the split of a total composition into one glycan per site, `glycan_splits`) of a glycoproteomics identification (e.g., `'N5(HexNAc(4)Hex(5)Fuc(1))'` from a search engine) ranked by their fragment evidence
 ```python
@@ -327,6 +321,17 @@ ranked = rank_glycopeptide_structures('EEQYNSTYR', 'N5(HexNAc(4)Hex(5)Fuc(1))', 
 ## Citation 
 If you use `CandyCrunch` or any of our datasets in your work, please cite Urban et al., Nat Methods 2024.  
 The data used to train `CandyCrunch` can be found at Zenodo, under [doi:10.5281/zenodo.7940046](https://doi.org/10.5281/zenodo.7940046)
+```bibtex
+@article{urban2024candycrunch,
+  title = {Predicting glycan structure from tandem mass spectrometry via deep learning},
+  author = {Urban, James and Jin, Chunsheng and Thomsson, Kristina A. and Karlsson, Niclas G. and Ives, Callum M. and Fadda, Elisa and Bojar, Daniel},
+  journal = {Nature Methods},
+  volume = {21},
+  pages = {1206--1215},
+  year = {2024},
+  doi = {10.1038/s41592-024-02314-6}
+}
+```
 
 ## Code signing policy
 Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).

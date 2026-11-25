@@ -12,7 +12,7 @@ __version__ = package.version
 # changed (a pull or reinstall; at most hourly, as editing them changes them too), else once a day, and the answer is kept in ~/.candycrunch so that
 # other imports stay offline. Only for CandyCrunch installed from git (it has a direct_url.json) or run from a checkout (whose egg-info has none),
 # never for a PyPI release, whose users should stay on released glycowork
-git_build = package.read_text("direct_url.json") or (pathlib.Path(__file__).parents[1] / ".git").exists()
+git_build = any(k in json.loads(package.read_text("direct_url.json") or "{}") for k in ("vcs_info", "dir_info")) or (pathlib.Path(__file__).parents[1] / ".git").exists()
 if git_build and not getattr(sys, "frozen", False):  # the app ships the glycowork it was built with
     try:
         source = json.loads(distribution("glycowork").read_text("direct_url.json") or "{}")

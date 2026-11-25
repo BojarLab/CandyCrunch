@@ -677,6 +677,18 @@ def test_reducing_end_check(capsys):
     assert len(reduced) >= 15 and all(len(set(outs[m]['top1_pred'].dropna()) & reduced) >= 0.8 * len(reduced) for m in ['custom', '2AB'])
 
 
+def test_mode_override(capsys):
+    # A run of the other ion mode than max_charge asks for: the checks and passes after the override run in the file's mode, so it warns once (it did for
+    # every reducing end the check tried) and gives the same table; permethylated glycans asked for in positive mode on a negative run drop their default
+    # Na+ (it raised that Na+ cannot carry the charge)
+    example = str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx')
+    overridden = wrap_inference(example, 'O', max_charge = 3, modification = '2AB')
+    assert capsys.readouterr().out.count('Overriding to negative mode') == 1
+    assert overridden.equals(wrap_inference(example, 'O', modification = '2AB'))
+    wrap_inference(example, 'O', sample_prep = 'permethylated', max_charge = 3)
+    assert RUN_ADDUCTS.get() == ()
+
+
 def test_filter_out_is_airtight():
     # A residue the user ignores stays out of every route to a structure, also the no-prediction rescue and impute
     df = wrap_inference(str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx'), 'O', filter_out = {'HexA', 'Neu5Ac'})
@@ -2331,6 +2343,63 @@ def test_spectra_readers(tmp_path):
     assert [p['charge'] for p in params] == [[2], [-3], [2, 3]] and [p['pepmass'] for p in params] == [(675.25, None), (675.25, 1e5), (675.25, None)]
 
 
+def test_inputs_of_other_writers(tmp_path):
+    # A run as other tools write it reads as the run itself: gzipped (msconvert --gzip), without mzML 1.1's namespace (whose ion mode, analyzer and charges
+    # were lost), stored with msconvert's truncation and zlib; delta or linear predictions are refused, not read as numbers
+    import gzip
+
+    def mzml(ns = ' xmlns="http://psi.hupo.org/ms/mzml"', compression = 'MS:1000574'):
+        def arrays(mzs, ints):
+            return ''.join(f'<binaryDataArray encodedLength="0"><cvParam cvRef="MS" accession="{acc}" name="" value=""/><cvParam cvRef="MS" accession="MS:1000523" '
+                           f'name="" value=""/><cvParam cvRef="MS" accession="{compression}" name="" value=""/><binary>'
+                           f'{base64.b64encode(zlib.compress(np.array(v, "<f8").tobytes())).decode()}</binary></binaryDataArray>' for acc, v in (('MS:1000514', mzs), ('MS:1000515', ints)))
+
+        def spectrum(i, level, rt, filt, mzs, ints, precursor = ''):
+            return (f'<spectrum index="{i}" id="controllerType=0 controllerNumber=1 scan={i + 1}" defaultArrayLength="{len(mzs)}"><cvParam cvRef="MS" accession="MS:1000511" '
+                    f'name="ms level" value="{level}"/><cvParam cvRef="MS" accession="MS:1000129" name="negative scan" value=""/><cvParam cvRef="MS" accession="MS:1000127" '
+                    f'name="centroid spectrum" value=""/><scanList count="1"><scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" '
+                    f'unitName="second"/><cvParam cvRef="MS" accession="MS:1000512" name="filter string" value="{filt}"/></scan></scanList>{precursor}'
+                    f'<binaryDataArrayList count="2">{arrays(mzs, ints)}</binaryDataArrayList></spectrum>')
+        precursor = ('<precursorList count="1"><precursor spectrumRef="controllerType=0 controllerNumber=1 scan=1"><selectedIonList count="1"><selectedIon>'
+                     '<cvParam cvRef="MS" accession="MS:1000744" name="selected ion m/z" value="675.25"/><cvParam cvRef="MS" accession="MS:1000041" name="charge state" '
+                     'value="2"/></selectedIon></selectedIonList><activation><cvParam cvRef="MS" accession="MS:1000133" name="" value=""/></activation></precursor></precursorList>')
+        return (f'<?xml version="1.0" encoding="utf-8"?><mzML{ns} version="1.1.0"><run id="r"><spectrumList count="2">' +
+                spectrum(0, 1, 600, 'ITMS - p ESI Full ms [400.00-2000.00]', [675.25, 675.75, 676.25], [100.0, 60.0, 20.0]) +
+                spectrum(1, 2, 601, 'ITMS - c ESI d Full ms2 675.25@cid35.00 [175.00-1365.00]', [290.09, 384.15, 675.25], [100.0, 40.0, 10.0], precursor) +
+                '</spectrumList></run></mzML>')
+
+    (tmp_path / 'run.mzML').write_text(mzml())
+    ref = load_spectra_filepath(str(tmp_path / 'run.mzML'), extract_ms1 = True)
+    assert ref.attrs['detected_mode'] == 'negative' and ref.attrs['detected_trap'] == 'linear' and ref['precursor_charge'].tolist() == [2]
+    (tmp_path / 'gz.mzML.gz').write_bytes(gzip.compress(mzml().encode()))
+    (tmp_path / 'nons.mzML').write_text(mzml(ns = ''))
+    (tmp_path / 'trunc.mzML').write_text(mzml(compression = 'MS:1003088'))
+    for name in ('gz.mzML.gz', 'nons.mzML', 'trunc.mzML'):
+        df = load_spectra_filepath(str(tmp_path / name), extract_ms1 = True)
+        assert df.drop(columns = 'peak_d').equals(ref.drop(columns = 'peak_d')) and df['peak_d'].tolist() == ref['peak_d'].tolist(), name
+        assert {k: v for k, v in df.attrs.items() if k != 'ms1'} == {k: v for k, v in ref.attrs.items() if k != 'ms1'}, name
+    (tmp_path / 'delta.mzML').write_text(mzml(compression = 'MS:1003089'))
+    with pytest.raises(ValueError, match = 'prediction'):
+        load_spectra_filepath(str(tmp_path / 'delta.mzML'))
+    (tmp_path / 'short.mzML.gz').write_bytes(gzip.compress(mzml().encode())[:200])
+    with pytest.raises(ValueError, match = 'not a complete gzip file'):
+        load_spectra_filepath(str(tmp_path / 'short.mzML.gz'))
+    # mgf retention times without RTINSECONDS: RTINMINUTES, Mascot Distiller's elution span, a time in minutes in the title (Bruker DataAnalysis); a time every
+    # title repeats is part of a name, and none at all is an error
+    titles = ['RTINMINUTES={}', 'TITLE=File: run.wiff, Elution from: {} to {} period: 0', 'TITLE=Cmpd 1, +MSn(675.2500), {:.2f} min']
+    for k, title in enumerate(titles):
+        (tmp_path / f'rt{k}.mgf').write_text(''.join(f'BEGIN IONS\n{title.format(rt, rt)}\nPEPMASS=675.25\nCHARGE=2-\n290.09 100\nEND IONS\n' for rt in (10.0, 10.5)))
+        assert np.allclose(load_spectra_filepath(str(tmp_path / f'rt{k}.mgf'))['RT'], [10.0, 10.5]), title
+    (tmp_path / 'gz.mgf.gz').write_bytes(gzip.compress((tmp_path / 'rt0.mgf').read_bytes()))
+    assert load_spectra_filepath(str(tmp_path / 'gz.mgf.gz')).equals(load_spectra_filepath(str(tmp_path / 'rt0.mgf')))
+    (tmp_path / 'named.mgf').write_text('BEGIN IONS\nTITLE=glycans 5 min gradient\nPEPMASS=675.25\n290.09 100\nEND IONS\n' * 2)
+    with pytest.raises(ValueError, match = 'no retention time'):
+        load_spectra_filepath(str(tmp_path / 'named.mgf'))
+    (tmp_path / 'none.mgf').write_text('BEGIN IONS\nTITLE=run.1.1.2\nPEPMASS=675.25\n290.09 100\nEND IONS\n')
+    with pytest.raises(ValueError, match = 'no retention time'):
+        load_spectra_filepath(str(tmp_path / 'none.mgf'))
+
+
 def test_mass_spec_helpers_from_glycopeptide_search():
     from candycrunch.analysis import add_qvalues, has_ion, intensity_share, match_peaks
     from candycrunch.prediction import averaged_precursor_mz, coeluting_lighter_ion, ion_trace, pair_spectra
@@ -2453,3 +2522,30 @@ def test_library_edge_cases(tmp_path):
     pairs = pd.DataFrame({'predictions': [[('Neu5Gc(a2-3)Gal', 0.9)], [('Neu5Ac(a2-3)Gal', 0.9), ('X', 0.1)], [('Neu5Ac(a2-3)Gal', 0.9), ('X', 0.1)]], 'RT': [10.0, 10.5, 20.0]},
                          index = pd.Index([600.0, 584.0, 584.0], name = 'm/z'))
     assert [len(p) for p in Ac_follows_Gc(pairs)['predictions']] == [1, 2, 1]
+
+
+def test_side_product_isotope_row():
+    # An ion-trap PA run: the glycosylamine of a glycan (2.016 Da below it, 14 spectra at 39.0 min) gives a PA reading on its own M+2 (2 spectra at 38.9), which
+    # folds with it into the glycan's row at 42.7; one spacing below (a glycosylaminitol) is no such isotope, and its glycan's row there stays
+    glycan = 'Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)[Gal(b1-4)GlcNAc(b1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc'
+    mz = (composition_to_mass(get_comp(glycan), modification = 'PA') + 2 * PROTON_MASS) / 2
+    row = lambda rt, n, ab, offset, end: {'m/z': mz, 'predictions': [(glycan, 0.9)], 'composition': get_comp(glycan), 'num_spectra': n, 'charge': 2, 'RT': rt,
+                                          'rel_abundance': ab, 'top_fragments': [1865.8, 698.3], 'peak_d': {1865.8: 100.0, 698.3: 50.0}, 'annotation_score': 25.0,
+                                          'evidence': 'side product' if offset else 'strong', 'adduct': None, 'top1_pred': glycan, 're_offset': offset, 'reducing_end': end}
+    for offset, end, rows in [(-calculate_adduct_mass('H2'), 'glycosylamine', 1), (calculate_adduct_mass('NH3-O'), 'glycosylaminitol', 2)]:
+        df = pd.DataFrame([row(42.7, 22, 3e6, 0.0, None), row(38.9, 2, 1e5, 0.0, None), row(39.0, 14, 2e6, offset, end)]).set_index('m/z')
+        out, _ = finalise_predictions(df, False, 'positive', 'PA', None, 300, 1.0, glycan_class = 'N')
+        assert sorted(out['num_spectra']) == ([38] if rows == 1 else [16, 22])
+
+
+def test_in_source_fragment_of_either_antenna():
+    # FA2G2 at a tenth of a triantennary sialylated glycan, at its RT: an in-source fragment whichever antenna the parent's structure carries the Neu5Ac on
+    # (losing the sialylated antenna of its 3-arm leaves an isomer of FA2G2), while A2G2, two cleavages away (the antenna and the core Fuc), is not one
+    fa2g2 = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc'
+    a2g2 = 'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc'
+    for parent in ['Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)[Gal(b1-4)GlcNAc(b1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc',
+                   'Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Gal(b1-4)GlcNAc(b1-2)[Neu5Ac(a2-6)Gal(b1-4)GlcNAc(b1-6)]Man(a1-6)]Man(b1-4)GlcNAc(b1-4)[Fuc(a1-6)]GlcNAc']:
+        df = pd.DataFrame({'top1_pred': [parent, fa2g2, a2g2], 'RT': [42.74, 42.76, 42.75], 'charge': [2, 1, 1], 'rel_abundance': [80.0, 8.0, 8.0]},
+                          index = pd.Index([1282.0, 1865.8, 1719.7], name = 'm/z'))
+        notes = flag_coeluting_substructures(df, 'N')['notes'].tolist()
+        assert notes[1].startswith(f'Possible in-source fragment of {parent}') and 'in-source' not in notes[2]

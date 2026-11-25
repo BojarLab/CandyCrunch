@@ -747,3 +747,39 @@ def test_n_terminal_modification():
         CandyCrumbs('Gal(b1-4)GlcNAc', [204.08], None, charge = 1, n_term_modification = 'Carbamidomethyl')
     with pytest.raises(ValueError):
         CandyCrumbs('VQPFN*H3N4F1*VTQGK', [b3], None, charge = 2, n_term_modification = 'Pepsinated')
+
+
+def test_dimethyl_labels():
+    # The Lys of stable-isotope dimethyl labeling as tokens: their masses, their glycowork names, a named label parsed to its token, the label on every fragment holding its
+    # Lys, and an N-terminal label on the b and c ions a site ranking reads
+    from candycrunch.analysis import (AA_masses, CandyCrumbs, MODIFICATION_TOKENS, WATER_MASS, backbone_ions, build_glycopeptide_input, fragment_residue_mass,
+                                      peptide_modification_mass, peptide_to_glycowork, rank_glycopeptide_sites)
+    from glycowork.motif.tokenization import PROTON_MASS, PEPTIDE_MODIFICATIONS, composition_to_mass
+    light = {token: AA_masses[token] - AA_masses['K'] for token in 'bouz'}
+    assert [round(light[t], 6) for t in 'bouz'] == [28.0313, 32.056407, 34.063117, 36.07567]
+    # by its name where glycowork has it, else by its mass (glycowork 1.12.0)
+    assert peptide_to_glycowork('SAPo') == ('SAPK[Dimethyl:2H(4)]' if 'Dimethyl:2H(4)' in PEPTIDE_MODIFICATIONS else 'SAPK[+32.056407]') and MODIFICATION_TOKENS['Dimethyl:2H(4)']['K'] == 'o'
+    assert build_glycopeptide_input('VTGGIFSVTK', 'S7(HexNAc(1));K10(Dimethyl:2H(4))')['peptide'] == 'VTGGIFSVTo'
+    assert build_glycopeptide_input('VTGGIFSVTK', 'K10(TMT6plex)')['peptide'] == 'VTGGIFSVTk'
+    assert abs(composition_to_mass({'HexNAc': 1}, peptide = peptide_to_glycowork('VTGGIFSVTo')) - composition_to_mass({'HexNAc': 1}, peptide = 'VTGGIFSVTK') - light['o']) < 1e-6
+    # every y ion holds the C-terminal Lys and its label, and with a labeled N-terminus every b ion holds that label
+    seq, nterm = 'VTGGIFSVTo', peptide_modification_mass('Dimethyl:2H(4)')
+    y3 = sum(AA_masses[x] for x in seq[-3:]) + WATER_MASS + PROTON_MASS
+    b3 = sum(AA_masses[x] for x in seq[:3]) + nterm + PROTON_MASS
+    out = CandyCrumbs('VTGGIFS*N1*VTo', [y3, b3, b3 - nterm], None, charge = 2, mass_threshold_ppm = 10, fragmentation_method = 'HCD', n_term_modification = 'Dimethyl:2H(4)')
+    assert out[y3]['Domon-Costello nomenclatures'][0][0] == ['y_3'] and out[b3]['Domon-Costello nomenclatures'][0][0] == ['b_3'] and not out[b3 - nterm]
+    # a HexNAc on Ser7, read from c ions that carry the N-terminal label: placed right with it, and the unlabeled ladder matches nothing
+    ladder = backbone_ions([fragment_residue_mass(r) for r in seq], n_term = nterm)
+    glcnac = composition_to_mass({'HexNAc': 1}) - WATER_MASS
+    spectrum = {float(ladder['c'][k] + PROTON_MASS + (glcnac if k >= 6 else 0.0)): 100.0 for k in range(2, 9)}
+    with_label = rank_glycopeptide_sites(seq, ['N1'], spectrum, charge = 2, fragmentation_method = 'ETD', glycan_class = 'O', n_term_modification = 'Dimethyl:2H(4)')
+    without = rank_glycopeptide_sites(seq, ['N1'], spectrum, charge = 2, fragmentation_method = 'ETD', glycan_class = 'O')
+    assert list(with_label['glycosites'].iloc[0]) == [6] and with_label.attrs['localization'] == 'localized' and without['site_ions'].max() == 0
+
+
+def test_monosaccharide_names_stay_glycans():
+    # The residue tokens spell some monosaccharides (Fuc: Phe, a dimethyl Lys, a carbamidomethyl Cys), which stay glycans; peptides of those tokens stay peptides
+    for name in ['Fuc', 'Ko', 'Suc', 'FucNAc', 'Man']:
+        assert glycopeptide_string_to_input(name)['glycans'] == [name]
+    for peptide in ['AVAVTLQSHc', 'VTGGIFSVTo', 'Kbu']:
+        assert glycopeptide_string_to_input(peptide)['peptide'] == peptide

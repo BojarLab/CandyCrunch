@@ -184,6 +184,26 @@ def centroid_gaussian(mzs, ints):
     return np.stack([mu[fine], apex[fine]], axis = 1)
 
 
+def one_file_per_run(paths):
+    """keeps one file of each run that paths give in several formats, in their order: its .cc, else its vendor file (.raw, .wiff, .d), else the first
+    copy converted from it (a converted copy can lack what the vendor file holds); a folder that is no run stands for itself\n
+   | Arguments:
+   | :-
+   | paths (list): paths of files and folders\n
+   | Returns:
+   | :-
+   | Returns the paths kept
+   """
+    runs = [os.path.normpath(p).lower() for p in paths]
+    runs = [r + os.sep if not r.endswith(('.d', '.raw')) and os.path.isdir(r) else os.path.splitext(r.removesuffix('.gz').removesuffix('.xml'))[0] for r in runs]
+    ranks = [0 if p.lower().endswith('.cc') else 1 if os.path.normpath(p).lower().endswith(('.raw', '.wiff', '.d')) else 2 for p in paths]
+    best = {}
+    for i, run in enumerate(runs):
+        if run not in best or ranks[i] < ranks[best[run]]:
+            best[run] = i
+    return [p for i, p in enumerate(paths) if best[runs[i]] == i]
+
+
 def read_mzml(filepath, centroid_levels = ()):
     """iterates over the spectra of an .mzML file\n
    | Arguments:
@@ -236,7 +256,12 @@ def read_mzml(filepath, centroid_levels = ()):
             if kind is None or kind in arrays:
                 continue
             data = base64.b64decode(bda.findtext(f'{ns}binary') or '')
-            if data and terms & {'MS:1000574', 'MS:1002746', 'MS:1002747', 'MS:1002748'}:
+            if terms & {'MS:1003089', 'MS:1003090'}:
+                # msconvert's --mzDelta / --mzLinear (and their intensity options): values stored as predictions, which read as plain numbers gave garbage
+                raise ValueError(f"{os.path.basename(filepath)} stores its peaks with msconvert's truncation and delta or linear prediction, which CandyCrunch "
+                                 f"does not read; convert the run again without --mzDelta, --mzLinear, --intenDelta, and --intenLinear (zlib or numpress is fine)")
+            # (truncation and zlib, msconvert's --mzTruncation / --intenTruncation alone, stores plain numbers with fewer mantissa bits)
+            if data and terms & {'MS:1000574', 'MS:1002746', 'MS:1002747', 'MS:1002748', 'MS:1003088'}:
                 data = zlib.decompress(data)
             if not data:
                 arrays[kind] = np.zeros(0)
@@ -448,7 +473,8 @@ def read_mgf(filepath):
    | Returns:
    | :-
    | Yields a dict per spectrum: params (lower-case keys, including those before the first spectrum; pepmass as an (m/z, intensity or None)
-   | tuple, charge as a list of ints, rtinseconds as float), m/z array and intensity array
+   | tuple, charge as a list of ints, rtinseconds as float, also from RTINMINUTES or a retention time in the title, then with rt_from_title True
+   | if from the title), m/z array and intensity array
    """
     header, params, started = {}, None, False
     # utf-8-sig drops a byte order mark, which hid the first BEGIN IONS (its params then became the defaults of every other spectrum)
@@ -467,8 +493,10 @@ def read_mgf(filepath):
                     if len(pepmass) == 3:
                         params['charge'] = pepmass[2]
                 if isinstance(params.get('charge'), str):
-                    # e.g. 2+, 3+ and 4+
-                    params['charge'] = [int(c[-1] + c[:-1]) if c[-1:] in ('+', '-') else int(c) for c in re.split(r',\s*|\s*and\s*', params['charge'].strip()) if c]
+                    # e.g., 2+, 3+ and 4+; their sign is the ion mode if every charge carries the same one (a bare number tells neither)
+                    charges = [c for c in re.split(r',\s*|\s*and\s*', params['charge'].strip()) if c]
+                    params['polarity'] = charges[0][-1] if charges and charges[0][-1] in '+-' and all(c[-1] == charges[0][-1] for c in charges) else None
+                    params['charge'] = [int(c[-1] + c[:-1]) if c[-1:] in ('+', '-') else int(c) for c in charges]
                 if 'rtinseconds' in params:
                     # A retention time, or ranges and lists of them (e.g., 600.5-612.5): the middle of their span
                     rts = [float(v) for v in re.findall(r'\d*\.?\d+(?:[eE][-+]?\d+)?', params['rtinseconds'])]
@@ -476,6 +504,15 @@ def read_mgf(filepath):
                         params['rtinseconds'] = (min(rts) + max(rts)) / 2
                     else:
                         del params['rtinseconds']
+                if 'rtinseconds' not in params:
+                    # Writers without RTINSECONDS: RTINMINUTES (MS-DIAL, MZmine 2), else Mascot Distiller's 'Elution from: 28.63 to 28.64' or the last time in
+                    # minutes in the title (Bruker DataAnalysis: 'Cmpd 12, +MSn(864.89), 28.63 min'; SCIEX: 'Elution: 28.63 min'); rt_from_title marks those
+                    title = params.get('title', '')
+                    span = re.search(r'(?i)elution from:\s*(\d*\.?\d+)\s*to\s*(\d*\.?\d+)', title)
+                    rts = ([float(v) for v in re.findall(r'\d*\.?\d+(?:[eE][-+]?\d+)?', params['rtinminutes'])] if 'rtinminutes' in params else
+                           [float(v) for v in span.groups()] if span else [float(v) for v in re.findall(r'(?i)(\d*\.?\d+)\s*min(?:utes?)?\b', title)[-1:]])
+                    if rts:
+                        params['rtinseconds'], params['rt_from_title'] = (min(rts) + max(rts)) / 2 * 60, 'rtinminutes' not in params
                 yield {'params': params, 'm/z array': np.array(mzs), 'intensity array': np.array(ints)}
                 params = None
             elif not sline or sline[0] in '#;!/':

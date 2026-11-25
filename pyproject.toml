@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "candycrunch"
 version = "1.0.0"
-description = "Package for predicting glycan structure from LC-MS/MS data"
+description = "Glycan structures from LC-MS/MS data by deep learning: prediction, fragment annotation, quantification across runs, and a desktop app"
 readme = "README.md"
 authors = [
     {name = "Daniel Bojar", email = "daniel.bojar@gu.se"},
@@ -15,6 +15,11 @@ license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Development Status :: 5 - Production/Stable",
     "Operating System :: OS Independent",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
@@ -41,11 +46,12 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/BojarLab/CandyCrunch"
 Issues = "https://github.com/BojarLab/CandyCrunch/issues"
+Releases = "https://github.com/BojarLab/CandyCrunch/releases"
 Paper = "https://doi.org/10.1038/s41592-024-02314-6"
 Data = "https://doi.org/10.5281/zenodo.7940046"
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.7"]
+gui = ["PySide6-Essentials>=6.7"]
 train = ["glycowork[ml]>=1.12.0", "torchmetrics"]
 
 [project.scripts]

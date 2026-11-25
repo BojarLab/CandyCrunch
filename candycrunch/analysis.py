@@ -24,6 +24,7 @@ from glycowork.motif.tokenization import map_to_basic as glycowork_map_to_basic,
 from glycowork.motif.graph import glycan_to_glycangraph, get_possible_topologies, graph_to_string, _attrs, _graph
 from glycowork.motif.smiles import glycan_to_smiles, parse_smiles, _rings_of_atoms, _number_residue, _split_token
 from glycowork.motif.draw import plot_glycans_excel
+from glycowork.glycan_data.loader import lib
 
 
 @lru_cache(maxsize = 4096)
@@ -92,9 +93,10 @@ W_SIDE_CHAIN_LOSSES = {'C': 32.979896, 'D': 44.997655, 'E': 59.013305, 'F': 77.0
                        'W': 116.049024, 'Y': 93.034040}
 W_SIDE_CHAIN_LOSSES['c'] = 90.001360  # Carbamidomethyl Cys, cleaved at Cbeta-Sgamma
 W_SIDE_CHAIN_LOSSES['m'] = W_SIDE_CHAIN_LOSSES['M'] + 15.994915  # Met sulfoxide, the lost radical keeps the oxygen
-# the radical lost by a labeled Lys keeps the label on its Nepsilon (j: guanidinyl CH2N2, k: TMT)
+# the radical lost by a labeled Lys keeps the label on its Nepsilon (j: guanidinyl CH2N2, k: TMT, b, o, u, z: dimethyl light, 2H(4), 2H(4)13C(2), 2H(6)13C(2))
 W_SIDE_CHAIN_LOSSES['j'] = W_SIDE_CHAIN_LOSSES['K'] + 42.02180
 W_SIDE_CHAIN_LOSSES['k'] = W_SIDE_CHAIN_LOSSES['K'] + 229.16293
+W_SIDE_CHAIN_LOSSES |= {token: W_SIDE_CHAIN_LOSSES['K'] + mass for token, mass in (('b', 28.0313), ('o', 32.056407), ('u', 34.063117), ('z', 36.07567))}
 # deamidated Asn and Gln are Asp and Glu
 W_SIDE_CHAIN_LOSSES['n'] = W_SIDE_CHAIN_LOSSES['D']
 W_SIDE_CHAIN_LOSSES['q'] = W_SIDE_CHAIN_LOSSES['E']
@@ -110,18 +112,22 @@ ranks = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', '
 AA_masses = {aa: calculate_adduct_mass(f) for aa, f in AMINO_ACID_FORMULAS.items()}
 # the tokens of the modified residues, by residue and the modification's Unimod name in glycowork's PEPTIDE_MODIFICATIONS (TMT-labeled Lys, Carbamidomethyl Cys,
 # Guanidinyl Lys, Met sulfoxide, the variable modification of nearly every glycoproteomics search, deamidated Asn and Gln, which PNGase F leaves at
-# released N-glycosites, and carbamidomethylated Met, the sulfonium iodoacetamide makes beside every Cys), so that peptide_to_glycowork can write them as glycowork does
+# released N-glycosites, carbamidomethylated Met, the sulfonium iodoacetamide makes beside every Cys, and the Lys of stable-isotope dimethyl labeling, light,
+# 2H(4), 2H(4)13C(2), and 2H(6)13C(2), whose letters are no amino acid's), so that peptide_to_glycowork can write them as glycowork does
 TOKEN_MODIFICATIONS = {'k': ('K', 'TMT6plex'), 'c': ('C', 'Carbamidomethyl'), 'j': ('K', 'Guanidinyl'), 'm': ('M', 'Oxidation'), 'n': ('N', 'Deamidated'),
-                       'q': ('Q', 'Deamidated'), 'x': ('M', 'Carbamidomethyl')}
+                       'q': ('Q', 'Deamidated'), 'x': ('M', 'Carbamidomethyl'), 'b': ('K', 'Dimethyl'), 'o': ('K', 'Dimethyl:2H(4)'), 'u': ('K', 'Dimethyl:2H(4)13C(2)'),
+                       'z': ('K', 'Dimethyl:2H(6)13C(2)')}
+# The isotope-coded dimethyl labels by their Unimod masses, for a glycowork that does not name them in PEPTIDE_MODIFICATIONS yet (1.12.0)
+LABEL_MASSES = {'Dimethyl:2H(4)': '+32.056407', 'Dimethyl:2H(4)13C(2)': '+34.063117', 'Dimethyl:2H(6)13C(2)': '+36.07567'}
 
 
 def peptide_modification_mass(modification):
     """Mass of a peptide modification: a number, or its Unimod name in glycowork's PEPTIDE_MODIFICATIONS (e.g., 'Carbamidomethyl')"""
     if isinstance(modification, (int, float)):
         return float(modification)
-    if modification not in PEPTIDE_MODIFICATIONS:
+    value = PEPTIDE_MODIFICATIONS.get(modification, LABEL_MASSES.get(modification))
+    if value is None:
         raise ValueError(f"No peptide modification {modification!r}; give a mass or a Unimod name of glycowork's PEPTIDE_MODIFICATIONS, e.g., 'Carbamidomethyl'")
-    value = PEPTIDE_MODIFICATIONS[modification]
     return float(value) if re.fullmatch(r'[+-]\d*\.?\d+', value) else calculate_adduct_mass(value)
 
 
@@ -129,6 +135,11 @@ AA_masses |= {token: AA_masses[aa] + peptide_modification_mass(name) for token, 
 MODIFICATION_TOKENS = {
     'Carbamidomethyl': {'C': 'c', 'M': 'x'},
     'Guanidinyl': {'K': 'j'},
+    'TMT6plex': {'K': 'k'},
+    'Dimethyl': {'K': 'b'},
+    'Dimethyl:2H(4)': {'K': 'o'},
+    'Dimethyl:2H(4)13C(2)': {'K': 'u'},
+    'Dimethyl:2H(6)13C(2)': {'K': 'z'},
     'Oxidation': {'M': 'm'},
     'Deamidated': {'N': 'n', 'Q': 'q'},
 }
@@ -2539,7 +2550,8 @@ def infer_glycosites(peptide_seq, glycan_class = None):
 
 
 def peptide_to_glycowork(peptide):
-    """Writes a peptide in CandyCrunch's one-letter code (c, j, k, m, n, q for modified residues) in glycowork's notation, for glycowork's glycopeptide masses and formulas\n
+    """Writes a peptide in CandyCrunch's one-letter code (b, c, j, k, m, n, o, q, u, x, z for modified residues) in glycowork's notation, for glycowork's glycopeptide masses
+    and formulas; a label the installed glycowork does not name (LABEL_MASSES) is written as its signed mass, which glycowork reads too\n
     | Arguments:
     | :-
     | peptide (string): amino acid sequence, e.g., 'NcSK'\n
@@ -2547,7 +2559,8 @@ def peptide_to_glycowork(peptide):
     | :-
     | Returns the peptide with named modifications, e.g., 'NC[Carbamidomethyl]SK', for composition_to_mass, glycan_to_mass or get_formula(..., peptide = ...)
     """
-    return ''.join(f'{TOKEN_MODIFICATIONS[aa][0]}[{TOKEN_MODIFICATIONS[aa][1]}]' if aa in TOKEN_MODIFICATIONS else aa for aa in peptide)
+    return ''.join(f'{TOKEN_MODIFICATIONS[aa][0]}[{name if (name := TOKEN_MODIFICATIONS[aa][1]) in PEPTIDE_MODIFICATIONS else LABEL_MASSES[name]}]'
+                   if aa in TOKEN_MODIFICATIONS else aa for aa in peptide)
 
 
 def build_glycopeptide_input(peptide, modification_str, structures = None):
@@ -2749,8 +2762,9 @@ def glycopeptide_string_to_input(gpep_string):
     if len(split_string) == 1:
         chem_string = split_string[0]
         # testing for '(' or a trailing 'c' mistook bare monosaccharides ('Man') for peptides and
-        # Carbamidomethyl-Cys-terminated peptides ('AVAVTLQSHc') for glycans
-        if set(chem_string) <= set(AA_masses):
+        # Carbamidomethyl-Cys-terminated peptides ('AVAVTLQSHc') for glycans; a monosaccharide glycowork knows stays one, as the residue tokens also spell
+        # some ('Fuc': Phe, 2H(4)13C(2)-dimethyl Lys, carbamidomethyl Cys, annotated as a peptide by its y ions)
+        if set(chem_string) <= set(AA_masses) and chem_string not in lib:
             input_dict['peptide'] = chem_string
         else:
             input_dict['glycans'] = [chem_string]
@@ -3195,9 +3209,9 @@ def composition_to_fragments(composition, fragment_masses, mass_threshold, max_c
             matches = small_hits + matches
             matches = matches[:1] if simplify else matches[:5]
             hit_dict[observed_mass] = {
-                'Theoretical fragment masses': [m[0] for m in matches],
+                'Theoretical fragment masses': [float(m[0]) for m in matches],
                 'Domon-Costello nomenclatures': [m[1] for m in matches],
-                'Fragment charges': [m[2] for m in matches],
+                'Fragment charges': [int(m[2]) for m in matches],
             }
         else:
             hit_dict[observed_mass] = None
@@ -3596,9 +3610,9 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
             filtered_properties = list(zip(*downstream_values[i]))
             final_hits = [next(y for y in filtered_properties if y[5] == x) for x in frag_dc_names[:5]]
             final_hits = [list(x) for x in zip(*final_hits)]
-            hit_dict[fragment_masses[i]] = {'Theoretical fragment masses': final_hits[1],
+            hit_dict[fragment_masses[i]] = {'Theoretical fragment masses': [float(x) for x in final_hits[1]],
                                             'Domon-Costello nomenclatures': final_hits[5],
-                                            'Fragment charges': final_hits[3]}
+                                            'Fragment charges': [int(x) for x in final_hits[3]]}
             if iupac:
                 hit_dict[fragment_masses[i]]['Fragment IUPAC'] = [glycopeptide_frag_to_string(pep_gr, x.graph) if peptide else None if x is None else
                                                                   mono_frag_to_string(x.graph) for x in final_hits[4]]
@@ -3886,7 +3900,7 @@ def rank_glycopeptide_structures(peptide, modification_str, fragment_masses, int
     | intensities (list): intensities of the m/z values if fragment_masses is a list; default:None (all equal)
     | charge (int): precursor charge state; default:2
     | structures (list): candidate IUPAC-condensed structures, or one such list per glycan of a multiply glycosylated peptide; default:None (every glycowork database structure of each composition)
-    | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD', e.g., the activation column of load_spectra_filepath; default:None (all peptide ion types)
+    | fragmentation_method (string): 'CID'/'HCD'/'ETD'/'ECD'/'EThcD'/'ETciD'/'EED'/'EDD'/'NETD'/'UVPD', e.g., the activation column of load_spectra_filepath; default:None (all peptide ion types)
     | mass_threshold (float): fragment mass tolerance in Da, the tolerance of ion-trap spectra; default:0.2
     | mass_threshold_ppm (float): relative tolerance in ppm, applied on top of mass_threshold; None for low-resolution spectra; default:10
     | kingdom (string): taxonomic kingdom of the database structures; default:'Animalia'
@@ -4120,13 +4134,14 @@ def glycan_splits(composition, glycan_space, max_glycans = 4, glycan_class = 'O'
 
 def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = None, charge = 2, candidate_sites = None, glycan_class = None,
                             fragmentation_method = None, mass_threshold = 0.2, mass_threshold_ppm = 10, top_n_peaks = None, protease = None, prior_weight = 0.1,
-                            glycan_space = None, site_prior_weight = None, collisional_masses = None, extended_weight = 0.2, margin = 0.02, max_placements = 200000):
+                            glycan_space = None, site_prior_weight = None, collisional_masses = None, extended_weight = 0.2, margin = 0.02, max_placements = 200000,
+                            n_term_modification = None):
     """Ranks the placements of a glycopeptide's glycans on its candidate sites by the site-determining ions of its MS2 spectra, the backbone ions (c/z with
     electron transfer, b/y with collisional activation) that carry every glycan whose site they cover, plus priors from the protease, from how often each glycan
     sits on a site, and from the oxonium ions of its collisional scans\n
     | Arguments:
     | :-
-    | peptide (string): amino acid sequence, in CandyCrunch's one-letter code (c, j, k, m, n, q, x for modified residues)
+    | peptide (string): amino acid sequence, in CandyCrunch's one-letter code (b, c, j, k, m, n, o, q, u, x, z for modified residues)
     | glycans (list): the glycans to place, one per occupied site, as compositions (dicts or strings, 'H1N1A1') or IUPAC-condensed structures; with glycan_space,
     |                 their sum is the total composition, and every split of it into glycans of glycan_space is placed
     | fragment_masses (list or dict): observed m/z values, a peak dictionary of m/z : intensity such as the peak_d of load_spectra_filepath, or a list of peak
@@ -4149,7 +4164,9 @@ def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = Non
     |                            the share of them holding an oxonium ion only such a glycan makes (EXTENDED_OXONIUM, 1% of the base peak or more, 10 ppm); default:None
     | extended_weight (float): see collisional_masses; default:0.2
     | margin (float): how far the best placement's site ions must lead every other placement's for it to be localized; default:0.02
-    | max_placements (int): most placements to score; with glycan_space, the splits with the fewest glycans that fit are kept; default:200000\n
+    | max_placements (int): most placements to score; with glycan_space, the splits with the fewest glycans that fit are kept; default:200000
+    | n_term_modification (string or float): a modification of the peptide's N-terminal amine, by Unimod name (e.g., 'Dimethyl', 'Carbamidomethyl') or mass, which the
+    |                                        N-terminal ions (b, c) and the precursor carry; default:None\n
     | Returns:
     | :-
     | Returns a dataframe with one row per placement, best first: 'glycosites' (0-based positions), 'glycans' (in the order of glycosites), 'score' (site_ions
@@ -4215,10 +4232,11 @@ def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = Non
         total.update(composition_of[k])
     names = [k for k, v in total.items() if v > 0]
     losses = np.unique(np.array(list(product(*[range(total[k] + 1) for k in names])), dtype = np.float64).reshape(-1, len(names)) @ np.array([composition_to_mass({k: 1}) - WATER_MASS for k in names]))
-    ladder = backbone_ions([fragment_residue_mass(r) for r in peptide])
+    n_term = peptide_modification_mass(n_term_modification) if n_term_modification is not None else 0.0
+    ladder = backbone_ions([fragment_residue_mass(r) for r in peptide], n_term = n_term)
     b_ion, c_ion, y_ion, z_ion = (ladder[k] + PROTON_MASS for k in 'bcyz')
     # the charge-reduced precursor keeps every side chain, a labile one too
-    neutral = sum(AA_masses[r] for r in peptide) + WATER_MASS + float(on_residue[0].sum())
+    neutral = sum(AA_masses[r] for r in peptide) + n_term + WATER_MASS + float(on_residue[0].sum())
     shares = np.zeros((n, len(placements)))
     # an ion depends only on its cleavage and the glycan mass on its side of it, which takes few values over all placements: each such ion is matched once a spectrum, and a
     # placement gathers its ions' peaks by the codes of its glycan masses (the same ions, peaks, and sums as matching every placement's ions)
