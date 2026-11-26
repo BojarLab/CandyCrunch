@@ -1153,6 +1153,11 @@ def precursor_metals(adducts):
     """metal_cations for the fragments of a precursor read as these adduct ions ('Li+', or ion names such as '[M+2Li]2+'): the metals of METAL_GLOBAL_MODS
     beyond DEFAULT_METAL_CATIONS that they name, else True (the default ones)"""
     return {f'+{m}' for a in adducts for m in re.findall(r'[A-Z][a-z]?', a)} & (METAL_GLOBAL_MODS - DEFAULT_METAL_CATIONS) or True
+
+
+def is_metal_cut(cut):
+    """whether a Domon-Costello entry is only the metal an adduct ion's fragment carries (M_+Na, M_2+Na): its charge carrier, no cleavage"""
+    return cut.startswith('M_') and set(parse_global_mod(cut[2:])) <= METAL_GLOBAL_MODS
 # Global modifications a fragment of a glycopeptide composition can carry, by the kind of ion (glycan-only, intact peptide, backbone ion): in spectra of
 # identified glycopeptides (HCD, EThcD, ETD) only these were annotated more often than in the same spectra shifted out of tolerance; metal adducts, CH2O,
 # CO2, C3H8O4 and H2O + NH3 never were, nor NH3 or two waters on backbone ions; a Met sulfoxide's CH3SOH leaves the intact peptide and backbone ions keeping it
@@ -1381,7 +1386,7 @@ _GLYCAN_GRAPHS = {}
 def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = 3,
                           fragment_masses = [], subgraphs = None,
                           threshold = 0.5, mass_tag = None, charge = -1, sample_prep = 'underivatized',
-                          disable_A_cross_rings = False, threshold_ppm = None, peptide_ion_types = None, max_cross_rings = None):
+                          disable_A_cross_rings = False, threshold_ppm = None, peptide_ion_types = None, max_cross_rings = None, metal_carrier = False):
     """Calculates the graph and mass of all possible fragments of the input\n
     | Arguments:
     | :-
@@ -1401,7 +1406,9 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     | threshold_ppm (float): relative tolerance in ppm on top of threshold, as match_fragment_properties applies it (a fragment it could never match
     |                        is not made); default:None
     | peptide_ion_types (set): the peptide backbone ion types to make, as CandyCrumbs names only those of its fragmentation method; default:None (all)
-    | max_cross_rings (int): most cross-ring cleavages (A or X) a fragment may have, as CandyCrumbs and supporting_ions use no others; default:None (any)\n
+    | max_cross_rings (int): most cross-ring cleavages (A or X) a fragment may have, as CandyCrumbs and supporting_ions use no others; default:None (any)
+    | metal_carrier (bool): whether a positive precursor's metal cation carries the charge through electron activation (ExD), so that a fragment keeping
+    |                       the metal may also have two cleavages; default:False\n
     | Returns:
     | :-
     | Returns a dict of lists of Fragments by their mass
@@ -1473,7 +1480,9 @@ def generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_clea
     # The check sums in another order than the full calculation, so it allows 1e-6 more
     precheck = not unfiltered
     set_idx = np.array([i for i, s in enumerate(subgraphs) if isinstance(s, set)], dtype = int)
-    todo, found, m_thresh = range(len(subgraphs)), {}, 1 if charge < 0 else 2
+    # a fragment with an adduct may have one cleavage besides it (positive mode); in ExD of a metal-adducted precursor the metal carries the charge, and its
+    # internal ions (sodiated B/Y and C/Z of permethylated glycans) are the isomers' diagnostic ions, so there it may have two
+    todo, found, m_thresh = range(len(subgraphs)), {}, 1 if charge < 0 else 2 + metal_carrier
     if precheck and len(set_idx):
         mode_mass = -PROTON_MASS if charge < 0 else PROTON_MASS
         targets = np.sort(charge_masses)
@@ -3337,8 +3346,9 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
     if mass_threshold_ppm is not None:
         mass_threshold = min(mass_threshold, max(fragment_masses) * abs(charge) * mass_threshold_ppm / 1e6)
     if disable_A_cross_rings is None:
-        # a metal cation opens the free reducing end of an unreduced glycan, so its A_R ions are the A cross-rings positive mode keeps
-        disable_A_cross_rings = ('non_reducing' if mass_tag is not None and abs(mass_tag) < 1e-6 else True) if charge > 0 else False
+        # a metal cation opens the free reducing end of an unreduced glycan, so its A_R ions are the A cross-rings positive mode keeps in CID; radical
+        # activation (ExD) makes A cross-rings of every residue (1,5A and 0,2A ions of sodiated permethylated glycans in EED)
+        disable_A_cross_rings = ('non_reducing' if mass_tag is not None and abs(mass_tag) < 1e-6 else True) if charge > 0 and not hydrogen_shifts else False
         # a warning shows once per session, while a print repeated for every glycan CandyCrunch scores in positive mode
         global _WARNED_A_CROSS_RINGS
         if disable_A_cross_rings and not _WARNED_A_CROSS_RINGS:
@@ -3447,7 +3457,8 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
         # annotations, of no higher charge, keeping its cross-ring cleavages
         prec_frags = generate_atomic_frags(nx_mono, global_mods, special_residues, allowed_X_cleavages, max_cleavages = max_cleavages,
                                            fragment_masses = [ms3_precursor], threshold = mass_threshold, mass_tag = mass_tag,
-                                           charge = charge, sample_prep = sample_prep, disable_A_cross_rings = disable_A_cross_rings)
+                                           charge = charge, sample_prep = sample_prep, disable_A_cross_rings = disable_A_cross_rings,
+                                           metal_carrier = hydrogen_shifts and charge > 0)
         parents = list(zip(*match_fragment_properties(prec_frags, ms3_precursor, mass_threshold, charge,
                                                       mass_threshold_ppm = mass_threshold_ppm)[1:]))
         if not parents:
@@ -3481,7 +3492,7 @@ def CandyCrumbs(input_string, fragment_masses, mass_threshold = None,
                                        subgraphs = subgraphs, threshold = mass_threshold, mass_tag = mass_tag,
                                        charge = charge, sample_prep = sample_prep,
                                        disable_A_cross_rings = disable_A_cross_rings, threshold_ppm = mass_threshold_ppm, peptide_ion_types = allowed_ion_types,
-                                       max_cross_rings = None if input_dict['peptide'] or parents is not None else 1)
+                                       max_cross_rings = None if input_dict['peptide'] or parents is not None else 1, metal_carrier = hydrogen_shifts and charge > 0)
     sorted_frag_keys = sorted(subg_frags.keys())
     if input_dict['peptide']:
         # each glycan's chains are ranked once, on the integer nodes of the free glycan: rank_chains orders equal-mass chains (the two arms

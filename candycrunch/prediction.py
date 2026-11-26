@@ -36,7 +36,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
                                           mz_to_composition, structure_to_basic, mass_dict, SIALIC_KEYS,
                                           sialic_linkage_splits, resolve_sialic_linkages, _carboxyl_sites)
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
-from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals
+from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals, is_metal_cut
 from candycrunch.confidence import calibrated_confidence
 from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, read_baf, read_tsf, read_waters, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
@@ -3275,12 +3275,14 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
         tester_mass_scores, losses = {}, set()
         for key in keys:
             cc_out = next(results)
-            # The isolated fragment's least-cleaved readings, whose cleavages an MS3 annotation inherits
+            # The isolated fragment's least-cleaved readings, whose cleavages an MS3 annotation inherits (an adduct ion's metal is no cleavage: the
+            # sodiated C2 of a high-mannose glycan read as a 2,4X instead)
             parents = [set(a) for a in parent['Domon-Costello nomenclatures']] if key is not None and (parent := next(iter(next(results).values()))) else []
-            parents = [a for a in parents if len(a) == min(map(len, parents))]
-            # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives;
-            # cross-ring (A/X) and internal (M) fragments are only counted when they appear alone or in small combinations of the cleavages made in
-            # MS3 (every MS3 fragment of a cross-ring MS2 fragment named that cross-ring with its own cleavage and went uncounted)
+            parents = [a for a in parents if sum(not is_metal_cut(x) for x in a) == min(sum(not is_metal_cut(x) for x in b) for b in parents)]
+            # Score each fragment mass by how many non-redundant Domon-Costello annotations it receives: cross-ring (A/X) fragments are only counted
+            # alone and global modifications (M_) with one cleavage at most, among the cleavages made in MS3 (every MS3 fragment of a cross-ring MS2
+            # fragment named that cross-ring with its own cleavage and went uncounted); the metal of an adduct ion is no modification, as every
+            # fragment of a sodiated precursor carried it and none of its cross-ring or internal fragments counted
             for _k, _v in cc_out.items():
                 if _v:
                     _filtered = []
@@ -3290,7 +3292,7 @@ def assign_annotation_scores_pooled(df_in, multiplier, mass_tag, mass_tolerance,
                             ant = [a for a in ant if a not in inherited]
                             if not ant:
                                 continue
-                        prefs = [a.split('_')[0][-1] for a in ant]
+                        prefs = [a.split('_')[0][-1] for a in ant if not is_metal_cut(a)]
                         if ('A' in prefs or 'X' in prefs) and len(prefs) > 1:
                             continue
                         if 'M' in prefs and len(prefs) > 2:
@@ -6356,7 +6358,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 if _v:
                     _filtered = []
                     for ant in _v['Domon-Costello nomenclatures']:
-                        prefs = [a.split('_')[0][-1] for a in ant]
+                        prefs = [a.split('_')[0][-1] for a in ant if not is_metal_cut(a)]
                         if ('A' in prefs or 'X' in prefs) and len(prefs) > 1:
                             continue
                         if 'M' in prefs and len(prefs) > 2:
@@ -6713,21 +6715,32 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         # MS3 spectra resolve isomers whose MS2 fragments look alike: an isomer explaining a row's MS3 spectra with more fragments of the fragment
         # they isolated (scored as in assign_annotation_scores_pooled) moves up, isomers explaining them equally well keep the model's order
         reranked = []
-        for preds, ms3, charge, comp in zip(df_out['predictions'], df_out['ms3'], df_out['charge'], df_out['composition']):
+        adducts = df_out['adduct'] if 'adduct' in df_out.columns else [None] * len(df_out)
+        for preds, ms3, charge, comp, adduct in zip(df_out['predictions'], df_out['ms3'], df_out['charge'], df_out['composition'], adducts):
             pools = {}
             for p, x in ms3 if len(preds) > 1 else []:
                 pools.setdefault(round(p), (p, []))[1].append([np.round(y, 1) for y in deisotope_ms2(x, int(abs(charge)), 0.05)][:15])
+            # An adduct ion's fragments carry its metal, as assign_annotation_scores_pooled reads them (a sodiated row's MS3 explained nothing)
+            crumbs_kwargs = dict(simplify = False, charge = int(charge), disable_global_mods = not isinstance(adduct, str) or mode == 'negative', disable_X_cross_rings = True,
+                                 max_cleavages = 2, mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0), sample_prep = sample_prep,
+                                 sialic_derivatization = sialic_derivatization, metal_cations = precursor_metals([adduct] if isinstance(adduct, str) else []))
             scores = [0] * len(preds)
             for i, (g, _) in enumerate(preds):
                 g = g if sialic_derivatization is None else fit_sialic_linkages(g, comp, scoring = True)
                 for p, ms3_spectra in pools.values() if g else []:
-                    cc_out = CandyCrumbs(g, {m for masses in ms3_spectra for m in masses}, mass_tolerance, simplify = False, charge = int(charge),
-                                         disable_global_mods = True, disable_X_cross_rings = True, max_cleavages = 2,
-                                         mass_tag = crumbs_mass_dict.get((modification, sample_prep), 0) + (mass_tag or 0), sample_prep = sample_prep,
-                                         ms3_precursor = p, sialic_derivatization = sialic_derivatization)
-                    counts = {k: sum(not (len(a) > 1 and {c.split('_')[0][-1] for c in a} & {'A', 'X'}) and not (
-                        len(a) > 2 and 'M' in {c.split('_')[0][-1] for c in a}) for a in v['Domon-Costello nomenclatures']) if v else 0
-                              for k, v in cc_out.items()}
+                    cc_out = CandyCrumbs(g, {m for masses in ms3_spectra for m in masses}, mass_tolerance, ms3_precursor = p, **crumbs_kwargs)
+                    # Judged on the cleavages made in MS3, as assign_annotation_scores_pooled judges them: the isolated fragment's least-cleaved readings,
+                    # which its MS3 annotations inherit, are taken out first
+                    parent = next(iter(CandyCrumbs(g, [p], mass_tolerance, **crumbs_kwargs).values()))
+                    parents = [set(a) for a in parent['Domon-Costello nomenclatures']] if parent else []
+                    parents = [a for a in parents if sum(not is_metal_cut(x) for x in a) == min(sum(not is_metal_cut(x) for x in b) for b in parents)]
+                    counts = {}
+                    for k, v in cc_out.items():
+                        counts[k] = 0
+                        for ant in v['Domon-Costello nomenclatures'] if v else []:
+                            ant = [a for a in ant if a not in max((b for b in parents if b <= set(ant)), key = len, default = set())]
+                            prefs = [a.split('_')[0][-1] for a in ant if not is_metal_cut(a)]
+                            counts[k] += bool(ant) and not (('A' in prefs or 'X' in prefs) and len(prefs) > 1) and not ('M' in prefs and len(prefs) > 2)
                     scores[i] += np.mean([sum(counts[m] for m in masses) for masses in ms3_spectra])
             reranked.append([preds[i] for i in sorted(range(len(preds)), key = lambda i: -scores[i])])
         df_out['predictions'] = reranked
@@ -6953,7 +6966,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         df_out.attrs.update(ms1 = ms1, mode = mode, accurate_ms1 = accurate_ms1, df_use = df_use, accurate_ms2 = trap == 'orbitrap', ms1_ppm_floor = ms1_ppm_floor,
                             ion_trap = trap in ('linear', 'amazon'), off_mass = off_mass, fragment_tolerance = (fragment_tolerance, fragment_ppm),
                             late_window = (rt_cap, float(loaded_file['RT'].min()), float(loaded_file['RT'].max())) if len(loaded_file) else None,
-                            precursor_calibration = precursor_calibration)
+                            precursor_calibration = precursor_calibration, activation = activation)
         return df_out
     if df_out.empty:
         # MS2 spectra without a single glycan peak mostly mean settings that do not fit the run, which would otherwise end in an empty table without a word
@@ -7036,6 +7049,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         from glycowork.motif.draw import plot_glycans_excel
         plot_glycans_excel(df_out.drop(columns = ['ms3'], errors = 'ignore').reset_index(),
                            os.path.splitext(spectra_filepath)[0] + '_output.xlsx', glycan_col_num = 'top1_pred')
+    # the run's fragmentation (its most frequent activation, None where the file names none), with which the app annotates its spectra
+    df_out.attrs['activation'] = activation
     # MS3 spectra are output like the MS2 spectra, only with spectra=True
     return (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'], errors = 'ignore')
 
@@ -7235,13 +7250,14 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     if experimental and not mass_dic:
         mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
     inference_dfs, file_modes, ms1_paths, accurate_ms1s, accurate_ms2s, ms1_ppm_floors, ion_traps, late_windows, fragment_tolerances = {}, {}, {}, {}, {}, {}, {}, {}, {}
-    precursor_calibrations = {}
+    precursor_calibrations, activations = {}, {}
     for file_label, (df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap) in zip(file_labels, results):
         # wrap_inference overrides the ion mode if the file says otherwise, so downstream steps have to follow it
         file_modes[file_label], ms1_paths[file_label], accurate_ms1s[file_label], accurate_ms2s[file_label] = file_mode, ms1_path, accurate_ms1, accurate_ms2
         ms1_ppm_floors[file_label], ion_traps[file_label], late_windows[file_label] = ms1_ppm_floor, ion_trap, df_out.attrs.pop('late_window', None)
         fragment_tolerances[file_label] = df_out.attrs.pop('fragment_tolerance', (None, None))
         precursor_calibrations[file_label] = df_out.attrs.pop('precursor_calibration', None)
+        activations[file_label] = df_out.attrs.pop('activation', None)
         inference_dfs[file_label] = df_out.assign(condition_label = file_label) if not df_out.empty else df_out
     # The table of a file without any glycan peak
     empty_table = pd.DataFrame(columns = ['top1_pred', 'predictions', 'composition', 'num_spectra', 'charge', 'RT', 'rel_abundance'],
@@ -7618,6 +7634,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             plot_glycans_excel(df_out.drop(columns = ['ms3'], errors = 'ignore').reset_index(),
                                os.path.splitext(spectra_filepath)[0] + '_output.xlsx',
                                glycan_col_num = 'top1_pred')
+        df_out.attrs['activation'] = activations[file_label]
         # MS3 spectra are output like the MS2 spectra, only with spectra=True
         inference_dfs[file_label] = (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'], errors = 'ignore')
     # Removed once the MS1 data is not needed any more, as an implicit clean-up raises a ResourceWarning
@@ -7698,11 +7715,11 @@ def _batch_inference_file(spectra_filepath, ms1_path, inference_kwargs):
     ms1, file_mode, accurate_ms1 = df_out.attrs.pop('ms1', None), df_out.attrs.pop('mode'), df_out.attrs.pop('accurate_ms1', False)
     accurate_ms2, ms1_ppm_floor, ion_trap = df_out.attrs.pop('accurate_ms2', False), df_out.attrs.pop('ms1_ppm_floor', 3.0), df_out.attrs.pop('ion_trap', False)
     late_window, fragment_tolerance = df_out.attrs.get('late_window'), df_out.attrs.get('fragment_tolerance', (None, None))
-    precursor_calibration = df_out.attrs.get('precursor_calibration')
+    precursor_calibration, activation = df_out.attrs.get('precursor_calibration'), df_out.attrs.get('activation')
     df_out.attrs.clear()
-    # (the late-row window and precursor calibration of finalise_predictions and the fragment tolerance of augment_predictions travel with the frame;
-    # wrap_inference_batch takes them off before pooling the files)
-    df_out.attrs.update(late_window = late_window, fragment_tolerance = fragment_tolerance, precursor_calibration = precursor_calibration)
+    # (the late-row window and precursor calibration of finalise_predictions, the fragment tolerance of augment_predictions, and the run's activation
+    # travel with the frame; wrap_inference_batch takes them off before pooling the files)
+    df_out.attrs.update(late_window = late_window, fragment_tolerance = fragment_tolerance, precursor_calibration = precursor_calibration, activation = activation)
     if ms1 is None or len(ms1[0]) == 0 or ms1_path is None:
         return df_out, file_mode, None, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap
     np.savez(ms1_path, rts = ms1[0], mzs = ms1[1], ints = ms1[2], offsets = ms1[3])

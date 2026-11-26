@@ -1521,6 +1521,16 @@ def test_bruker_mzxml(tmp_path):
     assert np.allclose(df['m/z'] + df['header_shift'], [966.204528808594, 675.813842773438, 675.418823242188])
 
 
+def test_run_activation_in_tables(tmp_path):
+    # A run's table names its fragmentation (most frequent activation), alone and in a batch, as the app annotates its spectra with it
+    run = BASE_DIR / 'packaging' / 'self_test.mzML'
+    assert wrap_inference(str(run), 'O').attrs['activation'] == 'CID'
+    for name in ('a.mzML', 'b.mzML'):
+        (tmp_path / name).write_bytes(run.read_bytes())
+    _, tables = wrap_inference_batch([str(tmp_path / 'a.mzML'), str(tmp_path / 'b.mzML')], 'O', intra_cat_thresh = 1.0)
+    assert [t.attrs['activation'] for t in tables.values()] == ['CID', 'CID']
+
+
 def test_mzxml_without_ms2_or_rt(tmp_path):
     # Runs without MS2 spectra (full-MS profiling, MSn files of MS3 and higher stages only) load as an empty table, which extract_spectra refuses
     # with its own error; MALDI spectra exported to mzXML have no retention times

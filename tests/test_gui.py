@@ -955,6 +955,34 @@ def test_gui_feature_curation_filter_and_crumbs_peaks(app):
     assert [float(line.split('\t')[1]) for line in crumbs.peaks.toPlainText().splitlines()] == [0.04, 0.73]
 
 
+def test_gui_exd_runs_annotate_with_their_activation(app, monkeypatch):
+    from candycrunch import gui
+    table = pd.DataFrame({'top1_pred': ['Gal(b1-3)GlcNAc(b1-3)Gal(b1-4)[Fuc(a1-3)]Glc'], 'predictions': [[('Gal(b1-3)GlcNAc(b1-3)Gal(b1-4)[Fuc(a1-3)]Glc', 0.9)]],
+                          'composition': [{'Hex': 3, 'HexNAc': 1, 'dHex': 1}], 'num_spectra': [3], 'charge': [1], 'RT': [30.0], 'rel_abundance': [100.0], 'notes': [''],
+                          'ppm_error': [0.5], 'GlyTouCan_ID': [''], 'adduct': ['[M+Na]+']}, index = pd.Index([1117.58], name = 'm/z'))
+    settings = dict(gui.DEFAULTS, glycan_class = 'free', modification = 'reduced_D', sample_prep = 'permethylated', max_charge = 1)
+    for activation, method in (('EED', 'EED'), ('CID', None), (None, None)):
+        table.attrs = {'activation': activation}
+        view = gui.ResultsView(gui.GlycanImages())
+        calls = []
+        monkeypatch.setattr(view.spectrum, 'annotate', lambda *args, **kwargs: calls.append(kwargs))
+        view.set_results({'files': ['a.mzXML'], 'settings': settings, 'tables': {'a': (table.copy(), [{268.1155: 50.0, 1117.58: 100.0}])}, 'features': None})
+        view.select_row(0)
+        # an electron-activated run's spectrum is annotated with its method, others as before
+        assert calls[-1].get('fragmentation_method') == method, activation
+        sent = []
+        view.open_in_crumbs.connect(sent.append)
+        view.send_to_crumbs()
+        crumbs = gui.CrumbsTab(gui.GlycanImages())
+        crumbs.fragmentation.setCurrentIndex(crumbs.fragmentation.findData('UVPD'))
+        crumbs.load(sent[-1])
+        assert crumbs.fragmentation.currentData() == method, activation
+    # Automatic fragment types: a permethylated glycan's cross-rings are left out in CID, kept in ExD
+    panel = gui.SpectrumPanel()
+    assert panel.make_request('Gal(b1-4)Glc', [100.0], [1.0], 1, 2.0, 'permethylated')['kwargs']['disable_A_cross_rings'] is True
+    assert 'disable_A_cross_rings' not in panel.make_request('Gal(b1-4)Glc', [100.0], [1.0], 1, 2.0, 'permethylated', fragmentation_method = 'EED')['kwargs']
+
+
 def test_gui_crumbs_settings_and_filtered_export(app, tmp_path, monkeypatch):
     from candycrunch import gui
     table = pd.DataFrame({'top1_pred': ['Gal(b1-3)GalNAc', 'Gal(b1-4)GlcNAc'], 'predictions': [[('Gal(b1-3)GalNAc', 0.9), ('Gal(b1-4)GlcNAc', 0.05)], [('Gal(b1-4)GlcNAc', 0.9)]],

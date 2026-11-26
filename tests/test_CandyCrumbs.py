@@ -164,6 +164,21 @@ def test_candycrumbs_permethylated_sialic_amides():
     assert 'Y_2_Alpha' in out[582.20]['Domon-Costello nomenclatures'][0]
 
 
+def test_candycrumbs_exd_of_sodiated_glycans():
+    # EED of sodiated, permethylated, deutero-reduced LNFP isomers (GlycoPOST GPST000543, FTICR, < 1 ppm): the metal carries the charge, so the sodiated
+    # internal ion at 268.116 (one GlcNAc, B/Y or C/Z), which only LNFP I, V, and VI make, is named in EED for those and not for LNFP II, and A cross-rings
+    # (a 1,5A ion at 458.24) are kept; CID keeps one cleavage beside the metal and no A cross-rings in positive mode
+    tag = composition_to_mass({}, sample_prep = 'permethylated', modification = 'reduced_D') - composition_to_mass({}, sample_prep = 'permethylated')
+    lnfp_v, lnfp_ii = 'Gal(b1-3)GlcNAc(b1-3)Gal(b1-4)[Fuc(a1-3)]Glc', 'Gal(b1-3)[Fuc(a1-4)]GlcNAc(b1-3)Gal(b1-4)Glc'
+    kwargs = dict(charge = 1, mass_tag = tag, sample_prep = 'permethylated', mass_threshold = 0.01, mass_threshold_ppm = 3, metal_cations = {'+Na'})
+    eed = CandyCrumbs(lnfp_v, [268.1155, 458.2360, 654.3418], fragmentation_method = 'EED', **kwargs)
+    assert {'B_2_Alpha', 'Y_3_Alpha', 'M_+Na'} == set(eed[268.1155]['Domon-Costello nomenclatures'][0])
+    assert '15A_2_Alpha' in eed[458.2360]['Domon-Costello nomenclatures'][0] and eed[654.3418]['Domon-Costello nomenclatures'][0] == ['M_+Na', 'Y_2_Alpha']
+    assert CandyCrumbs(lnfp_ii, [268.1155], fragmentation_method = 'EED', **kwargs)[268.1155] is None
+    cid = CandyCrumbs(lnfp_v, [268.1155, 458.2360, 654.3418], **kwargs)
+    assert cid[268.1155] is None and cid[458.2360] is None and cid[654.3418]['Domon-Costello nomenclatures'][0] == ['M_+Na', 'Y_2_Alpha']
+
+
 def test_candycrumbs_deuteropermethylated():
     # CD3 caps weigh 3.0188 Da more than CH3 ones and methanol leaves as CD3OH, while a native O-methyl stays CH3: the B1 ion of GalOMe is 228.18, three
     # caps above permethylated Gal's 219.12 and three below deuteropermethylated Gal's 231.20

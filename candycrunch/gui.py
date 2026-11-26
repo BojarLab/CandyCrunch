@@ -1468,7 +1468,8 @@ class SpectrumPanel(QWidget):
         self.fragment_types = _combo(FRAGMENT_TYPES)
         self.fragment_types.setToolTip('Fragment types to annotate with. Automatic: glycosidic fragments (B, C, Y, Z, also internal ones) for permethylated glycans, whose '
                                        'cross-ring readings matched no more peaks than in m/z-shifted spectra (CID and HCD of protonated ions); otherwise also X '
-                                       'cross-rings, and A cross-rings in negative mode and of the reducing end of metal-adducted unreduced glycans in positive mode. '
+                                       'cross-rings, and A cross-rings in negative mode and of the reducing end of metal-adducted unreduced glycans in positive mode; '
+                                       'with electron-based or UV activation (EED, EDD, ECD, ETD, ..., from the file or the CandyCrumbs tab) every A and X cross-ring. '
                                        'All cross-rings: every A and X cross-ring, e.g., for sodiated permethylated glycans at high collision energy or in MSn')
         # The figure on screen is laid out for the panel, so saving it gave a small picture with cramped labels; this draws it again at print size
         self.save = QPushButton('Save image…')
@@ -1560,7 +1561,8 @@ class SpectrumPanel(QWidget):
         panel's current size and settings"""
         size = self.stack.size()
         choice = self.fragment_types.currentData()
-        if choice == 'glycosidic' or (choice is None and sample_prep in ('permethylated', 'deuteropermethylated')):
+        from candycrunch.analysis import RADICAL_METHODS
+        if choice == 'glycosidic' or (choice is None and sample_prep in ('permethylated', 'deuteropermethylated') and kwargs.get('fragmentation_method') not in RADICAL_METHODS):
             kwargs = {'disable_X_cross_rings': True, 'disable_A_cross_rings': True} | kwargs
         elif choice == 'cross_rings':
             kwargs = {'disable_X_cross_rings': False, 'disable_A_cross_rings': False} | kwargs
@@ -3296,11 +3298,12 @@ class ResultsView(QWidget):
         if not isinstance(peaks, dict) or not peaks or structure is None:
             return structure, ms3_groups, None
         preds = table['predictions'].iat[r]
-        from candycrunch.analysis import precursor_metals
+        from candycrunch.analysis import precursor_metals, RADICAL_METHODS
         return structure, ms3_groups, ((structure, list(peaks.keys()), list(peaks.values()), int(table['charge'].iat[r]), _mass_tag(settings), settings['sample_prep']),
                                        dict(ms3 = [(p, n) for p, _, n in ms3_groups], candidates = [p[0] for p in preds if p[0] != structure] if isinstance(preds, (list, tuple)) else [],
                                             sialic_derivatization = settings.get('sialic_derivatization'), ion_trap = settings.get('trap') in ('linear', 'amazon'),
-                                            metal_cations = 'adduct' not in table.columns or (precursor_metals([a]) if isinstance(a := table['adduct'].iat[r], str) else False)))
+                                            metal_cations = 'adduct' not in table.columns or (precursor_metals([a]) if isinstance(a := table['adduct'].iat[r], str) else False),
+                                            **({'fragmentation_method': table.attrs['activation']} if table.attrs.get('activation') in RADICAL_METHODS else {})))
 
     def annotate(self):
         table, spectra = self.payload['tables'][self.source[0]]
@@ -3569,7 +3572,8 @@ class ResultsView(QWidget):
         panel = self.ms3_panel if ms3 else self.spectrum
         # The settings the results' spectrum annotates with: the charge carrier of the peak's ion, and for its MS2 spectrum the competing structures and the analyzer
         annotation = (self.spectrum_args(r, self.alternative)[2] or (None, {}))[1]
-        extra = {'metal_cations': annotation.get('metal_cations', True)} | ({} if ms3 else {k: annotation[k] for k in ('candidates', 'ion_trap') if k in annotation})
+        extra = {'metal_cations': annotation.get('metal_cations', True), 'fragmentation_method': annotation.get('fragmentation_method')} | (
+            {} if ms3 else {k: annotation[k] for k in ('candidates', 'ion_trap') if k in annotation})
         self.open_in_crumbs.emit(extra | {'structure': structure if isinstance(structure, str) else _composition(table['composition'].iat[r]),
                                   'peaks': ms3[1] if ms3 else spectra[r] or {}, 'charge': int(table['charge'].iat[r]), 'settings': _row_settings(self.payload['settings'], table, r),
                                   'ms3_precursor': ms3[0] if ms3 else None, 'tolerance': (panel.tolerance.value(), panel.unit.currentData())})
@@ -3700,7 +3704,9 @@ class CrumbsTab(QWidget):
         self.cleavages.setToolTip('Maximum number of concurrent cleavages per fragment')
         self.fragmentation = _combo(FRAGMENTATIONS)
         self.fragmentation.setToolTip('Restricts peptide backbone ion types for glycopeptides (not EED/EDD/NETD/UVPD); every method but CID/HCD also '
-                                      'annotates free-glycan fragments one or two hydrogen atoms off (odd-electron, hydrogen-shifted ions)')
+                                      'annotates free-glycan fragments one or two hydrogen atoms off (odd-electron, hydrogen-shifted ions), keeps their '
+                                      'cross-rings, and lets a fragment keeping the precursor\'s metal cation have two cleavages. Open in CandyCrumbs sets it to the '
+                                      'run\'s activation where the file names one (Bruker mzXML of CompassXport names none)')
         self.ms3_precursor = _spin(0, 5000, 1, 4, ' m/z')
         self.ms3_precursor.setSpecialValueText('None (MS2 spectrum)')
         self.ms3_precursor.setToolTip('For an MS3 spectrum: m/z of the MS2 fragment that was isolated, so its peaks are only annotated as fragments of that '
@@ -3796,6 +3802,8 @@ class CrumbsTab(QWidget):
         self.ms3_precursor.setValue(request.get('ms3_precursor') or 0)
         metals = request.get('metal_cations', True)
         self.carrier.setCurrentIndex(0 if metals is True else 2 if metals and '+Li' in metals else 1)
+        # (Any where the run names no electron-based or UV activation)
+        _set_combo(self.fragmentation, request.get('fragmentation_method'))
         self.spectrum.set_tolerance(*request['tolerance'])
         self.loaded = (self.structure.text().strip(), self.peaks.toPlainText(), {'candidates': request.get('candidates', []), 'ion_trap': request.get('ion_trap', False)})
         self.annotate()
