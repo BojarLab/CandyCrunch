@@ -87,7 +87,7 @@ NAME_HINTS = {'glycan_class': {'N': r'n-?glycans?|ng|n(?![a-z0-9])', 'O': r'o-?g
               'modification': {'reduced': r'(?<!non-)reduced|alditols?', 'unreduced': r'un-?reduced|non-?reduced', '2AB': r'2-?ab', '2AA': r'2-?aa', 'procainamide': r'procainamide',
                                'PA': r'pa-?label\w*|pyridylamin\w*|2-?aminopyridin\w*', 'benzyl': r'benzyl\w*|bn-?galnac|cora',
                                'glycolate+lactate': r'bleach\w*|hypochlorit\w*|ca-?clo|oxidative\w*'},
-              'sample_prep': {'permethylated': r'permethyl\w*', 'deuteropermethylated': r'deutero-?permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic'}}
+              'sample_prep': {'permethylated': r'permethyl\w*', 'deuteropermethylated': r'deutero-?permethyl\w*', 'peracetylated': r'peracetyl\w*'}, 'lc': {'PGC': r'pgc', 'C18': r'c18', 'other': r'hilic', 'infusion': r'(?:direct-?)?infusions?|infused'}}
 BATCH_KEYS = ('intra_cat_thresh', 'top_n_isomers', 'n_jobs')
 FEATURES = '\x00features'
 GLYCAN_CLASSES = [('O-glycans', 'O'), ('N-glycans', 'N'), ('Free oligosaccharides (e.g., milk)', 'free'), ('Glycolipid glycans', 'lipid'),
@@ -113,7 +113,7 @@ MAIN_ADDUCT_TIPS = {'positive': 'Automatic suits most runs: protons first, then 
                     'negative': 'Automatic suits most runs: acetate, formate, and HCO3- are all considered, and with survey scans the anion that neutral glycans show counts for abundances. '
                                 'Choose the anion of your mobile phase (e.g., HCO3- with ammonium bicarbonate) to read it before the other anions and to count its adduct ions for abundances. '
                                 'Back to Automatic when CandyCrunch restarts'}
-LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other')]
+LCS = [('PGC', 'PGC'), ('C18', 'C18'), ('Other', 'other'), ('Direct infusion (no LC)', 'infusion')]
 TRAPS = [('Linear ion trap', 'linear'), ('Orbitrap', 'orbitrap'), ('Bruker amaZon', 'amazon'), ('Other', 'other')]
 FRAGMENT_TYPES = [('Automatic', None), ('Glycosidic only', 'glycosidic'), ('All cross-rings', 'cross_rings')]
 TAXONOMY_LEVELS = ['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain']

@@ -1959,7 +1959,7 @@ def process_for_inference(df, glycan_class, mode = 'negative', modification = 'r
    | glycan_class (int or list): 0 = O-linked, 1 = N-linked, 2 = lipid/free, or one such code per row
    | mode (string): mass spectrometry mode, either 'negative' or 'positive'; default: 'negative'
    | modification (string): chemical modification of glycans; options are reduced/reduced_D/2AA/2AB/procainamide/PA/APTS/aminoxyTMT/GirardP/benzyl/glycolate/lactate or 'custom'; default:'reduced'
-   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
+   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other' (any other value, such as 'infusion', is read as 'other'); default:'PGC'
    | trap (string): mass analyzer of the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | rt_max_default (float): minimum maximum retention time to normalize to; default: 30.0
    | tta_thresh (float): inputs of spectra whose best annotation_score exceeds this get 3 augmented copies, the others one plain copy (column 'tta'); default: None (all get 3)
@@ -4048,7 +4048,7 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
                 raise ValueError(f"{os.path.basename(spectra_filepath)} is not a complete mzData file ({e}); it may have been cut short while being copied or "
                                  f"downloaded") from e
     if ext == ".mgf":
-        rows, agilent, signs, titled = [], [], set(), []
+        rows, agilent, signs, titled, timed = [], [], set(), [], []
         for spectrum in read_mgf(spectra_filepath):
             params = spectrum['params']
             if params.get('charge'):
@@ -4058,22 +4058,24 @@ def load_spectra_filepath(spectra_filepath, extract_ms1 = False):
             # Like MS1 scans of mzML files, spectra without a precursor m/z (no or an empty PEPMASS) are not predicted
             if not len(spectrum['m/z array']) or params.get('pepmass', (None,))[0] is None:
                 continue
-            if 'rtinseconds' not in params:
-                raise ValueError(f"MGF spectrum '{params.get('title', '')}' has no retention time (RTINSECONDS, RTINMINUTES, or a time in minutes in its TITLE); "
-                                 f"CandyCrunch needs retention times, so export the spectra with them")
+            timed.append('rtinseconds' in params)
             titled.append(params.get('rt_from_title', False))
             # Same conventions as process_mzML_stack: top 1000 peaks sorted by intensity, charge 1 treated as undetermined; so is CHARGE=0, which some
             # writers use for an unknown charge and which as a known charge left no candidate composition for any spectrum
             charge = (abs(int(params['charge'][0])) or None) if params.get('charge') and len(params['charge']) == 1 else None
             peak_d = dict(sorted(zip(spectrum['m/z array'].tolist(), spectrum['intensity array'].tolist()), key = lambda x: x[1], reverse = True)[:1000])
-            rows.append([float(params['pepmass'][0]), peak_d, float(params['rtinseconds']) / 60,
+            rows.append([float(params['pepmass'][0]), peak_d, float(params['rtinseconds']) / 60 if timed[-1] else 0.0,
                          charge if charge != 1 else None, params['pepmass'][1] if params['pepmass'][1] is not None else np.nan,
                          int(params['scans']) if str(params.get('scans')).isdigit() else params.get('scans'), None])
         df_out = pd.DataFrame(rows, columns = ['m/z', 'peak_d', 'RT', 'precursor_charge', 'intensity', 'scan', 'activation'])
-        # A time that every title repeats is part of a name (e.g., a '5 min gradient' run), not the retention time of each spectrum
-        if len(df_out) > 1 and all(titled) and df_out['RT'].nunique() == 1:
-            raise ValueError(f"The MGF spectra of {os.path.basename(spectra_filepath)} have no RTINSECONDS, and their titles all give {df_out['RT'].iat[0]:g} min, "
-                             f"which is no retention time; CandyCrunch needs retention times, so export the spectra with them")
+        if any(timed) and not all(timed):
+            raise ValueError(f"{timed.count(False)} of the {len(timed)} MGF spectra of {os.path.basename(spectra_filepath)} have no retention time (RTINSECONDS, "
+                             f"RTINMINUTES, or a time in minutes in their TITLE) while the others have one; export the spectra with their retention times")
+        # Spectra without retention times (a direct infusion, a single spectrum), or with a time that every title repeats, which is part of a name (e.g.,
+        # a '5 min gradient' run), are one time point: wrap_inference processes them as a direct infusion
+        if not any(timed) or (len(df_out) > 1 and all(titled) and df_out['RT'].nunique() == 1):
+            df_out['RT'] = 0.0
+            df_out.attrs['no_rt'] = True
         # An mgf names no analyzer; Agilent Q-TOF precursors and fragments are accurate to a few ppm (MS1 'tof', MS2 'other', as for timsTOF). Its precursor
         # intensities are the survey abundance when DDA triggered, not a trace (Spearman 0.15/0.18 with MassHunter feature heights in GPST000570, spectrum
         # counts 0.70/0.56), so they are dropped, as no valley or apex can be read from them
@@ -5726,7 +5728,10 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
    |                       the first being the run's own: the others are searched in runs of their own, a spectrum keeps the reducing end whose structure its
    |                       fragments explain best, and the rows name it in a column reducing_end; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
-   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
+   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', 'other', and 'infusion' (direct infusion without LC: every MS2 spectrum is one
+   |              time point, the middle of the acquisition, each precursor's spectra one row, quantified by precursor intensities; rt_min and rt_max still
+   |              select spectra by acquisition time, without the default skip of the first 2 min); spectra without retention times are processed so
+   |              whatever lc says; default:'PGC'
    | trap (string): mass analyzer of the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | rt_min (float): spectra before this retention time (in minutes) are ignored; default:0 (runs longer than 20 min then skip their first 2 min)
    | rt_max (float): spectra after this retention time (in minutes) are ignored; default:0 (all; in runs longer than 40 min, rows in the last 10% need a peak of their own over a low background)
@@ -5953,8 +5958,22 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     cross_crumbs_thresh = crumbs_thresh
     if accurate_ms1:
         crumbs_thresh = max(crumbs_thresh - 2, 0)
-    rt_cap = 0.9 * loaded_file['RT'].max() if not rt_max and len(loaded_file) and loaded_file['RT'].max() > 40 else None
-    loaded_file = filter_rts(loaded_file, rt_min, rt_max)
+    # A direct infusion (lc = 'infusion', or spectra without retention times) sprays every glycan of the sample for the whole acquisition, so its MS2
+    # spectra are one time point, the middle of the acquisition, as one elution peak is: each precursor's spectra pool into one cluster, as their
+    # times would otherwise chain or split them and the spray's fluctuating precursor intensities read as valleys between isomers (one glycan
+    # became up to three rows); and its survey scans hold no elution peak to place, test, or integrate a row on, so its rows are quantified by
+    # their precursor intensities. The acquisition times still select spectra (rt_min, rt_max), without the gradient's defaults (a run's first
+    # 2 min, its last tenth)
+    infusion = lc == 'infusion' or bool(loaded_file.attrs.get('no_rt'))
+    if infusion and not _return_intermediate and lc != 'infusion':
+        print(f"{source} gives its spectra no retention times, so it is processed as a direct infusion: every spectrum is one time point, and isomers that "
+              f"chromatography would separate are reported once.")
+    rt_cap = 0.9 * loaded_file['RT'].max() if not infusion and not rt_max and len(loaded_file) and loaded_file['RT'].max() > 40 else None
+    # (an rt_min of -inf keeps every spectrum before rt_max, as filter_rts drops the first 2 min of runs over 20 min only without an rt_min)
+    loaded_file = filter_rts(loaded_file, (rt_min or -np.inf) if infusion else rt_min, rt_max)
+    if infusion:
+        loaded_file['RT'] = float(loaded_file['RT'].median()) if len(loaded_file) else 0.0
+        ms1 = None
     if _top_clusters and rt_cap is not None:
         # The probes on the most intense clusters (reducing end, analyzer) read the run's gradient: in its last tenth, the column wash's contaminants are
         # among the most intense clusters (a PA reading of a background ion re-fragmented every minute took over a reduced N-glycan run)
@@ -7068,7 +7087,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    |                       the first being the run's own: the others are searched in runs of their own, a spectrum keeps the reducing end whose structure its
    |                       fragments explain best, and the rows name it in a column reducing_end; default:'reduced'
    | mass_tag (float): mass of custom reducing end tag that should be considered if relevant; default:None
-   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', and 'other'; default:'PGC'
+   | lc (string): type of liquid chromatography; options are 'PGC', 'C18', 'other', and 'infusion' (direct infusion without LC: every MS2 spectrum is one
+   |              time point, the middle of the acquisition, each precursor's spectra one row, quantified by precursor intensities; rt_min and rt_max still
+   |              select spectra by acquisition time, without the default skip of the first 2 min); spectra without retention times are processed so
+   |              whatever lc says; default:'PGC'
    | trap (string): mass analyzer of the MS2 spectra (the survey scan analyzer is read from the file); options are 'linear', 'orbitrap', 'amazon', and 'other'; default:'linear'
    | rt_min (float): spectra before this retention time (in minutes) are ignored; default:0 (runs longer than 20 min then skip their first 2 min)
    | rt_max (float): spectra after this retention time (in minutes) are ignored; default:0 (all; in runs longer than 40 min, rows in the last 10% need a peak of their own over a low background)

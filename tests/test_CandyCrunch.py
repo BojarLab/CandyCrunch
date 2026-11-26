@@ -2465,8 +2465,9 @@ def test_inputs_of_other_writers(tmp_path):
     (tmp_path / 'short.mzML.gz').write_bytes(gzip.compress(mzml().encode())[:200])
     with pytest.raises(ValueError, match = 'not a complete gzip file'):
         load_spectra_filepath(str(tmp_path / 'short.mzML.gz'))
-    # mgf retention times without RTINSECONDS: RTINMINUTES, Mascot Distiller's elution span, a time in minutes in the title (Bruker DataAnalysis); a time every
-    # title repeats is part of a name, and none at all is an error
+    # mgf retention times without RTINSECONDS: RTINMINUTES, Mascot Distiller's elution span, a time in minutes in the title (Bruker DataAnalysis); spectra
+    # without one, or with a time every title repeats (part of a name), are one time point, which wrap_inference processes as a direct infusion, and some
+    # spectra with a time beside others without one are an error
     titles = ['RTINMINUTES={}', 'TITLE=File: run.wiff, Elution from: {} to {} period: 0', 'TITLE=Cmpd 1, +MSn(675.2500), {:.2f} min']
     for k, title in enumerate(titles):
         (tmp_path / f'rt{k}.mgf').write_text(''.join(f'BEGIN IONS\n{title.format(rt, rt)}\nPEPMASS=675.25\nCHARGE=2-\n290.09 100\nEND IONS\n' for rt in (10.0, 10.5)))
@@ -2474,11 +2475,33 @@ def test_inputs_of_other_writers(tmp_path):
     (tmp_path / 'gz.mgf.gz').write_bytes(gzip.compress((tmp_path / 'rt0.mgf').read_bytes()))
     assert load_spectra_filepath(str(tmp_path / 'gz.mgf.gz')).equals(load_spectra_filepath(str(tmp_path / 'rt0.mgf')))
     (tmp_path / 'named.mgf').write_text('BEGIN IONS\nTITLE=glycans 5 min gradient\nPEPMASS=675.25\n290.09 100\nEND IONS\n' * 2)
-    with pytest.raises(ValueError, match = 'no retention time'):
-        load_spectra_filepath(str(tmp_path / 'named.mgf'))
     (tmp_path / 'none.mgf').write_text('BEGIN IONS\nTITLE=run.1.1.2\nPEPMASS=675.25\n290.09 100\nEND IONS\n')
+    for name in ('named.mgf', 'none.mgf'):
+        df = load_spectra_filepath(str(tmp_path / name))
+        assert df.attrs['no_rt'] and (df['RT'] == 0).all(), name
+    (tmp_path / 'mixed.mgf').write_text((tmp_path / 'rt0.mgf').read_text() + (tmp_path / 'none.mgf').read_text())
     with pytest.raises(ValueError, match = 'no retention time'):
-        load_spectra_filepath(str(tmp_path / 'none.mgf'))
+        load_spectra_filepath(str(tmp_path / 'mixed.mgf'))
+
+
+def test_direct_infusion(tmp_path):
+    # Spectra without retention times (a direct infusion, as many exports write it) are one time point: a glycan's spectra, in any order and with the
+    # spray's fluctuating precursor intensities, are one row at RT 0; chosen as lc = 'infusion', the spectra of a run with times pool the same way, at
+    # the middle of the acquisition
+    df = load_spectra_filepath(str(BASE_DIR / 'examples' / 'JC_171002Y1_extracted_spectra.xlsx'))
+    mz = 1040.35
+    spectra = df[np.abs(df['reducing_mass'] - mz) < 0.05].head(8)
+    for name, rts in (('infusion.mgf', [None] * 8), ('timed.mgf', [0.5 + 0.3 * k for k in range(8)])):
+        with open(tmp_path / name, 'w') as f:
+            for k, (m, peaks, intensity, rt) in enumerate(zip(spectra['reducing_mass'], spectra['peak_d'], [9e5, 2e5, 8e5, 1e5, 9e5, 3e5, 7e5, 1e5], rts)):
+                f.write(f'BEGIN IONS\nTITLE=scan {k}\n' + (f'RTINSECONDS={60 * rt}\n' if rt is not None else '') + f'PEPMASS={m} {intensity}\nCHARGE=1-\n' +
+                        ''.join(f'{a} {b}\n' for a, b in peaks.items()) + 'END IONS\n')
+    out = wrap_inference(str(tmp_path / 'infusion.mgf'), glycan_class = 'O')
+    rows = out[np.abs(out.index.values - mz) < 0.5]
+    assert len(rows) == 1 and rows['num_spectra'].iat[0] == len(spectra) and (out['RT'] == 0).all()
+    timed = wrap_inference(str(tmp_path / 'timed.mgf'), glycan_class = 'O', lc = 'infusion')
+    rows = timed[np.abs(timed.index.values - mz) < 0.5]
+    assert len(rows) == 1 and rows['num_spectra'].iat[0] == len(spectra) and np.allclose(timed['RT'], 1.55)
 
 
 def test_mass_spec_helpers_from_glycopeptide_search():
