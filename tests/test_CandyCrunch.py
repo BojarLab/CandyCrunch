@@ -1158,6 +1158,61 @@ def test_label_inputs_own_anchors():
     assert np.allclose([r['run_rt'] for r in labelled.attrs['map_rows']], run_rts) and sorted(labelled['spec_id']) == list(range(9))
 
 
+def test_label_inputs_own_anchors_acid_drift():
+    # A run whose sialylated glycans elute 1.2 min later per Neu5Ac against the map than its neutral ones: its own rows (RT_<run>) anchor a drift with an
+    # acid term, but three trisialylated ones sit at their map RT (carried over from another run), and the map's other two rows anchor by their inputs.
+    # The whole-map check judges each own row against the drift, not the anchors' median: the mono- and disialylated rows count as placed and the three off
+    # the drift do not, so the drift stays and the disialylated row without an own RT is labeled on its peak (by the median, the three counted and the
+    # sialylated ones did not, the map went to the median and that row sat 2.4 min before its peak)
+    import training.pipeline_labels as pl
+    from glycowork.motif.tokenization import glycan_to_composition
+    chain = lambda m, h: 'Gal(b1-4)GlcNAc(b1-3)' * m + 'Gal(b1-4)' * h + 'Glc'
+    neutral = [chain(m, h) for m in range(1, 4) for h in range(3)]
+    glycans = neutral[:8] + ['Neu5Ac(a2-3)' + g for g in neutral[:3]] + ['Neu5Ac(a2-8)Neu5Ac(a2-3)' + g for g in neutral[:4]]
+    glycans += ['Neu5Ac(a2-8)Neu5Ac(a2-8)Neu5Ac(a2-3)' + g for g in neutral[:3]] + [neutral[8], 'Neu5Ac(a2-8)Neu5Ac(a2-3)' + neutral[4]]
+    acid = [0] * 8 + [1] * 3 + [2] * 4 + [3] * 3 + [0, 2]
+    jitter = [0.04, -0.06, 0.08, -0.02, 0.06, -0.08, 0.02, -0.04, 0.05, -0.05, 0.03, -0.03, 0.07, -0.07, 0.04, 0.0, 0.0, 0.0, 0.01, -0.01]
+    map_rts = [10.0 + 0.25 * k for k in range(20)]
+    run_rts = [t + j + (1.2 * a if a < 3 else 0.0) for t, j, a in zip(map_rts, jitter, acid)]
+    masses = [300.0 + 37 * k for k in range(20)]
+    own = [True] * 18 + [False] * 2
+    inputs = pd.DataFrame({'spec_id': [0, 1], 'RT': run_rts[18:], 'intensity': 1e5, 'peak_d': [{50.0: 1.0}] * 2, 'rt_range': [(t, t) for t in run_rts[18:]],
+                           'num_spectra': 3, 'composition': [glycan_to_composition(g) for g in glycans[18:]], 'charge': 1, 'annotation_score': 12.0,
+                           'model_input': [np.zeros((3, 1), np.float32)] * 2, 'RT2': 0.3, 'glycan_type': 1, 'compositional_vector': [np.zeros(12)] * 2},
+                          index = pd.Index(masses[18:], name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    mapping = pd.DataFrame({'Mass': masses, 'RT': [r if o else t for r, t, o in zip(run_rts, map_rts, own)], 'map_rt': map_rts, 'glycan': glycans, 'rt_own': own})
+    labelled, _ = pl.label_inputs(inputs, mapping)
+    assert labelled.attrs['rt_alignment'] == 'model' and labelled.attrs['rt_anchors'] == 20
+    assert sorted(labelled['spec_id']) == [0, 1] and (labelled['rt_error'].abs() < 0.1).all()
+    assert np.allclose([r['run_rt'] for r in labelled.attrs['map_rows']][:18], run_rts[:18])
+
+
+def test_label_inputs_own_anchors_per_map():
+    # A run reading an N-glycan map and an O-glycan map whose RTs come from different reference runs: the N map's own rows (RT_<run>) sit 0.9 min before
+    # their map RT, the O map's two own rows on theirs. Five anchors give one median, -0.88, which put the O map's a2-6 / a2-3 isomer pair 0.9 min early,
+    # so the a2-6 isomer's peak was labeled with the a2-3 isomer; each map's own anchors set its own intercept, and both isomers are labeled on their peaks
+    import training.pipeline_labels as pl
+    from glycowork.motif.tokenization import glycan_to_composition
+    chain = lambda m, h: 'Gal(b1-4)GlcNAc(b1-3)' * m + 'Gal(b1-4)' * h + 'Glc'
+    glycans = [chain(m, 1) for m in range(1, 4)] + ['Gal(b1-3)GalNAc', 'GlcNAc(b1-6)[Gal(b1-3)]GalNAc', 'Gal(b1-3)[Neu5Ac(a2-6)]GalNAc', 'Neu5Ac(a2-3)Gal(b1-3)GalNAc']
+    map_rts = [18.0, 19.5, 21.0, 10.0, 11.0, 12.6, 13.4]
+    run_rts = [17.08, 18.6, 20.12, 10.03, 10.97, 12.62, 13.38]
+    masses = [700.0, 1065.0, 1430.0, 384.15, 587.23, 675.25, 675.25]
+    own = [True] * 5 + [False] * 2
+    inputs = pd.DataFrame({'spec_id': [0, 1], 'RT': run_rts[5:], 'intensity': 1e5, 'peak_d': [{50.0: 1.0}] * 2, 'rt_range': [(t, t) for t in run_rts[5:]],
+                           'num_spectra': 3, 'composition': [glycan_to_composition(g) for g in glycans[5:]], 'charge': 1, 'annotation_score': 12.0,
+                           'model_input': [np.zeros((3, 1), np.float32)] * 2, 'RT2': 0.3, 'glycan_type': 1, 'compositional_vector': [np.zeros(12)] * 2},
+                          index = pd.Index(masses[5:], name = 'm/z'))
+    inputs.attrs.update(mode = 'negative', trap = 'linear', lc = 'PGC', modification = 'reduced', mass_tag = None, sample_prep = 'underivatized')
+    mapping = pd.DataFrame({'Mass': masses, 'RT': [r if o else t for r, t, o in zip(run_rts, map_rts, own)], 'map_rt': map_rts, 'glycan': glycans, 'rt_own': own,
+                            'map_file': ['N.csv'] * 3 + ['O.csv'] * 4})
+    labelled, _ = pl.label_inputs(inputs, mapping)
+    assert list(labelled.sort_values('spec_id')['glycan']) == [pl.canonicalize_iupac(g) for g in glycans[5:]] and (labelled['rt_error'].abs() < 0.1).all()
+    assert labelled.attrs['rt_alignment'] == 'model' and labelled.attrs['rt_anchors'] == 5
+    assert np.allclose([r['run_rt'] for r in labelled.attrs['map_rows']][5:], run_rts[5:], atol = 0.1)
+
+
 def test_label_inputs_map_intercepts():
     # A run reading two maps whose RTs come from different reference runs elutes 0.2 min after one map's RTs (7 anchors) and 2.5 min after the other's
     # (5 anchors). One shift (the median of the 7 agreeing anchors) leaves the second map's rows 2.3 min off their peaks; an intercept per map (>= 5

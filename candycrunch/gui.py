@@ -3860,7 +3860,8 @@ class _SortItem(QTableWidgetItem):
         self.value = value
 
     def __lt__(self, other):
-        return self.value < other.value if self.value is not None and other.value is not None else super().__lt__(other)
+        # PySide6 sends QTableWidgetItem.__lt__ back to this override, so super() recursed until the stack overflowed
+        return self.value < other.value if self.value is not None and other.value is not None else self.text() < other.text()
 
 
 class CompareTab(QWidget):

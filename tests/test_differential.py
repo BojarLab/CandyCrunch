@@ -188,3 +188,22 @@ def test_gui_compare_groups():
     tab.set_session({'experiments': [{k: v for k, v in tab.session['experiments'][0].items() if k != 'comparison'}]})
     assert tab.groups()[2] == covariates
     tab.shutdown()
+
+
+def test_gui_compare_three_groups():
+    QtWidgets = pytest.importorskip('PySide6.QtWidgets')
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from candycrunch import gui
+    runs = [f'{g}{k}' for g in 'abc' for k in range(3)]
+    features = feature_table(runs, {'c0': 5, 'c1': 5, 'c2': 5}).assign(curation = '', excluded = False)
+    features['_top1'] = features['top1_pred']
+    session = {'experiments': [{'name': 'Experiment 1', 'files': [f'{run}.mzML' for run in runs], 'settings': dict(gui.DEFAULTS),
+                                'tables': {run: (pd.DataFrame(), []) for run in runs}, 'features': features}]}
+    tab = gui.CompareTab(gui.GlycanImages())
+    tab.set_session(session)
+    result = compare_groups(features, {run: run[0] for run in runs})
+    # Tukey's table sorts its group columns by their text (QTableWidgetItem's own comparison, called from the override, recursed until the stack overflowed)
+    tab.show_result(result)
+    tab.select_row(result['table']['Glycan'].tolist().index(GLYCANS[0]))
+    assert tab.tabs.isTabVisible(2) and tab.posthoc.rowCount() == 3 and tab.posthoc.item(0, 0).text() in 'abc'
+    tab.shutdown()

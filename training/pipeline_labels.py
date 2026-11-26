@@ -113,7 +113,9 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
    |                    5 compositions it lists once; with at least 10 of them, as a function of RT (within their RT range) and of the number of charged
    |                    residues where that fits them better, each term only where it brings more of them closer than it pushes away, and with an intercept
    |                    per map file where several maps have >= 5 of them; if their median deviation from it exceeds 1 min, the mapping counts as RT-less,
-   |                    unless at least 5 and 40% of them agree within 1 min, whose median then shifts it; the plain median of them or no shift instead for
+   |                    unless at least 5 and 40% of them agree within 1 min, whose median then shifts it; a map file of several whose anchors, two or more
+   |                    of them rows with rt_own, all lie within half of rt_window of their median offset from that adds it as an intercept of its own; the
+   |                    plain median of them or no shift instead for
    |                    a map file's rows where that puts >= 10% more of them within rt_window of a passing input of their composition (rows with rt_own
    |                    and map_rt: of their own RT); rows with rt_own (RTs read in the run itself) neither move nor are dropped, and where the mapping
    |                    gives their map_rt (the map's RT) each composition and map RT of them anchors by its offset from it, before any input);
@@ -350,6 +352,24 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         else:
             rt_shift, map_rts, row_shift, past, alignment, drift = 0.0, np.where(own, map_rts, np.nan), np.zeros(len(map_rts)), np.zeros(len(map_rts), bool), 'dropped', None
     pre_switch = rt_shift
+    # A run reading several map files has each map's RTs from that map's own reference runs, but one shift for all of them (an intercept per map only
+    # from 5 anchors of it): a map file with two or more own rows among its anchors (MS2-confirmed apexes of its rows in this run) whose anchors all lie
+    # within half of rt_window of their median offset from that shift takes the median as an intercept of its own, for its open rows too (an O-glycan
+    # map whose two own rows sat on their map RTs was moved 0.9 min by the median of five anchors, three of them an N-glycan map's own rows, and its a2-6
+    # isomer's peak took the a2-3 label; a file whose anchors scatter keeps the shift: own rows at a map RT carried over from another run sit at another
+    # offset than the rest)
+    own_intercepts = {}
+    if len(offsets) >= 5 and alignment != 'dropped' and len(set(files)) > 1:
+        rest = np.array(offsets) - row_shift[anchor_rows]
+        for f in np.unique(files):
+            mine = files[anchor_rows] == f
+            if (mine & own[anchor_rows]).sum() >= 2 and np.abs(rest[mine] - np.median(rest[mine])).max() <= rt_window / 2:
+                own_intercepts[f] = float(np.median(rest[mine]))
+                row_shift = np.where(files == f, row_shift + own_intercepts[f], row_shift)
+        if own_intercepts:
+            shifts = row_shift[~np.isnan(given_rts)]
+            rt_shift = float(np.median(shifts))
+            alignment = 'model' if np.ptp(shifts) > 0 else 'none' if rt_shift == 0.0 else 'median'
     if len(offsets) >= 5 and alignment != 'dropped':
         # The whole map then checks the shift: each anchor is one input per composition, and where those inputs are other isomers' peaks (offsets in two
         # clusters, or a minority mode the agreeing anchors picked: 8 of 17 at -2.5 min against a plain median of 0.0) the shift moves the map off its
@@ -364,10 +384,11 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         counted, input_rts = ~np.isnan(given_rts) & ~own, inputs['RT'].to_numpy(dtype = float)
         # (an own row anchoring by its map RT counts as placed where the shift puts that RT within rt_window of its own RT, its peak: without it, the
         # inputs of the one or two other rows of a mostly own map decided against every own row, and shifts of 1-2.5 min that the own rows agreed on
-        # went back to none; but only where its offset lies within rt_window of the anchors' median, as one off the map's gradient is a map RT carried
-        # over from another shift or another isomer's apex: three such rows 0.65 min before their map RT, against ten anchors 0.6 min after it, put a
-        # run back to no shift and every other row 0.65 min off its peak)
-        own_at = own & ~np.isnan(map_given) & (np.abs(given_rts - map_given - np.median(offsets)) <= rt_window)
+        # went back to none; but only where its offset lies within rt_window of the shift the fit gives it, as one off the map's gradient is a map RT
+        # carried over from another shift or another isomer's apex: three such rows 0.65 min before their map RT, against ten anchors 0.6 min after it,
+        # put a run back to no shift and every other row 0.65 min off its peak; the fit's, not the anchors' median, as where the drift has an acid term
+        # the median left out every sialylated own row and kept the own rows off the fit, and the plain median replaced a drift that had them on their peaks)
+        own_at = own & ~np.isnan(map_given) & (np.abs(given_rts - map_given - row_shift) <= rt_window)
         switched = False
         for f in np.unique(files[counted]):
             placed = lambda shift: int((at_row & (np.abs(input_rts[:, None] - (given_rts + np.where(own, 0.0, shift))[None, :]) <= rt_window)).any(axis = 0)[counted & (files == f)].sum()
@@ -388,6 +409,8 @@ def label_inputs(inputs, mapping, mz_tolerance = 0.5, rt_window = 1.0, crumbs_th
         if alignment != 'model':
             return np.full(len(open_rows), rt_shift)
         shift = drift(acid) if drift is not None else np.full(len(open_rows), pre_switch)
+        for f, v in own_intercepts.items():
+            shift = np.where(open_files == f, shift + v, shift)
         for f, v in fixed.items():
             shift = np.where(open_files == f, v, shift)
         return shift
