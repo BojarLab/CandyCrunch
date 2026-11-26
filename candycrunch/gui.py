@@ -47,7 +47,7 @@ except ImportError as error:
         ctypes.windll.user32.MessageBoxW(None, message, 'CandyCrunch', 0x10)
     raise ImportError(message) from error
 from candycrunch import __version__, references
-from candycrunch.utils import PALETTE, format_composition, one_file_per_run, vc
+from candycrunch.utils import PALETTE, format_composition, one_file_per_run, read_glycan_database, vc
 from viscose.qt import DPI, Canvas, ChartEvent, ChartView, Target, Toolbar
 
 # Defaults and constants are read from prediction.py's source, so the app always offers the library's own defaults without importing torch. Only the
@@ -67,8 +67,9 @@ def _statement(head):
 
 
 _batch_def = _statement('def wrap_inference_batch(')
-# model_file is the app's own setting (an imported model, None for the built-in one), which the worker turns into wrap_inference's model and glycans
-DEFAULTS = {'intra_cat_thresh': 1.0, 'model_file': None}
+# model_file is the app's own setting (an imported model, None for the built-in one), which the worker turns into wrap_inference's model and glycans;
+# database_file names the file glycan_database was read from
+DEFAULTS = {'intra_cat_thresh': 1.0, 'model_file': None, 'database_file': None}
 for _arg, _default in zip(_batch_def.args.args[-len(_batch_def.args.defaults):], _batch_def.args.defaults):
     try:
         DEFAULTS[_arg.arg] = ast.literal_eval(_default)
@@ -410,7 +411,7 @@ def _worker_main(jobs, messages, warm_up = False):
         for name, files, settings in experiments:
             try:
                 _install_progress(messages, weights, len(files))
-                kwargs = {k: v for k, v in settings.items() if k not in BATCH_KEYS and k != 'model_file'}
+                kwargs = {k: v for k, v in settings.items() if k not in BATCH_KEYS + ('model_file', 'database_file')}
                 if settings.get('model_file'):
                     if settings['model_file'] not in models:
                         models[settings['model_file']] = _load_model(settings['model_file'])
@@ -2253,6 +2254,17 @@ class SettingsPanel(QScrollArea):
         self.taxa.setCaseSensitivity(Qt.CaseInsensitive)
         self.taxa.setFilterMode(Qt.MatchContains)
         self.inputs['taxonomy_filter'].setCompleter(self.taxa)
+        # The user's own glycan database, read when loaded (read_glycan_database) and kept with the experiment and the session as its glycans, so that it
+        # needs its file only once; never in QSettings, as it describes these samples
+        self.database = _combo([("glycowork's", None), ('Mine only', 'only'), ("glycowork's and mine", 'add')])
+        self.database.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.database.setToolTip('Where candidate structures and compositions come from. Mine: a list of yours (.txt, .csv, .tsv, or .xlsx, one glycan per line or row: '
+                                 'structures as IUPAC-condensed, WURCS, GlycoCT, or GlyTouCan IDs, and compositions such as H5N4F1), in place of glycowork\'s database '
+                                 '(only your glycans are reported) or beside it. Structures the model does not know are found by their fragments')
+        self.database_button = QPushButton('Load list…')
+        self.database_button.setToolTip('Reads a list of glycans: a .txt file with one per line, or a .csv, .tsv, or .xlsx file with one per row')
+        self.database_note = _label('', 'hint')
+        self.database_glycans, self.database_file = None, None
         form.addRow('RT from', self.inputs['rt_min'])
         form.addRow('RT until', self.inputs['rt_max'])
         form.addRow('Peak width', self.inputs['rt_diff'])
@@ -2268,6 +2280,11 @@ class SettingsPanel(QScrollArea):
         form.addRow(self.inputs['get_missing'])
         form.addRow('Taxonomic level', self.inputs['taxonomy_level'])
         form.addRow('Taxon', self.inputs['taxonomy_filter'])
+        # (the note on a row of its own, as beside the labels it widened the panel past its pane)
+        form.addRow('Glycan database', self.database)
+        form.addRow('', self.database_button)
+        form.addRow(self.database_note)
+        self.advanced_form = form
         grid = QGridLayout()
         self.filter_boxes = {}
         for n, name in enumerate(FILTER_CHOICES):
@@ -2289,6 +2306,9 @@ class SettingsPanel(QScrollArea):
         self.mode.currentIndexChanged.connect(self.fill_main_adducts)
         self.adducts.currentIndexChanged.connect(lambda: self.advanced_toggle.setText(f'Advanced settings ({self.adducts.currentData()})' if self.adducts.currentData() else 'Advanced settings'))
         self.import_model_button.clicked.connect(self.import_model)
+        self.database.activated.connect(lambda: self.database.currentData() and not self.database_glycans and self.load_database())
+        self.database.currentIndexChanged.connect(lambda: [self.advanced_form.setRowVisible(w, self.database.currentData() is not None) for w in (self.database_button, self.database_note)])
+        self.database_button.clicked.connect(self.load_database)
         self.model_checked.connect(self.model_imported)
         self.remove.clicked.connect(self.remove_selected)
         self.experiment_button.clicked.connect(lambda: self.move_runs([item for item in self.files.selectedItems() if item.parent() is not None],
@@ -2301,7 +2321,7 @@ class SettingsPanel(QScrollArea):
         self.files_changed.connect(lambda: self.show_experiment(self.current_experiment()))
         self.files_changed.connect(lambda: self.files.setFixedHeight(min(240, max(110, 6 + max(self.files.sizeHintForRow(0), self.files.fontMetrics().height() + 4) * sum(
             self.files.topLevelItem(i).childCount() + 1 for i in range(self.files.topLevelItemCount()))))))
-        for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic, self.adducts, self.model]:
+        for widget in list(self.inputs.values()) + list(self.filter_boxes.values()) + [self.mode, self.charge, self.sialic, self.adducts, self.model, self.database]:
             getattr(widget, {QComboBox: 'currentIndexChanged', QCheckBox: 'toggled', QLineEdit: 'textChanged'}.get(type(widget), 'valueChanged')).connect(
                 lambda *_: self.reset.setEnabled(any(v != DEFAULTS.get(k, v) for k, v in self.values().items())))
         self.set_values(DEFAULTS)
@@ -2519,6 +2539,42 @@ class SettingsPanel(QScrollArea):
         self.advanced_toggle.setChecked(True)
         QTimer.singleShot(0, lambda: self.ensureWidgetVisible(self.model))
 
+    def load_database(self):
+        """Reads a list of glycans as the experiment's own glycan database; a list that cannot be read is named in a message, and with none loaded the
+        database is glycowork's again"""
+        path, _ = QFileDialog.getOpenFileName(self, 'Load a glycan database', QSettings().value('folder', os.path.expanduser('~')),
+                                              'Glycan lists (*.txt *.csv *.tsv *.xlsx);;All files (*)')
+        if path:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                with IMPORT_LOCK:
+                    glycans = read_glycan_database(path)
+            except Exception as error:
+                QMessageBox.warning(self, 'CandyCrunch', f'This list cannot be used: {error}')
+                glycans = None
+            finally:
+                QApplication.restoreOverrideCursor()
+            if glycans:
+                # (compositions as text, which the session's JSON keeps and read_glycan_database reads back)
+                self.set_database([format_composition(g) for g in glycans], os.path.basename(path), self.database.currentData() or DEFAULTS['database_mode'])
+        if not self.database_glycans:
+            self.database.setCurrentIndex(0)
+
+    def set_database(self, glycans, file, mode):
+        """Shows an experiment's own glycan database (None: glycowork's)"""
+        self.database_glycans, self.database_file = glycans or None, file if glycans else None
+        _set_combo(self.database, mode if glycans else None)
+        for widget in (self.database_button, self.database_note):
+            self.advanced_form.setRowVisible(widget, bool(glycans))
+        # (a composition as format_composition writes it: Hex5HexNAc4dHex1)
+        structures = sum('(' in g or not g[-1].isdigit() for g in glycans or [])
+        compositions = len(glycans or []) - structures
+        # (a long file name elided in the middle, as a word longer than the pane widens it)
+        name = file if not file or len(file) <= 36 else f'{file[:17]}…{file[-18:]}'
+        self.database_note.setText(f"{name or 'List'}: {structures} structure{'s' * (structures != 1)}, {compositions} composition{'s' * (compositions != 1)}" if glycans else 'No list loaded')
+        self.database_note.setToolTip('\n'.join((glycans or [])[:40]) + ('\n…' if glycans and len(glycans) > 40 else ''))
+        self.reset.setEnabled(any(v != DEFAULTS.get(k, v) for k, v in self.values().items()))
+
     def remove_selected(self):
         for item in self.files.selectedItems():
             if item.parent() is None:
@@ -2560,6 +2616,9 @@ class SettingsPanel(QScrollArea):
         values['sialic_derivatization'] = self.sialic.currentData()
         values['adducts'], values['run_anion'] = (None, self.adducts.currentData()) if self.mode.currentData() == 'negative' else (self.adducts.currentData(), None)
         values['model_file'] = self.model.currentData()
+        mode = self.database.currentData()
+        values['glycan_database'], values['database_mode'] = (list(self.database_glycans), mode) if mode and self.database_glycans else (None, DEFAULTS['database_mode'])
+        values['database_file'] = self.database_file if values['glycan_database'] else None
         # Classes measured together, and reducing ends side by side, go to wrap_inference as a list
         if '+' in values['glycan_class']:
             values['glycan_class'] = values['glycan_class'].split('+')
@@ -2607,6 +2666,7 @@ class SettingsPanel(QScrollArea):
         if model and self.model.findData(model) < 0 and os.path.exists(model):
             self.model.addItem(os.path.splitext(os.path.basename(model))[0], model)
         self.model.setCurrentIndex(max(self.model.findData(model), 0) if model else 0)
+        self.set_database(values.get('glycan_database'), values.get('database_file'), values.get('database_mode', DEFAULTS['database_mode']))
 
 
 class ResultsView(QWidget):
@@ -5145,7 +5205,7 @@ class MainWindow(QMainWindow):
             return
         settings = self.settings.values()
         # Only the settings that differ from the defaults, so that a later release's defaults reach those left at theirs; the main adduct describes these runs, not the next ones
-        self.store.setValue('settings', json.dumps({k: sorted(v) if k == 'filter_out' else v for k, v in settings.items() if k not in ('adducts', 'run_anion') and (k not in DEFAULTS or v != DEFAULTS[k])}))
+        self.store.setValue('settings', json.dumps({k: sorted(v) if k == 'filter_out' else v for k, v in settings.items() if k not in ('adducts', 'run_anion', 'glycan_database', 'database_mode', 'database_file') and (k not in DEFAULTS or v != DEFAULTS[k])}))
         self.weights = {**STAGE_WEIGHTS, **json.loads(self.store.value('stage_weights', '{}'))}
         self.runner.submit(experiments, self.weights)
         self.started, self.stage_text = time.time(), 'Waiting for the CandyCrunch model to load' if self.status_text.text().startswith('Loading') else 'Starting'

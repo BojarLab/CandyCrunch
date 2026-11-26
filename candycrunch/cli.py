@@ -44,6 +44,8 @@ def build_parser():
     parser.add_argument('--experimental', help='Whether to search databases for structures of unexplained peaks; default: True', type=str_to_bool, required=False)
     parser.add_argument('--taxonomy_level', help='Taxonomic level to restrict database searches to; default: Class', type=str, choices=['Species', 'Genus', 'Family', 'Order', 'Class', 'Phylum', 'Kingdom', 'Domain'], required=False)
     parser.add_argument('--taxonomy_filter', help='Taxon at --taxonomy_level to restrict database searches to (e.g., Mammalia for Class, Homo_sapiens for Species); default: Mammalia', type=str, required=False)
+    parser.add_argument('--glycan_database', help='Your own glycan database: .txt, .csv, .tsv, or .xlsx files of glycans, one per line or row, and/or glycans themselves, space-separated: structures (IUPAC-condensed, WURCS, GlycoCT, GlyTouCan IDs) and compositions (e.g., H5N4F1 or Hex5HexNAc4dHex1); also finds structures the model does not know, by their fragments; default: none (glycowork\'s database)', type=str, nargs='+', required=False)
+    parser.add_argument('--database_mode', help='only: --glycan_database in place of glycowork\'s database, so that only its glycans are reported; add: beside it; default: only', type=str, choices=['only', 'add'], required=False)
     parser.add_argument('--intra_cat_thresh', help='Several files only: minutes the RT of a structure can differ from the mean of its group; default: 1.0', type=float, default=1.0)
     parser.add_argument('--top_n_isomers', help='Several files only: number of isomer groups to retain per composition in each file; default: 5', type=int, default=5)
     parser.add_argument('--n_jobs', help='Number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default: 1', type=int, default=1)
@@ -88,6 +90,13 @@ def main(argv=None):
         parser.error('--mass_tag and --modification custom go together (glycans with a free reducing end: --modification unreduced)')
     if args.max_charge == 0:
         parser.error('--max_charge has to be at least 1 (the ion mode is set by --mode)')
+    # Each --glycan_database value is a file of glycans or a glycan, read now, so that a glycan it cannot read ends the run before it starts
+    if args.glycan_database:
+        from candycrunch.utils import read_glycan_database
+        try:
+            args.glycan_database = [g for v in args.glycan_database for g in read_glycan_database(v if os.path.isfile(v) else [v])]
+        except ValueError as e:
+            parser.error(f'--glycan_database: {e}')
     # wrap_inference takes a free reducing end as a custom label without mass, as the app does
     ends = ['custom' if m == 'unreduced' else m for m in ends]
     args.modification = (ends[0] if len(ends) == 1 else ends) if ends else None

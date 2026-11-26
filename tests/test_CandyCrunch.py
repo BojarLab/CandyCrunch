@@ -695,6 +695,35 @@ def test_filter_out_is_airtight():
     assert not any('Neu5Ac' in p[0] for preds in df['predictions'] for p in (preds or []))
 
 
+def test_glycan_database(tmp_path):
+    # The user's own glycan database: read in every notation from .txt, .csv (its named column) and .xlsx, an entry that is no glycan named, also by the CLI
+    # before it runs. In place of glycowork's database, only its glycans are reported, the model's structures included; a structure the model does not
+    # know is a row by its fragments (the example's H type 1 core 1 at 530.29 as Fuc(a1-4)), and a glycan it lacks is none (Fuc(a1-2)Gal(b1-3)[Gal(b1-4)GlcNAc(b1-6)]GalNAc)
+    from candycrunch import cli
+    from candycrunch.utils import read_glycan_database
+    entries = ['Fuc(a1-4)Gal(b1-3)GalNAc', 'Fuc(a1-2)Gal(b1-3)[GlcNAc(b1-6)]GalNAc', 'H5', "{'Hex': 5}", 'G00055MO', '# a comment', '']
+    (tmp_path / 'mine.txt').write_text('\n'.join(entries))
+    pd.DataFrame({'Glycan': entries[:3]}).to_csv(tmp_path / 'mine.csv', index = False)
+    pd.DataFrame({'x': entries[:3]}).to_excel(tmp_path / 'mine.xlsx', index = False, header = False)
+    expected = ['Fuc(a1-4)Gal(b1-3)GalNAc', 'Fuc(a1-2)Gal(b1-3)[GlcNAc(b1-6)]GalNAc', {'Hex': 5}]
+    assert read_glycan_database(tmp_path / 'mine.txt') == expected + ['Gal(b1-4)GlcNAc']
+    assert read_glycan_database(str(tmp_path / 'mine.csv')) == read_glycan_database(str(tmp_path / 'mine.xlsx')) == expected
+    with pytest.raises(ValueError, match = 'notaglycan'):
+        read_glycan_database(['Gal(b1-4)GlcNAc', 'notaglycan'])
+    example = str(BASE_DIR / 'candycrunch' / 'example_PGM_O-glycans.xlsx')
+    with pytest.raises(SystemExit):
+        cli.main(['--spectra_filepath', example, '--glycan_class', 'O', '--glycan_database', str(tmp_path / 'mine.txt'), 'notaglycan', '--output', str(tmp_path / 'out.csv')])
+    assert not (tmp_path / 'out.csv').exists()
+    df = wrap_inference(example, 'O', glycan_database = tmp_path / 'mine.txt')
+    reported_as = listed_glycans(read_glycan_database(tmp_path / 'mine.txt'))[2]
+    assert len(df) and all(reported_as(g) == [g] for g in df['top1_pred'])
+    assert df.loc[np.abs(df.index.values - 530.29) < 0.01, 'top1_pred'].tolist() == ['Fuc(a1-4)Gal(b1-3)GalNAc']
+    assert (np.abs(df.index.values - 733.39) < 0.01).any() and not (np.abs(df.index.values - 895.47) < 0.05).any()
+    # Beside glycowork's database, the model's structure of the peak stands
+    df = wrap_inference(example, 'O', glycan_database = tmp_path / 'mine.txt', database_mode = 'add')
+    assert df.loc[np.abs(df.index.values - 530.29) < 0.01, 'top1_pred'].tolist() == ['Fuc(a1-2)Gal(b1-3)GalNAc'] and (np.abs(df.index.values - 895.47) < 0.05).any()
+
+
 def test_search_options_keep_the_checks(tmp_path):
     # Without imputation and database search a run only loses what those two add: domain_filter still runs, so a [M+HCO3]- three times stronger than its [M-H]- is
     # never listed at its own m/z, and its spectra count for the row of their glycan nearest in RT. That holds also where the model names none of them: spectra

@@ -19,7 +19,7 @@ def test_gui_settings_match_wrap_inference(app):
     params = inspect.signature(wrap_inference).parameters
     # Every setting the app sends must be an argument of wrap_inference(_batch) (the worker turns model_file into model and glycans), and the app's
     # defaults must be the library's
-    assert set(values) - set(gui.BATCH_KEYS) - {'model_file'} <= set(params)
+    assert set(values) - set(gui.BATCH_KEYS) - {'model_file', 'database_file'} <= set(params)
     assert set(gui.BATCH_KEYS) <= set(inspect.signature(wrap_inference_batch).parameters)
     assert {k: v for k, v in values.items() if k in params and params[k].default is not inspect.Parameter.empty} == {
         k: params[k].default for k in values if k in params and params[k].default is not inspect.Parameter.empty}
@@ -53,6 +53,35 @@ def test_gui_main_adduct(app):
     assert panel.values()['adducts'] == 'Li+'
     panel.set_values({**panel.values(), 'max_charge': -3, 'adducts': None, 'run_anion': 'Formate'})
     assert panel.values()['run_anion'] == 'Formate'
+
+
+def test_gui_glycan_database(app, tmp_path, monkeypatch):
+    from candycrunch import gui
+    panel = gui.SettingsPanel()
+    assert panel.values()['glycan_database'] is None and not panel.advanced_form.isRowVisible(panel.database_note)
+    path = tmp_path / 'mine.txt'
+    path.write_text('Gal(b1-3)GalNAc\nH5N4F1\n')
+    monkeypatch.setattr(gui.QFileDialog, 'getOpenFileName', lambda *args, **kwargs: (str(path), ''))
+    gui._set_combo(panel.database, 'only')
+    panel.load_database()
+    values = panel.values()
+    assert (values['glycan_database'], values['database_mode'], values['database_file']) == (['Gal(b1-3)GalNAc', 'Hex5HexNAc4dHex1'], 'only', 'mine.txt')
+    assert panel.database_note.text() == 'mine.txt: 1 structure, 1 composition' and panel.advanced_form.isRowVisible(panel.database_note) and panel.reset.isEnabled()
+    # Kept with the experiment and the session; the worker sends the file's name nowhere
+    panel.set_values(gui.DEFAULTS)
+    assert panel.values()['glycan_database'] is None and panel.database.currentData() is None
+    panel.set_values(values)
+    assert panel.values() == values
+    gui._set_combo(panel.database, 'add')
+    assert panel.values()['database_mode'] == 'add' and panel.values()['glycan_database'] == values['glycan_database']
+    # A list that cannot be read is named, and glycowork's database stays
+    warned = []
+    monkeypatch.setattr(gui.QMessageBox, 'warning', lambda *args: warned.append(args[2]))
+    path.write_text('notaglycan\n')
+    panel.set_values(gui.DEFAULTS)
+    gui._set_combo(panel.database, 'only')
+    panel.load_database()
+    assert 'notaglycan' in warned[0] and panel.values()['glycan_database'] is None and panel.database.currentData() is None
 
 
 def test_gui_sorts_by_mass_and_compare_names(app):

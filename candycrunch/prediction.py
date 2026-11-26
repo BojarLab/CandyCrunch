@@ -27,7 +27,7 @@ import pandas as pd
 # df_glycan is read where it is used, as importing it loads it (1.2 s and 430 MB), which a process that only reads spectra or runs CandyCrumbs never needs
 import glycowork.glycan_data.loader as glycan_loader
 from glycowork.glycan_data.loader import stringify_dict, unwrap
-from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, graph_to_string
+from glycowork.motif.graph import subgraph_isomorphism, glycan_to_nxGraph, compare_glycans, graph_to_string, get_possible_topologies
 from glycowork.motif.processing import enforce_class, canonicalize_iupac, get_class, is_composition
 from glycowork.motif.annotate import get_molecular_properties
 from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
@@ -38,7 +38,7 @@ from glycowork.motif.tokenization import (composition_to_mass, get_ion_mzs,
 from candycrunch.inference import CandyCrunchCNN, load_weights, set_num_threads, transform_mz, transform_rt
 from candycrunch.analysis import CandyCrumbs, PEPTIDE_ION_TYPES, supporting_ions, run_jobs, deisotope_ms2, precursor_metals, is_metal_cut
 from candycrunch.confidence import calibrated_confidence
-from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, read_baf, read_tsf, read_waters, centroid_ion_trap, centroid_tof, mz_order, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
+from candycrunch.utils import read_mzml, read_mzxml, read_mzdata, read_mgf, read_raw_scan_table, read_raw_packet, read_masshunter, read_wiff, read_baf, read_tsf, read_waters, centroid_ion_trap, centroid_tof, mz_order, read_glycan_database, TIMS_MS1_PEAKS, TIMS_MS2_PEAKS
 
 this_dir = os.path.dirname(__file__)
 with open(os.path.join(this_dir, 'glycans.pkl'), 'rb') as f:
@@ -2942,6 +2942,82 @@ def create_struct_map(df_glycan, glycan_class, filter_out = None, phylo_level = 
     return common_struct_map, processed_df_use, topology_map
 
 
+# What listed_glycans made of each glycan database of the user's (by its entries)
+_LISTED = {}
+
+
+def listed_glycans(database):
+    """a glycan database of the user's (read_glycan_database) as a run takes it: its structures (without -ol, as structure maps and the model write them),
+    its compositions (as stringify_dict keys), and reported_as, the database glycans as which a structure is reported: itself if it is one of them or a more
+    specific version of one (compare_glycans' subsumes: linkages a listed structure leaves open filled in), or a structure of one of its compositions; the
+    listed structures it may be if it leaves open what they do not (linkage hedges, floating parts in some placement, as the model's vocabulary holds them);
+    else none. A listed structure with parts of unknown place ({...}, as structure maps leave them out) counts as its composition"""
+    key = tuple(map(str, database))
+    if key not in _LISTED:
+        structures = list(dict.fromkeys(g.replace('-ol', '').replace('1Cer', '') for g in database if isinstance(g, str) and '{' not in g))
+        by_comp = defaultdict(list)
+        for g in structures:
+            by_comp[stringify_dict(get_comp(g))].append(g)
+        comps, seen = {stringify_dict(c if isinstance(c, dict) else get_comp(c)) for c in database if isinstance(c, dict) or '{' in c}, {}
+
+        def reported_as(glycan):
+            if glycan not in seen:
+                plain = glycan.replace('-ol', '').replace('1Cer', '')
+                comp = stringify_dict(get_comp(plain))
+                if comp in comps or plain in by_comp[comp] or any(compare_glycans(g, plain, subsumes = True) for g in by_comp[comp]):
+                    seen[glycan] = [glycan]
+                else:
+                    try:
+                        placed = get_possible_topologies(plain) if '{' in plain else [plain]
+                    except Exception:
+                        placed = [plain]
+                    seen[glycan] = [g for g in by_comp[comp] if compare_glycans(plain, g, subsumes = True) or any(compare_glycans(p, g) for p in placed)]
+            return seen[glycan]
+
+        _LISTED[key] = (structures, comps, reported_as)
+    return _LISTED[key]
+
+
+def database_note(database, glycans, only):
+    # What a run says of a glycan database of the user's: its structures, how many of them the model does not know (glycans), and its compositions
+    structures, comps, _ = listed_glycans(database)
+    known = defaultdict(list)
+    for g in glycans:
+        known[stringify_dict(get_comp(g))].append(g)
+    new = sum(not any(compare_glycans(v, g) for v in known[stringify_dict(get_comp(g))]) for g in structures)
+    return (f"Glycan database: {len(structures)} structure{'s' * (len(structures) != 1)} ({new} of them unknown to the model, found by their fragments) and "
+            f"{len(comps)} composition{'s' * (len(comps) != 1)}, {'in place of' if only else 'beside'} glycowork's database.")
+
+
+def database_maps(database, classes, maps, only, filter_out, glycans):
+    """structure maps (create_struct_maps) of a run with a glycan database of the user's (read_glycan_database): a composition's candidate structures are its
+    structures in that database, then those of the run's own maps (maps: composition map, database, topology map), else of the model's vocabulary
+    (glycans), else of glycowork's database of any taxon, which score the composition's spectra as they would without the database (with only, wrap_inference
+    reports none of them unless the database gives their composition without a structure). With only, the database's compositions are the only ones"""
+    structures, comps, _ = listed_glycans(database)
+    # What the user excludes stays out; the default HexA does not, as listed glycans with a GlcA are meant
+    excluded = set(filter_out) - {'HexA'}
+    topo_map = defaultdict(list)
+    for g in structures:
+        if not excluded.intersection(get_comp(g)):
+            topo_map[stringify_dict(get_comp(g))].append(g)
+    own_comps, own_frame, own_topo = maps
+    for k in list(topo_map) + sorted(comps - set(topo_map)):
+        found = own_topo.get(k) or ([own_comps[k]] if k in own_comps else [])
+        found = found or [g for g in glycans if stringify_dict(get_comp(g)) == k and any(enforce_class(g, c) for c in classes)][:1]
+        found = found or [g.replace('-ol', '').replace('1Cer', '') for g, t in zip(glycan_loader.df_glycan['glycan'], glycan_loader.df_glycan['glycan_type']) if t in classes and
+                          stringify_dict(get_comp(g)) == k][:1]
+        topo_map[k] += [g for g in found if g not in topo_map[k] and not excluded.intersection(get_comp(g))]
+    topo_map = {k: v for k, v in topo_map.items() if v}
+    rows = [(g, get_comp(g), next((c for c in classes if enforce_class(g, c)), classes[0])) for v in topo_map.values() for g in v]
+    frame = pd.DataFrame(rows, columns = ['glycan', 'Composition', 'glycan_type']).assign(comp_str = [stringify_dict(c) for _, c, _ in rows])
+    if only:
+        return {k: v[0] for k, v in topo_map.items()}, frame, topo_map
+    # Beside the run's own maps, a composition's listed structures come first
+    merged_topo = {k: topo_map.get(k) or own_topo.get(k) or [own_comps[k]] for k in set(own_comps) | set(topo_map)}
+    return {**own_comps, **{k: v[0] for k, v in topo_map.items()}}, pd.concat([frame, own_frame], ignore_index = True), merged_topo
+
+
 def complementary_pairs(mz, peaks, charge, tolerance, n = 15):
     """count pairs among the n most intense fragments that add up to the precursor at a charge state: a singly charged B/C ion and the
     (charge - 1)-fold charged rest of the glycan (b + (charge - 1) * y = charge * mz, the charge carriers cancel)"""
@@ -3412,17 +3488,20 @@ def deduplicate_predictions(df, mz_diff = 0.5, rt_diff = 1.0, mz_ppm = None):
     # A predicted row one or two isotope spacings above a co-eluting, more abundant row of the same charge, whose composition is that row's with a Neu5Ac read as
     # two dHex or a Neu5Gc as Hex + dHex (1.02 Da heavier), is that row's 13C peak read as the heavier isobar, whatever its spectrum (ion-trap MS2 of such z = 2
     # pairs had cosines of 0.65-0.79) or the lighter row's prediction; it joins that row. Accurate survey scans (mz_ppm) tell the two apart by the precursor
-    # itself at z = 1: a 13C pick lies 1.0034 above the lighter row, the isobar 1.0204 (17 mDa), so only a singly charged row nearer the 13C position
-    # joins; a co-eluting difucosylated glycan beside its sialylated near-isobar (milk oligosaccharides: Hex3HexNAc1dHex2 [M+H]+ 1000.372 and
-    # Hex3HexNAc1Neu5Ac1 999.352, 0.4 min apart) is a glycan of its own, which finalise_predictions' isobar step judges by its peak. At z >= 2 the two
-    # positions (8.5 mDa at z = 2) lie within the error of a precursor blended with its neighbours, and the fold stays
+    # itself: a 13C pick lies 1.0034 / z above the lighter row, the isobar 1.0204 / z (17 mDa at z = 1, 8.5 at z = 2, 5.7 at z = 3: 6-9 ppm, and both rows
+    # read on one calibration), so only a row nearer the 13C position joins; a co-eluting difucosylated glycan beside its sialylated near-isobar (milk
+    # oligosaccharides: Hex3HexNAc1dHex2 [M+H]+ 1000.372 and Hex3HexNAc1Neu5Ac1 999.352, 0.4 min apart; PGC N-glycan runs: Hex6HexNAc5Neu5Ac1dHex2 [M-2H]2-
+    # at three RTs among the peaks of its disialylated near-isobar, read at that row's ppm) is a glycan of its own, which finalise_predictions' isobar step
+    # judges by its peak. Without accurate survey scans a singly charged pair is left to that step too, which judges it by the resolved peaks (the heavy
+    # row's peak against what the light glycan's M+1 gives there): folded here, difucosylated O-glycans and milk oligosaccharides co-eluting with their
+    # sialylated isobars never reached it. At z >= 2 an ion trap merges the isotopes of the pair, and the fold stays
     comps = df['composition'].values if 'composition' in df.columns else [None] * len(df)
     isobars = ({'dHex': 2, 'Neu5Ac': -1}, {'Hex': 1, 'dHex': 1, 'Neu5Gc': -1})
     for k in np.flatnonzero([p is not None and isinstance(c, dict) for p, c in zip(first_preds, comps)]):
         iso = [j for n in (1, 2) for j in isotope_rows(k, n)
                if isinstance(comps[j], dict) and charges[j] == charges[k] and abs(rt_vals[j] - rt_vals[k]) < rt_diff and (abund is None or abund[j] > abund[k])
                and any(all(comps[k].get(r, 0) - comps[j].get(r, 0) == d.get(r, 0) for r in set(comps[k]) | set(comps[j]) | set(d)) for d in isobars)
-               and (not mz_ppm or abs(charges[k]) > 1 or abs(idx_vals[k] - idx_vals[j] - n * ISOTOPE_SPACING / abs(charges[k])) < abs(idx_vals[k] - idx_vals[j] - 1.0204 / abs(charges[k])))]
+               and (abs(charges[k]) > 1 if not mz_ppm else abs(idx_vals[k] - idx_vals[j] - n * ISOTOPE_SPACING / abs(charges[k])) < abs(idx_vals[k] - idx_vals[j] - 1.0204 / abs(charges[k])))]
         if iso:
             # with the rows it represents (its other spectra), which would otherwise keep it as their representative
             reps[(reps == k) | (np.arange(len(reps)) == k)] = reps[iso[0]]
@@ -4547,7 +4626,7 @@ def filter_rts(loaded_file, rt_min, rt_max):
 def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use, mode, modification,
                         mass_tag, filter_out, mass_tolerance, mass_dic, sample_prep = 'underivatized',
                         max_charge = -3, glycans = glycans, sialic_derivatization = None, trust_header_charge = False, accurate_ms2 = False,
-                        fragment_tolerance = None, fragment_ppm = None):
+                        fragment_tolerance = None, fragment_ppm = None, allowed = None):
     """adds and reorders predictions based on possible structures\n
     | Arguments:
     | :-
@@ -4571,7 +4650,9 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
     | accurate_ms2 (bool): whether the MS2 spectra are orbitrap spectra, whose rows supported by neither the model nor the fragment-backed database structure
     |                      are no glycan peaks; default:False
     | fragment_tolerance (float): fragment mass tolerance of accurate MS2 (orbitrap, TOF), as passed to domain_filter; default:None
-    | fragment_ppm (float): relative fragment mass tolerance (ppm), as passed to domain_filter; default:None\n
+    | fragment_ppm (float): relative fragment mass tolerance (ppm), as passed to domain_filter; default:None
+    | allowed (callable): the structures as which a structure may be reported (a glycan database of the user's in place of glycowork's, listed_glycans'
+    |                     reported_as), for the structures added here; default:None (any as it is)\n
     | Returns:
     | :-
     | Returns a dataframe of predictions
@@ -4615,6 +4696,16 @@ def augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_cl
             # Orbitrap MS2 annotate a real glycan well enough for the model or the database fallback, so a row filled in only here is a tail or an artifact
             # of another ion
             df_out['predictions'] = [[] if e == 'weak' else preds for e, preds in zip(df_out['evidence'], df_out['predictions'])]
+    if allowed is not None:
+        # (the biosynthetic network, the sialic acid swaps, and the database search above draw on the model's vocabulary and glycowork's database)
+        reported = []
+        for preds in df_out['predictions']:
+            kept = {}
+            for k in preds if isinstance(preds, list) else []:
+                for h in allowed(k[0]):
+                    kept.setdefault(h, (h,) + tuple(k[1:]))
+            reported.append(list(kept.values()) if isinstance(preds, list) else preds)
+        df_out['predictions'] = reported
     # Filter out wrong predictions via diagnostic ions etc.
     df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, modification = modification,
                            mass_tolerance = mass_tolerance, df_use = df_use, sample_prep = sample_prep,
@@ -5697,7 +5788,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                    extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh = 300,
                    filter_out = {'HexA'}, supplement = True,
                    experimental = True, mass_dic = None, sample_prep = 'underivatized',
-                   taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
+                   taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, glycan_database = None, database_mode = 'only', plot_glycans = False,
                    sialic_derivatization = None, reducing_end_variants = None, adducts = None, run_anion = None, n_jobs = 1, return_inputs = False, _return_intermediate = False, _loaded = None,
                    _top_clusters = None,
                    _condensed = None, _pair = None):
@@ -5754,6 +5845,14 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
    | taxonomy_level (string): taxonomy level of taxonomy_filter; default:'Class'
    | taxonomy_filter (string): only glycans of this taxon in df_use supply candidate compositions and database structures; default:'Mammalia'
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
+   | glycan_database (string or list): the user's own glycan database: a .txt, .csv, .tsv, or .xlsx file, or a list, of glycan structures (IUPAC-condensed,
+   |                                   WURCS, GlycoCT, GlyTouCan IDs) and compositions (H5N4F1, Hex5HexNAc4dHex1; see read_glycan_database). Its structures
+   |                                   are candidates of their compositions, also those the model does not know: such a structure is a spectrum's if its
+   |                                   fragments back it as a database structure needs and the model names no structure of the spectrum. A composition it
+   |                                   gives without a structure is a candidate with the structures glycowork's database or the model's vocabulary has of it;
+   |                                   default:None
+   | database_mode (string): 'only' (glycan_database in place of glycowork's database: only its compositions are candidates, and only its glycans are
+   |                         reported, the model's structures included) or 'add' (beside glycowork's database of taxonomy_filter); default:'only'
    | plot_glycans (bool): whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False
    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of the underivatized sample (or of one permethylated after it): 'EE' (ethyl esterification), 'EEA'
    |                                          (ethyl esterification and amidation), 'ME' (methyl esterification), 'DMA' (dimethylamidation), 'SALSA', 'GQ' (glycoqueuing:
@@ -5791,8 +5890,13 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
    | then also have a column ms3 (list of (isolated MS2 fragment m/z, MS3 peak dictionary) per row); with return_inputs, the dataframe of model inputs,
    | each with the binned_intensities, mz_remainder, RT2 and glycan_type it was encoded with
    """
+    # A glycan database of the user's is read once, so that the passes below over the run (reducing end and glycan class checks) take it as read
+    if database_mode not in ('only', 'add'):
+        raise ValueError(f"database_mode {database_mode!r} is neither 'only' (glycan_database in place of glycowork's database) nor 'add' (beside it).")
+    glycan_database = read_glycan_database(glycan_database) if glycan_database is not None else None
     # For processing the file as another glycan class, if its predictions say that it holds that class rather than glycan_class
     run_args = {k: v for k, v in locals().items() if k not in ('spectra_filepath', 'glycan_class', '_return_intermediate', '_loaded', '_top_clusters', '_condensed', '_pair')}
+    only = glycan_database is not None and database_mode == 'only'
     # Permethylated glycans carry no proton in positive mode: their sodium adducts are the run's own charge carrier (protonated ions are under 1% of the signal), so finalise_predictions keeps them without a protonated partner; adducts = [] opts out
     if adducts is None and sample_prep in ('permethylated', 'deuteropermethylated') and max_charge > 0:
         adducts = ['Na+']
@@ -6096,6 +6200,18 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 # Targets set from computed m/z then pin their compositions like orbitrap survey scans, within the 10 ppm they were matched to (the z = 3
                 # targets of GPST000403 sit 3-5 ppm below their compositions, its z = 2 ones 0.7 ppm)
                 ms1_ppm_floor, accurate_ms1, crumbs_thresh = 10.0, True, max(crumbs_thresh - 2, 0)
+    # A glycan database of the user's: its structures are candidates of their compositions, in place of glycowork's database (only) or beside it.
+    # domain_filter still looks up fragment compositions in glycowork's (known_use), as a database of whole glycans holds few of them
+    known_use, allowed, listed = df_use, None, set()
+    if glycan_database is not None:
+        common_structure_map, df_use, topo_struct_map = database_maps(glycan_database, classes, (common_structure_map, df_use, topo_struct_map), only, filter_out, glycans)
+        if df_use.empty:
+            raise ValueError("No glycan of the glycan database is a candidate: filter_out excludes its structures, and glycowork's database and the model's "
+                             "vocabulary have no structure of its compositions.")
+        structures, _, allowed = listed_glycans(glycan_database)
+        listed, allowed = set(structures), allowed if only else None
+        if not _return_intermediate:
+            print(database_note(glycan_database, glycans, only))
     # Group spectra by mass/retention isomers and process them for being inputs to CandyCrunch. The reducing end and glycan class checks process the same
     # spectra again, so the clusters are kept for them, keyed by the precursor m/z and RT (only the isotope correction above can differ between their runs)
     # With accurate survey scans, spectra join a peak within 20 ppm instead of the flat-Da window: at 0.48 Da, z = 3/4 peaks pooled the MS2 triggered on their
@@ -6158,7 +6274,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # apart from an in-class composition at the same nominal mass: with ion-trap MS1 they added as many glycans outside the ground truth as
     # inside it. The 20 ppm allow for the few ppm of orbitrap calibration offset seen in practice (up to -9 ppm)
     cross_class = None
-    if accurate_ms1 and any(c not in classes for c in ['N', 'O', 'free']):
+    if accurate_ms1 and any(c not in classes for c in ['N', 'O', 'free']) and not only:
         cross_maps = [_STRUCT_MAPS[k] if (k := (id(glycan_loader.df_glycan), c, frozenset(filter_out), taxonomy_level, taxonomy_filter)) in _STRUCT_MAPS else _STRUCT_MAPS.setdefault(k, create_struct_map(
             glycan_loader.df_glycan, c, filter_out = filter_out, phylo_level = taxonomy_level, phylo_filter = taxonomy_filter)) for c in ['N', 'O', 'free'] if c not in classes]
         cross_class = (pd.concat([m[1] for m in cross_maps]), {k: v for m in cross_maps[::-1] for k, v in m[0].items()},
@@ -6174,7 +6290,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                                                 c, filter_out = filter_out, phylo_level = 'Kingdom', phylo_filter = 'vocabulary') if vocab else None
         if _STRUCT_MAPS[k] is not None:
             vocabulary.append(_STRUCT_MAPS[k])
-    vocabulary = create_struct_maps(None, classes, maps = vocabulary) if vocabulary and sialic_derivatization is None and _pair is None else None
+    vocabulary = create_struct_maps(None, classes, maps = vocabulary) if vocabulary and sialic_derivatization is None and _pair is None and not only else None
     vocabulary = (vocabulary[1], vocabulary[0], vocabulary[2]) if vocabulary else None
     df_out = assign_candidate_structures(df_out, df_use, common_structure_map, topo_struct_map, mass_tolerance, mode,
                                          mass_tag, modification = modification, max_charge = max_charge,
@@ -6261,6 +6377,18 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             combs = sorted(combs.items(), key = lambda x: x[1], reverse = True)
             preds.append([g for g, _ in combs])
             pred_conf.append([c for _, c in combs])
+    if allowed is not None:
+        # With the user's glycan database alone, the model's structures are its glycans (listed_glycans: a hedge of the model as the listed structures it
+        # covers), at the probabilities the model gives them
+        reported = [{} for _ in preds]
+        for p, q, r in zip(preds, pred_conf, reported):
+            for g, c in zip(p, q):
+                for h in allowed(g):
+                    r[h] = max(r.get(h, 0), c)
+        reported = [sorted(r.items(), key = lambda x: x[1], reverse = True) for r in reported]
+        preds, pred_conf = [[g for g, _ in r] for r in reported], [[c for _, c in r] for r in reported]
+        # ... and the candidate structures that only scored their composition (database_maps) are no database structures for it
+        df_out['candidate_structure'] = [g if isinstance(g, str) and allowed(g) == [g] else None for g in df_out['candidate_structure']]
     df_out['rel_abundance'] = df_out['intensity']
     df_out['predictions'] = [list(zip(preds[i], pred_conf[i])) for i in df_out['input_id']]
     _raw_predictions = df_out['predictions'].tolist()
@@ -6289,6 +6417,8 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     ladder_rows = set()
     for i in np.flatnonzero(df_out['hexose_ladder'].values.astype(bool)):
         g = df_out['candidate_structure'].iloc[i]
+        if not isinstance(g, str):
+            continue
         p = next((c for s, c in _raw_predictions[i] if s == g), 0)
         df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(max(p, pred_thresh), 4))]
         df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(max(p, pred_thresh), 4))]
@@ -6529,6 +6659,23 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
             df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
             df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
             database_rows.add(df_out.index[i])
+    if listed:
+        # A structure of the user's glycan database that the model does not name (it names only structures it was trained on, and with the database alone
+        # only those of it) is its spectrum's if its fragments back it as much as a database structure needs above, within the run's accurate-MS1 window or
+        # fitting the precursor as above, and no candidate of the spectrum has a model structure; of several, the best backed
+        named = np.array([bool(p) for p in df_out['predictions']], dtype = bool)
+        ok = ~named & np.array([isinstance(g, str) and g in listed for g in df_out['candidate_structure']], dtype = bool) & (
+            df_out['annotation_score'].values > cross_crumbs_thresh) & ((df_out['annotation_score'].values >= 14) if trap == 'orbitrap' else True) & ~df_out[
+            'spec_id'].isin(set(df_out['spec_id'][named])).values
+        if accurate_ms1 and window is not None:
+            ok &= np.abs(ppm - window[0]) <= window[1]
+        elif not accurate_ms1:
+            ok &= fits & reachable
+        for i in df_out.reset_index(drop = True)[ok].groupby('spec_id')['annotation_score'].idxmax().values if ok.any() else []:
+            g = df_out['candidate_structure'].iloc[i]
+            df_out.iat[i, df_out.columns.get_loc('predictions')] = [(g, round(pred_thresh, 4))]
+            df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
+            database_rows.add(df_out.index[i])
     df_out['charge'] = [c * multiplier for c in df_out['charge']]
     df_out['RT'] = df_out['RT'].round(2)
     # Extract & sort the top frag_num fragments by intensity
@@ -6578,7 +6725,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep,
                            mass_tag = mass_tag, max_charge = max_charge,
                            modification = modification, mass_tolerance = mass_tolerance,
-                           df_use = df_use, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1,
+                           df_use = known_use, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1,
                            fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm).reset_index()
     # A spectrum's row is the one with the best fragment evidence, unless its top structure is at least ppm_thresh off the precursor where
     # finalise_predictions cuts by ppm alone (multiply charged rows, or accurate survey scans), so it could never be reported, while another composition of
@@ -6668,6 +6815,12 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 df_out.iat[i, df_out.columns.get_loc('isomers')] = [(g, round(pred_thresh, 4))]
                 df_out.iat[i, df_out.columns.get_loc('_pred')] = 1.0
                 database_rows.add(df_out['m/z'].iloc[i])
+    if glycan_database is not None:
+        # Of a composition's candidate structures in a spectrum, the one a database structure went to above stands for the composition: the others only
+        # scored it (database_maps), and one of them explaining more fragments took the spectrum without a structure
+        keys = pd.Series([f'{s} {stringify_dict(c)}' if isinstance(c, dict) else '' for s, c in zip(df_out['spec_id'].values, df_out['composition'].values)])
+        named = (df_out['_pred'].values > 0)
+        df_out = df_out[named | ~keys.isin(set(keys[named])).values]
     df_out = df_out.sort_values(['spec_id', '_below', 'doomed', '_sia', '_rank', '_pred', '_main'], ascending = [False, True, True, True, False, False, False]).groupby('spec_id').first().drop(
         columns = ['_below', 'doomed', '_sia', '_rank', '_pred', '_main', '_vocab'])
     # A sparse spectrum (at most 6 fragments, as an ion trap near its detection limit gives) can never pass crumbs_thresh, so it passes if at least two and 60%
@@ -6883,7 +7036,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                                    rel_abundance = df_var['intensity'], evidence = 'side product', top_fragments = [
                     [round(float(m), 4) for m, _ in sorted(p.items(), key = lambda x: x[1], reverse = True)[:frag_num]] for p in df_var['peak_d']]).set_index('m/z')
             df_var = domain_filter(df_var, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep, mass_tag = mass_tag,
-                                   max_charge = max_charge, modification = modification, mass_tolerance = mass_tolerance, df_use = df_use,
+                                   max_charge = max_charge, modification = modification, mass_tolerance = mass_tolerance, df_use = known_use,
                                    sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1)
             df_var = df_var[df_var['predictions'].str.len() > 0][[c for c in df_out.columns if c in df_var.columns and c != 'rt_range'] + ['re_offset', 'reducing_end', 'rt_range']]
         if len(df_var):
@@ -6948,7 +7101,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         label, own = '+'.join(classes), sum(in_classes(g, classes) for g in tops)
         counts = {c: sum(enforce_class(g, c) and not in_classes(g, classes) for g in tops) for c in ['N', 'O', 'free'] if c not in classes}
         other = max(counts, key = counts.get, default = None)
-        if other is not None and counts[other] >= max(5, own):
+        if other is not None and counts[other] >= max(5, own) and not only:
             df_other = wrap_inference(spectra_filepath, other, **run_args, _return_intermediate = True, _loaded = loaded_spectra, _condensed = condensed)
             found = sum(bool(p) and enforce_class(p[0][0], other) and not (set(get_comp(p[0][0])) == {'Hex'} and get_comp(p[0][0])['Hex'] >= 3) for p in (
                 df_other.loc[df_other['re_offset'] == 0, 'predictions'] if 're_offset' in df_other.columns else df_other['predictions']))
@@ -6959,7 +7112,7 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
                 glycan_class, classes, df_out, df_use, mass_dic = other, [other], df_other, df_other.attrs['df_use'], None
             df_other.attrs.clear()
         # The clusters (with their binned spectra) are not needed any more, and MS1 quantification is next (an N or O run keeps them for its other-class passes)
-        pairs = {'N': ['O', 'free'], 'O': ['N', 'free']}.get(classes[0], []) if len(classes) == 1 else []
+        pairs = {'N': ['O', 'free'], 'O': ['N', 'free']}.get(classes[0], []) if len(classes) == 1 and not only else []
         if not pairs:
             condensed.clear()
     if _return_intermediate:
@@ -6978,12 +7131,15 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         df_out['ppm_error'] = []
         return (df_out, []) if spectra else df_out
     df_out['top1_pred'] = [x[0][0] if x else np.nan for x in df_out.predictions]
-    # Same augmentation and clean-up as every file in wrap_inference_batch
-    df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, df_use, mode,
+    # Same augmentation and clean-up as every file in wrap_inference_batch; with the user's glycan database alone, the database search looks up its glycans
+    if only and experimental and not mass_dic:
+        mass_dic = make_mass_dic([g for g in glycans if allowed(g) == [g]], glycan_class, filter_out, pd.concat([df_use, known_use[[allowed(g) == [g] for g in known_use['glycan']]]]),
+                                 sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
+    df_out = augment_predictions(df_out, pred_thresh, supplement, experimental, glycan_class, known_use if only else df_use, mode,
                                  modification, mass_tag, filter_out, mass_tolerance, mass_dic,
                                  sample_prep = sample_prep, max_charge = max_charge, glycans = glycans,
                                  sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1, accurate_ms2 = trap == 'orbitrap',
-                                 fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm)
+                                 fragment_tolerance = fragment_tolerance, fragment_ppm = fragment_ppm, allowed = allowed)
     if len(loaded_file):
         df_out.attrs['late_window'] = (rt_cap, float(loaded_file['RT'].min()), float(loaded_file['RT'].max()))
     df_out.attrs['precursor_calibration'] = precursor_calibration
@@ -7079,7 +7235,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                          extra_thresh = 0.2, crumbs_thresh = 3, ppm_thresh = 300,
                          filter_out = {'HexA'}, supplement = True,
                          experimental = True, mass_dic = None, sample_prep = 'underivatized',
-                         taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, plot_glycans = False,
+                         taxonomy_level = 'Class', taxonomy_filter = 'Mammalia', df_use = None, glycan_database = None, database_mode = 'only', plot_glycans = False,
                          n_jobs = 1, sialic_derivatization = None, library_thresh = 0.9, reducing_end_variants = None, adducts = None, run_anion = None):
     """wrapper function to get & curate CandyCrunch predictions, then harmonize them across multiple files\n
    | Arguments:
@@ -7126,6 +7282,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
    | taxonomy_level (string): taxonomy level to filter by; default:'Class'
    | taxonomy_filter (string): which taxonomy to pull glycans for; default:'Mammalia'
    | df_use (dataframe): sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan
+   | glycan_database (string or list): the user's own glycan database, as in wrap_inference; default:None
+   | database_mode (string): 'only' (glycan_database in place of glycowork's database) or 'add' (beside it), as in wrap_inference; default:'only'
    | plot_glycans (bool): whether to save a <file>_output.xlsx file per input file with SNFG images of all top1 predictions; default:False
    | n_jobs (int): number of files to process in parallel (separate processes), and of processes for the supporting peaks of each file's rows; default:1
    | sialic_derivatization (string or tuple): linkage-specific sialic acid derivatization of the samples, as in wrap_inference; default:None
@@ -7149,6 +7307,12 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     glycan_class = classes[0] if len(classes) == 1 else classes
     sialic_derivatization = tuple(sialic_derivatization) if isinstance(sialic_derivatization, list) else sialic_derivatization
     filter_out = set(filter_out or ()) | ({'Ac'} if sample_prep != 'underivatized' else set())
+    if database_mode not in ('only', 'add'):
+        raise ValueError(f"database_mode {database_mode!r} is neither 'only' (glycan_database in place of glycowork's database) nor 'add' (beside it).")
+    # A glycan database of the user's is read once and goes to every file's run as read
+    glycan_database = read_glycan_database(glycan_database) if glycan_database is not None else None
+    only = glycan_database is not None and database_mode == 'only'
+    allowed = listed_glycans(glycan_database)[2] if only else None
     print(f"Your chosen settings are: {'+'.join(classes)} glycans, {mode} ion mode, {'+'.join(e if e and e != 'custom' else ('unreduced' if not mass_tag else f'custom {mass_tag}') for e in ends or [modification])} glycans, {lc} LC, and {trap} mass analyzer. If any of that seems off to you, please restart with correct parameters.")
     # The runs of the files take database glycans as None, as they then build the same ones and keep their structure maps across files (wrap_inference)
     given_df_use = df_use
@@ -7177,7 +7341,10 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                             crumbs_thresh = crumbs_thresh, ppm_thresh = ppm_thresh, filter_out = filter_out,
                             experimental = experimental, sample_prep = sample_prep, taxonomy_level = taxonomy_level,
                             taxonomy_filter = taxonomy_filter, sialic_derivatization = sialic_derivatization,
-                            reducing_end_variants = reducing_end_variants, adducts = adducts, run_anion = run_anion, _return_intermediate = True)
+                            reducing_end_variants = reducing_end_variants, adducts = adducts, run_anion = run_anion, glycan_database = glycan_database,
+                            database_mode = database_mode, _return_intermediate = True)
+    if glycan_database is not None:
+        print(database_note(glycan_database, glycans, only))
     # Worker processes load the default model themselves, so only a custom model has to be sent to them
     if model is not None and model is not globals().get('candycrunch'):
         inference_kwargs['model'] = model
@@ -7217,7 +7384,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             own = sum(in_classes(g, classes) for g in tops)
             counts = {c: sum(enforce_class(g, c) and not in_classes(g, classes) for g in tops) for c in ['N', 'O', 'free'] if c not in classes}
             c = max(counts, key = counts.get, default = None)
-            if c is None or counts[c] < max(5, own):
+            if c is None or counts[c] < max(5, own) or only:
                 break
             use_c = glycan_loader.df_glycan
             use_c = copy.deepcopy(use_c[use_c.glycan_type == c])
@@ -7246,9 +7413,12 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
         if found >= 1.5 * own:
             glycan_class, classes, key, mass_dic = c, [c], c, None
     results, df_use = runs[key]
-    # Built once here instead of once per file inside augment_predictions
+    # Built once here instead of once per file inside augment_predictions; with a glycan database of the user's, from its structures too, and with it alone
+    # only from its glycans
     if experimental and not mass_dic:
-        mass_dic = make_mass_dic(glycans, glycan_class, filter_out, df_use, sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
+        listed = pd.DataFrame({'glycan': listed_glycans(glycan_database)[0] if glycan_database is not None else []})
+        mass_dic = make_mass_dic([g for g in glycans if allowed is None or allowed(g) == [g]], glycan_class, filter_out, pd.concat([listed, df_use[[allowed is None or allowed(g) == [g] for g in df_use['glycan']]]]),
+                                 sample_prep = sample_prep, sialic_derivatization = sialic_derivatization)
     inference_dfs, file_modes, ms1_paths, accurate_ms1s, accurate_ms2s, ms1_ppm_floors, ion_traps, late_windows, fragment_tolerances = {}, {}, {}, {}, {}, {}, {}, {}, {}
     precursor_calibrations, activations = {}, {}
     for file_label, (df_out, file_mode, ms1_path, accurate_ms1, accurate_ms2, ms1_ppm_floor, ion_trap) in zip(file_labels, results):
@@ -7383,7 +7553,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                          max_charge = abs(max_charge) * (-1 if file_mode == 'negative' else 1),
                                          sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1s[file_label],
                                          accurate_ms2 = accurate_ms2s[file_label], fragment_tolerance = fragment_tolerances[file_label][0],
-                                         fragment_ppm = fragment_tolerances[file_label][1])
+                                         fragment_ppm = fragment_tolerances[file_label][1], allowed = allowed)
             if len(df_out) > 0:
                 augmented[file_label] = df_out
                 df_out, spectra_out = finalise_file(file_label, df_out, run_anion = run_anion)
@@ -7406,7 +7576,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
     # augmented and finalized per file, and join their file unless they are another charge state of one of its rows; gap filling and the feature table then
     # treat them like any other row. Running the pass on every file once one file has the other class lost on the files without it
     next_cat = None
-    for pair in ({'N': ['O', 'free'], 'O': ['N', 'free']}.get(classes[0], []) if len(classes) == 1 else []):
+    for pair in ({'N': ['O', 'free'], 'O': ['N', 'free']}.get(classes[0], []) if len(classes) == 1 and not only else []):
         only_class = lambda g: isinstance(g, str) and enforce_class(g, pair) and not any(enforce_class(g, c) for c in ('N', 'O') if c != pair) and (
             pair != 'free' or set(glycan_to_composition(g)) != {'Hex'})
         only = lambda p: isinstance(p, list) and len(p) > 0 and only_class(p[0][0])
@@ -7444,7 +7614,7 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
                                               filter_out, mass_tolerance, None, sample_prep = sample_prep, max_charge = abs(max_charge) * (-1 if file_mode == 'negative' else 1),
                                               glycans = glycans, sialic_derivatization = sialic_derivatization, trust_header_charge = accurate_ms1s[file_label],
                                               accurate_ms2 = accurate_ms2s[file_label], fragment_tolerance = fragment_tolerances[file_label][0],
-                                              fragment_ppm = fragment_tolerances[file_label][1])
+                                              fragment_ppm = fragment_tolerances[file_label][1], allowed = allowed)
                 if not len(df_pair):
                     continue
                 ms1 = None
@@ -7541,10 +7711,16 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             # replacing one Neu5Ac by two dHex adds 1.02 Da, so many compositions sit there. Of the gap rows of one composition (at any charge) on one peak
             # only the most intense stays (ion traps scatter a precursor over several m/z clusters, and each of them would fill that peak again)
             own_z = np.abs(own['charge'].values.astype(float)) if len(own) else np.zeros(0)
+            # A file holds the glycan classes its own MS2 rows show: a gap row of a class none of them has (an O-glycan in the N-glycan release of a sample whose
+            # O-glycan release is in the batch) is another ion at its mass
+            own_classes = {c for t in set(df_out['top1_pred']) if isinstance(t, str) for c in ('N', 'O', 'free') if enforce_class(t, c)} if len(df_out) else set()
             keep, gap_rts = np.zeros(len(missing), dtype = bool), defaultdict(list)
             for i in np.argsort(-np.nan_to_num(np.asarray(areas, dtype = float)), kind = 'stable'):
                 row, apex_rt = missing.iloc[i], apex_rts[i]
                 if not is_peak[i] or apex_ints[i] < floor or (np.abs(own_rts.get(row['mass_label'], np.zeros(0)) - apex_rt) <= rt_diff).any():
+                    continue
+                if own_classes and isinstance(row['repr_top1'], str) and not any(enforce_class(row['repr_top1'], c) for c in own_classes) and any(
+                        enforce_class(row['repr_top1'], c) for c in ('N', 'O', 'free')):
                     continue
                 # With accurate survey scans the apex has to show the glycan's isotope envelope (M..M+3 of its formula, dot product >= 0.9 over the survey scans around
                 # it, as match between runs takes analytes in MaillardMorsels): the narrow window alone takes any centroid there
@@ -7731,7 +7907,7 @@ def filter_top_n_isomers(df_in, top_n = 5, rt_diff = 1.0):
     # Rank the isomer groups (categories) at each mass within each file: carrying a prediction first, then by abundance in that file, then by the number of
     # files they were seen in; a group stays if it is among the top_n of any file. One cap over all files dropped real isomers once more files brought more
     # groups, and compared intensities across files; ranking by the number of files first dropped a file's strongest isomers (22 spectra of A2G2S2 on PGC)
-    # for one-spectrum rows that another file shares. Groups without a prediction stay, so finalise_predictions sees the rows it sees in wrap_inference
+    # for one-spectrum rows that another file shares. Groups without a prediction rank after the named ones and take what is left of top_n
     keys = ['mass_label', 'category_label']
     cats = df_out.groupby(keys).agg(has_pred = ('top1_pred', lambda x: x.notna().any()), file_presences = ('condition_label', 'nunique')).reset_index()
     cats = df_out.groupby(keys + ['condition_label'])['rel_abundance'].sum().reset_index().merge(cats, on = keys)

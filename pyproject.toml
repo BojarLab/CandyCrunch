@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "candycrunch"
-version = "1.0.1"
+version = "1.0.2"
 description = "Glycan structures from LC-MS/MS data by deep learning: prediction, fragment annotation, quantification across runs, and a desktop app"
 readme = "README.md"
 authors = [

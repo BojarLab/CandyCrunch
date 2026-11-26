@@ -71,6 +71,8 @@ If you would like to run our main inference function from the command line, you 
 --experimental, type=bool: whether to impute missing predictions via database searches etc.; default:True <br />
 --taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class' <br />
 --taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
+--glycan_database, type=string: your own glycan database, as .txt, .csv, .tsv, or .xlsx files of glycans (one per line or row) and/or the glycans themselves, space-separated: structures in IUPAC-condensed, WURCS, GlycoCT, or as GlyTouCan IDs, and compositions such as H5N4F1 or Hex5HexNAc4dHex1; structures the model does not know are found by their fragments; in the app, Advanced settings > Glycan database; default: none (glycowork's database) <br />
+--database_mode, type=string: 'only' (--glycan_database in place of glycowork's database: only its glycans are reported) or 'add' (beside it); default:'only' <br />
 --intra_cat_thresh, type=float: several files only, minutes the RT of a structure can differ from the mean of its group across files; default:1.0 <br />
 --top_n_isomers, type=int: several files only, number of isomer groups at each composition to retain in each file; default:5 <br />
 --n_jobs, type=int: number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default:1 <br />
@@ -138,6 +140,8 @@ mass_dic, type=dict: only if experimental = "True", dictionary of form mass : li
 taxonomy_level, type=string: taxonomic level used to restrict the glycan database; default:'Class' <br />
 taxonomy_filter, type=string: taxon at taxonomy_level used to restrict the glycan database; default:'Mammalia' <br />
 df_use, type=DataFrame: only if experimental = "True", sugarbase-like database of glycans with species associations etc.; default: use glycowork-stored df_glycan <br />
+glycan_database, type=string or list: your own glycan database, a .txt, .csv, .tsv, or .xlsx file or a list of glycan structures (IUPAC-condensed, WURCS, GlycoCT, GlyTouCan IDs) and compositions (H5N4F1, Hex5HexNAc4dHex1); its structures are candidates of their compositions, also those the model does not know, which are found by their fragments; default:None <br />
+database_mode, type=string: 'only' (glycan_database in place of glycowork's database: only its compositions are candidates and only its glycans are reported) or 'add' (beside it); default:'only' <br />
 plot_glycans, type=bool: whether to save an .xlsx file with SNFG images of all top1 predictions next to spectra_filepath, named like it plus _output; default:False <br />
 sialic_derivatization, type=string or tuple: linkage-specific sialic acid derivatization of underivatized samples, or of samples permethylated after it, 'EE', 'EEA', 'ME', 'DMA', 'SALSA', 'GQ', 'GQ-d5', or a pair of glycowork SIALIC_PRODUCTS for a2-6 and a2-3/8/9 sialic acids; precursor masses then tell a2-6 from a2-3/8/9 sialic acids; default:None <br />
 reducing_end_variants, type=dict: other reducing ends the glycans may carry, as name: group on the free glycan's reducing end (formula or mass; 0 for a free reducing end), e.g., {'free': 0} or {'ethyl glycoside': 'C2H4'}; default:None (free reducing ends of reduced or labeled glycans, plus ethyl glycosides for 'lipid', glycosylamines for 'PA', and glycosylaminitols, NH3-O, for reduced N-glycans) <br />

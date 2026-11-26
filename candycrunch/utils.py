@@ -1279,3 +1279,84 @@ def format_composition(composition, style = 'names'):
     from glycowork.glycan_data.loader import stringify_dict
     from glycowork.motif.processing import canonicalize_composition
     return canonicalize_composition(composition, as_string = True) if style == 'letters' or any('_a2-' in k for k in composition) else stringify_dict(composition)
+
+
+# Glycan databases already read (read_glycan_database), by their file and its time of change or by their entries: every pass over a run and every file of
+# a batch reads the same one
+_GLYCAN_DATABASES = {}
+
+
+def read_glycan_database(source):
+    """a glycan database of the user's, which wrap_inference takes in place of glycowork's or beside it (glycan_database): glycan structures in any notation
+    glycowork's canonicalize_iupac reads (IUPAC-condensed, WURCS, GlycoCT, GlyTouCan IDs) and compositions (H5N4F1A1, Hex5HexNAc4dHex1Neu5Ac1, or as a
+    dictionary, {'Hex': 5, 'HexNAc': 4, 'dHex': 1, 'Neu5Ac': 1}, as CandyCrunch's tables write them)\n
+   | Arguments:
+   | :-
+   | source (string or list): path of a .txt file with one glycan per line, or of a .csv, .tsv, or .xlsx file with one glycan per row (in its column named
+   |                          glycan, structure, composition, or iupac, else its first; a first row that is no glycan is taken as a header), or a list of
+   |                          glycans; empty lines and lines starting with # are skipped\n
+   | Returns:
+   | :-
+   | Returns the database's glycans in their order without repeats: structures as IUPAC-condensed strings, compositions as dictionaries; a ValueError names
+   | every entry that is neither
+   """
+    from glycowork.motif.processing import canonicalize_composition, canonicalize_iupac, is_composition
+    from glycowork.motif.tokenization import composition_to_mass, glycan_to_composition
+    import ast
+    import pandas as pd
+    if isinstance(source, (str, os.PathLike)):
+        path = os.fspath(source)
+        if not os.path.isfile(path):
+            raise ValueError(f'The glycan database {path} does not exist.')
+        key = (os.path.abspath(path), os.path.getmtime(path))
+        if key in _GLYCAN_DATABASES:
+            return _GLYCAN_DATABASES[key]
+        if path.lower().endswith(('.csv', '.tsv', '.xlsx', '.xls')):
+            table = pd.read_excel(path, header = None, dtype = str) if path.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(
+                path, header = None, dtype = str, sep = '\t' if path.lower().endswith('.tsv') else ',', skip_blank_lines = True)
+            named = [k for k, x in table.iloc[0].items() if isinstance(x, str) and x.strip().lower() in ('glycan', 'glycans', 'structure', 'structures', 'composition', 'compositions', 'iupac')] if len(table) else []
+            entries = table[named[0]].iloc[1:].tolist() if named else table[table.columns[0]].tolist() if len(table.columns) else []
+        else:
+            with open(path, encoding = 'utf-8-sig') as file:
+                entries = file.read().splitlines()
+    else:
+        path, key = None, tuple(str(x) for x in source)
+        if key in _GLYCAN_DATABASES:
+            return _GLYCAN_DATABASES[key]
+        entries = list(source)
+    glycans, unreadable = [], []
+    for n, entry in enumerate(entries):
+        if isinstance(entry, dict):
+            text = entry
+        elif not isinstance(entry, str) or not entry.strip() or entry.strip().startswith('#'):
+            continue
+        else:
+            text = entry.strip()
+        try:
+            if isinstance(text, dict) or text.startswith('{') and ':' in text:
+                glycan = canonicalize_composition({str(k): int(v) for k, v in (text if isinstance(text, dict) else ast.literal_eval(text)).items() if int(v)})
+                composition_to_mass(glycan)
+            elif is_composition(text):
+                glycan = canonicalize_composition(text)
+                composition_to_mass(glycan)
+            else:
+                glycan = canonicalize_iupac(text)
+                # (canonicalize_iupac returns what it cannot read as it is)
+                composition_to_mass(glycan_to_composition(glycan))
+            if not glycan:
+                raise ValueError
+        except Exception:
+            # A file's first row may be its header
+            if n == 0 and path is not None and len(entries) > 1:
+                continue
+            unreadable.append(str(entry).strip())
+            continue
+        if glycan not in glycans:
+            glycans.append(glycan)
+    if unreadable:
+        raise ValueError(f"The glycan database{' ' + os.path.basename(path) if path else ''} has entries that are neither a glycan structure (IUPAC-condensed, "
+                         f"WURCS, GlycoCT, or a GlyTouCan ID) nor a composition (e.g., H5N4F1 or Hex5HexNAc4dHex1): " + ', '.join(unreadable[:5]) + (', ...' if len(unreadable) > 5 else ''))
+    if not glycans:
+        raise ValueError(f"The glycan database{' ' + os.path.basename(path) if path else ''} holds no glycans.")
+    _GLYCAN_DATABASES[key] = glycans
+    return glycans
