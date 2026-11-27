@@ -168,6 +168,8 @@ DARK_GRAYS = {'#cccccc': '#4f4857', '#dddddd': '#3a3441', '#b8b0c0': '#6e6578'}
 # glycowork's modules import each other in a cycle, so two threads importing them at once (the drawing, annotation, and taxonomy threads all
 # start with an import) can hit Python's import deadlock detection, which killed the drawing thread or failed the first annotation
 IMPORT_LOCK = threading.Lock()
+# What's new dates its releases in English whatever the system's language (strftime's %B follows the locale Qt sets on Linux)
+MONTHS = ('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December')
 STYLE = """
 QWidget#settings {{ background: {wash}; }}
 QLabel[role="heading"] {{ font-weight: 600; color: {ink}; padding-top: 8px; }}
@@ -282,6 +284,28 @@ def _send_session(update):
     thread = threading.Thread(target = _post_envelope, args = ({'sent_at': now}, [({'type': 'session'}, json.dumps({**update, 'timestamp': now}).encode())]), daemon = True)
     thread.start()
     return thread
+
+
+def _version_key(version):
+    """A version's numbers (1.0.2 of v1.0.2 or 1.0.2.dev3), to compare versions without the packaging package, which a pip install may lack"""
+    found = re.match(r'\D*(\d+(?:\.\d+)*)', version or '')
+    return tuple(int(n) for n in found.group(1).split('.')) if found else ()
+
+
+def _release_notes(upto, after = None):
+    """What's new: the notes of CandyCrunch's GitHub releases after version `after` up to `upto`, newest first, as Markdown with a heading and date per
+    release; without `after` only upto's own, and '' while upto has no release. Raises OSError without network"""
+    with urllib.request.urlopen('https://api.github.com/repos/BojarLab/CandyCrunch/releases?per_page=100', timeout = 10) as response:
+        releases = sorted((r for r in json.load(response) if not r['draft'] and r['published_at']), key = lambda r: _version_key(r['tag_name']), reverse = True)
+    top, notes = _version_key(upto), []
+    for release in releases:
+        version = _version_key(release['tag_name'])
+        if version <= top and (version > _version_key(after) if after else version == top):
+            year, month, day = map(int, release['published_at'][:10].split('-'))
+            # A release's own headings (older notes have them) become bold lines under its heading
+            body = re.sub(r'^#{1,6}[ \t]+(.+?)[ \t#]*$', r'**\1**', (release['body'] or '').replace('\r\n', '\n').strip(), flags = re.M)
+            notes.append(f'### CandyCrunch {release["tag_name"].lstrip("v")}\n\n*{MONTHS[month - 1]} {day}, {year}*\n\n{body}')
+    return '\n\n'.join(notes) if any(_version_key(r['tag_name']) == top for r in releases) else ''
 
 
 def _load_model(path):
@@ -4640,6 +4664,7 @@ class MainWindow(QMainWindow):
     update_checked = Signal(str)
     update_progress = Signal(int)
     update_downloaded = Signal(bool)
+    notes_ready = Signal(object, bool)
     error_caught = Signal(str, object)
     report_done = Signal(bool, object)
 
@@ -4726,7 +4751,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_text, 1)
         self.statusBar().addPermanentWidget(self.elapsed)
         self.statusBar().addPermanentWidget(self.progress)
-        self.update_button, self.update_url, self.update_path = QPushButton(), None, None
+        self.update_button, self.update_url, self.update_path, self.update_notes = QPushButton(), None, None, None
         self.update_button.setFlat(True)
         self.update_button.setStyleSheet(f'color: {CANDY}; font-weight: 600;')
         self.update_button.hide()
@@ -4783,6 +4808,7 @@ class MainWindow(QMainWindow):
         self.usage_action.toggled.connect(lambda on: (self.store.setValue('usage_stats', on), on or self.store.remove(f'sessions/{os.getpid()}'),
                                                       setattr(self, 'session', self.session if on else None)))
         help_menu.addSeparator()
+        help_menu.addAction("What's new", lambda: self.whats_new(asked = True))
         help_menu.addAction('Check for updates…', lambda: self.check_update(announce = True))
         help_menu.addAction('About CandyCrunch', self.about)
         self.settings.add_files.clicked.connect(self.choose_files)
@@ -4810,9 +4836,12 @@ class MainWindow(QMainWindow):
         self.images.ready.connect(self.image_ready)
         self.update_button.clicked.connect(self.install_update)
         self.update_found.connect(lambda tag: (self.update_button.setText(f'Update to CandyCrunch {tag}'), self.update_button.show()))
+        self.update_button.setToolTip("Shows what's new, then downloads the update")
+        self.notes_ready.connect(self.show_notes)
         self.update_checked.connect(lambda text: QMessageBox.information(self, 'Check for updates', text))
         self.update_progress.connect(lambda percent: self.update_button.setText(f'Downloading update… {percent}%'))
-        self.update_downloaded.connect(lambda ok: (self.update_button.setEnabled(True), self.update_button.setText('Install update and restart' if ok else 'Download failed, retry')))
+        self.update_downloaded.connect(lambda ok: (self.update_button.setEnabled(True), self.update_button.setText(
+            'Download failed, retry' if not ok else "Quit and open the update's disk image" if self.update_path.endswith('.dmg') else 'Install update and restart')))
         self.error_caught.connect(self.caught_error, Qt.QueuedConnection)
         self.report_done.connect(self.report_sent)
         # Errors in the window and its threads went nowhere, as the app has no console; now they go to the log and become crash reports
@@ -4881,6 +4910,7 @@ class MainWindow(QMainWindow):
             self.open_session(sessions[0])
         self.load_taxa()
         self.check_update()
+        self.whats_new()
         if THEME['name'] == 'dark':
             self.retheme()
 
@@ -4910,10 +4940,10 @@ class MainWindow(QMainWindow):
         self.images.get('Fuc(a1-2)Gal(b1-3)GalNAc', compact = False, urgent = True)
 
     def check_update(self, announce = False):
-        """The installed Windows app offers the newest GitHub release that carries a Windows installer, without network access simply nothing; announce:
-        asked from the Help menu, so the answer comes also without a newer release, and other installs are told how they are updated"""
+        """The Windows and macOS apps offer the newest GitHub release that carries their installer or disk image, without network access simply nothing;
+        announce: asked from the Help menu, so the answer comes also without a newer release, and other installs are told how they are updated"""
         running = __version__
-        if not (getattr(sys, 'frozen', False) and sys.platform == 'win32'):
+        if not (getattr(sys, 'frozen', False) and sys.platform in ('win32', 'darwin')):
             if announce:
                 QMessageBox.information(self, 'Check for updates', f'This is CandyCrunch {running}. ' + (
                     'The newest release is on <a href="https://github.com/BojarLab/CandyCrunch/releases/latest">GitHub</a>.' if getattr(sys, 'frozen', False) else
@@ -4925,12 +4955,16 @@ class MainWindow(QMainWindow):
                 from packaging.version import Version
                 with urllib.request.urlopen('https://api.github.com/repos/BojarLab/CandyCrunch/releases/latest', timeout = 10) as response:
                     release = json.load(response)
-                asset = next((a for a in release['assets'] if a['name'].endswith('-Windows-Setup.exe')), None)
+                asset = next((a for a in release['assets'] if a['name'].endswith('-Windows-Setup.exe' if sys.platform == 'win32' else '-macOS.dmg')), None)
                 if asset and Version(release['tag_name'].lstrip('v')) > Version(running):
                     self.update_url = asset['browser_download_url']
+                    # What's new since this version, shown when Update is clicked (none without them: the update installs as before)
+                    with contextlib.suppress(Exception):
+                        self.update_notes = (release['tag_name'].lstrip('v'), _release_notes(release['tag_name'], running))
                     self.update_found.emit(release['tag_name'].lstrip('v'))
                     if announce:
-                        self.update_checked.emit(f'CandyCrunch {release["tag_name"].lstrip("v")} is out (this is {running}): Update in the status bar installs it.')
+                        self.update_checked.emit(f'CandyCrunch {release["tag_name"].lstrip("v")} is out (this is {running}): Update in the status bar shows '
+                                                 "what's new and installs it.")
                 elif announce:
                     self.update_checked.emit(f'CandyCrunch {running} is the newest version.')
             except Exception:
@@ -4938,6 +4972,64 @@ class MainWindow(QMainWindow):
                     self.update_checked.emit(f'This is CandyCrunch {running}. GitHub could not be reached to look for a newer version.')
 
         threading.Thread(target = check, daemon = True).start()
+
+    def whats_new(self, asked = False):
+        """What's new: once, at the first start of a version newer than the one whose notes were shown last (QSettings 'notes_seen'), the notes of every
+        release since that one (only this version's after an update from a version that kept no record); asked from the Help menu, every release's up to
+        this one. A first install only records its version, and notes GitHub does not give (no network, or this version not released yet) wait for the
+        next start"""
+        seen = self.store.value('notes_seen')
+        if not asked:
+            if seen and _version_key(seen) >= _version_key(__version__):
+                return
+            # A first start: no window was ever closed, so nothing was used before
+            if seen is None and self.store.value('geometry') is None:
+                self.store.setValue('notes_seen', __version__)
+                return
+
+        def fetch():
+            try:
+                notes = _release_notes(__version__, '0' if asked else seen)
+            except Exception:
+                notes = None
+            self.notes_ready.emit(notes, asked)
+
+        threading.Thread(target = fetch, daemon = True).start()
+
+    def show_notes(self, notes, asked):
+        """Shows what whats_new found: after an update once, recorded as shown; asked, also why there is nothing to show"""
+        if not asked:
+            if notes:
+                self.store.setValue('notes_seen', __version__)
+                self.notes_dialog(f'CandyCrunch is updated to {__version__}', notes)
+        elif notes:
+            self.notes_dialog(f'This is CandyCrunch {__version__}', notes)
+        else:
+            QMessageBox.information(self, "What's new", f'GitHub could not be reached for the release notes of CandyCrunch {__version__}.' if notes is None else
+                                    f'CandyCrunch {__version__} has no release notes on GitHub yet.')
+
+    def notes_dialog(self, heading, notes, install = False):
+        """The release notes (Markdown) under a heading, links opening in the browser; before an update with Update now and Later, which returns whether
+        Update now was clicked"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("What's new in CandyCrunch")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(_label(heading))
+        text = QTextBrowser()
+        text.setOpenExternalLinks(True)
+        text.setMarkdown(notes)
+        layout.addWidget(text, 1)
+        buttons = QDialogButtonBox()
+        if install:
+            buttons.addButton('Update now', QDialogButtonBox.AcceptRole).setDefault(True)
+            buttons.addButton('Later', QDialogButtonBox.RejectRole)
+        else:
+            buttons.addButton(QDialogButtonBox.Close)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(640, 480)
+        return dialog.exec() == QDialog.Accepted
 
     def caught_error(self, text, values):
         self.append_log(text)
@@ -5484,10 +5576,28 @@ class MainWindow(QMainWindow):
         if self.update_path:
             # Closing first releases the app's files (and asks if a run is still going); the installer updates the same folder in place and starts the new version
             if self.close():
-                subprocess.Popen([self.update_path, '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RELAUNCH=1'])
+                if sys.platform == 'win32':
+                    subprocess.Popen([self.update_path, '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RELAUNCH=1'])
+                elif self.update_path.endswith('.dmg'):
+                    # The app's folder takes no new version (an account that may not change Applications): its disk image opens to drag it there
+                    subprocess.Popen(['open', self.update_path])
+                else:
+                    # Once this process has ended, the new app (unpacked while this one ran) takes the old one's place and starts; if it cannot, the old one
+                    # comes back and starts
+                    subprocess.Popen(['/bin/sh', '-c', 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; old="$(dirname "$2")/.CandyCrunch.app.old"; '
+                                      'rm -rf "$old"; if mv "$2" "$old"; then if mv "$3" "$2"; then rm -rf "$old"; else rm -rf "$2"; mv "$old" "$2"; fi; fi; '
+                                      'open "$2"', 'sh', str(os.getpid()), _app_bundle(), self.update_path], start_new_session = True,
+                                     stdin = subprocess.DEVNULL, stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL)
             return
+        # What's new first; taken, the notes count as shown, so the new version does not show them again at its first start
+        if self.update_notes and self.update_notes[1]:
+            if not self.notes_dialog(f'CandyCrunch {self.update_notes[0]} is out (this is {__version__})', self.update_notes[1], install = True):
+                return
+            self.store.setValue('notes_seen', self.update_notes[0])
+            self.update_notes = None
         self.update_button.setEnabled(False)
         self.update_button.setText('Downloading update…')
+
         def work():
             path = os.path.join(tempfile.gettempdir(), self.update_url.rsplit('/', 1)[1])
             try:
@@ -5500,6 +5610,23 @@ class MainWindow(QMainWindow):
                             self.update_progress.emit(done * 100 // total)
                 os.replace(path + '.part', path)
                 self.update_path = path
+                # On macOS the new app is unpacked from its disk image while this one runs, where its folder can take it: a failure shows before the window
+                # closes, and the restart only moves it into place
+                if sys.platform == 'darwin' and os.access(os.path.dirname(_app_bundle()), os.W_OK):
+                    app, mount = path[:-len('.dmg')] + '.app', tempfile.mkdtemp()
+                    try:
+                        shutil.rmtree(app, ignore_errors = True)
+                        subprocess.run(['hdiutil', 'attach', '-nobrowse', '-readonly', '-noverify', '-mountpoint', mount, path], check = True, capture_output = True)
+                        try:
+                            subprocess.run(['ditto', os.path.join(mount, 'CandyCrunch.app'), app], check = True, capture_output = True)
+                        finally:
+                            subprocess.run(['hdiutil', 'detach', '-quiet', mount], capture_output = True)
+                        os.remove(path)
+                        self.update_path = app
+                    except (OSError, subprocess.CalledProcessError):
+                        shutil.rmtree(app, ignore_errors = True)
+                    with contextlib.suppress(OSError):
+                        os.rmdir(mount)
             except Exception:
                 pass
             self.update_downloaded.emit(self.update_path is not None)
@@ -5530,10 +5657,15 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+def _app_bundle():
+    """The folder of the macOS app this process runs from (CandyCrunch.app/Contents/MacOS/CandyCrunch is sys.executable)"""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))))
+
+
 def _moved_to_applications():
     """The macOS app started from its disk image (mounted under /Volumes, or translocated by Gatekeeper) offers to copy itself into Applications and
     start from there, as otherwise every start opens the disk image again; True once the copy is in place and starts after this process ends"""
-    bundle = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))))
+    bundle = _app_bundle()
     if not (bundle.endswith('.app') and (bundle.startswith('/Volumes/') or '/AppTranslocation/' in bundle)):
         return False
     if QMessageBox.question(None, 'CandyCrunch', 'CandyCrunch is running from its disk image. Move it into your Applications folder and start it from there?') != QMessageBox.Yes:

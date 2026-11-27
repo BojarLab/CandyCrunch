@@ -1090,3 +1090,139 @@ def test_gui_annotation_process(app):
     data = io.BytesIO()
     gui._FigurePickler(data).dump(local)
     assert pickle.loads(data.getvalue()).to_svg() == local.to_svg()
+
+
+def test_gui_whats_new(app, tmp_path, monkeypatch):
+    # What's new comes from the GitHub releases' notes: once at the first start of a newer version, before an update, and from the Help menu
+    import io
+    import json
+    from types import SimpleNamespace
+    from PySide6.QtCore import QSettings, QTimer
+    from candycrunch import gui
+    releases = [{'tag_name': 'v1.0.3', 'draft': True, 'published_at': None, 'body': 'not out'},
+                {'tag_name': 'v1.0.1', 'draft': False, 'published_at': '2026-11-26T13:43:22Z', 'body': '- Fixed a crash'},
+                {'tag_name': 'v1.0.2', 'draft': False, 'published_at': '2026-12-03T09:00:00Z', 'body': '## General\r\n\r\n- Changelogs in the app'},
+                {'tag_name': 'v1.0.0', 'draft': False, 'published_at': '2026-11-25T10:43:06Z', 'body': '- CandyCrunch-GUI'}]
+    calls = []
+
+    def urlopen(url, timeout):
+        calls.append(url)
+        if url == 'offline':
+            raise OSError('no network')
+        return io.BytesIO(json.dumps(releases).encode())
+
+    monkeypatch.setattr(gui.urllib.request, 'urlopen', urlopen)
+    notes = gui._release_notes('1.0.2', '1.0.0')
+    assert notes.index('### CandyCrunch 1.0.2') < notes.index('### CandyCrunch 1.0.1') and '1.0.0' not in notes and 'not out' not in notes
+    assert '*December 3, 2026*\n\n**General**\n\n- Changelogs in the app' in notes
+    assert gui._release_notes('1.0.2').count('### ') == 1 and gui._release_notes('1.0.4', '1.0.0') == '' and gui._release_notes('1.0.2', '0').count('### ') == 3
+    # A first start records its version; an update shows the notes since the version last shown, once; without network they wait
+    monkeypatch.setattr(gui, '__version__', '1.0.2')
+    monkeypatch.setattr(gui, 'threading', SimpleNamespace(Thread = lambda target, daemon: SimpleNamespace(start = target)))
+    shown = []
+    calls.clear()
+    window = SimpleNamespace(store = QSettings(str(tmp_path / 'settings.ini'), QSettings.IniFormat), notes_dialog = lambda heading, notes, install = False: shown.append((heading, notes)) or True)
+    window.notes_ready = SimpleNamespace(emit = lambda notes, asked: gui.MainWindow.show_notes(window, notes, asked))
+    gui.MainWindow.whats_new(window)
+    assert window.store.value('notes_seen') == '1.0.2' and not calls and not shown
+    window.store.setValue('notes_seen', '1.0.0')
+    gui.MainWindow.whats_new(window)
+    gui.MainWindow.whats_new(window)
+    assert len(shown) == 1 and shown[0][0] == 'CandyCrunch is updated to 1.0.2' and shown[0][1] == notes and window.store.value('notes_seen') == '1.0.2'
+    # An update from a version that kept no record shows this version's notes
+    window.store.remove('notes_seen')
+    window.store.setValue('geometry', b'used')
+    gui.MainWindow.whats_new(window)
+    assert shown[1][1] == gui._release_notes('1.0.2')
+    window.store.setValue('notes_seen', '1.0.1')
+    monkeypatch.setattr(gui.urllib.request, 'urlopen', lambda url, timeout: urlopen('offline', timeout))
+    gui.MainWindow.whats_new(window)
+    assert len(shown) == 2 and window.store.value('notes_seen') == '1.0.1'
+    monkeypatch.setattr(gui.urllib.request, 'urlopen', urlopen)
+    gui.MainWindow.whats_new(window, asked = True)
+    assert shown[2] == ('This is CandyCrunch 1.0.2', gui._release_notes('1.0.2', '0')) and window.store.value('notes_seen') == '1.0.1'
+    # Update shows what's new first: Later keeps the version, Update now downloads and counts the notes as shown
+    window.update_path, window.update_notes, window.update_button = None, ('1.0.3', 'notes'), QtWidgets.QPushButton()
+    window.notes_dialog = lambda heading, notes, install = False: shown.append((heading, install)) and False
+    gui.MainWindow.install_update(window)
+    assert shown[3] == ('CandyCrunch 1.0.3 is out (this is 1.0.2)', True) and window.update_button.isEnabled() and window.store.value('notes_seen') == '1.0.1'
+    monkeypatch.setattr(gui, 'threading', SimpleNamespace(Thread = lambda target, daemon: SimpleNamespace(start = lambda: None)))
+    window.notes_dialog = lambda heading, notes, install = False: True
+    gui.MainWindow.install_update(window)
+    assert window.store.value('notes_seen') == '1.0.3' and window.update_notes is None and window.update_button.text() == 'Downloading update…'
+    # The dialog: the notes as rich text, Update now accepting
+    parent, seen = QtWidgets.QMainWindow(), []
+
+    def answer():
+        dialog = next(w for w in app.topLevelWidgets() if isinstance(w, QtWidgets.QDialog) and w.isVisible())
+        seen.append(dialog.findChild(QtWidgets.QTextBrowser).toPlainText())
+        next(b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() == 'Update now').click()
+
+    QTimer.singleShot(200, answer)
+    assert gui.MainWindow.notes_dialog(parent, 'CandyCrunch 1.0.2 is out (this is 1.0.1)', notes, install = True)
+    assert seen[0].startswith('CandyCrunch 1.0.2\nDecember 3, 2026\nGeneral\nChangelogs in the app') and '#' not in seen[0]
+
+
+def test_gui_macos_update(app, tmp_path, monkeypatch):
+    # The macOS app downloads the release's disk image, unpacks the new app from it while running, and swaps it in once its window has closed; where its
+    # folder takes no new version, it opens the disk image instead
+    import io
+    import shutil
+    import subprocess
+    from pathlib import Path
+    from types import SimpleNamespace
+    from candycrunch import gui
+    bundle = tmp_path / 'Applications' / 'CandyCrunch.app'
+    (bundle / 'Contents' / 'MacOS').mkdir(parents = True)
+    (bundle / 'Contents' / 'MacOS' / 'CandyCrunch').write_text('old')
+    (tmp_path / 'tmp').mkdir()
+    runs, opened, emitted = [], [], []
+
+    def run(command, check = False, capture_output = False):
+        runs.append(command[:2])
+        if command[0] == 'ditto':
+            if ditto_fails:
+                raise subprocess.CalledProcessError(1, command)
+            shutil.copytree(bundle, command[2])
+            (Path(command[2]) / 'Contents' / 'MacOS' / 'CandyCrunch').write_text('new')
+
+    class Response(io.BytesIO):
+        headers = {'Content-Length': '9'}
+
+    monkeypatch.setattr(gui, 'sys', SimpleNamespace(platform = 'darwin', executable = str(bundle / 'Contents' / 'MacOS' / 'CandyCrunch')))
+    monkeypatch.setattr(gui, 'threading', SimpleNamespace(Thread = lambda target, daemon: SimpleNamespace(start = target)))
+    monkeypatch.setattr(gui.tempfile, 'gettempdir', lambda: str(tmp_path / 'tmp'))
+    monkeypatch.setattr(gui.urllib.request, 'urlopen', lambda url, timeout: Response(b'disk image'))
+    monkeypatch.setattr(gui.subprocess, 'run', run)
+    monkeypatch.setattr(gui.subprocess, 'Popen', lambda command, **kwargs: opened.append(command))
+    for ditto_fails, writable in ((False, True), (True, True), (False, False)):
+        monkeypatch.setattr(gui.os, 'access', lambda path, mode: writable)
+        window = SimpleNamespace(update_path = None, update_notes = None, update_url = 'https://github.com/x/CandyCrunch-1.0.3-macOS.dmg', update_button = QtWidgets.QPushButton(),
+                                 update_progress = SimpleNamespace(emit = lambda percent: None), update_downloaded = SimpleNamespace(emit = emitted.append), close = lambda: True)
+        gui.MainWindow.install_update(window)
+        gui.MainWindow.install_update(window)
+        dmg, staged = str(tmp_path / 'tmp' / 'CandyCrunch-1.0.3-macOS.dmg'), str(tmp_path / 'tmp' / 'CandyCrunch-1.0.3-macOS.app')
+        if writable and not ditto_fails:
+            # unpacked, the disk image gone; the swap waits for this process and gets the app's folder and the new app
+            assert runs[-3:] == [['hdiutil', 'attach'], ['ditto', runs[-2][1]], ['hdiutil', 'detach']] and window.update_path == staged and not gui.os.path.exists(dmg)
+            assert opened[-1][:2] == ['/bin/sh', '-c'] and opened[-1][3:] == ['sh', str(gui.os.getpid()), str(bundle), staged]
+            swap = opened[-1]
+        else:
+            # a failed unpack leaves nothing behind; either way the disk image opens
+            assert window.update_path == dmg and not gui.os.path.exists(staged) and opened[-1] == ['open', dmg]
+        assert emitted[-1] is True
+    # The swap itself: the new app in place and started, the old one gone; a new app that cannot move brings the old one back
+    monkeypatch.undo()
+    sh = shutil.which('sh')
+    if sh:
+        dead = subprocess.Popen([sh, '-c', 'exit 0'])
+        dead.wait()
+        for present in (True, False):
+            (bundle / 'Contents' / 'MacOS' / 'CandyCrunch').write_text('old')
+            shutil.rmtree(staged, ignore_errors = True)
+            if present:
+                shutil.copytree(bundle, staged)
+                (Path(staged) / 'Contents' / 'MacOS' / 'CandyCrunch').write_text('new')
+            subprocess.run([sh, '-c', swap[2], 'sh', str(dead.pid), str(bundle).replace('\\', '/'), staged.replace('\\', '/')], capture_output = True)
+            assert (bundle / 'Contents' / 'MacOS' / 'CandyCrunch').read_text() == ('new' if present else 'old')
+            assert not (bundle.parent / '.CandyCrunch.app.old').exists() and not gui.os.path.exists(staged)

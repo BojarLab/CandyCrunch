@@ -2545,6 +2545,23 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
                 if ints[v] < 0.5 * min(sm[top], sm[m]) and min(v, len(ints) - v) >= 2 and (ints[np.abs(rts - rts[v]) <= 0.03] < 0.75 * min(sm[top], sm[m])).all():
                     cut = v
                     break
+        if cut is None and survey is not None and len(rts) >= 4:
+            # Ion-trap DDA fragments isomers 0.3-1 min apart on their flanks (dynamic exclusion), so the precursor intensities of their spectra show no
+            # valley and both chain into one cluster. Their survey trace does (as for joins above: the signal within mz_diff of the apex m/z, averaged over
+            # 7 scans): where it falls below a fifth of the smaller of its highest points on either side of a stretch between two spectra, each side holding
+            # at least 2 spectra, the cluster holds two peaks and is cut there, at the deepest such valley
+            q0, q1 = np.searchsorted(survey[0], rts[0] - 0.25), np.searchsorted(survey[0], rts[-1] + 0.25, side = 'right')
+            times = survey[0][q0:q1]
+            trace = np.convolve([survey[2][survey[3][q]:survey[3][q + 1]][np.abs(survey[1][survey[3][q]:survey[3][q + 1]] - c['apex_mz']) <= mz_diff].sum()
+                                 for q in range(q0, q1)], np.ones(7) / 7, mode = 'same') if q1 - q0 >= 7 else []
+            depths = {}
+            for k in range(2, len(rts) - 1) if len(trace) else ():
+                left, right = np.flatnonzero(times <= rts[k - 1]), np.flatnonzero(times >= rts[k])
+                if len(left) and len(right) and rts[k] > rts[k - 1]:
+                    a, b = left[np.argmax(trace[left])], right[np.argmax(trace[right])]
+                    if min(trace[a], trace[b]) > 0:
+                        depths[k] = trace[a:b + 1].min() / min(trace[a], trace[b])
+            cut = min(depths, key = depths.get) if depths and min(depths.values()) < 0.2 else None
         if cut is None:
             clusters.append(c)
             continue
@@ -2757,6 +2774,13 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
     for cluster in clusters:
         highest_intensity_index = np.argmax(cluster['intensity'])
         highest_intensity = cluster['intensity'][highest_intensity_index]
+        # Without accurate survey scans (mz_ppm), a cluster's charge is the charge most of its spectra carry, not its apex spectrum's alone: an ion trap
+        # reads each scan's charge state from an envelope whose isotopes it merges, and a cluster whose apex scan was read wrong took the wrong charge
+        # (disialylated [M-2H]2- clusters read as z = 3 in 6 of 44 and 17 of 50 spectra, the apex among them, lost their composition to z = 3 candidates)
+        rep_charge = cluster['precursor_charge'][highest_intensity_index]
+        votes = Counter(z for z in cluster['precursor_charge'] if z is not None and z == z).most_common(2)
+        if not mz_ppm and rep_charge is not None and rep_charge == rep_charge and len(votes) > 1 and votes[0][1] > votes[1][1]:
+            rep_charge = votes[0][0]
         if highest_intensity > 0:
             rep_mz = cluster['m/z'][highest_intensity_index]
             mean_rt = cluster['RT'][highest_intensity_index]
@@ -2775,8 +2799,7 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         key = (tuple(map(id, cluster['peak_d'])), peak_tol, min_mz, max_mz, bin_num)
         if key in merged:
             _, peaks, binned_intensities, mz_remainder = merged[key]
-            condensed_data.append([rep_mz, mean_rt, highest_intensity, peaks, binned_intensities, mz_remainder, len(cluster['RT']),
-                                   cluster['precursor_charge'][highest_intensity_index]])
+            condensed_data.append([rep_mz, mean_rt, highest_intensity, peaks, binned_intensities, mz_remainder, len(cluster['RT']), rep_charge])
             continue
         # Cluster fragment peaks across spectra by mass proximity, then weight-average mass and sum intensity
         ms = np.fromiter((m for spec in cluster['peak_d'] for m in spec), float)
@@ -2868,7 +2891,6 @@ def condense_dataframe(df, mz_diff = 0.5, rt_diff = 1.0, min_mz = 39.714, max_mz
         binned_intensities.flags.writeable = mz_remainder.flags.writeable = False
         merged[key] = (cluster['peak_d'], peaks, binned_intensities, mz_remainder)
         num_spectra = len(cluster['RT'])
-        rep_charge = cluster['precursor_charge'][highest_intensity_index]
         # Without MS1, the apex precursor intensity is the abundance: it tracks MS1 peak areas far better than summing or integrating
         # the precursor intensities of however many MS2 spectra dynamic exclusion happened to allow
         condensed_data.append(
@@ -5317,7 +5339,14 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         # Underivatized the adduct sits k x 11.2 mDa above the reading's own ion (Hex + dHex - Neu5Ac = 17.0153 Da), 4-6 ppm at z = 2-3, inside the
         # precursor tolerance and the scatter of the run's ppm errors, so only the apex tells them apart: an adduct forms in the source and peaks with its
         # ion (an A3G3S3 alditol's [M+NH4+2H]3+, read as Hex7HexNAc5Neu5Ac2dHex1, at the same RT in ammonium-buffered HILIC), while Lewis x-carrying brain
-        # N-glycans elute 0.4-1 min from their sialylated near-isobars and are real
+        # N-glycans elute 0.4-1 min from their sialylated near-isobars and are real. Where the adduct's offset exceeds the half-width of the run's
+        # composition window, the precursor tells them apart too: a row read nearer its own m/z than the adduct's (after the run's calibration centre)
+        # is the glycan itself (fucosylated N-glycans of a TOF run beside their sialylated isobars, read at -1..+1.5 ppm with the adduct 6.3 ppm above)
+        deviation = None
+        if sample_prep == 'underivatized' and window is not None:
+            deviation = (df_out.index.values - df_out['theo_mz'].values) / df_out['theo_mz'].values * 1e6 - window[0]
+            half_ppm = np.maximum(window[1], 3000 / df_out.index.values.astype(float))
+            nh4_shift = mass_dict['NH4+'] - PROTON_MASS - (mass_dict['Hex'] + mass_dict['dHex'] - mass_dict['Neu5Ac'])
         window = rt_diff if sample_prep != 'underivatized' else 0.3
         comps = [c if isinstance(c, dict) else {} for c in df_out['composition']]
         keys = [stringify_dict(c) for c in comps]
@@ -5327,6 +5356,9 @@ def finalise_predictions(df_out, get_missing, mode, modification, mass_tag, ppm_
         for i in sorted(range(len(df_out)), key = lambda i: df_out.iat[i, ab]):
             c = comps[i]
             for k in range(1, min(c.get('Hex', 0), c.get('dHex', 0), zs[i]) + 1):
+                gap = k * nh4_shift / zs[i] / df_out['theo_mz'].iat[i] * 1e6 if deviation is not None else 0.0
+                if deviation is not None and gap > half_ppm[i] and deviation[i] < gap / 2:
+                    continue
                 target = stringify_dict({m: n for m, n in {**c, 'Hex': c['Hex'] - k, 'dHex': c['dHex'] - k, 'Neu5Ac': c.get('Neu5Ac', 0) + k}.items() if n})
                 partners = [j for j in range(len(df_out)) if j != i and j not in folded and keys[j] == target and abs(rts[j] - rts[i]) <= window
                             and df_out.iat[j, ab] >= df_out.iat[i, ab]]
@@ -6256,6 +6288,25 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
         # The other-class pass below: clusters at a row the run already reports, or of one spectrum (it keeps rows from >= 2), cannot add a row
         mzs, rts = np.array(_pair[1], dtype = float).reshape(-1, 2).T
         df_out = df_out[(df_out['num_spectra'].values >= 2) & ~((np.abs(df_out['m/z'].values[:, None] - mzs) < mass_tolerance) & (np.abs(df_out['RT'].values[:, None] - rts) < rt_diff)).any(axis = 1)]
+    # A spectrum without an instrument charge state still shows a single charge in the survey scans, by its precursor's isotope spacing: an M+1 peak 1.003 above
+    # the monoisotopic one with at least a fifth of its intensity, and none such 1.003 / z above for z = 2-4. assign_candidate_structures and domain_filter
+    # trust that charge 1 as they trust the instrument's: a TOF run without header charges, whose MS2 hold a hundred peaks up to three times the precursor m/z,
+    # mostly noise, lost its singly charged Man3, Man4, and agalacto glycans to the test for fragments above a singly charged precursor, first in domain_filter
+    # and then in the candidates, where those peaks gave the spectrum a z = 2 composition of the same m/z instead (survey scans: M+1 at 0.4-0.6 of M, 0.00-0.08
+    # half a unit above). Higher charges read this way stay under the charge state's fragment test: trusted too, they added rows of glycans at retention times
+    # the maps lack (13 such against 4 found)
+    if accurate_ms1 and ms1 is not None and len(ms1[0]) and 'precursor_charge' in df_out.columns:
+        ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
+        survey = {}
+        for mz, rt, h in zip(df_out['m/z'].values, df_out['RT'].values, df_out['precursor_charge'].values):
+            if (h is None or pd.isna(h)) and (mz, rt) not in survey:
+                centers, tol, found = mz + ISOTOPE_SPACING / np.array([np.inf, 1, 2, 3, 4]), max(mz * 1e-5, 0.003), np.zeros(5)
+                i = int(np.argmin(np.abs(ms1_rts - rt)))
+                for k in range(max(i - 2, 0), min(i + 3, len(ms1_rts))):
+                    scan_mzs, scan_ints = ms1_mzs[ms1_offsets[k]:ms1_offsets[k + 1]], ms1_ints[ms1_offsets[k]:ms1_offsets[k + 1]]
+                    found += [scan_ints[a:b].sum() for a, b in zip(np.searchsorted(scan_mzs, centers - tol), np.searchsorted(scan_mzs, centers + tol, side = 'right'))]
+                survey[mz, rt] = 1 if found[0] > 0 and found[1] >= 0.2 * found[0] and (found[2:] < 0.2 * found[0]).all() else None
+        df_out['precursor_charge'] = [survey.get((mz, rt)) if h is None or pd.isna(h) else h for mz, rt, h in zip(df_out['m/z'].values, df_out['RT'].values, df_out['precursor_charge'].values)]
     # Other reducing ends (unreduced glycans that escaped reduction, ethyl glycosides formed on ethanol during glycosphingolipid glycan release): neutral mass
     # difference to the run's reducing end -> name; the condensed spectra are searched for them once the run's own glycans are known (not in the reducing end
     # check's runs on the most intense clusters)
@@ -6703,24 +6754,6 @@ def wrap_inference(spectra_filepath, glycan_class, model = None, glycans = glyca
     # The model's readings that the annotation gate backs: a glycan present mostly as its glycosylaminitol has few spectra at its alditol's mass, whose readings can
     # leave below although its glycosylaminitol spectra carry its signal
     gated_readings = [p[0] for p, s in zip(df_out['predictions'], df_out['annotation_score']) if p and s > crumbs_thresh]
-    # A spectrum without an instrument charge state still shows a single charge in the survey scans, by its precursor's isotope spacing: an M+1 peak 1.003 above
-    # the monoisotopic one with at least a fifth of its intensity, and none such 1.003 / z above for z = 2-4. domain_filter trusts that charge 1 as it trusts the
-    # instrument's: a TOF run without header charges, whose MS2 hold a hundred peaks up to three times the precursor m/z, mostly noise, lost its singly charged
-    # Man3, Man4, and agalacto glycans to the test for fragments above a singly charged precursor (survey scans: M+1 at 0.4-0.6 of M, 0.00-0.08 half a unit
-    # above). Higher charges read this way stay under the charge state's fragment test: trusted too, they added rows of glycans at retention times the maps
-    # lack (13 such against 4 found)
-    if accurate_ms1 and ms1 is not None and len(ms1[0]) and 'precursor_charge' in df_out.columns:
-        ms1_rts, ms1_mzs, ms1_ints, ms1_offsets = ms1
-        survey = {}
-        for mz, rt, h in zip(df_out.index.values, df_out['RT'].values, df_out['precursor_charge'].values):
-            if (h is None or pd.isna(h)) and (mz, rt) not in survey:
-                centers, tol, found = mz + ISOTOPE_SPACING / np.array([np.inf, 1, 2, 3, 4]), max(mz * 1e-5, 0.003), np.zeros(5)
-                i = int(np.argmin(np.abs(ms1_rts - rt)))
-                for k in range(max(i - 2, 0), min(i + 3, len(ms1_rts))):
-                    scan_mzs, scan_ints = ms1_mzs[ms1_offsets[k]:ms1_offsets[k + 1]], ms1_ints[ms1_offsets[k]:ms1_offsets[k + 1]]
-                    found += [scan_ints[a:b].sum() for a, b in zip(np.searchsorted(scan_mzs, centers - tol), np.searchsorted(scan_mzs, centers + tol, side = 'right'))]
-                survey[mz, rt] = 1 if found[0] > 0 and found[1] >= 0.2 * found[0] and (found[2:] < 0.2 * found[0]).all() else None
-        df_out['precursor_charge'] = [survey.get((mz, rt)) if h is None or pd.isna(h) else h for mz, rt, h in zip(df_out.index.values, df_out['RT'].values, df_out['precursor_charge'].values)]
     # Filter out wrong predictions via diagnostic ions etc.
     df_out = domain_filter(df_out, glycan_class, mode = mode, filter_out = filter_out, sample_prep = sample_prep,
                            mass_tag = mass_tag, max_charge = max_charge,
