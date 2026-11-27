@@ -798,3 +798,15 @@ def test_monosaccharide_names_stay_glycans():
         assert glycopeptide_string_to_input(name)['glycans'] == [name]
     for peptide in ['AVAVTLQSHc', 'VTGGIFSVTo', 'Kbu']:
         assert glycopeptide_string_to_input(peptide)['peptide'] == peptide
+
+
+def test_w_side_chain_loss_tryptophan():
+    # Cbeta-Cgamma homolysis of a Trp z. ion loses the indolyl radical (C8H6N, 116.050024 Da), leaving the same dehydroalanine backbone as other non-beta-branched residues
+    from candycrunch.analysis import W_SIDE_CHAIN_LOSSES
+    expected_loss = calculate_adduct_mass('C8H6N')
+    assert abs(W_SIDE_CHAIN_LOSSES['W'] - expected_loss) < 1e-5
+    w1_exact = round(mass.fast_mass('W', ion_type = 'z-dot', charge = 1) - mass.calculate_mass(formula = 'C8H6N'), 6)
+    hits = CandyCrumbs({'peptide': 'TSAAW', 'glycans': [{'HexNAc': 1}], 'glycosites': [0]}, [w1_exact], charge = 2,
+                       fragmentation_method = 'EThcD', disable_global_mods = True)
+    assert hits[w1_exact] is not None
+    assert hits[w1_exact]['Domon-Costello nomenclatures'][0] == [['w_1'], ['loss of glycan 1']]
