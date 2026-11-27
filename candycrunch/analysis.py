@@ -90,7 +90,7 @@ bond_type_helper = {1: ['bond', 'no_bond'], 2: ['red_bond', 'red_no_bond'], 3: [
 W_SIDE_CHAIN_LOSSES = {'C': 32.979896, 'D': 44.997655, 'E': 59.013305, 'F': 77.039125, 'H': 67.029623,
                        'I': 29.039125, 'K': 58.065674, 'L': 43.054775, 'M': 61.011196, 'N': 44.013639,
                        'Q': 58.029289, 'R': 86.071822, 'S': 17.002740, 'T': 15.023475, 'V': 15.023475,
-                       'W': 116.049024, 'Y': 93.034040}
+                       'W': 116.050024, 'Y': 93.034040}
 W_SIDE_CHAIN_LOSSES['c'] = 90.001360  # Carbamidomethyl Cys, cleaved at Cbeta-Sgamma
 W_SIDE_CHAIN_LOSSES['m'] = W_SIDE_CHAIN_LOSSES['M'] + 15.994915  # Met sulfoxide, the lost radical keeps the oxygen
 # the radical lost by a labeled Lys keeps the label on its Nepsilon (j: guanidinyl CH2N2, k: TMT, b, o, u, z: dimethyl light, 2H(4), 2H(4)13C(2), 2H(6)13C(2))
