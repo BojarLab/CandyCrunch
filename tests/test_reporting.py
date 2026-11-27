@@ -137,7 +137,7 @@ def test_glycan_report(tmp_path, monkeypatch):
     with zipfile.ZipFile(path) as z:
         targets = {re.search(r'Id="([^"]+)"', x).group(1): re.search(r'Target="[./]*(?:xl/)?([^"]+)"', x).group(1)
                    for x in re.findall(r'<Relationship [^>]+>', z.read('xl/drawings/_rels/drawing1.xml.rels').decode())}
-        shown = re.findall(r'<(?:xdr:)?ext cx="(\d+)" cy="\d+"/>.*?r:embed="(rId\d+)"', z.read('xl/drawings/drawing1.xml').decode(), re.S)
+        shown = re.findall(r'<(?:xdr:)?ext cx="(\d+)" cy="\d+"\s*/>.*?r:embed="(rId\d+)"', z.read('xl/drawings/drawing1.xml').decode(), re.S)
         # (glycowork shows each picture at a quarter of its PNG, to the nearest pixel)
         scales = {round(int(cx) / 9525 / struct.unpack('>II', z.read('xl/' + targets[r])[16:24])[0], 2) for cx, r in shown}
         # (each with glycowork's vector twin for Excel 2016+)
