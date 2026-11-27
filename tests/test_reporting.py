@@ -69,7 +69,7 @@ def batch():
     features = pd.DataFrame([{'top1_pred': s, 'm/z': ion(comp, z) - 0.3 / abs(z), 'RT': rt, 'charge': z, 'composition': comp, 'GlyTouCan_ID': None,
                               'n_files_ms2': len(AMOUNTS), 'flag': flag} for name, (s, comp, z, rt, _, flag) in GLYCANS.items()])
     for run, t in runs.items():
-        features[run] = [t.loc[[s == x if s else x is None for x in t['top1_pred']], 'rel_abundance'].sum() or np.nan for s in features['top1_pred']]
+        features[run] = [t.loc[[s == x if isinstance(s, str) else pd.isna(x) for x in t['top1_pred']], 'rel_abundance'].sum() or np.nan for s in features['top1_pred']]
         features[f'evidence_{run}'] = 'ms2'
     return features, runs
 
