@@ -78,6 +78,8 @@ If you would like to run our main inference function from the command line, you 
 --n_jobs, type=int: number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default:1 <br />
 --plot_glycans, type=bool: whether to write the output as an .xlsx file that contains SNFG images of all top1 predictions (a `.csv` output additionally gets an `.xlsx` of the same name); default:False <br />
 --composition_format, type=string: how the output tables write compositions, 'dict' ({'Hex': 5, 'HexNAc': 4, 'dHex': 1}), 'names' (Hex5HexNAc4dHex1), or 'letters' (H5N4F1; A Neu5Ac, G Neu5Gc, S sulfate); in the app, View > Compositions as (or a right click on the Composition column's header) sets how tables, the detail pane, and exports write them; default:dict <br />
+--report, type=string: several files only: also writes a report of the batch for the people whose samples it measured, an .xlsx workbook with the glycan profile of every sample (with SNFG drawings), traits, motifs, sample checks, and every peak with what it is (`glycan_report` in `candycrunch.reporting`); default:None <br />
+--internal_standard, type=string(s): with --report, internal standards spiked into every sample, each a composition, optionally with its charge and RT in minutes (e.g., H5N3A2 or H5N3A2,-2,17.1); the first is the reference of every sample's glycan amount, and of an ion that comes with it at a constant ratio only what a sample holds clearly above that background stays in the profile; default:None <br />
 --version: prints the CandyCrunch version and exits
 </pre>
 </details>
@@ -93,6 +95,10 @@ Several files, or a folder of Thermo and Waters .raw, SCIEX .wiff, Bruker and Ag
 ```console
 $ candycrunch_predict --spectra_filepath path_to_my_files/ --glycan_class O --intra_cat_thresh 1.75 --top_n_isomers 2 --output path_to_my_outputs/output_file.csv
 ```
+
+With `--report path_to_my_outputs/report.xlsx` a batch also gets a report for the people whose samples it measured: the glycan profile of every sample with SNFG drawings, traits (classes, cores and N-glycan types, sialylation, fucosylation, sulfation, mean residues per glycan), glycowork motifs, sample checks, and every peak with a note on what is not in the profile (glucose oligomers, peeling products, in-source fragments, glycans of another class). With `--internal_standard H5N3A2` the standard is measured in every sample, each sample's glycan amount is given relative to it, the standard is left out of the profile, and an ion that comes with it at a constant ratio (an impurity, the reagents spiked with it, or carryover) has that background subtracted, keeping only what a sample holds clearly above it:
+```console
+$ candycrunch_predict --spectra_filepath path_to_my_files/ --glycan_class O --output path_to_my_outputs/output_file.csv --report path_to_my_outputs/report.xlsx --internal_standard H5N3A2
 
 ## Using CandyCrunch &ndash; In your browser
 To try CandyCrunch without installing anything, [bojarlab.github.io/CandyCrunch](https://bojarlab.github.io/CandyCrunch/) runs the CandyCrunch pipeline in a browser tab, with the same files and settings as the command line, and gives its results as CSV and Excel downloads. Your files are read where they are and never uploaded. A bundled example run lets you try it without data of your own. It needs Chrome or Edge 137 or newer. For large runs and batches, the desktop app is faster.
@@ -171,7 +177,7 @@ rel_abundance is the peak's share (in %) of the summed abundance of all rows. Wi
 ### `wrap_inference_batch` (in `candycrunch.prediction`) <br>
 Wrapper function to predict glycan structures from multiple LC-MS/MS files using CandyCrunch. <br />
 This function works similarly to `wrap_inference` except a list of filenames is provided and a tuple is returned: a feature table and a dictionary of output DataFrames, one for each input file, keyed by their filenames. <br />
-The feature table has one row per isomer group with a structure (also those without one with get_missing; a glycan that files report at different charge states is one row) with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID, the number of files with MS2 evidence, and a flag (in-source fragment, peeling product, glucose oligomer, or other class; `compare_groups` leaves flagged features out unless `include_flagged`), followed by its relative abundance in each file and an `evidence_<file>` column per file ('ms2', or 'ms1_only' if it was gap-filled from MS1; in batches of 10 or more files only isomer groups that at least two files report by MS2 are gap-filled). The first column holds the glycans; `compare_groups` (in `candycrunch.differential`) tests the table for differences between groups of files with glycowork's `get_differential_expression` (two groups) or `get_glycanova` (three or more), as the app's Compare groups tab does. <br />
+The feature table has one row per composition of an isomer group (by its structure, or by its composition where no file names one and MS2 shows it in some file; a glycan that files report at different charge states is one row) with its top1 prediction, consensus m/z, RT, charge, composition, GlyTouCan ID, the number of files with MS2 evidence, and a flag (in-source fragment, peeling product, glucose oligomer, or other class; `compare_groups` leaves flagged features out unless `include_flagged`), followed by its relative abundance in each file and an `evidence_<file>` column per file ('ms2', or 'ms1_only' if it was gap-filled from MS1; in batches of 10 or more files only isomer groups that at least two files report by MS2 are gap-filled). The first column holds the glycans; `compare_groups` (in `candycrunch.differential`) tests the table for differences between groups of files with glycowork's `get_differential_expression` (two groups) or `get_glycanova` (three or more), as the app's Compare groups tab does. <br />
 Precursors are clustered by m/z across files within the mass tolerance, and glycan predictions are assigned to groups based on the prediction most often ranked first in the group across files (ties go to the highest probability summed over the group), which rows of the group's composition without a prediction also take. Useful for retention time correction but cannot correct LC runs in cases where noise exceeds signal. <br />
 
 The algorithm operates under the assumption that the same structures should elute at a given RT ± intra_cat_thresh.
@@ -308,6 +314,8 @@ ranked = rank_glycopeptide_structures('EEQYNSTYR', 'N5(HexNAc(4)Hex(5)Fuc(1))', 
 - Contains other functions to manipulate glycan string representations, e.g., `domon_costello_to_fragIUPAC` <br>
 #### `differential` <br>
 - Contains `compare_groups`, differential abundance between groups of runs on a `wrap_inference_batch` feature table with glycowork's statistics <br>
+#### `reporting` <br>
+- Contains `glycan_report`, the report of a `wrap_inference_batch` batch as one workbook: glycan profiles per sample, traits, motifs, sample checks against an internal standard, and every peak <br>
 #### `model` <br>
 - Includes code for model definition, dataset handling, and data augmentation; only used in the back-end <br>
 #### `confidence` <br>

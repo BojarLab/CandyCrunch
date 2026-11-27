@@ -27,8 +27,8 @@ Each result also holds 'timing' (seconds per step: imports, load, crumbs, topk, 
 trace, metric), 'memory' (the process's GB so far) and 'peaks'/'fps' (every ground-truth peak with the structure matched to it and its similarity, every
 false positive), which tests/harness_diff.py compares between two runs.
 
-Trace (stage where each ground-truth peak was lost, in pipeline order): no_ms2 (no MS2 spectrum within 0.5 m/z and 1 min, or with accurate survey
-scans none of the glycan on its own MS1 maximum and those of the glycan within 1 min nearer other peaks), no_cluster, composition_not_candidate,
+Trace (stage where each ground-truth peak was lost, in pipeline order): no_ms2 (no MS2 spectrum within 0.5 m/z and 1 min, or none of the glycan (on ion-trap
+survey scans: of the ion) on its own MS1 maximum and those of the glycan within 1 min nearer other peaks), no_cluster, composition_not_candidate,
 model_no_composition (no structure of the composition in the model's raw top 25), below_pred_thresh (in the top 25, but no prediction survives
 pred_thresh / the class veto), domain_filter, other_composition_chosen (the spectrum is reported with another composition), crumbs_gate, deduplicated,
 finalize (ppm / RT / merge steps), matched_elsewhere (a reported row is near, but the one-to-one matching gave it to another peak or it lies just outside the
@@ -741,15 +741,16 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
     loaded = captured.get('loaded', pd.DataFrame(columns = ['m/z', 'RT']))
     lmz = loaded['m/z' if 'm/z' in loaded.columns else 'reducing_mass'].values
     lz = loaded['precursor_charge'].values.astype(float) if 'precursor_charge' in loaded.columns else np.full(len(loaded), np.nan)
-    # With accurate survey scans, the MS2 of a peak's ion within 1 min may all lie on another maximum of the ion (an isomer, a tail), where the pipeline
-    # reports them, while the peak itself was never fragmented. Its own maximum is found as tests/audit_gt.py finds it (its Run reads a file: here it
-    # takes the spectra wrap_inference loaded, without the MS2 peaks it does not need, and the module's loader is put back once it has)
-    run = None
-    if loaded.attrs.get('detected_ms1_trap') in ('orbitrap', 'tof') and loaded.attrs.get('ms1') is not None and len(loaded):
+    # The MS2 of a peak's ion within 1 min may all lie on another maximum of the ion (an isomer, a tail), where the pipeline reports them, while the
+    # peak itself was never fragmented. Its own maximum is found as tests/audit_gt.py finds it (its Run reads a file: here it takes the spectra
+    # wrap_inference loaded, without the MS2 peaks it does not need, and the module's loader is put back once it has)
+    run, accurate = None, loaded.attrs.get('detected_ms1_trap') in ('orbitrap', 'tof')
+    if loaded.attrs.get('ms1') is not None and len(loaded):
         import tests.audit_gt as ag
         load, ag.load_spectra_filepath = ag.load_spectra_filepath, lambda *args, **kwargs: loaded.assign(peak_d = None)
         run = ag.Run('')
         ag.load_spectra_filepath = load
+        run = run if run.ms1 is not None else None
         # Some runs read every precursor 10-20 ppm off the ground truth's masses (calibration): their median offset over the MS2 within 1 min and 50 ppm
         # of a peak's m/z
         off = np.concatenate([((lmz - m) / m)[(np.abs(loaded['RT'].values - r) <= 1) & (np.abs(lmz - m) <= 5e-5 * m)] for m, r in zip(gt['Mass'], gt[rt_col])] + [[]])
@@ -841,17 +842,20 @@ def trace_file(captured, preds, gt, rt_col, sign = -1, vocabulary = None):
             # 0.5 m/z (another glycan, or an isotope of one, which accurate survey scans resolve from this one) do not count: the pipeline reports them
             # at their own mass. A peak without a maximum, or with spectra of its glycan nearer to it than to any other peak, keeps the 1-min rule: its
             # ground-truth RT up to 1 min off its peak, or its mass given to 0.1, put the maximum beside its own MS2, and the metric still matches it
-            # to a row there
+            # to a row there. Ion-trap survey scans merge an ion's isotopes, and their MS2 read the precursor 0.1-0.4 m/z off: the maximum is read on the
+            # envelope as audit_gt reads it (M-0.3 to M+1.3, per isotope where the trap resolves them), and every MS2 of the 1-min rule counts as its own
             z, tol = int(abs(gzz)) if gzz == gzz and gzz else 1, max(2e-5 * gmz, 0.01)
-            mx = sorted((m for m in run.maxima(sum(run.trace(gmz + j * ISOTOPE_SPACING / z - tol, gmz + j * ISOTOPE_SPACING / z + tol) for j in range(3)))
-                         if abs(m['RT'] - grt) <= 0.3), key = lambda m: abs(m['RT'] - grt))
+            trace = sum(run.trace(gmz + j * ISOTOPE_SPACING / z - tol, gmz + j * ISOTOPE_SPACING / z + tol) for j in range(3)) if accurate else run.envelope(gmz, z)
+            mx = sorted((m for m in run.maxima(trace) if abs(m['RT'] - grt) <= 0.3), key = lambda m: abs(m['RT'] - grt))
             if mx:
-                m1, pol = z1(np.array([gmz]), np.array([gzz]), sign)[0], np.sign(gzz) if gzz == gzz and gzz else sign
-                ions = np.array([(m1 + (k - 1) * pol * PROTON_MASS) / k + j * ISOTOPE_SPACING / k for k in range(1, 5) for j in (0, 1)] + [gmz + j * ISOTOPE_SPACING / z for j in (2, 3)]
-                                + [gmz + ISOTOPE_SPACING / k for k in range(1, 5)])
-                # (a mass given to fewer decimals, 0.1 in some maps, lies anywhere within half its last digit)
-                digits = next(d for d in range(5) if abs(gmz - round(gmz, d)) < 1e-6 or d == 4)
-                own = (np.abs(lmz[:, None] - ions * (1 + shift)) <= np.maximum(2e-5 * ions, 0.01) + 0.5 * 10.0 ** -digits).any(1)
+                own = hit
+                if accurate:
+                    m1, pol = z1(np.array([gmz]), np.array([gzz]), sign)[0], np.sign(gzz) if gzz == gzz and gzz else sign
+                    ions = np.array([(m1 + (k - 1) * pol * PROTON_MASS) / k + j * ISOTOPE_SPACING / k for k in range(1, 5) for j in (0, 1)] + [gmz + j * ISOTOPE_SPACING / z for j in (2, 3)]
+                                    + [gmz + ISOTOPE_SPACING / k for k in range(1, 5)])
+                    # (a mass given to fewer decimals, 0.1 in some maps, lies anywhere within half its last digit)
+                    digits = next(d for d in range(5) if abs(gmz - round(gmz, d)) < 1e-6 or d == 4)
+                    own = (np.abs(lmz[:, None] - ions * (1 + shift)) <= np.maximum(2e-5 * ions, 0.01) + 0.5 * 10.0 ** -digits).any(1)
                 fragmented = (own & (lrt >= mx[0]['window'][0]) & (lrt <= mx[0]['window'][1])).any()
                 if not fragmented:
                     nearer = np.zeros(hit.sum(), dtype = bool)

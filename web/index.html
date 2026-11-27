@@ -116,7 +116,7 @@ footer a, header a { color: var(--accent); }
 
 <script type="module">
 // Options the CLI has that the page sets itself or that cannot run in a browser (one process only)
-const HIDDEN = new Set(['spectra_filepath', 'output', 'n_jobs']);
+const HIDDEN = new Set(['spectra_filepath', 'output', 'n_jobs', 'report', 'internal_standard']);
 // Shown first; every other option of the CLI goes under More options
 const PRIMARY = ['glycan_class', 'mode', 'modification', 'sample_prep', 'lc', 'trap'];
 const $ = (id) => document.getElementById(id);

@@ -204,6 +204,22 @@ def one_file_per_run(paths):
     return [p for i, p in enumerate(paths) if best[runs[i]] == i]
 
 
+def run_labels(paths):
+    """the run name of each spectra file of a batch, as wrap_inference_batch names its files, their tables, and the feature table's columns: the file's
+    name, with its position in the list where files in different folders share one\n
+   | Arguments:
+   | :-
+   | paths (list): the spectra files, in the batch's order\n
+   | Returns:
+   | :-
+   | Returns the run names in the same order
+   """
+    labels = [os.path.splitext(os.path.basename(os.path.normpath(p)))[0] for p in paths]
+    while len(set(labels)) < len(labels):
+        labels = [label if labels.count(label) == 1 else f"{label}_{i}" for i, label in enumerate(labels)]
+    return labels
+
+
 def read_mzml(filepath, centroid_levels = ()):
     """iterates over the spectra of an .mzML file\n
    | Arguments:

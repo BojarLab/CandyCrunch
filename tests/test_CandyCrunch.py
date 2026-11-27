@@ -663,6 +663,10 @@ def test_candycrunch_batch(batch_set, result_collector, verbose):
         assert np.mean(name_scores) > BATCH_F1_THRESHOLDS.get(name, AVG_THRESHOLD)
     # Feature table: one row per isomer group with per-file abundances and evidence
     assert {'top1_pred', 'm/z', 'RT', 'n_files_ms2', 'flag'}.issubset(combined.columns)
+    # A glycan a file reports by its composition alone, with MS2, is a feature too
+    compositions = list(combined['composition'])
+    assert all(c in compositions for label in labels for c, top, evidence in zip(outputs[label][0]['composition'], outputs[label][0]['top1_pred'], outputs[label][0]['evidence'])
+               if top is None and evidence == 'ms2' and isinstance(c, dict) and c)
     assert all(label in combined.columns and f'evidence_{label}' in combined.columns for label in labels)
     assert (combined['n_files_ms2'] > 0).all()
 

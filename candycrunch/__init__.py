@@ -1,12 +1,16 @@
 from importlib.metadata import distribution, PackageNotFoundError
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import time
 import warnings
 package = distribution("candycrunch")
-__version__ = package.version
+# (an editable install keeps the metadata of the day it was made, and which copy of it a script finds depends on the folder it runs from)
+pyproject = pathlib.Path(__file__).parents[1] / "pyproject.toml"
+own = re.search(r'^version = "([^"]+)"', pyproject.read_text(encoding = "utf-8"), re.M) if pyproject.exists() and 'name = "candycrunch"' in pyproject.read_text(encoding = "utf-8") else None
+__version__ = own.group(1) if own else package.version
 # CandyCrunch's dev version follows glycowork's dev branch, whose version stays the same over many commits, so a stale glycowork is told by the
 # commit it was installed from: GitHub is asked how many commits glycowork's dev has beyond it when that commit changed, when CandyCrunch's files
 # changed (a pull or reinstall; at most hourly, as editing them changes them too), else once a day, and the answer is kept in ~/.candycrunch so that

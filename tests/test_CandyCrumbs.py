@@ -8,7 +8,8 @@ from collections import Counter
 import numpy as np
 from pyteomics import mass
 from candycrunch.analysis import CandyCrumbs, get_fragment_mass, glycan_to_graph_monos, derivatization_sites, DERIVATIZATION_MASSES, \
-    build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, glycan_splits, O_SITE_GLYCANS, supporting_ions, WATER_MASS, \
+    build_glycopeptide_input, rank_glycopeptide_structures, rank_glycopeptide_compositions, rank_glycopeptide_sites, glycan_splits, O_SITE_GLYCANS, O_SITE_OCCUPANCY, \
+    O_OCCUPANCY_WEIGHT, supporting_ions, WATER_MASS, \
     mono_attributes, smiles_mono_attributes, \
     CHAIN_IONS, domon_costello_to_label, deisotope_ms2, \
     peptide_to_glycowork, infer_glycosites, AA_masses, fragment_residue_mass, backbone_ions, generate_atomic_frags, get_initial_global_mods, input_to_graph, glycopeptide_string_to_input, extend_masses, \
@@ -457,6 +458,17 @@ def test_rank_glycopeptide_sites_splits_and_priors():
     assert abs(shed - (z[2] + gm)) / shed * 1e6 < 20
     df = rank_glycopeptide_sites(pep, ['H1N1A1'], {c[0] + gm: 2e4, c[2] + gm: 2e4, z[0]: 4e4, shed: 1e6, 1000.0: 5e5}, charge = 3, glycan_class = 'O', mass_threshold_ppm = 20)
     assert df['glycosites'][0] == [0] and df.set_index(df['glycosites'].map(tuple))['site_ions'][(3,)] == 0
+
+
+def test_rank_glycopeptide_sites_occupancy():
+    # without ions to decide, an H2N2 on a peptide with two Thr is two T antigens, as a Thr mostly carries a glycan (O_SITE_OCCUPANCY), and on two Ser one core 2 glycan, as a
+    # Ser mostly does not; without the occupancy both stay one glycan, as each further glycan costs its log frequency
+    space = [{'HexNAc': 1}, {'Hex': 1, 'HexNAc': 1}, {'Hex': 2, 'HexNAc': 2}]
+    flat = {composition_to_mass({'HexNAc': 1}) - WATER_MASS + PROTON_MASS: 100.0}
+    args = {'charge': 3, 'glycan_class': 'O', 'mass_threshold_ppm': 20, 'glycan_space': space}
+    assert rank_glycopeptide_sites('TPATPGAPGK', ['H2N2'], flat, **args)['glycans'][0] == ['H1N1', 'H1N1']
+    assert rank_glycopeptide_sites('SPASPGAPGK', ['H2N2'], flat, **args)['glycans'][0] == ['H2N2']
+    assert rank_glycopeptide_sites('TPATPGAPGK', ['H2N2'], flat, occupancy_weight = 0, **args)['glycans'][0] == ['H2N2']
 
 
 def test_glycopeptide_nsite_pieces():

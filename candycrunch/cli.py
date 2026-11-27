@@ -51,6 +51,8 @@ def build_parser():
     parser.add_argument('--n_jobs', help='Number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default: 1', type=int, default=1)
     parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions; default: False', type=str_to_bool, required=False)
     parser.add_argument('--composition_format', help="How the output tables write compositions: dict ({'Hex': 5, 'HexNAc': 4, 'dHex': 1}), names (Hex5HexNAc4dHex1), or letters (H5N4F1; A Neu5Ac, G Neu5Gc, S sulfate); default: dict", type=str, choices=['dict', 'names', 'letters'], default='dict')
+    parser.add_argument('--report', help='Several files only: also write a report of the batch for the people whose samples it measured, an .xlsx workbook with the glycan profile of every sample (with SNFG drawings), its traits and motifs, sample checks, and every peak with what it is', type=str, required=False)
+    parser.add_argument('--internal_standard', help='With --report: internal standards spiked into every sample, space-separated, each a composition, optionally with its charge and RT in minutes (e.g., H5N3A2 or H5N3A2,-2,17.1); the first is the reference of every sample\'s glycan amount, and of an ion that comes with it at a constant ratio only what a sample holds clearly above that background stays in the profile', type=str, nargs='+', required=False)
     parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)
     return parser
 
@@ -70,6 +72,12 @@ def main(argv=None):
         parser.error(f'--output {args.output} cannot be written ({e.strerror}); close it if another program has it open, or choose another path')
     if not existed:
         os.remove(args.output)
+    if args.report and not args.report.endswith('.xlsx'):
+        parser.error('--report has to end with .xlsx')
+    if args.report and not os.path.isdir(os.path.dirname(os.path.abspath(args.report))):
+        parser.error(f'the folder of --report {args.report} does not exist')
+    if args.internal_standard and not args.report:
+        parser.error('--internal_standard goes with --report')
     # Windows shells pass wildcards (data\*.mzML) on as typed; they are expanded here, as other shells do
     args.spectra_filepath = [q for p in args.spectra_filepath for q in (sorted(glob.glob(p)) or [p] if any(c in p for c in '*?[') and not os.path.exists(p) else [p])]
     # A .d or Waters .raw folder is one run (a shell completes it with a trailing separator); any other folder gives its runs, but not the ._ files of
@@ -84,6 +92,19 @@ def main(argv=None):
     missing = [f for f in filepaths if not os.path.exists(f)]
     if missing:
         parser.error(f"not found: {', '.join(missing)}")
+    if args.report and len(filepaths) < 2:
+        parser.error('--report needs several files (a batch)')
+    standards = []
+    for value in args.internal_standard or []:
+        from glycowork.motif.processing import canonicalize_composition
+        from glycowork.motif.tokenization import composition_to_mass
+        parts = value.split(',')
+        try:
+            composition = canonicalize_composition(parts[0])
+            composition_to_mass(composition)
+            standards.append({'composition': composition, 'charge': int(parts[1]) if len(parts) > 1 and parts[1] else None, 'rt': float(parts[2]) if len(parts) > 2 and parts[2] else None})
+        except (ValueError, KeyError):
+            parser.error(f'--internal_standard {value}: expected a composition, optionally with its charge and RT in minutes (e.g., H5N3A2 or H5N3A2,-2,17.1)')
     # One reducing end is that end, several side by side a list (the first being the run's own, which --mass_tag belongs to)
     ends = args.modification or []
     if (args.mass_tag is not None) != (ends[:1] == ['custom']):
@@ -100,7 +121,7 @@ def main(argv=None):
     # wrap_inference takes a free reducing end as a custom label without mass, as the app does
     ends = ['custom' if m == 'unreduced' else m for m in ends]
     args.modification = (ends[0] if len(ends) == 1 else ends) if ends else None
-    args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'composition_format', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs')}
+    args_dict = {k:v for k, v in vars(args).items() if v is not None and k not in ('spectra_filepath', 'output', 'mode', 'filter_out', 'plot_glycans', 'composition_format', 'intra_cat_thresh', 'top_n_isomers', 'n_jobs', 'report', 'internal_standard')}
     # wrap_inference takes the ion mode from the sign of max_charge
     if args.mode or args.max_charge:
         args_dict['max_charge'] = abs(args.max_charge or 3) * (1 if args.mode == 'positive' else -1)
@@ -138,6 +159,12 @@ def main(argv=None):
             # (openpyxl, a dependency, writes text as text; xlsxwriter, which pandas takes where installed, turns the references into hyperlinks and
             # leaves a cell empty where they are longer than Excel's 255 characters for a link)
             df_flat.to_excel(path, index=False, engine='openpyxl')
+    if args.report:
+        from candycrunch.reporting import glycan_report
+        ends = args.modification if isinstance(args.modification, list) else [args.modification or 'reduced']
+        settings = {'CandyCrunch': __version__, 'glycan class': ' and '.join(args.glycan_class), 'reducing end': ' and '.join(ends), 'sample preparation': args.sample_prep or 'underivatized', 'LC': args.lc or 'PGC'}
+        glycan_report(combined_batch, inference_dfs, args.report, spectra_filepaths=filepaths, standards=standards, modification=args.modification or 'reduced',
+                      sample_prep=args.sample_prep or 'underivatized', settings=settings)
 
 if __name__ == '__main__':
     main()

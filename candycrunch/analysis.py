@@ -4097,6 +4097,15 @@ N_TERMINAL_O_GLYCOPROTEASES = {'IMPa', 'OgpA', 'OpeRATOR', 'SmE'}
 O_SITE_GLYCANS = {'H1N1': 910, 'N1': 846, 'H1N1A1': 420, 'H2N2': 360, 'H1N1A2': 209, 'H2N2A2': 137, 'H2N2A1': 122, 'H2N2F1A1': 65, 'H1N2': 59, 'H1N2A1': 38, 'H2N2F1': 37,
                   'H1N1F1': 35, 'N2': 32, 'H2N2F1A2': 20, 'H1N3A1': 15, 'H2N3F1A1': 9, 'H2N2A3': 9, 'N1A1': 7, 'H1N2F1': 5, 'H1N3': 5, 'H2N3F1': 4, 'H1N3F1': 4, 'H1N3F1A1': 4}
 O_SITE_PRIOR_WEIGHT = 0.01
+# How often a Ser or Thr of these peptides carries a glycan at all (sites occupied, sites), from the same validated O-glycopeptides' fully localized placements. The site prior
+# above is the frequency of a glycan given that its site is occupied, so alone it charged every further glycan its log frequency and an empty site nothing, and a total such as
+# H2N2 stayed one core 2 where the paired scans' ions between two Thr sides with two T antigens (68 glycopeptides with one curated placement and two glycans, all read as one).
+# Each occupied site adds O_OCCUPANCY_WEIGHT x the log odds of its residue. Learned on four of the five proteins and tested on the fifth (5,919 glycopeptides of 34 samples):
+# the validated placement first in 0.759 of 903 glycopeptides with several placements (0.720 without; weight 0.01: 0.761, 0.02: 0.743), and the collisional HexNAc oxonium
+# ratio at glycopeptide level (75th percentile < 0.6: no GlcNAc; 25th percentile > 5: a GlcNAc) contradicting the best placement's glycans in 28 glycopeptides (39 without;
+# 0.01: 33, 0.02: 49); the O-glycoprotease cut, 0 either way. Thr with Pro at +3 (0.96-0.98 occupied) ranks as Thr alone
+O_SITE_OCCUPANCY = {'S': (357, 1104), 'T': (2002, 2524)}
+O_OCCUPANCY_WEIGHT = 0.005
 # Oxonium ions only a glycan of two or more HexNAc makes (HexNAc2, HexHexNAc2, Hex2HexNAc2, and their Neu5Ac forms); two glycans of one HexNAc each, on two sites, never
 # make them. In the collisional scans of the Malaker lab's 34 O-glycoprotein samples one of them above 1% of the base peak (10 ppm) sits in 29% of spectra whose total
 # composition must hold such a glycan and in 1.0% of spectra with one HexNAc (HexNAc-only totals, Tn on several sites, 0.8-3.9%; adjacent Ser/Thr no more often); the
@@ -4146,7 +4155,7 @@ def glycan_splits(composition, glycan_space, max_glycans = 4, glycan_class = 'O'
 def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = None, charge = 2, candidate_sites = None, glycan_class = None,
                             fragmentation_method = None, mass_threshold = 0.2, mass_threshold_ppm = 10, top_n_peaks = None, protease = None, prior_weight = 0.1,
                             glycan_space = None, site_prior_weight = None, collisional_masses = None, extended_weight = 0.2, margin = 0.02, max_placements = 200000,
-                            n_term_modification = None):
+                            n_term_modification = None, occupancy_weight = None):
     """Ranks the placements of a glycopeptide's glycans on its candidate sites by the site-determining ions of its MS2 spectra, the backbone ions (c/z with
     electron transfer, b/y with collisional activation) that carry every glycan whose site they cover, plus priors from the protease, from how often each glycan
     sits on a site, and from the oxonium ions of its collisional scans\n
@@ -4171,6 +4180,8 @@ def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = Non
     | glycan_space (list): the glycans a site can carry, as composition dicts; given, the glycans are split anew (glycan_splits); default:None
     | site_prior_weight (float): what each glycan of a placement adds per unit of its log frequency on a site (O_SITE_GLYCANS); default:None (O_SITE_PRIOR_WEIGHT for
     |                            glycan_class 'O', else 0)
+    | occupancy_weight (float): what each occupied Ser or Thr adds per unit of the log odds that its residue carries a glycan (O_SITE_OCCUPANCY), where the glycans hold
+    |                           two or more HexNAc between them (how many glycans they are is open); default:None (O_OCCUPANCY_WEIGHT for glycan_class 'O', else 0)
     | collisional_masses (list): peak dictionaries of the glycopeptide's collisional (HCD) scans; a placement with a glycan of two or more HexNAc gains extended_weight x
     |                            the share of them holding an oxonium ion only such a glycan makes (EXTENDED_OXONIUM, 1% of the base peak or more, 10 ppm); default:None
     | extended_weight (float): see collisional_masses; default:0.2
@@ -4290,6 +4301,11 @@ def rank_glycopeptide_sites(peptide, glycans, fragment_masses, intensities = Non
     seen = sum(O_SITE_GLYCANS.values())
     canonical = {k: canonicalize_composition(composition_of[k], as_string = True) for k in placed}
     prior = np.array([sum(math.log(O_SITE_GLYCANS.get(canonical[k], 0.5) / seen) for _, k in p) for p in placements]) * site_prior_weight
+    if occupancy_weight is None:
+        occupancy_weight = O_OCCUPANCY_WEIGHT if glycan_class == 'O' else 0.0
+    if occupancy_weight and sum(composition_of[k].get('HexNAc', 0) for _, k in placements[0]) >= 2:
+        odds = {r: math.log(occupied / (sites - occupied)) for r, (occupied, sites) in O_SITE_OCCUPANCY.items()}
+        prior += occupancy_weight * np.array([sum(odds.get(peptide[s], 0.0) for s, _ in p) for p in placements])
     if protease in N_TERMINAL_O_GLYCOPROTEASES:
         prior += np.array([prior_weight if p[0][0] == 0 else 0.0 for p in placements])
     if collisional_masses:
