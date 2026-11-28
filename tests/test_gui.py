@@ -11,6 +11,17 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+def test_gui_pyside_keeps_none_alive(app):
+    """PySide6 6.12.0 drops a reference to None in every call of a method returning None; on Python 3.11, where None is not immortal, a few thousand calls
+    kill the interpreter (none_dealloc), so the gui extra leaves such a release out there"""
+    import sys
+    edit = QtWidgets.QLineEdit()
+    before = sys.getrefcount(None)
+    for _ in range(1000):
+        edit.setText('x')
+    assert sys.getrefcount(None) > before - 100, 'this PySide6 drops a reference to None in every call returning None: leave it out of the gui extra for Python < 3.12'
+
+
 def test_gui_settings_match_wrap_inference(app):
     from candycrunch import gui
     from candycrunch.prediction import wrap_inference, wrap_inference_batch

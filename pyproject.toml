@@ -39,7 +39,7 @@ dependencies = [
     "pandas>=2.2.2",
     "zstandard; python_version < '3.14'",
     "openpyxl",
-    "viscose>=0.3.2",
+    "viscose>=0.3.3",
     "glycorender",
 ]
 
@@ -51,7 +51,8 @@ Paper = "https://doi.org/10.1038/s41592-024-02314-6"
 Data = "https://doi.org/10.5281/zenodo.7940046"
 
 [project.optional-dependencies]
-gui = ["PySide6-Essentials>=6.7"]
+# (PySide6 6.12.0 drops a reference to None in every call of a method returning None, which kills Python 3.11 after a few thousand calls; None is immortal from 3.12)
+gui = ["PySide6-Essentials>=6.7,!=6.12.0; python_version < '3.12'", "PySide6-Essentials>=6.7; python_version >= '3.12'"]
 train = ["glycowork[ml]>=1.12.0", "torchmetrics"]
 
 [project.scripts]
