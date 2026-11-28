@@ -1035,15 +1035,15 @@ def test_gui_crumbs_settings_and_filtered_export(app, tmp_path, monkeypatch):
     crumbs.peaks.setPlainText('204.09	10')
     crumbs.annotate()
     assert 'candidates' not in calls[-1] and calls[-1]['metal_cations'] is False
-    # This table as CSV writes the rows a filter shows
+    # Save this table writes the rows a filter shows, in the format of the name typed
     view.filter('GlcNAc')
     assert view.proxy.rowCount() == 1
     path = str(tmp_path / 'shown.csv')
-    monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *args, **kwargs: (path, ''))
-    view.export_table('csv')
+    monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *args, **kwargs: (path, gui.EXCEL[0]))
+    view.export_table()
     assert list(pd.read_csv(path)['top1_pred']) == ['Gal(b1-4)GlcNAc']
     view.filter('')
-    view.export_table('csv')
+    view.export_table()
     assert len(pd.read_csv(path)) == 2
 
 
@@ -1226,3 +1226,73 @@ def test_gui_macos_update(app, tmp_path, monkeypatch):
             subprocess.run([sh, '-c', swap[2], 'sh', str(dead.pid), str(bundle).replace('\\', '/'), staged.replace('\\', '/')], capture_output = True)
             assert (bundle / 'Contents' / 'MacOS' / 'CandyCrunch').read_text() == ('new' if present else 'old')
             assert not (bundle.parent / '.CandyCrunch.app.old').exists() and not gui.os.path.exists(staged)
+
+
+def test_gui_report(app, tmp_path, monkeypatch):
+    """Export > Save batch report… writes glycan_report of the batch in a thread, with the app's names of its settings; a standard has to read as a
+    composition and needs the runs' files"""
+    import openpyxl
+    from PySide6.QtCore import QEventLoop
+    from PySide6.QtWidgets import QLineEdit
+    from candycrunch import gui
+    from tests.test_reporting import batch
+    features, runs = batch()
+    tables = {r: (t.assign(predictions = [[(s, 0.9)] if isinstance(s, str) else [] for s in t['top1_pred']]), [{204.09: 50.0, 290.09: 100.0}] * len(t)) for r, t in runs.items()}
+    view = gui.ResultsView(gui.GlycanImages())
+    view.set_results({'files': [str(tmp_path / f'{r}.mzML') for r in runs], 'settings': {**gui.DEFAULTS, 'glycan_class': 'O'}, 'tables': tables, 'features': features})
+    # one entry per thing saved, its format chosen in the save dialog
+    assert [a.text() for a in view.export_menu.actions() if a.text()] == ['Save this table…', 'Save all tables…', 'Save batch report…', 'Save fragment table…']
+    # a standard that is no composition, then one whose runs' files are gone, then none
+    typed, warned, done = ['H5N3A2,two', 'H5N3A2', ''], [], []
+
+    class Filled(gui.QDialog):
+        def exec(self):
+            title, standard = self.findChildren(QLineEdit)
+            title.setText('Test report')
+            standard.setText(typed.pop(0))
+            return gui.QDialog.Accepted
+
+    monkeypatch.setattr(gui, 'QDialog', Filled)
+    monkeypatch.setattr(gui.QMessageBox, 'warning', lambda parent, title, text: warned.append(text))
+    monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda *a, **k: (str(tmp_path / 'report.xlsx'), ''))
+    view.exported.connect(lambda path, error: done.append((path, error)))
+    # (QSettings of a test organization, in an INI file of its own, so that the user's settings stay as they are)
+    from PySide6.QtCore import QSettings
+    names = app.organizationName(), app.applicationName()
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path))
+    app.setOrganizationName('CandyCrunchTest')
+    app.setApplicationName('CandyCrunchTest')
+    try:
+        view.export_report()
+        assert not typed and 'expected a composition' in warned[0] and 'not where they were' in warned[1] and QSettings().value('report_title') == 'Test report'
+        while not done:
+            app.processEvents(QEventLoop.AllEvents, 50)
+    finally:
+        app.setOrganizationName(names[0])
+        app.setApplicationName(names[1])
+        QSettings.setDefaultFormat(QSettings.NativeFormat)
+    assert done == [(str(tmp_path / 'report.xlsx'), '')]
+    wb = openpyxl.load_workbook(tmp_path / 'report.xlsx')
+    about = ' '.join(str(c.value) for c in wb['About']['A'])
+    assert 'Spectra' in wb.sheetnames and about.startswith('Test report')
+    assert 'glycan class O-glycans; reducing end reduced (alditol); sample preparation underivatized; LC PGC;' in about
+    # (the app keeps each run's m/z as a column, which the spectra's precursors are read from)
+    header = [c.value for c in wb['Spectra'][1]]
+    assert all(row[header.index('Precursor m/z')] > 300 for row in wb['Spectra'].iter_rows(min_row = 2, values_only = True))
+    # the results shown stay as they were: the report annotates copies, with the tolerance the app annotates spectra at
+    assert all('fragment_tolerance' not in t.attrs for t, _ in tables.values())
+
+
+def test_gui_save_as(app, monkeypatch):
+    """One save dialog for every format of a table: the file type chosen sets the format, a name typed with another type's suffix overrides it, a name
+    without one gets the type's"""
+    from candycrunch import gui
+    formats = [gui.EXCEL, gui.SNFG_EXCEL, gui.CSV]
+    for typed, chosen, expected in (('t', gui.CSV[0], ('t.csv', 'csv')), ('t', gui.SNFG_EXCEL[0], ('t.xlsx', 'snfg')), ('t.csv', gui.EXCEL[0], ('t.csv', 'csv')),
+                                    ('t.xlsx', gui.CSV[0], ('t.xlsx', 'xlsx')), ('t.xlsx', gui.SNFG_EXCEL[0], ('t.xlsx', 'snfg')), ('', '', (None, None))):
+        offered = []
+        monkeypatch.setattr(gui.QFileDialog, 'getSaveFileName', lambda parent, title, start, filters, typed = typed, chosen = chosen: (offered.append((start, filters)), (typed, chosen))[1])
+        assert gui._save_as(None, 'Save this table', 'features', formats) == expected
+        # (Excel first, under the stem given)
+        assert offered[0][0].endswith('features.xlsx') and offered[0][1] == 'Excel (*.xlsx);;Excel with SNFG drawings (*.xlsx);;CSV (*.csv)'

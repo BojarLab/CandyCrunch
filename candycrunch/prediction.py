@@ -7854,7 +7854,8 @@ def wrap_inference_batch(spectra_filepath_list, glycan_class, intra_cat_thresh, 
             plot_glycans_excel(df_out.drop(columns = ['ms3'], errors = 'ignore').reset_index(),
                                os.path.splitext(spectra_filepath)[0] + '_output.xlsx',
                                glycan_col_num = 'top1_pred')
-        df_out.attrs['activation'] = activations[file_label]
+        # (the run's activation and fragment tolerance in Da and ppm (None: Da alone), with which the app and the batch report annotate its spectra)
+        df_out.attrs.update(activation = activations[file_label], fragment_tolerance = (fragment_tolerances[file_label][0] or mass_tolerance, fragment_tolerances[file_label][1]))
         # MS3 spectra are output like the MS2 spectra, only with spectra=True
         inference_dfs[file_label] = (df_out, spectra_out) if spectra else df_out.drop(columns = ['ms3'], errors = 'ignore')
     # Removed once the MS1 data is not needed any more, as an implicit clean-up raises a ResourceWarning

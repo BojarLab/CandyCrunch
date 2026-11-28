@@ -889,7 +889,7 @@ def _annotation_step(kind, request):
     supporting_ions of the structure; 'draw', plot_annotated_spectrum with those, as (figure, index of its spectrum's axes, None). Runs in the annotation
     process (_annotation_main), else in the panel's thread"""
     with IMPORT_LOCK:
-        from candycrunch.analysis import CandyCrumbs, plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, deisotope_ms2
+        from candycrunch.analysis import plot_annotated_spectrum, supporting_ions, resolve_spectrum_input, spectrum_hits
         # the fragment glyphs import these themselves
         import glycowork.motif.draw, glycorender.render
     glycopeptide = bool(resolve_spectrum_input(request['structure'])[0])
@@ -911,18 +911,9 @@ def _annotation_step(kind, request):
             return {'residues': [], 'candidates': []}
     # The mirrored spectrum (e.g., the EThcD scan an HCD scan triggered) is annotated as the spectrum is, deisotoped, at its own tolerance and with its own settings
     spectrum = request['mirror'] if kind == 'mirror' else request
-    # Isotope peaks stay unlabeled, as the pipeline scores deisotoped spectra: offered to CandyCrumbs, the M+1 and M+2 of carbon-rich (permethylated)
-    # fragments took cross-ring or three-cleavage labels. A pattern whose apex is more than twice its first peak keeps both: the first is a noise peak below
-    # a fragment as often as the monoisotopic peak of a heavy fragment, whose M+1 is often the most intense one (and more so when the isolation window
-    # centered the precursor's M+1); glycopeptides with bounded isotope ratios, as the glycopeptide functions score them
-    peaks = dict(zip(spectrum['mzs'], spectrum['intensities']))
-    mono = sorted({m for relabel in (False, True) for m in deisotope_ms2(peaks, max(abs(spectrum['charge']), 1), min(spectrum['tolerance'], 0.05), relabel = relabel,
-                                                                          bound_isotope_ratio = glycopeptide)})
-    # A ppm tolerance alone bounds the matches (CandyCrumbs' Da window, 0.5 by default, is then wider at any fragment m/z)
-    return CandyCrumbs(request['structure'], mono, spectrum['tolerance'] if spectrum['ppm'] is None else None, mass_threshold_ppm = spectrum['ppm'],
-                       max_cleavages = request['kwargs'].get('max_cleavages', 3), simplify = True, charge = spectrum['charge'], mass_tag = request['mass_tag'],
-                       sample_prep = request['sample_prep'], intensities = [peaks[m] for m in mono],
-                       **({k: v for k, v in request['kwargs'].items() if k != 'max_cleavages'} | (spectrum['kwargs'] if kind == 'mirror' else {})))
+    return spectrum_hits(request['structure'], dict(zip(spectrum['mzs'], spectrum['intensities'])), spectrum['charge'], spectrum['tolerance'],
+                         mass_threshold_ppm = spectrum['ppm'], mass_tag = request['mass_tag'], sample_prep = request['sample_prep'],
+                         **(request['kwargs'] | (spectrum['kwargs'] if kind == 'mirror' else {})))
 
 
 def _viscose_warp(scale, inverse):
@@ -1266,6 +1257,26 @@ def _composition_menu(menu, choose):
         action.setData(style)
 
 
+# What a table is saved as: the save dialog's file types (the first the default), as (filter, kind for ResultsView.write, suffix)
+EXCEL, SNFG_EXCEL, CSV = ('Excel (*.xlsx)', 'xlsx', '.xlsx'), ('Excel with SNFG drawings (*.xlsx)', 'snfg', '.xlsx'), ('CSV (*.csv)', 'csv', '.csv')
+
+
+def _save_as(parent, title, stem, formats):
+    """A save dialog with formats as its file types, one menu entry for every format; gives (path, kind), the kind of the file type chosen unless the
+    name typed ends in another type's suffix, and (None, None) when cancelled"""
+    path, chosen = QFileDialog.getSaveFileName(parent, title, os.path.join(QSettings().value('folder', os.path.expanduser('~')), stem + formats[0][2]),
+                                               ';;'.join(f for f, _, _ in formats))
+    if not path:
+        return None, None
+    kind, suffix = next(((k, s) for f, k, s in formats if f == chosen), formats[0][1:])
+    typed = os.path.splitext(path)[1].lower()
+    if not typed:
+        path += suffix
+    elif typed != suffix:
+        kind = next((k for _, k, s in formats if s == typed), kind)
+    return path, kind
+
+
 def _draw_in_background(owner, write, path):
     """Runs write, an export that draws every glycan of a table into Excel, in a thread: on the window's thread it froze the window for seconds to minutes
     (116 N-glycans 7-10 s, 90 glycans of a comparison 5 s), long enough for Windows to call it not responding; owner's exported signal then gives the path
@@ -1478,9 +1489,10 @@ class SpectrumPanel(QWidget):
         self.controls = QHBoxLayout()
         self.controls.setContentsMargins(6, 4, 6, 0)
         self.summary = _label('', 'hint')
-        self.summary.setWordWrap(False)
+        # Wrapped onto further lines where the panel is narrower than the summary, which on one line ran off its right edge
+        self.summary.setWordWrap(True)
         # Ignored: the summary's length changes with every annotation, and as a minimum width it resized the panel, which re-annotated it, endlessly
-        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
         self.tolerance = _spin(0.001, 2.0, 0.05, 3)
         self.tolerance.setValue(DEFAULTS['ppm_thresh'] * MZ_REF / 1e6)
         self.tolerance.setToolTip('Maximum difference between an observed peak and a theoretical fragment mass')
@@ -1858,14 +1870,11 @@ class SpectrumPanel(QWidget):
         """Writes the fragment table as CSV (UTF-8 with BOM, so Excel reads the Greek letters of fragment names) or Excel"""
         if not self.fragment_records:
             return
-        path, chosen = QFileDialog.getSaveFileName(self, 'Export fragment table', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'fragments.csv'),
-                                                   'CSV (*.csv);;Excel (*.xlsx)')
+        path, kind = _save_as(self, 'Save fragment table', 'fragments', [EXCEL, CSV])
         if not path:
             return
-        if not os.path.splitext(path)[1]:
-            path += '.xlsx' if chosen.startswith('Excel') else '.csv'
         try:
-            if path.lower().endswith('.xlsx'):
+            if kind == 'xlsx':
                 self.fragment_frame().to_excel(path, index = False)
             else:
                 self.fragment_frame().to_csv(path, index = False, encoding = 'utf-8-sig')
@@ -2953,13 +2962,12 @@ class ResultsView(QWidget):
         self.dataset.blockSignals(False)
         self.dataset.setVisible(self.dataset.count() > 1)
         self.export_menu.clear()
-        for text, kind in (('This table as CSV…', 'csv'), ('This table as Excel…', 'xlsx'), ('This table as Excel with SNFG drawings…', 'snfg')):
-            self.export_menu.addAction(text, lambda kind = kind: self.export_table(kind))
+        self.export_menu.addAction('Save this table…', self.export_table)
         if payload['features'] is not None:
-            self.export_menu.addAction('All tables as CSV…', lambda: self.export_all('.csv'))
-            self.export_menu.addAction('All tables as Excel…', lambda: self.export_all('.xlsx'))
+            self.export_menu.addAction('Save all tables…', self.export_all)
+            self.export_menu.addAction('Save batch report…', self.export_report)
         self.export_menu.addSeparator()
-        self.export_menu.addAction('Fragment table of the MS2 spectrum…', self.spectrum.export_fragments)
+        self.export_menu.addAction('Save fragment table…', self.spectrum.export_fragments)
         self.show_dataset()
         self.experiment_shown.emit(payload['name'])
 
@@ -3704,12 +3712,9 @@ class ResultsView(QWidget):
             # (openpyxl writes text as text; xlsxwriter, which pandas takes where installed, turns the references into hyperlinks and leaves a cell empty where they are longer than Excel's 255 characters for a link)
             df.map(lambda v: str(v) if isinstance(v, (list, tuple, dict, set)) else v).to_excel(path, index = False, engine = 'openpyxl')
 
-    def export_table(self, kind):
+    def export_table(self):
         label = self.dataset.currentData()
-        stem = 'features' if label == FEATURES else label
-        suffix = '.csv' if kind == 'csv' else '.xlsx'
-        path, _ = QFileDialog.getSaveFileName(self, 'Export table', os.path.join(QSettings().value('folder', os.path.expanduser('~')), stem + suffix),
-                                              'CSV (*.csv)' if kind == 'csv' else 'Excel (*.xlsx)')
+        path, kind = _save_as(self, 'Save this table', 'features' if label == FEATURES else label, [EXCEL, SNFG_EXCEL, CSV])
         # The table as shown: with a filter typed, its rows (it wrote every row), in the order shown
         frame, shown = self.current_frame(), self.proxy.rowCount()
         if shown < self.model.rowCount():
@@ -3729,13 +3734,12 @@ class ResultsView(QWidget):
             finally:
                 QApplication.restoreOverrideCursor()
 
-    def export_all(self, suffix):
+    def export_all(self):
         """Same file layout as candycrunch_predict: the feature table, then <name>_<run> per run"""
-        path, _ = QFileDialog.getSaveFileName(self, 'Export all tables', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'candycrunch' + suffix),
-                                              'CSV (*.csv)' if suffix == '.csv' else 'Excel (*.xlsx)')
+        path, kind = _save_as(self, 'Save all tables', 'candycrunch', [EXCEL, CSV])
         if not path:
             return
-        stem = os.path.splitext(path)[0]
+        stem, suffix = os.path.splitext(path)[0], '.csv' if kind == 'csv' else '.xlsx'
         self.status.emit('Exporting…')
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -3748,6 +3752,73 @@ class ResultsView(QWidget):
             QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
         finally:
             QApplication.restoreOverrideCursor()
+
+    def export_report(self):
+        """glycan_report of the experiment's batch: the glycan profile of every sample, motifs, sample checks, every peak, and each glycan's evidence with its
+        annotated spectrum, as one workbook for the people whose samples it measured; written in a thread, as it reads the runs again for a standard and
+        annotates a spectrum per glycan (Karl_cc's 42 runs: about a minute)"""
+        payload, settings = self.payload, self.payload['settings']
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Batch report')
+        form = QFormLayout(dialog)
+        title, standard = QLineEdit(QSettings().value('report_title', 'Glycan profiles')), QLineEdit()
+        standard.setPlaceholderText('None, or e.g. H5N3A2 or H5N3A2,-2,17.1')
+        standard.setToolTip("Internal standards spiked into every sample, separated by spaces, each a composition, optionally with its charge and RT in minutes; the first is the reference of every sample's glycan amount")
+        form.addRow('Title', title)
+        form.addRow('Internal standard', standard)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        dialog.setMinimumWidth(460)
+        while True:
+            if dialog.exec() != QDialog.Accepted:
+                return
+            with IMPORT_LOCK:
+                from candycrunch.reporting import read_standard
+            try:
+                standards = [read_standard(x) for x in standard.text().split()]
+            except ValueError as error:
+                QMessageBox.warning(self, 'Batch report', str(error))
+                continue
+            # (a standard is measured in the runs' survey scans, which the results do not keep)
+            missing = [f for f in payload['files'] if not os.path.exists(f)] if standards else []
+            if missing:
+                QMessageBox.warning(self, 'Batch report', f'The internal standard is measured in the runs\' files, and {len(missing)} of them are not where they were, e.g. {missing[0]}')
+                continue
+            break
+        QSettings().setValue('report_title', title.text().strip() or 'Glycan profiles')
+        path, _ = _save_as(self, 'Save batch report', 'report', [EXCEL])
+        if not path:
+            return
+        # The settings by the names the app gives them; the report adds what the runs tell (ion mode, mass analyzers, activation)
+        named = lambda choices, value: next((label for label, v in choices if v == value), str(value))
+        lower = lambda text: text[0].lower() + text[1:] if len(text) > 1 and text[1].islower() else text
+        classes, ends = settings.get('glycan_class', 'O'), settings.get('modification', 'reduced')
+        ends = '+'.join(ends) if isinstance(ends, (list, tuple)) else ends
+        end = (lower(named(REDUCING_ENDS, 'unreduced')) if not settings.get('mass_tag') else f"label of {settings['mass_tag']} Da") if ends == 'custom' else lower(named(REDUCING_ENDS, ends))
+        shown = {'glycan class': ' and '.join(named(GLYCAN_CLASSES, c) for c in ([classes] if isinstance(classes, str) else classes)), 'reducing end': end,
+                 'sample preparation': lower(named(SAMPLE_PREPS, settings.get('sample_prep', 'underivatized'))), 'LC': lower(named(LCS, settings.get('lc', 'PGC')))}
+        # Copies, as curation may go on while the report is written; a table of results made before the batch kept each run's fragment tolerance takes the
+        # tolerance the spectra here are annotated at
+        trap = settings.get('trap')
+        tolerance = {'orbitrap': (0.02, 15.0), 'other': (0.05, None)}.get(trap, (settings.get('ppm_thresh', DEFAULTS['ppm_thresh']) * MZ_REF / 1e6, None))
+        tables = {}
+        for run, (table, spectra) in payload['tables'].items():
+            table = table.copy()
+            table.attrs.setdefault('fragment_tolerance', tolerance)
+            tables[run] = (table, spectra)
+        features = payload['features'].copy()
+
+        def write():
+            with IMPORT_LOCK:
+                from candycrunch.reporting import glycan_report
+                import candycrunch.prediction, candycrunch.analysis, candycrunch.differential, glycowork.motif.annotate, glycowork.motif.draw
+            glycan_report(features, tables, path, spectra_filepaths = payload['files'], standards = standards, modification = settings.get('modification', 'reduced'),
+                          sample_prep = settings.get('sample_prep', 'underivatized'), title = title.text().strip() or 'Glycan profiles', settings = shown)
+
+        self.status.emit(f'Writing the report of {len(tables)} runs, with an annotated spectrum per glycan…')
+        _draw_in_background(self, write, path)
 
 
 class CrumbsTab(QWidget):
@@ -4389,13 +4460,11 @@ class CompareTab(QWidget):
         else:
             self.table.sortByColumn(self.table.horizontalHeader().sortIndicatorSection(), self.table.horizontalHeader().sortIndicatorOrder())
         self.proxy.set_needle(self.search.text())
-        menu.addAction('Results as CSV…', lambda: self.export_results('csv'))
-        menu.addAction('Results as Excel…', lambda: self.export_results('xlsx'))
-        menu.addAction('Results as Excel with SNFG drawings…', lambda: self.export_results('snfg'))
+        menu.addAction('Save comparison…', self.export_results)
         menu.addSeparator()
-        menu.addAction('Volcano plot as image…', self.save_plot)
+        menu.addAction('Save volcano plot…', self.save_plot)
         if two:
-            menu.addAction('Volcano plot (glycowork)…', self.save_volcano)
+            menu.addAction('Save volcano plot (glycowork)…', self.save_volcano)
         self.draw_volcano(self.volcano.new_figure())
         self.select_row(keep_row if keep_row is not None and keep_row < len(df) else (self.proxy.mapToSource(self.proxy.index(0, 0)).row() if len(df) else None))
 
@@ -4514,12 +4583,9 @@ class CompareTab(QWidget):
             self.posthoc.setSortingEnabled(True)
             self.posthoc.resizeColumnsToContents()
 
-    def export_results(self, kind):
+    def export_results(self):
         result = self.result
-        stem = '_vs_'.join(re.sub(r'[^\w.-]+', '_', g) for g in result['groups'])
-        suffix = '.csv' if kind == 'csv' else '.xlsx'
-        path, _ = QFileDialog.getSaveFileName(self, 'Export comparison', os.path.join(QSettings().value('folder', os.path.expanduser('~')), stem + suffix),
-                                              'CSV (*.csv)' if kind == 'csv' else 'Excel (*.xlsx)')
+        path, kind = _save_as(self, 'Save comparison', '_vs_'.join(re.sub(r'[^\w.-]+', '_', g) for g in result['groups']), [EXCEL, SNFG_EXCEL, CSV])
         if not path:
             return
         posthoc = pd.concat([table.assign(Glycan = glycan) for glycan, table in result['posthoc'].items()], ignore_index = True) if result['posthoc'] else None
@@ -4552,7 +4618,7 @@ class CompareTab(QWidget):
             QApplication.restoreOverrideCursor()
 
     def save_plot(self):
-        path, _ = QFileDialog.getSaveFileName(self, 'Save plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.png'),
+        path, _ = QFileDialog.getSaveFileName(self, 'Save volcano plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.png'),
                                               'PNG image (*.png);;SVG image (*.svg);;PDF (*.pdf)')
         if path:
             figure = vc.Figure(self.volcano.figure.width / 72, self.volcano.figure.height / 72, PALETTE)
@@ -4563,7 +4629,7 @@ class CompareTab(QWidget):
                 QMessageBox.critical(self, 'Export', f'Could not write {path}:\n{error}')
 
     def save_volcano(self):
-        path, _ = QFileDialog.getSaveFileName(self, 'Save volcano plot', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.svg'),
+        path, _ = QFileDialog.getSaveFileName(self, 'Save volcano plot (glycowork)', os.path.join(QSettings().value('folder', os.path.expanduser('~')), 'volcano.svg'),
                                               'SVG image (*.svg);;PDF (*.pdf);;PNG image (*.png)')
         if not path:
             return

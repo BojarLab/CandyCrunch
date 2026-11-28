@@ -5422,6 +5422,36 @@ def deisotope_ms2(peaks, precursor_charge, mass_tolerance = 0.2, sum_intensities
     return dict(sorted(deisotoped.items(), key = lambda x: x[1], reverse = True))
 
 
+def spectrum_hits(input_string, peaks, charge, mass_threshold = 0.5, mass_threshold_ppm = None, mass_tag = None, sample_prep = 'underivatized', max_cleavages = 3, **kwargs):
+    """CandyCrumbs of an MS2 spectrum as the app and the batch report draw it: on its monoisotopic peaks, so isotope peaks stay unlabeled\n
+    | Arguments:
+    | :-
+    | input_string (string/dict): anything CandyCrumbs accepts, i.e., a glycan, a composition, a peptide*glycan* string, or an input dict
+    | peaks (dict): MS2 spectrum as m/z : intensity
+    | charge (int): signed precursor charge
+    | mass_threshold (float): fragment tolerance in Da, also the window of deisotoping (at most 0.05); default:0.5
+    | mass_threshold_ppm (float): fragment tolerance in ppm, which then bounds the matches alone; default:None
+    | mass_tag (float): mass of the glycan label or reducing end modification, as in CandyCrumbs; default:None
+    | sample_prep (string): underivatized/permethylated/deuteropermethylated/peracetylated; default:'underivatized'
+    | max_cleavages (int): maximum concurrent fragmentations per mass; default:3
+    | **kwargs: passed straight to CandyCrumbs, e.g., fragmentation_method, disable_X_cross_rings, sialic_derivatization\n
+    | Returns:
+    | :-
+    | Returns the CandyCrumbs hit_dict, for plot_annotated_spectrum
+    """
+    # As the pipeline scores deisotoped spectra: offered to CandyCrumbs, the M+1 and M+2 of carbon-rich (permethylated) fragments took cross-ring or
+    # three-cleavage labels. A pattern whose apex is more than twice its first peak keeps both: the first is a noise peak below a fragment as often as the
+    # monoisotopic peak of a heavy fragment, whose M+1 is often the most intense one (and more so when the isolation window centered the precursor's M+1);
+    # glycopeptides with bounded isotope ratios, as the glycopeptide functions score them
+    glycopeptide = bool(resolve_spectrum_input(input_string)[0])
+    mono = sorted({m for relabel in (False, True) for m in deisotope_ms2(peaks, max(abs(charge), 1), min(mass_threshold, 0.05), relabel = relabel,
+                                                                          bound_isotope_ratio = glycopeptide)})
+    # (a ppm tolerance alone bounds the matches: CandyCrumbs' Da window, 0.5 by default, is then wider at any fragment m/z)
+    return CandyCrumbs(input_string, mono, None if mass_threshold_ppm is not None else mass_threshold, mass_threshold_ppm = mass_threshold_ppm,
+                       max_cleavages = max_cleavages, simplify = True, charge = charge, mass_tag = mass_tag, sample_prep = sample_prep,
+                       intensities = [peaks[m] for m in mono], **kwargs)
+
+
 def plot_annotated_spectrum(input_string, spectrum, intensities = None, mass_threshold = None,
                             max_cleavages = 3, mass_tag = None, sample_prep = 'underivatized',
                             disable_global_mods = False, prior_weight = 1.0, charge = None, ax = None,

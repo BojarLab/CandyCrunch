@@ -115,8 +115,9 @@ def test_glycan_report(tmp_path, monkeypatch):
     motifs = report['motifs'].set_index('Motif')
     core3 = glycans[glycans['Motifs'].str.contains('Oglycan_core3')][samples].fillna(0).sum()
     assert np.allclose(motifs.loc['Oglycan_core3', samples], core3) and {'Oglycan_core1', 'Oglycan_core2'} <= set(motifs.index)
-    # the glycan known by its composition alone carries its monosaccharides, which the Motifs sheet counts
-    assert {'Neu5Ac', 'S', 'dHex'} <= set(glycans.loc[glycans['Structure'] == '', 'Motifs'].item().split(', ')) and 'S' in motifs.index
+    # the glycan known by its composition alone carries its monosaccharides, which the Motifs sheet counts (its dHex as Fuc, where glycowork merges the two rows)
+    carried = set(glycans.loc[glycans['Structure'] == '', 'Motifs'].item().split(', '))
+    assert {'Neu5Ac', 'S'} <= carried and carried & {'Fuc', 'dHex'} and 'S' in motifs.index
     # at glycowork's default feature set: its named motifs and the monosaccharides and disaccharides ('exhaustive')
     from glycowork.glycan_data.loader import motif_list
     assert set(motifs.index) - set(motif_list['motif_name'])
@@ -124,7 +125,18 @@ def test_glycan_report(tmp_path, monkeypatch):
     from openpyxl import load_workbook
     wb = load_workbook(path)
     assert wb.sheetnames == ['About', 'Glycans', 'Motifs', 'Samples', 'Peaks']
-    assert 'Ions that come with the standard' in ' '.join(str(c.value) for c in wb['About']['A'])
+    about = ' '.join(str(c.value) for c in wb['About']['A'])
+    assert 'Ions that come with the standard' in about
+    # What the runs tell of their acquisition fills in the settings the caller left out: the ion mode by the charges, the analyzer by the spectra read
+    assert 'glycan class O; ion mode negative; mass analyzer linear ion trap (MS1).' in about
+    # The standard's columns of the samples sheet in their formats, its header row as high as its longest header
+    header = {c.value: c.column for c in wb['Samples'][1]}
+    assert wb['Samples'].cell(row = 2, column = header['H5N3A2: RT (min)']).number_format == '0.00' and wb['Samples'].row_dimensions[1].height >= 45
+    # Every glycans row as high as its drawing and the lines of its motifs
+    ws = wb['Glycans']
+    j = next(c.column for c in ws[1] if c.value == 'Motifs')
+    width = ws.column_dimensions[ws.cell(row = 1, column = j).column_letter].width
+    assert all(ws.row_dimensions[i].height >= 15 * len(ws.cell(row = i, column = j).value) / (1.1 * width) for i in range(2, ws.max_row + 1))
     # The version of the CandyCrunch that wrote it, whatever the caller lists
     assert f'CandyCrunch {candycrunch.__version__};' in ' '.join(str(c.value) for c in wb['About']['A'])
     # Rows by mass, isomers by retention time, in both tables
@@ -145,11 +157,69 @@ def test_glycan_report(tmp_path, monkeypatch):
     assert len(shown) == len(glycans) and len(scales) == 1 and svgs == len(glycans)
 
 
+def test_glycan_report_evidence(tmp_path):
+    """each glycan's diagnostic ions come from the spectrum of its best confidence, and link to that spectrum, annotated, in the Spectra sheet"""
+    features, runs = batch()
+    support = {GLYCANS['G2'][0]: '1/2 residues supported: Neu5Ac(a2-6) on reducing-end GalNAc (513.2 Y1b)', GLYCANS['G3'][0]: '0/1 residues supported',
+               GLYCANS['G1'][0]: '0/1 residues supported; Neu5Ac linkage reads a2-3 ([M-H-Neu5Ac]- 384.2 at 41%)'}
+    with_spectra = {}
+    for k, (run, t) in enumerate(runs.items(), 1):
+        # (G2's confidence is highest in run5, where its diagnostic ion is; elsewhere its rows name none)
+        t = t.assign(num_spectra = 2, predictions = [[(s, 0.9)] if isinstance(s, str) else [] for s in t['top1_pred']],
+                     confidence = [0.95 if s == GLYCANS['G2'][0] and run == 'run5' else 0.6 if isinstance(s, str) else np.nan for s in t['top1_pred']],
+                     supported_by = [(support.get(s, '') if run == 'run5' or s != GLYCANS['G2'][0] else '0/2 residues supported') if isinstance(s, str) else '' for s in t['top1_pred']])
+        t.attrs['fragment_tolerance'] = (0.5, None)
+        # spectra with the losses of a Hex, a HexNAc, and a Neu5Ac from the singly charged precursor
+        peaks = [{round(m * abs(z) + (abs(z) - 1) * PROTON_MASS - loss, 2): v for loss, v in ((0, 30), (162.05, 100), (203.08, 60), (291.1, 80))} for m, z in zip(t.index, t['charge'])]
+        with_spectra[run] = (t, peaks)
+    path = tmp_path / 'report.xlsx'
+    report = glycan_report(features, with_spectra, str(path), sample_names = {r: r.replace('run', 'S') for r in AMOUNTS})
+    glycans, spectra = report['glycans'], report['spectra']
+    diagnostic = dict(zip(glycans['Structure'], glycans['Diagnostic ions']))
+    # the residues placed and the readings, without the count of residues; a glycan without either has none
+    assert diagnostic[GLYCANS['G2'][0]] == 'Neu5Ac(a2-6) on reducing-end GalNAc (513.2 Y1b)' and diagnostic[GLYCANS['G3'][0]] == ''
+    assert diagnostic[GLYCANS['G1'][0]] == 'Neu5Ac linkage reads a2-3 ([M-H-Neu5Ac]- 384.2 at 41%)' and diagnostic[''] == ''
+    # every glycan has its spectrum, in the order of the glycans sheet; G2's from the sample of its best confidence; the composition by its name
+    assert list(spectra['_glycan']) == list(range(len(glycans)))
+    assert spectra.set_index('Glycan').loc[GLYCANS['G2'][0], 'Sample'] == 'S5' and 'Hex2HexNAc3Neu5Ac1S1dHex2' in set(spectra['Glycan'])
+    from openpyxl import load_workbook
+    wb = load_workbook(path)
+    assert wb.sheetnames == ['About', 'Glycans', 'Motifs', 'Samples', 'Peaks', 'Spectra'] and 'Spectra: for every glycan' in ' '.join(str(c.value) for c in wb['About']['A'])
+    # each glycan's diagnostic ions (or, without them, 'Annotated spectrum') link to the row of its own spectrum
+    ws, sheet = wb['Glycans'], wb['Spectra']
+    header = {c.value: c.column for c in ws[1]}
+    for i in range(2, ws.max_row + 1):
+        cell = ws.cell(row = i, column = header['Diagnostic ions'])
+        target = sheet[cell.hyperlink.location.split('!')[1]].row
+        assert sheet.cell(row = target, column = 1).value == (ws.cell(row = i, column = header['Structure']).value or ws.cell(row = i, column = header['Composition']).value)
+        assert cell.value == (glycans['Diagnostic ions'].iat[i - 2] or 'Annotated spectrum')
+    # one picture per spectrum, each with its vector twin
+    with zipfile.ZipFile(path) as z:
+        rels = [n for n in z.namelist() if re.fullmatch(r'xl/drawings/_rels/drawing\d+\.xml\.rels', n)]
+        pictures = {n: z.read(n).decode().count('.png"') for n in rels}
+        twins = {n: z.read(n).decode().count('.svg"') for n in rels}
+    assert sorted(pictures.values()) == [len(glycans)] * 2 and twins == pictures
+    # a row excluded in curation is evidence of nothing: G2 then takes another run's row, which names no diagnostic ion
+    with_spectra['run5'][0]['excluded'] = [s == GLYCANS['G2'][0] for s in with_spectra['run5'][0]['top1_pred']]
+    report = glycan_report(features, with_spectra, sample_names = {r: r.replace('run', 'S') for r in AMOUNTS})
+    assert report['spectra'].set_index('Glycan').loc[GLYCANS['G2'][0], 'Sample'] != 'S5'
+    assert report['glycans'].set_index('Structure').loc[GLYCANS['G2'][0], 'Diagnostic ions'] == ''
+
+
 def test_glycan_report_without_standard():
     features, runs = batch()
     report = glycan_report(features, runs, standards = None, drawings = False)
     # Without a standard everything but the flagged glycan is in the profile, and the samples sheet has no amounts
     assert len(report['glycans']) == 8 and 'Glycan signal / standard' not in report['samples'].columns
+
+
+def test_read_standard():
+    from candycrunch.reporting import read_standard
+    assert read_standard('H5N3A2') == {'composition': {'Hex': 5, 'HexNAc': 3, 'Neu5Ac': 2}, 'charge': None, 'rt': None}
+    assert read_standard('Hex5HexNAc3Neu5Ac2, -2, 17.1') == {'composition': {'Hex': 5, 'HexNAc': 3, 'Neu5Ac': 2}, 'charge': -2, 'rt': 17.1}
+    assert read_standard('H5N3A2,,17.1')['rt'] == 17.1
+    with pytest.raises(ValueError, match = 'expected a composition'):
+        read_standard('H5N3A2,two')
 
 
 def test_cli_report_options(tmp_path, capsys):

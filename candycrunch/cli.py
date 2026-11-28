@@ -51,7 +51,7 @@ def build_parser():
     parser.add_argument('--n_jobs', help='Number of processes: files processed in parallel, and fragment scoring and supporting peaks within a file; default: 1', type=int, default=1)
     parser.add_argument('--plot_glycans', help='Whether to save the output as .xlsx with SNFG glycan images for all top1 predictions; default: False', type=str_to_bool, required=False)
     parser.add_argument('--composition_format', help="How the output tables write compositions: dict ({'Hex': 5, 'HexNAc': 4, 'dHex': 1}), names (Hex5HexNAc4dHex1), or letters (H5N4F1; A Neu5Ac, G Neu5Gc, S sulfate); default: dict", type=str, choices=['dict', 'names', 'letters'], default='dict')
-    parser.add_argument('--report', help='Several files only: also write a report of the batch for the people whose samples it measured, an .xlsx workbook with the glycan profile of every sample (with SNFG drawings), its traits and motifs, sample checks, and every peak with what it is', type=str, required=False)
+    parser.add_argument('--report', help='Several files only: also write a report of the batch for the people whose samples it measured, an .xlsx workbook with the glycan profile of every sample (with SNFG drawings and the diagnostic ions of each structure), glycowork\'s motifs per sample, sample checks, every peak with what it is, and the annotated MS2 spectrum of each glycan', type=str, required=False)
     parser.add_argument('--internal_standard', help='With --report: internal standards spiked into every sample, space-separated, each a composition, optionally with its charge and RT in minutes (e.g., H5N3A2 or H5N3A2,-2,17.1); the first is the reference of every sample\'s glycan amount, and of an ion that comes with it at a constant ratio only what a sample holds clearly above that background stays in the profile', type=str, nargs='+', required=False)
     parser.add_argument('--output', help='Output file path ending in .csv or .xlsx', type=str, required=True)
     return parser
@@ -96,15 +96,11 @@ def main(argv=None):
         parser.error('--report needs several files (a batch)')
     standards = []
     for value in args.internal_standard or []:
-        from glycowork.motif.processing import canonicalize_composition
-        from glycowork.motif.tokenization import composition_to_mass
-        parts = value.split(',')
+        from candycrunch.reporting import read_standard
         try:
-            composition = canonicalize_composition(parts[0])
-            composition_to_mass(composition)
-            standards.append({'composition': composition, 'charge': int(parts[1]) if len(parts) > 1 and parts[1] else None, 'rt': float(parts[2]) if len(parts) > 2 and parts[2] else None})
-        except (ValueError, KeyError):
-            parser.error(f'--internal_standard {value}: expected a composition, optionally with its charge and RT in minutes (e.g., H5N3A2 or H5N3A2,-2,17.1)')
+            standards.append(read_standard(value))
+        except ValueError as error:
+            parser.error(f'--internal_standard {error}')
     # One reducing end is that end, several side by side a list (the first being the run's own, which --mass_tag belongs to)
     ends = args.modification or []
     if (args.mass_tag is not None) != (ends[:1] == ['custom']):
@@ -135,9 +131,13 @@ def main(argv=None):
     if len(filepaths) == 1:
         tables = [(args.output, wrap_inference(filepaths[0], n_jobs=args.n_jobs, **args_dict))]
     else:
-        combined_batch, inference_dfs = wrap_inference_batch(filepaths, intra_cat_thresh=args.intra_cat_thresh, top_n_isomers=args.top_n_isomers, n_jobs=args.n_jobs, **args_dict)
+        # (a report annotates each glycan's spectrum, so it takes the batch's spectra, which the tables written keep only with --spectra)
+        report_spectra = bool(args.report) and not args.spectra
+        combined_batch, inference_dfs = wrap_inference_batch(filepaths, intra_cat_thresh=args.intra_cat_thresh, top_n_isomers=args.top_n_isomers, n_jobs=args.n_jobs,
+                                                             **(args_dict | ({'spectra': True} if report_spectra else {})))
         stem, ext = os.path.splitext(args.output)
-        tables = [(args.output, combined_batch)] + [(f'{stem}_{label}{ext}', df_out) for label, df_out in inference_dfs.items()]
+        tables = [(args.output, combined_batch)] + [(f'{stem}_{label}{ext}', df_out[0].drop(columns=['ms3', 'xic', 'confidence_terms'], errors='ignore') if report_spectra else df_out)
+                                                    for label, df_out in inference_dfs.items()]
     for path, df_out in tables:
         if isinstance(df_out, tuple):
             # (without the MS1 integrations behind each abundance and the terms of each confidence, which only the app shows)
@@ -162,7 +162,7 @@ def main(argv=None):
     if args.report:
         from candycrunch.reporting import glycan_report
         ends = args.modification if isinstance(args.modification, list) else [args.modification or 'reduced']
-        settings = {'CandyCrunch': __version__, 'glycan class': ' and '.join(args.glycan_class), 'reducing end': ' and '.join(ends), 'sample preparation': args.sample_prep or 'underivatized', 'LC': args.lc or 'PGC'}
+        settings = {'glycan class': ' and '.join(args.glycan_class), 'reducing end': ' and '.join(ends), 'sample preparation': args.sample_prep or 'underivatized', 'LC': args.lc or 'PGC'}
         glycan_report(combined_batch, inference_dfs, args.report, spectra_filepaths=filepaths, standards=standards, modification=args.modification or 'reduced',
                       sample_prep=args.sample_prep or 'underivatized', settings=settings)
 
