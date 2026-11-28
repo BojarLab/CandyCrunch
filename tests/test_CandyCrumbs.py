@@ -134,7 +134,7 @@ DERIVATIZATION_GLYCANS = ['Neu5Ac(a2-3)Gal(b1-4)GlcNAc(b1-2)Man(a1-3)[Man(a1-6)]
                           'Man6P(a1-2)Man(a1-2)Man',
                           'GalOS(b1-3)GalNAc', 'Neu5Ac9Ac(a2-3)Gal(b1-4)Glc', 'GlcNS6S(a1-4)IdoA2S(a1-4)GlcNS',
                           'Gal(b1-4)GlcN(a1-6)Glc', 'Xyl(b1-2)Man(b1-4)GlcNAc', 'Fuc(a1-2)Gal4S(b1-3)GalNAc',
-                          'LDManHep(a1-3)LDManHep(a1-5)Kdo', 'Araf(a1-5)Araf(a1-5)Araf', 'QuiNAc(b1-3)GalNAc', 'Kdo4P(a2-4)Kdo']
+                          'LDManHep(a1-3)LDManHep(a1-5)Kdo', 'Araf(a1-5)Araf(a1-5)Araf', 'QuiNAc(b1-3)GalNAc', 'Kdo4P(a2-4)Kdo', 'Gal3/6S(b1-3)GalNAc']
 
 
 @pytest.mark.parametrize("glycan", DERIVATIZATION_GLYCANS)

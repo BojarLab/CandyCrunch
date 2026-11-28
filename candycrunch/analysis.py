@@ -506,7 +506,7 @@ def glycan_to_graph_monos(glycan):
             comp = {}
         base = [k for k in comp if k not in SUBSTITUENTS]
         modification = get_modification(label)
-        positions = re.findall(r'(\d|O)?(PCho|PEtN|Ac|Me|S|P)', modification)
+        positions = re.findall(r'((?:\d/)*\d|O)?(PCho|PEtN|Ac|Me|S|P)', modification)
         # glycowork's composition drops what it does not know (Qui3NAc becomes dHex, ManNAcA HexNAc), so a residue is
         # only derived if its substituents, an alditol, a stereo prefix, a lactone or an aglycone fully explain it; a substituent
         # written straight after another one belongs to it (GlcNAc1PP, Man3PMe, GlcN4PPEtN) and does not sit at an unknown position; a furanose (Galf2Ac,
@@ -514,7 +514,7 @@ def glycan_to_graph_monos(glycan):
         if (len(base) != 1 or comp[base[0]] != 1 or base[0] not in derivatization_sites['permethylated'] or
                 (core := map_to_basic(get_core(label), obfuscate_ptm = False)) not in (base[0], 'Ins') or
                 Counter(s for _, s in positions) != {k: v for k, v in comp.items() if k in SUBSTITUENTS and k != '-H2O'} or
-                re.sub(r'(\d|O)?(PCho|PEtN|Ac|Me|S|P)|\d,\dlactone|^[DL]-|-ol$|^1(Ser|Thr|Asn|Cer)$', '', modification) or
+                re.sub(r'((?:\d/)*\d|O)?(PCho|PEtN|Ac|Me|S|P)|\d,\dlactone|^[DL]-|-ol$|^1(Ser|Thr|Asn|Cer)$', '', modification) or
                 re.search(r'(?<=[A-NP-Za-z])(PCho|PEtN|Ac|Me|S|P)', modification)):
             # everything else (Kdo, heptoses, furanoses, QuiNAc, diphosphates, ...) is read off its atoms, if glycowork can write it as SMILES
             try:
@@ -523,13 +523,14 @@ def glycan_to_graph_monos(glycan):
                 pass
             continue
         base = base[0]
-        # a substituent without a number sits on the amine of a hexosamine (GlcNS), one on O at an unknown hydroxyl
-        subs = [(s, int(p) if p.isdigit() else 2 if not p and get_core(label).endswith('N') else None) for p, s in
+        # a substituent without a number sits on the amine of a hexosamine (GlcNS), one on O at an unknown hydroxyl, one at alternative positions (Gal3/6S)
+        # at one of them, so like O on every fragment keeping one of them
+        subs = [(s, {int(x) for x in p.split('/')} if p[:1].isdigit() else {2} if not p and get_core(label).endswith('N') else None) for p, s in
                 positions] + [('-H2O', None)] * comp.get('-H2O', 0)
         base_attr = mono_attributes[base]
         frags = [f for f in base_attr['mass'] if f == base or core == base]
         hydroxyls = set(derivatization_sites['peracetylated'][base])
-        in_frag = {f: [s for s, p in subs if p in base_attr['atoms'][f] or (p is None and hydroxyls & set(base_attr['atoms'][f]))]
+        in_frag = {f: [s for s, p in subs if (p if p is not None else hydroxyls) & set(base_attr['atoms'][f])]
                    for f in frags}
         mono_attributes[key] = {'atoms': {key if f == base else f: base_attr['atoms'][f] for f in frags}} | {
             prop: {key if f == base else f: base_attr[prop][f] + sum(SUBSTITUENTS[s][prop] for s in in_frag[f])
